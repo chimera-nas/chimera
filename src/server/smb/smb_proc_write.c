@@ -8,6 +8,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_compound.h"
 
 /* A write-time-sticky handle needs the pre-write mtime back from the VFS so the
  * write callback can restore it; otherwise no pre-attrs are requested. */
@@ -18,35 +19,39 @@ chimera_smb_write_pre_attr_mask(const struct chimera_smb_open_file *open_file)
            ? CHIMERA_VFS_ATTR_MTIME : 0;
 } /* chimera_smb_write_pre_attr_mask */
 
-/* Completion for the mtime-restore setattr issued after a write through a
- * write-time-sticky handle.  The write itself already succeeded; a failed
- * restore leaves a slightly-advanced write time but is not worth failing the
- * write over, so we always report success. */
-static void
-chimera_smb_write_sticky_restore_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+/* Map a VFS write error to the SMB2 status a client expects.  Every failure
+ * used to collapse to INTERNAL_ERROR, which hid the one a client acts on --
+ * DISK_FULL -- behind a status it retries; the cases here are the ones FLUSH
+ * and SET_INFO already tell apart. */
+static inline uint32_t
+chimera_smb_write_error_status(enum chimera_vfs_error error_code)
 {
-    struct chimera_smb_request *request = private_data;
+    switch (error_code) {
+        case CHIMERA_VFS_OK:     return SMB2_STATUS_SUCCESS;
+        case CHIMERA_VFS_ENOSPC:
+        case CHIMERA_VFS_EDQUOT: return SMB2_STATUS_DISK_FULL;
+        case CHIMERA_VFS_EROFS:  return SMB2_STATUS_MEDIA_WRITE_PROTECTED;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:  return SMB2_STATUS_ACCESS_DENIED;
+        case CHIMERA_VFS_EISDIR: return SMB2_STATUS_FILE_IS_A_DIRECTORY;
+        case CHIMERA_VFS_EINVAL: return SMB2_STATUS_INVALID_PARAMETER;
+        case CHIMERA_VFS_ESTALE: return SMB2_STATUS_FILE_CLOSED;
+        case CHIMERA_VFS_EIO:    return SMB2_STATUS_IO_DEVICE_ERROR;
+        default:                 return SMB2_STATUS_INTERNAL_ERROR;
+    } /* switch */
+} /* chimera_smb_write_error_status */
 
-    chimera_smb_open_file_release(request, request->write.open_file);
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
-} /* chimera_smb_write_sticky_restore_callback */
-
+/* The write is over: give its payload back, tell the directory's watchers, and
+ * answer the client.  Nothing here reads the write's results -- what the reply
+ * carries is a count the marshaller already has, and the one attribute a write
+ * owes anybody (the pre-write mtime a sticky handle restores) is consumed
+ * inside the run, by the gate. */
 static void
 chimera_smb_write_callback(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_smb_request *request,
+    enum chimera_vfs_error      error_code)
 {
-    struct chimera_smb_request       *request = private_data;
-    struct chimera_server_smb_thread *thread  = request->compound->thread;
+    struct chimera_server_smb_thread *thread = request->compound->thread;
 
     /* Release write iovecs here on the server thread, not in VFS backend.
      * The iovecs were allocated on this thread and must be released here
@@ -80,31 +85,153 @@ chimera_smb_write_callback(
         request->write.open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_MODIFIED;
     }
 
-    /* A handle that explicitly set its write time has "taken control" of it:
-     * the backend bumped mtime as a side effect of this write, so restore it to
-     * the pre-write value (reported in pre_attr) to keep it frozen. */
-    if (!error_code &&
-        (request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) &&
-        (pre_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+    chimera_smb_open_file_release(request, request->write.open_file);
+    chimera_smb_complete_request(request,
+                                 chimera_smb_write_error_status(error_code));
+} /* chimera_smb_write_callback */
 
-        request->write.restore_attrs.va_req_mask = 0;
-        request->write.restore_attrs.va_set_mask = CHIMERA_VFS_ATTR_MTIME;
-        request->write.restore_attrs.va_mtime    = pre_attr->va_mtime;
+/* A handle that explicitly set its write time has "taken control" of it: the
+ * backend bumps mtime as a side effect of the write, so the pre-write reading
+ * is put back to keep it frozen.
+ *
+ * The value restored is the WRITE's OWN pre-attr mtime, which does not exist
+ * until the WRITE has run -- so the restore is a SETATTR whose argument the
+ * gate fills in the moment the WRITE reports, from that op's result.  That is
+ * what the gate's edit rule is for: it writes an argument of an op STRICTLY
+ * AHEAD of the one it is consulted on, and it ASSIGNS the value rather than
+ * folding it into what a previous execution left, so a re-run of the sequence
+ * restores the same mtime the write it re-ran actually displaced.
+ *
+ * A backend that reports no pre-write mtime leaves nothing to restore, and the
+ * op is skipped rather than applying a zero timestamp.
+ *
+ * The restore is not allowed to fail the WRITE: a slightly-advanced write time
+ * is not worth failing a write that succeeded over, which is why the
+ * completion reads the WRITE's own status rather than the sequence's. */
+static void
+chimera_smb_write_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_compound_op       *edit;
 
-        chimera_vfs_setattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            request->write.open_file->handle,
-                            &request->write.restore_attrs,
-                            0,
-                            0,
-                            chimera_smb_write_sticky_restore_callback,
-                            request);
+    if (*status != CHIMERA_VFS_OK ||
+        (int) index != request->write.seq_write_idx ||
+        request->write.seq_restore_idx <= (int) index) {
         return;
     }
 
-    chimera_smb_open_file_release(private_data, request->write.open_file);
-    chimera_smb_complete_request(private_data, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
-} /* chimera_smb_write_callback */
+    op   = chimera_vfs_compound_op(compound, index);
+    edit = chimera_vfs_compound_op_edit(
+        compound, (uint32_t) request->write.seq_restore_idx);
+
+    if (!edit) {
+        return;
+    }
+
+    if (op->pre_attr.va_set_mask & CHIMERA_VFS_ATTR_MTIME) {
+        edit->set_attr.va_req_mask = 0;
+        edit->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MTIME;
+        edit->set_attr.va_mtime    = op->pre_attr.va_mtime;
+        edit->skip                 = 0;
+    } else {
+        edit->skip = 1;
+    }
+} /* chimera_smb_write_gate */
+
+static void
+chimera_smb_write_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+
+    /* The WRITE's own status, not the sequence's: a failed sticky-mtime restore
+     * behind a successful write is not a failed write, exactly as it was not
+     * when the restore was a call of its own. */
+    op = chimera_vfs_compound_op(compound,
+                                 (uint32_t) request->write.seq_write_idx);
+
+    status = op->status;
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_write_callback(request, status);
+} /* chimera_smb_write_sequence_complete */
+
+/* PUTHANDLE(the open SMB2 already holds) -> WRITE -> [SETATTR(mtime)].  The
+ * pre-write mtime that a write-time-sticky handle restores has to be sampled by
+ * the write itself, so it is asked for here rather than by a GETATTR the
+ * sequence would run after the write had already advanced it -- and the restore
+ * that consumes it is an op in the same run, its timestamp filled in by the
+ * gate the moment the WRITE reports (chimera_smb_write_gate).
+ *
+ * The restore addresses the LENT handle, which is what keeps it on the
+ * descriptor-rights path: putting the write time back is authorized by the open
+ * the client is writing through, not re-checked against the file's mode. */
+static void
+chimera_smb_write_submit(
+    struct chimera_smb_request       *request,
+    struct chimera_server_smb_thread *thread,
+    const struct chimera_claim_actor *io_owner)
+{
+    struct chimera_vfs_attrs restore;
+
+    /* The handle this write runs on, captured once so the restore behind it
+     * acts on the same one the sequence borrowed: open_file->handle is not
+     * re-read, because a pipelined CLOSE on the same FileId NULLs it whether or
+     * not a write is in flight. */
+    request->write.handle = request->write.open_file->handle;
+
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread,
+        &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->write.handle,
+                                       request->write.open_file->open_flags);
+
+    request->write.seq_write_idx = (int8_t) chimera_vfs_compound_add_write(
+        request->vfs_compound,
+        NULL,
+        request->write.offset,
+        request->write.length,
+        !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
+        request->write.iov,
+        request->write.niov,
+        chimera_smb_write_pre_attr_mask(request->write.open_file),
+        0,
+        io_owner);
+
+    request->write.seq_restore_idx = -1;
+
+    /* Only a sticky handle owes a restore, and only it asked the write for the
+     * pre-attr the restore is made of.  The timestamp is left empty here: it is
+     * the gate's to assign, from the reading the WRITE takes. */
+    if (request->write.open_file->flags &
+        CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) {
+
+        memset(&restore, 0, sizeof(restore));
+
+        request->write.seq_restore_idx = (int8_t)
+            chimera_vfs_compound_add_setattr(request->vfs_compound,
+                                             request->write.handle,
+                                             &restore, 0, 0);
+
+        chimera_vfs_compound_set_gate(request->vfs_compound,
+                                      chimera_smb_write_gate, request);
+    }
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_write_sequence_complete, request);
+} /* chimera_smb_write_submit */
 
 static void
 chimera_smb_rdma_read_callback(
@@ -141,33 +268,11 @@ chimera_smb_rdma_read_callback(
         }
 
         struct chimera_claim_actor io_owner = {
-            .owner          = {
-                .proto      = CHIMERA_CLAIM_PROTO_SMB2,
-                .client_key = request->session_handle->session->client_key,
-                .owner_lo   = request->write.open_file->file_id.pid,
-                .owner_hi   = request->write.open_file->file_id.vid,
-            },
-            .op_handle      = request->write.open_file->handle,
+            .owner     = chimera_smb_open_actor_owner(request->write.open_file),
+            .op_handle = request->write.open_file->handle,
         };
 
-        if (request->write.open_file->grant) {
-            io_owner.owner = request->write.open_file->grant->claim.owner;
-        }
-
-        chimera_vfs_write_owned(
-            thread->vfs_thread,
-            &request->session_handle->session->cred,
-            request->write.open_file->handle,
-            request->write.offset,
-            request->write.length,
-            !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
-            chimera_smb_write_pre_attr_mask(request->write.open_file),
-            0,
-            request->write.iov,
-            request->write.niov,
-            &io_owner,
-            chimera_smb_write_callback,
-            request);
+        chimera_smb_write_submit(request, thread, &io_owner);
     }
 
 } /* chimera_smb_rdma_read_callback */
@@ -230,6 +335,13 @@ chimera_smb_write(struct chimera_smb_request *request)
     struct evpl_iovec                *chunk_iov = request->write.chunk_iov;
     int                               i, offset = 0;
 
+    if (request->compound_input_gathered &&
+        request->compound_input_status != SMB2_STATUS_SUCCESS) {
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+        chimera_smb_complete_request(request, request->compound_input_status);
+        return;
+    }
+
     request->write.open_file = chimera_smb_open_file_resolve(request, &request->write.file_id);
 
     if (unlikely(!request->write.open_file)) {
@@ -246,6 +358,13 @@ chimera_smb_write(struct chimera_smb_request *request)
      * transport before any handle-backed file logic. */
     if (request->write.open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_PIPE) {
         chimera_smb_pipe_write(request);
+        return;
+    }
+
+    if (request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+        chimera_smb_open_file_release(request, request->write.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_DEVICE_REQUEST);
         return;
     }
 
@@ -333,29 +452,13 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
-    /* When the open holds a caching lease, use the lease's owner identity for
-     * the write so the WRITE trigger self-exempts (an RqLs holder self-exempts
-     * by owner/KEY unconditionally): the holder is writing through its own
-     * granted write cache and must NOT break itself.  For RqLs leases the owner
-     * carries the lease_key (owner.key); for legacy oplocks it is the open's
-     * file_id with a zero key -- a legacy LEVEL_II oplock is NOT same-key-exempt
-     * and breaks its own read cache on write (smb2.oplock.batch6).  Without this
-     * the lease is broken on every self-write, which races a server-initiated
-     * OPLOCK_BREAK notification with the WRITE response and surfaces as
-     * INVALID_NETWORK_RESPONSE on the client. */
-    struct chimera_claim_actor io_owner;
-    memset(&io_owner, 0, sizeof(io_owner));
-    io_owner.owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
-    io_owner.owner.client_key = request->session_handle->session->client_key;
-    if (request->write.open_file->grant) {
-        /* Carry the grant's own identity -- including its KEY-circle lease key
-         * -- so the write self-exempts only against a genuine RqLs lease key. */
-        io_owner.owner = request->write.open_file->grant->claim.owner;
-    } else {
-        io_owner.owner.owner_lo = request->write.open_file->file_id.pid;
-        io_owner.owner.owner_hi = request->write.open_file->file_id.vid;
-    }
-    io_owner.op_handle = request->write.open_file->handle;
+    /* Reconnect preserves the open's canonical ACCESS/RANGE owner even when
+     * a nonlease durable handle is reclaimed by another ClientGuid. Keep that
+     * identity, adding its cache key for lease self-exemption. */
+    struct chimera_claim_actor io_owner = {
+        .owner     = chimera_smb_open_actor_owner(request->write.open_file),
+        .op_handle = request->write.open_file->handle,
+    };
 
     /* Mandatory byte-range lock enforcement: a shared lock denies writes from
      * everyone, an exclusive lock denies writes from other opens.  (The
@@ -376,7 +479,8 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
-    if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {
+    if (request->write.channel == SMB2_CHANNEL_RDMA_V1 &&
+        !request->compound_input_gathered) {
         /* We need to read in the data we're supposed to be writing first */
 
         request->write.pending_rdma_reads = request->write.num_rdma_elements;
@@ -400,20 +504,7 @@ chimera_smb_write(struct chimera_smb_request *request)
             chunk_iov++;
         }
     } else {
-        chimera_vfs_write_owned(
-            thread->vfs_thread,
-            &request->session_handle->session->cred,
-            request->write.open_file->handle,
-            request->write.offset,
-            request->write.length,
-            !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
-            chimera_smb_write_pre_attr_mask(request->write.open_file),
-            0,
-            request->write.iov,
-            request->write.niov,
-            &io_owner,
-            chimera_smb_write_callback,
-            request);
+        chimera_smb_write_submit(request, thread, &io_owner);
     }
 } /* chimera_smb_write */
 
@@ -523,3 +614,267 @@ chimera_smb_write_reply(
     evpl_iovec_cursor_append_uint16(reply_cursor, 0); /* write channel length */
 
 } /* chimera_smb_write_reply */
+
+/* The parsed payload belongs to this command until terminal release, including
+ * rejected finishes. No callback consumes it while the attempt is replayable. */
+struct smb_write_input {
+    void         (*done)(
+        struct smb_vfs_command *,
+        unsigned int);
+    unsigned int pending;
+    unsigned int chunks;
+    int          failed;
+};
+
+static int
+smb_write_compound_eligible(struct chimera_smb_request *request)
+{
+    return request->write.channel == 0 || request->write.channel == SMB2_CHANNEL_RDMA_V1;
+} /* smb_write_compound_eligible */
+
+static void
+smb_write_input_done(
+    int   status,
+    void *private_data)
+{
+    struct smb_vfs_command     *command = private_data;
+    struct smb_write_input     *input   = command->private_data;
+    struct chimera_smb_request *request = command->request;
+
+    if (status) {
+        input->failed = 1;
+    }
+    if (--input->pending == 0) {
+        for (unsigned int i = 0; i < input->chunks; i++) {
+            evpl_iovec_release(request->compound->thread->evpl, &request->write.chunk_iov[i]);
+        }
+        input->chunks = 0;
+        input->done(command, input->failed ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    }
+} /* smb_write_input_done */
+
+static void
+smb_write_compound_gather(
+    struct smb_vfs_command *command,
+    void ( *done )(struct smb_vfs_command *, unsigned int))
+{
+    struct chimera_smb_request *request = command->request;
+    struct smb_write_input     *input;
+    uint64_t                    total  = 0;
+    uint32_t                    offset = 0;
+
+    if (request->write.channel != SMB2_CHANNEL_RDMA_V1) {
+        done(command, SMB2_STATUS_SUCCESS);
+        return;
+    }
+    for (uint32_t i = 0; i < request->write.num_rdma_elements; i++) {
+        total += request->write.rdma_elements[i].length;
+    }
+    if (!evpl_bind_is_rdma(request->compound->conn->bind) ||
+        total != request->write.length || request->write.length > command->max_read) {
+        done(command, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+    input = calloc(1, sizeof(*input));
+    if (!input) {
+        done(command, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+        return;
+    }
+    command->private_data = input;
+    input->done           = done;
+    input->pending        = 1;
+    for (uint32_t i = 0; i < request->write.num_rdma_elements; i++) {
+        struct chimera_smb_rdma_element *element = &request->write.rdma_elements[i];
+        struct evpl_iovec               *chunk;
+        if (!element->length) {
+            continue;
+        }
+        chunk = &request->write.chunk_iov[input->chunks++];
+        evpl_iovec_clone_segment(chunk, &request->write.iov[0], offset, element->length);
+        input->pending++;
+        evpl_rdma_read(request->compound->thread->evpl, request->compound->conn->bind,
+                       element->token, element->offset, chunk, 1, smb_write_input_done, command);
+        offset += element->length;
+    }
+    smb_write_input_done(0, command);
+} /* smb_write_compound_gather */
+
+static struct chimera_smb_file_id
+smb_write_compound_file_id(struct chimera_smb_request *request)
+{
+    return request->write.file_id;
+} /* smb_write_compound_file_id */
+
+static void
+smb_write_sticky_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command               *command = private_data;
+    const struct chimera_vfs_compound_op *write   = chimera_vfs_compound_op(compound, command->result);
+    struct chimera_vfs_compound_op       *restore = chimera_vfs_compound_op_args(compound, index);
+
+    (void) status;
+
+    if (!(command->state->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) ||
+        !(write->dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+        chimera_vfs_compound_op_skip(compound, index);
+        return;
+    }
+    restore->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MTIME;
+    restore->set_attr.va_mtime    = write->dir_pre_attr.va_mtime;
+} /* smb_write_sticky_prepare */
+
+static void
+smb_write_sticky_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    (void) compound;
+    (void) index;
+    (void) private_data;
+    /* Preserve the existing best-effort timestamp-restore policy. */
+    *status = CHIMERA_VFS_OK;
+} /* smb_write_sticky_complete */
+
+static int
+smb_write_compound_build(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct chimera_smb_request *request = command->request;
+    struct chimera_vfs_attrs    restore = { .va_set_mask = CHIMERA_VFS_ATTR_MTIME };
+    int                         write, sticky;
+
+    if (!request->write.length) {
+        /* Zero-byte writes neither touch byte-range locks nor recall leases. */
+        return chimera_vfs_compound_add_checkpoint(compound);
+    }
+    command->actor.owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+    command->actor.owner.client_key = request->session_handle->session->client_key;
+    if (command->open->grant) {
+        command->actor.owner = command->open->grant->claim.owner;
+    } else {
+        command->actor.owner.owner_lo = command->open->file_id.pid;
+        command->actor.owner.owner_hi = command->open->file_id.vid;
+    }
+    write = chimera_vfs_compound_add_write(compound, command->handle, request->write.offset, request->write.length, !!(
+                                               request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH), request->write.iov,
+                                           request->write.niov, 0, 0, &command->actor);
+    /* An earlier SET_INFO in this compound can turn sticky time on. */
+    chimera_vfs_compound_set_result_masks(compound, write, 0, CHIMERA_VFS_ATTR_MTIME, 0);
+    sticky = chimera_vfs_compound_add_setattr(compound, command->handle, &restore, 0, 0);
+    chimera_vfs_compound_set_op_callbacks(compound, sticky, smb_write_sticky_prepare,
+                                          smb_write_sticky_complete, command);
+    return write;
+} /* smb_write_compound_build */
+
+static void
+smb_write_compound_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command     *command = private_data;
+    struct chimera_smb_request *request = command->request;
+    struct smb_vfs_open_state  *state   = command->state;
+    unsigned int                result  = SMB2_STATUS_SUCCESS;
+
+    (void) compound;
+    (void) index;
+    (void) status;
+
+    if (state->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+        result = SMB2_STATUS_INVALID_DEVICE_REQUEST;
+    } else if (!(command->open->desired_access &
+                 (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
+                  SMB2_GENERIC_WRITE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED))) {
+        result = SMB2_STATUS_ACCESS_DENIED;
+    } else if (request->write.offset > INT64_MAX ||
+               (request->write.length && request->write.offset + request->write.length > CHIMERA_SMB_MAX_FILE_SIZE) ||
+               request->write.length > command->max_read) {
+        result = SMB2_STATUS_INVALID_PARAMETER;
+    } else if (state->channel_sequence_valid &&
+               (uint16_t) (request->channel_sequence - state->channel_sequence) >= 0x8000) {
+        result = SMB2_STATUS_FILE_NOT_AVAILABLE;
+    } else {
+        state->channel_sequence       = request->channel_sequence;
+        state->channel_sequence_valid = 1;
+        state->sequence_dirty         = 1;
+        if (request->write.length && chimera_vfs_compound_io_denied(compound, command->handle,
+                                                                    request->write.offset, request->write.length, true,
+                                                                    &command->actor)) {
+            result = SMB2_STATUS_FILE_LOCK_CONFLICT;
+        }
+    }
+    command->status = result;
+} /* smb_write_compound_prepare */
+
+static void
+smb_write_compound_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+
+    (void) compound;
+    (void) index;
+    if (*status == CHIMERA_VFS_OK && command->request->write.length && command->open->parent_fh_len) {
+        command->state->flags       |= CHIMERA_SMB_OPEN_FILE_FLAG_MODIFIED;
+        command->state->flags_dirty |= CHIMERA_SMB_OPEN_FILE_FLAG_MODIFIED;
+    }
+} /* smb_write_compound_complete */
+
+static void
+smb_write_compound_publish(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct chimera_smb_request           *request = command->request;
+    const struct chimera_vfs_compound_op *write   = chimera_vfs_compound_op(compound, command->result);
+    struct chimera_smb_open_file         *open    = command->open;
+
+    if (command->status != SMB2_STATUS_SUCCESS) {
+        return;
+    }
+    if (request->write.length && open->parent_fh_len) {
+        chimera_vfs_notify_emit_nobreak(request->compound->thread->shared->vfs->vfs_notify,
+                                        open->parent_fh, open->parent_fh_len,
+                                        CHIMERA_VFS_NOTIFY_FILE_MODIFIED | CHIMERA_VFS_NOTIFY_STREAM_WRITE |
+                                        CHIMERA_VFS_NOTIFY_STREAM_SIZE,
+                                        open->name, open->name_len, NULL, 0);
+    }
+    /* Report the bytes actually accepted, including a backend short write. */
+    request->write.length = write->written;
+} /* smb_write_compound_publish */
+
+static void
+smb_write_compound_release(struct smb_vfs_command *command)
+{
+    struct chimera_smb_request *request = command->request;
+
+    if (!command->deferred) {
+        evpl_iovecs_release(request->compound->thread->evpl, request->write.iov, request->write.niov);
+        request->write.niov = 0;
+    }
+    free(command->private_data);
+    command->private_data = NULL;
+} /* smb_write_compound_release */
+
+const struct smb_vfs_command_ops chimera_smb_write_compound_ops = {
+    .eligible      = smb_write_compound_eligible,
+    .file_id       = smb_write_compound_file_id,
+    .build         = smb_write_compound_build,
+    .prepare       = smb_write_compound_prepare,
+    .complete      = smb_write_compound_complete,
+    .publish       = smb_write_compound_publish,
+    .gather_inputs = smb_write_compound_gather,
+    .release       = smb_write_compound_release,
+};

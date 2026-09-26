@@ -4,7 +4,7 @@
 
 #include <stdlib.h>
 
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_claim.h"
 #include "vfs/vfs_internal.h"
 #include "common/macros.h"

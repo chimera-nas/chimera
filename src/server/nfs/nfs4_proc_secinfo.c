@@ -6,7 +6,7 @@
 #include "nfs4_status.h"
 #include "nfs.h"
 #include "evpl/evpl_rpc2.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 
 /* RFC 7530 §16.31: SECINFO returns the security mechanisms the server will
@@ -43,11 +43,8 @@ chimera_nfs4_secinfo_complete(
     res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
                                                export ? export->sec_allowed : 0,
                                                req->thread->shared->gss_enabled);
-    /* RFC 8881 §18.29.3: SECINFO consumes the current filehandle on success,
-     * so a following op relying on it fails with NFS4ERR_NOFILEHANDLE.  That
-     * is a 4.1 rule: RFC 7530 §17.31.3 describes the same operation without
-     * it, and leaves the filehandle in place, which is what a 4.0 client is
-     * entitled to rely on. */
+    /* NFSv4.0 retains the current FH; v4.1+ consumes it (RFC 7530
+     * 16.31.4 versus RFC 8881 18.29.3). */
     if (req->minorversion >= 1) {
         req->fhlen = 0;
     }
@@ -110,7 +107,6 @@ chimera_nfs4_secinfo_resume(
         res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
                                                    sibling.sec_allowed,
                                                    thread->shared->gss_enabled);
-        /* Consume the current filehandle on success, 4.1+ only (see above). */
         if (req->minorversion >= 1) {
             req->fhlen = 0;
         }
@@ -175,7 +171,6 @@ chimera_nfs4_secinfo(
         res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
                                                    export ? export->sec_allowed : 0,
                                                    req->thread->shared->gss_enabled);
-        /* Consume the current filehandle on success, 4.1+ only (see above). */
         if (req->minorversion >= 1) {
             req->fhlen = 0;
         }

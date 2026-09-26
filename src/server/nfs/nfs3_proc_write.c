@@ -7,27 +7,35 @@
 #include "nfs_common/nfs3_attr.h"
 #include "nfs_internal.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
 
+#include "nfs3_compound.h"
+
 static void
 chimera_nfs3_write_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct WRITE3args                *args   = req->args_write;
-    struct WRITE3res                  res;
-    int                               rc;
+    struct nfs3_compound                 *ctx = private_data;
+
+    if (nfs3_compound_retry(ctx)) {
+        return;
+    }
+    struct nfs_request                   *req       = ctx->req;
+    const struct chimera_vfs_compound_op *op        = nfs3_compound_result(ctx);
+    const struct chimera_vfs_attrs       *pre_attr  = &op->dir_pre_attr;
+    const struct chimera_vfs_attrs       *post_attr = &op->dir_post_attr;
+    uint32_t                              length = op->written, sync = op->committed;
+
+    struct chimera_server_nfs_thread     *thread = req->thread;
+    struct chimera_server_nfs_shared     *shared = thread->shared;
+    struct evpl                          *evpl   = thread->evpl;
+    struct WRITE3args                    *args   = req->args_write;
+    struct WRITE3res                      res;
+    int                                   rc;
 
     /* Release write iovecs here on the server thread, not in VFS backend.
      * The iovecs were allocated on this thread and must be released here
@@ -35,7 +43,7 @@ chimera_nfs3_write_complete(
      */
     evpl_iovecs_release(evpl, args->data.iov, args->data.niov);
 
-    res.status = chimera_vfs_error_to_nfsstat3(error_code);
+    res.status = nfs3_compound_status(ctx);
 
     if (res.status == NFS3_OK) {
         res.resok.count = length;
@@ -54,57 +62,13 @@ chimera_nfs3_write_complete(
         chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, pre_attr, post_attr);
     }
 
-    chimera_vfs_release(thread->vfs_thread, req->handle);
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
+    nfs3_compound_free(ctx);
     nfs_request_free(thread, req);
 } /* chimera_nfs3_write_complete */
-
-static void
-chimera_nfs3_write_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct WRITE3args                *args   = req->args_write;
-    struct WRITE3res                  res;
-    int                               rc;
-
-    if (error_code == CHIMERA_VFS_OK) {
-
-        req->handle = handle;
-
-        chimera_vfs_write(thread->vfs_thread, &req->cred,
-                          handle,
-                          args->offset,
-                          args->count,
-                          args->stable,           /* 3-level requested stability */
-                          CHIMERA_NFS3_ATTR_WCC_MASK,
-                          CHIMERA_NFS3_ATTR_MASK,
-                          args->data.iov,
-                          args->data.niov,
-                          chimera_nfs3_write_complete,
-                          req);
-    } else {
-        res.status =
-            chimera_vfs_error_to_nfsstat3(error_code);
-        chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, NULL, NULL);
-        rc = shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, NULL, &res, req->encoding);
-        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-
-        /* Iovecs were already taken from the message in chimera_nfs3_write,
-         * so we need to release them here since VFS won't do it.
-         */
-        evpl_iovecs_release(evpl, args->data.iov, args->data.niov);
-        nfs_request_free(thread, req);
-    }
-} /* chimera_nfs3_write_open_callback */
 
 void
 chimera_nfs3_write(
@@ -172,10 +136,11 @@ chimera_nfs3_write(
         args->count = CHIMERA_NFS3_MAX_XFER;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs3_write_open_callback,
-                        req);
+    struct nfs3_compound        *ctx      = nfs3_compound_alloc(req, CHIMERA_VFS_OPEN_INFERRED);
+    struct chimera_vfs_compound *compound = ctx->compound;
+    ctx->result = chimera_vfs_compound_add_write(compound, NULL, args->offset, args->count, args->stable, args->data.iov
+                                                 , args->data.niov, 0, 0, NULL);
+    chimera_vfs_compound_set_result_masks(compound, ctx->result, CHIMERA_NFS3_ATTR_MASK, CHIMERA_NFS3_ATTR_WCC_MASK,
+                                          CHIMERA_NFS3_ATTR_MASK);
+    chimera_vfs_compound_submit(compound, chimera_nfs3_write_complete, ctx);
 } /* chimera_nfs3_write */

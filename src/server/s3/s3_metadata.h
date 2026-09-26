@@ -25,6 +25,42 @@
 struct evpl;
 struct chimera_s3_request;
 struct chimera_vfs_open_handle;
+struct chimera_vfs_compound;
+struct chimera_s3_metadata;
+
+/* Compound builders. Capture request headers before submitting; during an
+ * attempt only compound-private metadata is changed. Emit response headers
+ * after the compound's aggregate status has been accepted. */
+typedef int (*chimera_s3_metadata_continue_t)(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data);
+
+struct chimera_s3_metadata * chimera_s3_metadata_capture(
+    struct chimera_s3_request *request);
+struct chimera_s3_metadata * chimera_s3_metadata_read_alloc(
+    void);
+int chimera_s3_metadata_append_store(
+    struct chimera_vfs_compound *compound,
+    struct chimera_s3_metadata  *metadata);
+int chimera_s3_metadata_append_read(
+    struct chimera_vfs_compound   *compound,
+    struct chimera_s3_metadata    *metadata,
+    chimera_s3_metadata_continue_t after,
+    void                          *private_data);
+int chimera_s3_metadata_append_copy(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_s3_metadata     *metadata,
+    struct chimera_vfs_open_handle *source,
+    struct chimera_vfs_open_handle *destination,
+    chimera_s3_metadata_continue_t  after,
+    void                           *private_data);
+void chimera_s3_metadata_emit(
+    struct chimera_vfs_compound *compound,
+    struct chimera_s3_metadata  *metadata,
+    struct chimera_s3_request   *request,
+    int                          include_tag_count);
+void chimera_s3_metadata_free(
+    struct chimera_s3_metadata *metadata);
 
 /* Common prefix of every S3 metadata xattr. */
 #define CHIMERA_S3_XATTR_PREFIX     "user.s3."
@@ -33,45 +69,3 @@ struct chimera_vfs_open_handle;
 /* Sub-namespace used for x-amz-meta-* user metadata. */
 #define CHIMERA_S3_XATTR_META       "user.s3.meta."
 #define CHIMERA_S3_XATTR_META_LEN   (sizeof(CHIMERA_S3_XATTR_META) - 1)
-
-typedef void (*chimera_s3_metadata_done_t)(
-    struct chimera_s3_request *request,
-    int                        error,
-    void                      *private_data);
-
-/*
- * Capture the metadata headers from request->http_request and persist them as
- * extended attributes on `handle`, then invoke `done`. Suitable for PutObject
- * and CopyObject (x-amz-metadata-directive: REPLACE).
- */
-void
-chimera_s3_metadata_store_from_headers(
-    struct chimera_s3_request      *request,
-    struct chimera_vfs_open_handle *handle,
-    chimera_s3_metadata_done_t      done,
-    void                           *private_data);
-
-/*
- * Copy every "user.s3.*" extended attribute from `src_handle` to `dst_handle`,
- * then invoke `done`. Suitable for CopyObject (x-amz-metadata-directive: COPY).
- */
-void
-chimera_s3_metadata_copy(
-    struct chimera_s3_request      *request,
-    struct chimera_vfs_open_handle *src_handle,
-    struct chimera_vfs_open_handle *dst_handle,
-    chimera_s3_metadata_done_t      done,
-    void                           *private_data);
-
-/*
- * Read the metadata extended attributes from `handle` and attach the matching
- * HTTP response headers (Content-Type, ..., x-amz-meta-*) to the request, then
- * invoke `done`. Used by GetObject / HeadObject. When no content-type xattr is
- * present the caller's default (application/octet-stream) is left in place.
- */
-void
-chimera_s3_metadata_attach_headers(
-    struct chimera_s3_request      *request,
-    struct chimera_vfs_open_handle *handle,
-    chimera_s3_metadata_done_t      done,
-    void                           *private_data);

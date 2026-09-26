@@ -200,11 +200,12 @@ mism(
 {
     va_list ap;
 
-    printf("MISMATCH [%s state %zu] ", g_trace, g_state_index);
+    printf("MISMATCH [%s] state %zu: ", g_trace, g_state_index);
     va_start(ap, fmt);
     vprintf(fmt, ap);
     va_end(ap);
     printf("\n");
+    fflush(stdout);
     g_nmismatch++;
     g_abort_trace = 1;
 } /* mism */
@@ -295,8 +296,9 @@ check_refused_create_side_effect(
     uint32_t          disp,
     uint32_t          status)
 {
-    struct smb2_create_out out;
-    long long              want, got;
+    uint8_t   info[64];
+    uint32_t  info_len = 0;
+    long long want, got;
 
     if (status != ST_SHARING_VIOLATION) {
         return;
@@ -311,20 +313,35 @@ check_refused_create_side_effect(
         return;
     }
 
-    smb2_create(c, name, MBT_FILE_OPEN, MBT_FILE_READ_ATTRIBUTES,
-                MBT_FILE_SHARE_READ | MBT_FILE_SHARE_WRITE | MBT_FILE_SHARE_DELETE,
-                NULL, &out);
-    if (out.status != ST_SUCCESS) {
+    json_t *opens   = json_object_get(json_object_get(g_post_sdb, "opens"), "#map");
+    int     queried = 0;
+    for (size_t i = 0; i < json_array_size(opens); i++) {
+        json_t     *entry     = json_array_get(opens, i);
+        json_t     *open      = json_array_get(entry, 1);
+        int64_t     fid       = jint(json_array_get(entry, 0));
+        int64_t     tree      = jfield(open, "tree");
+        const char *open_name = json_string_value(json_object_get(open, "name"));
+        if (!open_name || strcmp(open_name, name) || fid < 0 || fid >= MAX_FID ||
+            !g_fid_known[fid] || !g_conn_for_fid[fid] || tree < 0 || tree >= MAX_TREE) {
+            continue;
+        }
+        c = g_conn_for_fid[fid];
+        uint32_t    saved_tree = c->tree_id;
+        c->tree_id = g_wire_tree[tree];
+        uint32_t    status = smb2_query_info(c, SMB2_INFO_FILE_T,
+                                             SMB2_FILE_STANDARD_INFO_T,
+                                             g_wire_fid[fid], 0, info,
+                                             sizeof(info), &info_len);
+        c->tree_id = saved_tree;
+        if (status == ST_SUCCESS && info_len >= 24) {
+            queried = 1;
+            break;
+        }
+    }
+    if (!queried || g64(info, 8) % BS) {
         return;
     }
-    /* The CREATE reply carries EndOfFile, so the size costs no extra round
-     * trip beyond the probe open itself. */
-    smb2_close(c, out.file_id);
-
-    if (out.end_of_file % BS) {
-        return;
-    }
-    got = (long long) (out.end_of_file / BS);
+    got = (long long) (g64(info, 8) / BS);
     if (want == got) {
         return;
     }
@@ -2000,6 +2017,11 @@ do_logoff(
          * connection itself stays in the history: a reconnect may still want
          * its ClientGuid. */
         bind_sess(sess, NULL);
+        /* Quiescence walks the transport history, not the session map. Do
+         * not send encrypted ECHO barriers with keys the server just retired.
+         * Keep the connection's ClientGuid for a later reconnect. */
+        c->session_id = 0;
+        c->tree_id    = 0;
         for (int i = 0; i < MAX_FID; i++) {
             if (g_conn_for_fid[i] == c) {
                 g_conn_for_fid[i] = NULL;

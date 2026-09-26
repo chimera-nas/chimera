@@ -14,7 +14,7 @@
 #include "nfs_drc_reply.h"
 #include "nfs4_lease.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 #include "evpl/evpl_rpc2_program.h"
@@ -420,6 +420,10 @@ nfs3_drc_kv_put(
                                               NFS3_DRC_VALUE_HDR_LEN + body_len,
                                               ts, body, body_len);
 
+    /* A key-value write is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, stores a record in a backend's KV
+     * band rather than creating anything in a namespace, and takes a key and a
+     * value where every sequence op takes an object. */
     chimera_vfs_put_key(vfs_thread, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nfs3_drc_kv_done, ctx);
 } /* nfs3_drc_kv_put */
@@ -438,6 +442,10 @@ nfs3_drc_kv_delete(
                                            key->addr_len, key->proc, key->xid,
                                            key->cksum);
 
+    /* A key-value delete is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, drops a record from a backend's KV
+     * band rather than unlinking a name from a directory, and takes a key where
+     * every sequence op takes an object. */
     chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
                            nfs3_drc_kv_done, ctx);
 } /* nfs3_drc_kv_delete */
@@ -764,6 +772,10 @@ nfs3_drc_serve(
     hc->start_len    = nfs_kv_conn_addr_prefix(hc->start, drc->kv_type,
                                                key->addr, key->addr_len);
 
+    /* A key-value search is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, enumerates a backend's KV store
+     * rather than a namespace, and streams its answers through a per-record
+     * callback that no sequence result can hold. */
     chimera_vfs_search_keys(thread->vfs_thread, hc->start, hc->start_len,
                             NULL, 0, 0,
                             nfs3_drc_hydrate_scan_cb,

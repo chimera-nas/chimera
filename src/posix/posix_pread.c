@@ -81,6 +81,7 @@ chimera_posix_pread(
     req.read.callback     = chimera_posix_pread_callback;
     req.read.private_data = &comp;
     req.read.handle       = entry->handle;
+    req.read.open_flags   = chimera_posix_fd_open_flags(entry);
     req.read.offset       = (uint64_t) offset;  // Use caller-provided offset
     req.read.length       = count;
     req.read.buf          = buf;

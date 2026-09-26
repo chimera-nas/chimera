@@ -95,12 +95,12 @@ nfs4_stateid_decode(
 } /* nfs4_stateid_decode */
 
 /*
- * RFC 7530 §9.1.4.2 seqid validation for a (non-special) NFSv4.0 stateid: the
+ * RFC 7530 §9.1.4.2 / RFC 8881 §8.2.4 validation for a non-special stateid: the
  * presented seqid is compared against the state's current seqid.  A smaller
  * seqid is a stale reference to a superseded stateid (NFS4ERR_OLD_STATEID); a
  * larger one was never issued (NFS4ERR_BAD_STATEID).  A zero seqid means "use
- * the most current" and always matches.  4.1+ does not carry this seqid
- * coupling, so callers gate this on minorversion 0.
+ * the most current" and always matches. Session-based operations also check
+ * explicit nonzero versions; sessions do not remove stateid versioning.
  */
 static inline nfsstat4
 nfs4_stateid_check_seqid(

@@ -16,7 +16,7 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_fh.h"
 #include "vfs/vfs_internal.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_mount_table.h"
 

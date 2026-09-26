@@ -78,6 +78,10 @@ chimera_nfs4_rename_callback(
         return;
     }
 
+    chimera_nfs4_unmarshall_cinfo(&rename_res->oprename.resok4.source_cinfo,
+                                  &request->rename_at.r_fromdir_pre_attr, &request->rename_at.r_fromdir_post_attr);
+    chimera_nfs4_unmarshall_cinfo(&rename_res->oprename.resok4.target_cinfo,
+                                  &request->rename_at.r_todir_pre_attr, &request->rename_at.r_todir_post_attr);
     /* The two post-mutation snapshots (ops 8 and 10). */
     chimera_nfs4_unmarshall_dir_attr(res, 8, &request->rename_at.r_fromdir_post_attr);
     chimera_nfs4_unmarshall_dir_attr(res, 10, &request->rename_at.r_todir_post_attr);

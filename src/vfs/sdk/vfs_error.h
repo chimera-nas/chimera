@@ -9,6 +9,7 @@ enum chimera_vfs_error {
     CHIMERA_VFS_OK           = 0,      /* Success */
     CHIMERA_VFS_EPERM        = 1,      /* Operation not permitted */
     CHIMERA_VFS_ENOENT       = 2,      /* No such file or directory */
+    CHIMERA_VFS_EINTR        = 4,      /* Interrupted operation */
     CHIMERA_VFS_EIO          = 5,      /* I/O error */
     CHIMERA_VFS_ENXIO        = 6,      /* No such device or address */
     CHIMERA_VFS_EAGAIN       = 11,     /* Try again */
@@ -37,5 +38,6 @@ enum chimera_vfs_error {
     CHIMERA_VFS_EBADCOOKIE   = 200,    /* Bad readdir cookie/verifier */
     CHIMERA_VFS_ENODATA      = 61,     /* No such extended attribute */
     CHIMERA_VFS_ERANGE       = 34,     /* Result too large for buffer */
+    CHIMERA_VFS_ECANCELED    = 125,    /* Operation cancelled by its own caller */
     CHIMERA_VFS_UNSET        = 100000  /* Unset error code */
 };

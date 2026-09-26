@@ -17,7 +17,7 @@
 #include "nfs4_attr.h"
 #include "nfs4_status.h"
 #include "nfs4_root_cookie.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 #include "common/logging.h"
 #include "common/macros.h"
 
@@ -74,27 +74,42 @@ nfs4_root_getattr(
     }
 } /* nfs4_getattr_root */
 
+/* Every export path is resolved the same way: PUTROOT seats the VFS root and
+ * LOOKUP_PATH walks the export's (possibly multi-component) path from it.  The
+ * walk is one op rather than a chain because the path IS one call -- the VFS
+ * has always had the multi-component form, and the sequence is how a caller
+ * reaches it without holding the root handle itself. */
+#define NFS4_ROOT_EXPORT_LOOKUP_OP 1
+
 static void
 nfs4_root_lookup_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request *req    = private_data;
-    nfsstat4            status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    struct LOOKUP4res  *res    = &req->res_compound.resarray[req->index].oplookup;
+    struct nfs_request                   *req = private_data;
+    nfsstat4                              status;
+    const struct chimera_vfs_compound_op *vop;
+    struct LOOKUP4res                    *res =
+        &req->res_compound.resarray[req->index].oplookup;
+
+    status = chimera_nfs4_errno_to_nfsstat4(
+        chimera_vfs_compound_status(compound));
+
+    if (status == NFS4_OK) {
+        vop = chimera_vfs_compound_op(compound,
+                                      NFS4_ROOT_EXPORT_LOOKUP_OP);
+
+        if (vop->fh_len) {
+            memcpy(req->fh, vop->fh, vop->fh_len);
+            req->fhlen = (int) vop->fh_len;
+        } else {
+            status = NFS4ERR_SERVERFAULT;
+        }
+    }
 
     res->status = status;
 
-    if (error_code == CHIMERA_VFS_OK) {
-        if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-            res->status = NFS4ERR_SERVERFAULT;
-            status      = NFS4ERR_SERVERFAULT;
-        } else {
-            memcpy(req->fh, attr->va_fh, attr->va_fh_len);
-            req->fhlen = attr->va_fh_len;
-        }
-    }
+    chimera_vfs_compound_free(compound);
 
     chimera_nfs4_compound_complete(req, status);
 } /* nfs4_root_lookup_complete */
@@ -106,9 +121,8 @@ nfs4_root_lookup_export(
     const struct chimera_nfs_export  *export,
     const char                       *full_path)
 {
-    struct LOOKUP4res *res = &req->res_compound.resarray[req->index].oplookup;
-    uint8_t            root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t           root_fh_len;
+    struct LOOKUP4res           *res = &req->res_compound.resarray[req->index].oplookup;
+    struct chimera_vfs_compound *compound;
 
     /* Enforce the export's security-flavor policy at the namespace-root
      * boundary: a client traversing into the export under a disallowed flavor
@@ -134,17 +148,15 @@ nfs4_root_lookup_export(
     }
 
     req->handle = NULL; // Ensure handle is NULL so that the lookup callback does not attempt to release it
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(nfs_thread->vfs_thread,
-                       &req->cred,
-                       root_fh,
-                       root_fh_len,
-                       full_path,
-                       strlen(full_path),
-                       CHIMERA_VFS_ATTR_FH,
-                       0,
-                       nfs4_root_lookup_complete,
-                       req);
+
+    compound = chimera_vfs_compound_alloc(nfs_thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putroot(compound);
+    chimera_vfs_compound_add_lookup_path(compound, full_path,
+                                         (int) strlen(full_path),
+                                         CHIMERA_VFS_ATTR_FH, 0);
+
+    chimera_vfs_compound_submit(compound, nfs4_root_lookup_complete, req);
 } /* nfs4_root_lookup_export */
 
 SYMBOL_EXPORT void
@@ -159,13 +171,12 @@ nfs4_root_lookup(
     char                             *full_path = NULL;
 
     /**
-     * We are doing a lookup on the export path. The path
-     * can contain multiple components, so we need to use
-     * the chimera_vfs_lookup() logic from the root file handle
-     * to find the mount point file handle.
+     * We are doing a lookup on the export path. The path can contain
+     * multiple components, so it is resolved as a LOOKUP_PATH from the
+     * VFS root a PUTROOT seats -- see nfs4_root_lookup_export.
      */
 
-    const struct chimera_nfs_export *export = NULL;
+    const struct chimera_nfs_export  *export = NULL;
 
     rc = chimera_nfs_find_export_path(shared, args->objname.data, args->objname.len, &full_path, &export);
     if (rc) {
@@ -208,17 +219,30 @@ struct nfs4_root_export_fh_ctx {
 
 static void
 nfs4_root_export_fh_resolve_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs4_root_export_fh_ctx   *ctx    = private_data;
-    struct chimera_server_nfs_shared *shared = ctx->thread->shared;
+    struct nfs4_root_export_fh_ctx       *ctx    = private_data;
+    struct chimera_server_nfs_shared     *shared = ctx->thread->shared;
+    const struct chimera_vfs_compound_op *vop;
+    enum chimera_vfs_error                error_code;
+    uint8_t                               fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                              fh_len = 0;
 
-    if (error_code == CHIMERA_VFS_OK &&
-        (!attr || !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH))) {
-        error_code = CHIMERA_VFS_EIO;
+    error_code = chimera_vfs_compound_status(compound);
+
+    if (error_code == CHIMERA_VFS_OK) {
+        vop = chimera_vfs_compound_op(compound, NFS4_ROOT_EXPORT_LOOKUP_OP);
+
+        if (vop->fh_len) {
+            memcpy(fh, vop->fh, vop->fh_len);
+            fh_len = vop->fh_len;
+        } else {
+            error_code = CHIMERA_VFS_EIO;
+        }
     }
+
+    chimera_vfs_compound_free(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
         ctx->callback(error_code, NULL, 0, ctx->thread, ctx->req);
@@ -230,14 +254,13 @@ nfs4_root_export_fh_resolve_complete(
     /* Prime the cache unless the "/" export changed while the resolve was in
      * flight; a stale prime would mis-recognize the old root. */
     if (shared->root_export_id == ctx->export_id) {
-        memcpy(shared->root_export_fh, attr->va_fh, attr->va_fh_len);
-        shared->root_export_fh_len = attr->va_fh_len;
+        memcpy(shared->root_export_fh, fh, fh_len);
+        shared->root_export_fh_len = fh_len;
         shared->root_export_fh_id  = ctx->export_id;
     }
     evpl_mutex_unlock(&shared->exports_lock);
 
-    ctx->callback(CHIMERA_VFS_OK, attr->va_fh, attr->va_fh_len,
-                  ctx->thread, ctx->req);
+    ctx->callback(CHIMERA_VFS_OK, fh, fh_len, ctx->thread, ctx->req);
     free(ctx);
 } /* nfs4_root_export_fh_resolve_complete */
 
@@ -250,6 +273,7 @@ nfs4_root_export_fh_resolve(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct chimera_nfs_export        *cur, root_export;
     struct nfs4_root_export_fh_ctx   *ctx;
+    struct chimera_vfs_compound      *compound;
     uint8_t                           fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                          fh_len;
     uint16_t                          root_id;
@@ -304,16 +328,15 @@ nfs4_root_export_fh_resolve(
     ctx->callback  = callback;
     ctx->export_id = root_id;
 
-    chimera_vfs_lookup(thread->vfs_thread,
-                       &req->cred,
-                       fh,
-                       fh_len,
-                       path,
-                       strlen(path),
-                       CHIMERA_VFS_ATTR_FH,
-                       CHIMERA_VFS_LOOKUP_FOLLOW,
-                       nfs4_root_export_fh_resolve_complete,
-                       ctx);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putroot(compound);
+    chimera_vfs_compound_add_lookup_path(compound, path, (int) strlen(path),
+                                         CHIMERA_VFS_ATTR_FH,
+                                         CHIMERA_VFS_LOOKUP_FOLLOW);
+
+    chimera_vfs_compound_submit(compound,
+                                nfs4_root_export_fh_resolve_complete, ctx);
 } /* nfs4_root_export_fh_resolve */
 
 SYMBOL_EXPORT void
@@ -348,6 +371,39 @@ nfs4_root_export_fh_get(
 
     nfs4_root_export_fh_resolve(thread, req, callback);
 } /* nfs4_root_export_fh_get */
+
+SYMBOL_EXPORT int
+nfs4_root_export_fh_peek(
+    struct chimera_server_nfs_thread *thread,
+    uint16_t                          export_id,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len)
+{
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    uint16_t                          root_id;
+    int                               answer;
+
+    /* The same lockless gate nfs4_root_junction_check opens with, and for the
+     * same reason: a handle can only BE the namespace root if it was minted
+     * under the "/" export. */
+    root_id = shared->root_export_id;
+
+    if (root_id == 0 || export_id != root_id) {
+        return 0;
+    }
+
+    evpl_mutex_lock(&shared->exports_lock);
+
+    if (shared->root_export_fh_id == root_id && shared->root_export_fh_len) {
+        answer = (shared->root_export_fh_len == fh_len &&
+                  memcmp(shared->root_export_fh, fh, fh_len) == 0);
+    } else {
+        answer = -1;
+    }
+    evpl_mutex_unlock(&shared->exports_lock);
+
+    return answer;
+} /* nfs4_root_export_fh_peek */
 
 static void
 nfs4_root_junction_check_fh_ready(
@@ -393,8 +449,8 @@ nfs4_root_junction_check(
 /*
  * Pseudo-fs root READDIR.
  *
- * Each entry's attributes require resolving the export's backing path via
- * chimera_vfs_lookup(), which completes asynchronously, so the exports are
+ * Each entry's attributes require resolving the export's backing path, a
+ * PUTROOT and a LOOKUP_PATH that complete asynchronously, so the exports are
  * walked one at a time by a state machine: issue the lookup for the current
  * export, marshal its attrs in the completion callback, then advance to the
  * next export, and complete the compound only after the walk finishes.
@@ -431,8 +487,6 @@ struct nfs4_root_readdir_export {
 struct nfs4_root_readdir_state {
     struct nfs_request              *req;
     struct chimera_vfs_thread       *vfs_thread;
-    uint8_t                          root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                         root_fh_len;
     uint64_t                         attrmask;
     struct nfs4_root_readdir_export *exports;
     int                              num_exports;
@@ -554,18 +608,28 @@ static void nfs4_root_readdir_advance(
 
 static void
 nfs4_root_readdir_lookup_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attrs,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs4_root_readdir_state *state  = private_data;
-    struct nfs_request             *req    = state->req;
-    struct READDIR4args            *args   = &req->args_compound->argarray[req->index].opreaddir;
-    struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
-    struct entry4                  *entry  = state->entry;
-    uint32_t                        dbuf_cur;
+    struct nfs4_root_readdir_state       *state  = private_data;
+    struct nfs_request                   *req    = state->req;
+    struct READDIR4args                  *args   = &req->args_compound->argarray[req->index].opreaddir;
+    struct nfs_nfs4_readdir_cursor       *cursor = &req->readdir4_cursor;
+    struct entry4                        *entry  = state->entry;
+    const struct chimera_vfs_compound_op *vop;
+    struct chimera_vfs_attrs             *attrs;
+    enum chimera_vfs_error                error_code;
+    uint32_t                              dbuf_cur;
 
     state->lookup_done = 1;
+
+    error_code = chimera_vfs_compound_status(compound);
+    vop        = chimera_vfs_compound_op(compound,
+                                         NFS4_ROOT_EXPORT_LOOKUP_OP);
+    /* The op owns its attribute copies -- an ACL among them -- until the
+     * compound is freed, so the marshalling below runs first and the free is
+     * the last thing this callback does with the sequence. */
+    attrs = (struct chimera_vfs_attrs *) &vop->attr;
 
     if (error_code != CHIMERA_VFS_OK) {
         /* An export root that fails to resolve (deleted directory, config
@@ -615,6 +679,8 @@ nfs4_root_readdir_lookup_callback(
         }
     }
 
+    chimera_vfs_compound_free(compound);
+
     /* If the lookup completed synchronously the advance() loop is still on
      * the stack and continues the walk itself; re-entering it here would
      * recurse once per export. */
@@ -628,6 +694,7 @@ nfs4_root_readdir_advance(struct nfs4_root_readdir_state *state)
 {
     struct nfs_request              *req = state->req;
     struct nfs4_root_readdir_export *export;
+    struct chimera_vfs_compound     *compound;
     struct entry4                   *entry;
     int                              rc;
 
@@ -686,16 +753,16 @@ nfs4_root_readdir_advance(struct nfs4_root_readdir_state *state)
         state->entry       = entry;
         state->lookup_done = 0;
 
-        chimera_vfs_lookup(state->vfs_thread,
-                           &req->cred,
-                           state->root_fh,
-                           state->root_fh_len,
-                           export->path,
-                           strlen(export->path),
-                           CHIMERA_VFS_ATTR_FH,
-                           state->attrmask,
-                           nfs4_root_readdir_lookup_callback,
-                           state);
+        compound = chimera_vfs_compound_alloc(state->vfs_thread, &req->cred);
+
+        chimera_vfs_compound_add_putroot(compound);
+        chimera_vfs_compound_add_lookup_path(compound, export->path,
+                                             (int) strlen(export->path),
+                                             CHIMERA_VFS_ATTR_FH |
+                                             state->attrmask, 0);
+
+        chimera_vfs_compound_submit(compound,
+                                    nfs4_root_readdir_lookup_callback, state);
 
         if (!state->lookup_done) {
             /* Lookup is in flight; its callback resumes the walk. */
@@ -753,7 +820,6 @@ nfs4_root_readdir(
     state->error_code  = CHIMERA_VFS_OK;
     state->attrmask    = chimera_nfs4_attr2mask(args->attr_request,
                                                 args->num_attr_request);
-    chimera_vfs_get_root_fh(state->root_fh, &state->root_fh_len);
 
     nfs4_root_readdir_advance(state);
 } /* nfs4_root_readdir */

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs_internal.h"
 #include "common/macros.h"
 
@@ -75,6 +75,15 @@ chimera_vfs_put_key_at(
     uint32_t                    key_off;
 
     chimera_vfs_kv_route_fh(thread, fh, fhlen, &route);
+
+    if ((key_len && !key) || (value_len && !value)) {
+        callback(CHIMERA_VFS_EINVAL, private_data);
+        return;
+    }
+    if ((uint64_t) key_len + value_len + !!route.fallback > CHIMERA_VFS_PLUGIN_DATA_SIZE) {
+        callback(CHIMERA_VFS_ERANGE, private_data);
+        return;
+    }
 
     if (route.fallback) {
         request = chimera_vfs_request_alloc_common(thread, NULL, route.module,

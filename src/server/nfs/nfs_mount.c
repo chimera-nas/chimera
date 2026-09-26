@@ -12,7 +12,7 @@
 #include "nfs_internal.h"
 #include "nfs_mount.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 
 /*
  * Derive the rmtab hostname for a connection: the caller's remote address with
@@ -171,13 +171,16 @@ chimera_nfs_mount_null(
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_nfs_mount_null */
 
+/* Answer the MNT from a resolved export root, or from the failure that stopped
+ * the resolve.  Reached from the sequence's completion and, for the refusals
+ * decided before any VFS work, directly. */
 static void
-chimera_nfs_mount_lookup_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_nfs_mount_reply(
+    enum chimera_vfs_error error_code,
+    const uint8_t         *fh,
+    uint32_t               fh_len,
+    struct nfs_request    *req)
 {
-    struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct evpl                      *evpl   = thread->evpl;
     struct chimera_server_nfs_shared *shared = thread->shared;
@@ -214,12 +217,12 @@ chimera_nfs_mount_lookup_complete(
         uint8_t wire[CHIMERA_NFS_FH_MAX];
         int     wirelen;
 
-        chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
+        chimera_nfs_abort_if(fh_len == 0,
                              "NFS mount: no file handle was returned");
 
         /* Wrap the export root handle with its export id (and sign it) before
          * handing it to the client, so subsequent NFSv3 ops can attribute it. */
-        chimera_nfs_fh_encode(req, attr->va_fh, attr->va_fh_len, wire, &wirelen);
+        chimera_nfs_fh_encode(req, fh, fh_len, wire, &wirelen);
 
         rc = xdr_dbuf_alloc_opaque(&res.mountinfo.fhandle,
                                    wirelen,
@@ -242,6 +245,38 @@ chimera_nfs_mount_lookup_complete(
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
+} /* chimera_nfs_mount_reply */
+
+/* PUTROOT seats the VFS root and LOOKUP_PATH walks the export's path from it
+ * -- the same two ops the NFSv4 namespace root resolves an export with
+ * (nfs4_root.c), because it is the same question. */
+#define NFS_MOUNT_LOOKUP_OP 1
+
+static void
+chimera_nfs_mount_lookup_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct nfs_request                   *req = private_data;
+    const struct chimera_vfs_compound_op *vop;
+    enum chimera_vfs_error                error_code;
+    uint8_t                               fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                              fh_len = 0;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    if (error_code == CHIMERA_VFS_OK) {
+        vop = chimera_vfs_compound_op(compound, NFS_MOUNT_LOOKUP_OP);
+
+        if (vop->fh_len) {
+            memcpy(fh, vop->fh, vop->fh_len);
+            fh_len = vop->fh_len;
+        }
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs_mount_reply(error_code, fh, fh_len, req);
 } /* chimera_nfs_mount_lookup_complete */
 
 void
@@ -258,8 +293,7 @@ chimera_nfs_mount_mnt(
     struct nfs_request               *req;
     int                               rc;
     char                             *full_path = NULL;
-    uint8_t                           root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                          root_fh_len;
+    struct chimera_vfs_compound      *compound;
     char                              hostname[64];
     char                              directory[MNTPATHLEN + 1];
 
@@ -277,7 +311,7 @@ chimera_nfs_mount_mnt(
         if (full_path) {
             free(full_path);
         }
-        chimera_nfs_mount_lookup_complete(CHIMERA_VFS_ENOENT, NULL, req);
+        chimera_nfs_mount_reply(CHIMERA_VFS_ENOENT, NULL, 0, req);
         return;
     }
 
@@ -294,7 +328,7 @@ chimera_nfs_mount_mnt(
         if (full_path) {
             free(full_path);
         }
-        chimera_nfs_mount_lookup_complete(CHIMERA_VFS_EACCES, NULL, req);
+        chimera_nfs_mount_reply(CHIMERA_VFS_EACCES, NULL, 0, req);
         return;
     }
 
@@ -313,17 +347,16 @@ chimera_nfs_mount_mnt(
     chimera_nfs_mount_copy_path(&args->path, directory, sizeof(directory));
     chimera_nfs_mount_record(shared, hostname, directory);
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(thread->vfs_thread,
-                       &req->cred,
-                       root_fh,
-                       root_fh_len,
-                       full_path,
-                       strlen(full_path),
-                       CHIMERA_VFS_ATTR_FH,
-                       CHIMERA_VFS_LOOKUP_FOLLOW,
-                       chimera_nfs_mount_lookup_complete,
-                       req);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putroot(compound);
+    chimera_vfs_compound_add_lookup_path(compound, full_path,
+                                         (int) strlen(full_path),
+                                         CHIMERA_VFS_ATTR_FH,
+                                         CHIMERA_VFS_LOOKUP_FOLLOW);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs_mount_lookup_complete,
+                                req);
     if (full_path) {
         free(full_path);
     }

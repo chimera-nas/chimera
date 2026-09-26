@@ -6,10 +6,94 @@
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "nfs4_access.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_access.h"
+
+/*
+ * The ACCESS4_* bits this server will actually evaluate for `attr`/`fh`.
+ *
+ * The server reports in `supported` exactly the requested bits it evaluated,
+ * never undefined bits or bits not meaningful for the object type (RFC 7530
+ * sec 16.1.4 / RFC 8276 sec 8.4).  The xattr access bits exist only in
+ * NFSv4.2, so they are meaningful only when the client negotiated
+ * minorversion >= 2 AND the backend implements xattrs -- on 4.0/4.1 bit 0x40
+ * is undefined and must be ignored.
+ *
+ * Split out from the fill because the caller needs it to build the ACE mask it
+ * evaluates; the VFS-compound path passes `fh` for the object that op ran
+ * against rather than req->fh.
+ */
+uint32_t
+chimera_nfs4_access_requested(
+    struct nfs_request             *req,
+    const struct ACCESS4args       *args,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen)
+{
+    uint32_t meaningful;
+
+    meaningful = chimera_nfs4_access_meaningful(
+        S_ISDIR(attr->va_mode),
+        req->minorversion >= 2 &&
+        chimera_nfs4_xattr_supported(req->thread->vfs_thread, fh, fhlen));
+
+    return args->access & meaningful;
+} /* chimera_nfs4_access_requested */
+
+/*
+ * Fill an ACCESS4 result from the evaluated request bits and the ACE bits the
+ * central gate granted.  `granted` may cover more than `requested` asked for
+ * (the VFS compound evaluates the client's whole request); the mapping back is
+ * limited to `requested` either way.
+ *
+ * `attr` is the object's, and is needed for the execute rule below -- which
+ * lives HERE rather than in either caller because both paths have to give the
+ * same answer, and a rule applied on one of them would be the one thing this
+ * conversion is not allowed to change.
+ */
+void
+chimera_nfs4_access_fill(
+    struct nfs_request             *req,
+    struct ACCESS4res              *res,
+    uint32_t                        requested,
+    uint32_t                        granted,
+    const struct chimera_vfs_attrs *attr)
+{
+    res->status           = NFS4_OK;
+    res->resok4.supported = requested;
+    res->resok4.access    = chimera_nfs4_access_from_granted(requested, granted);
+
+    /* RFC 8881 18.1.4: even privileged callers may receive EXECUTE only
+     * when a mode execute bit or an ALLOW ACE marks the object executable.
+     * This ACCESS reporting rule does not change the shared DAC engine. */
+    if (res->resok4.access & ACCESS4_EXECUTE) {
+        bool                      executable = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && (attr->va_mode & 0111);
+        const struct chimera_acl *acl        = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL;
+        if (!executable && acl) {
+            for (uint32_t i = 0; i < acl->num_aces; i++) {
+                if (acl->aces[i].type == CHIMERA_ACE_ALLOWED &&
+                    (acl->aces[i].access_mask & CHIMERA_ACE_EXECUTE)) {
+                    executable = true;
+                    break;
+                }
+            }
+        }
+        if (!executable) {
+            res->resok4.access &= ~ACCESS4_EXECUTE;
+        }
+    }
+
+    /* A read-only export never grants write-class access, regardless of what
+     * the ACL/mode would allow.  `supported` stays unmasked: the bits were
+     * evaluated, just not granted (RFC 7530 sec 16.1). */
+    if (chimera_nfs_export_id_is_ro(req->thread->shared, req->export_id)) {
+        res->resok4.access &= ~(ACCESS4_MODIFY | ACCESS4_EXTEND |
+                                ACCESS4_DELETE | ACCESS4_XAWRITE);
+    }
+} /* chimera_nfs4_access_fill */
 
 static void
 chimera_nfs4_access_complete(
@@ -20,61 +104,25 @@ chimera_nfs4_access_complete(
     struct nfs_request *req  = private_data;
     struct ACCESS4args *args = &req->args_compound->argarray[req->index].opaccess;
     struct ACCESS4res  *res  = &req->res_compound.resarray[req->index].opaccess;
-    uint32_t            meaningful, requested, granted;
-
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    uint32_t            requested, granted;
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
-    /* The server reports in `supported` exactly the requested bits it
-     * evaluated, never undefined bits or bits not meaningful for the object
-     * type (RFC 7530 sec 16.1.4 / RFC 8276 sec 8.4).  The xattr access bits
-     * exist only in NFSv4.2, so they are meaningful only when the client
-     * negotiated minorversion >= 2 AND the backend implements xattrs -- on 4.0/
-     * 4.1 bit 0x40 is undefined and must be ignored. */
-    meaningful = chimera_nfs4_access_meaningful(
-        S_ISDIR(attr->va_mode),
-        req->minorversion >= 2 &&
-        chimera_nfs4_xattr_supported(req->thread->vfs_thread,
-                                     req->fh, req->fhlen));
-
-    requested = args->access & meaningful;
+    requested = chimera_nfs4_access_requested(req, args, attr,
+                                              req->fh, req->fhlen);
 
     /* Evaluate the canonical ACL (or mode fallback) once via the shared gate,
      * then map the granted ACE bits back to the ACCESS4_* result bits. */
     granted = chimera_vfs_access_check(attr, &req->cred,
                                        chimera_nfs4_access4_to_mask(requested));
 
-    /* RFC 8881 18.1.4: the server SHOULD NOT set ACCESS4_EXECUTE unless an
-     * execute bit is set.  A privileged caller's DAC override grants
-     * ACE_EXECUTE on a file with no execute bit anywhere in its mode, which is
-     * right for the OPEN that follows and wrong for the advisory answer -- so
-     * withhold that ONE bit here rather than weakening the override.
-     *
-     * Restricted to non-directories on purpose: a directory's search
-     * permission travels as ACCESS4_LOOKUP, which maps to the same ACE bit and
-     * which the RFC does NOT qualify this way -- stripping it there would
-     * refuse a privileged caller the traversal it really does have. */
-    if (!S_ISDIR(attr->va_mode) &&
-        !(attr->va_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
-        granted &= ~CHIMERA_ACE_EXECUTE;
-    }
-
-    res->status           = NFS4_OK;
-    res->resok4.supported = requested;
-    res->resok4.access    = chimera_nfs4_access_from_granted(requested, granted);
-
-    /* A read-only export never grants write-class access, regardless of what
-     * the ACL/mode would allow.  `supported` stays unmasked: the bits were
-     * evaluated, just not granted (RFC 7530 sec 16.1). */
-    if (chimera_nfs_export_id_is_ro(req->thread->shared, req->export_id)) {
-        res->resok4.access &= ~(ACCESS4_MODIFY | ACCESS4_EXTEND |
-                                ACCESS4_DELETE | ACCESS4_XAWRITE);
-    }
+    chimera_nfs4_access_fill(req, res, requested, granted, attr);
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_access_complete */

@@ -10,7 +10,6 @@
 #include "common/format.h"
 #include "common/misc.h"
 #include "vfs.h"
-#include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "prometheus-c.h"
 
@@ -59,6 +58,27 @@ struct chimera_vfs_close_ref {
     int                        needs_close;
     uint8_t                    fh[CHIMERA_VFS_FH_SIZE + 16];
 };
+
+typedef void (*chimera_vfs_close_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+/* Close the open instance named by vfs_private -- the cookie the backend
+ * returned from open.  That cookie, not fh, is what identifies the instance;
+ * fh names the object it was opened on and is carried so a backend can tell
+ * which of its filesystems (or which mount) the close belongs to, and so the
+ * op appears in traces with the handle it applies to.  Both are supplied by
+ * the open-handle cache, which owns them for the handle's lifetime. */
+void
+chimera_vfs_close(
+    struct chimera_vfs_thread   *thread,
+    struct chimera_vfs_module   *vfs_module,
+    const void                  *fh,
+    int                          fhlen,
+    uint64_t                     vfs_private,
+    uint64_t                     fh_hash,
+    chimera_vfs_close_callback_t callback,
+    void                        *private_data);
 
 static inline void
 chimera_vfs_close_ref_capture(
@@ -1089,13 +1109,17 @@ chimera_vfs_open_cache_clear_doc(
  * Otherwise performs a normal release and returns 0.
  */
 struct chimera_vfs_doc_info {
-    uint8_t                      parent_fh[CHIMERA_VFS_FH_SIZE];
-    char                         name[CHIMERA_VFS_NAME_MAX];
-    struct chimera_vfs_cred      cred;
-    uint16_t                     parent_fh_len;
-    uint16_t                     name_len;
+    uint8_t                        parent_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                        target_fh[CHIMERA_VFS_FH_SIZE];
+    uint16_t                       target_fh_len;
+    struct chimera_vfs_file_state *pending_state;
+    void                          *smb_stream_delete;
+    char                           name[CHIMERA_VFS_NAME_MAX];
+    struct chimera_vfs_cred        cred;
+    uint16_t                       parent_fh_len;
+    uint16_t                       name_len;
     /* Backend close state -- the caller closes after the unlink */
-    struct chimera_vfs_close_ref close_ref;
+    struct chimera_vfs_close_ref   close_ref;
 };
 
 static inline int
@@ -1127,9 +1151,13 @@ chimera_vfs_open_cache_release_doc(
         /* Last reference with DOC — extract deletion info and remove
          * from cache.  The caller is responsible for the actual unlink
          * and for closing the underlying VFS module handle. */
-        doc_out->parent_fh_len = handle->doc_parent_fh_len;
-        doc_out->name_len      = handle->doc_name_len;
-        doc_out->cred          = handle->doc_cred;
+        doc_out->parent_fh_len     = handle->doc_parent_fh_len;
+        doc_out->pending_state     = NULL;
+        doc_out->smb_stream_delete = NULL;
+        doc_out->target_fh_len     = handle->fh_len;
+        memcpy(doc_out->target_fh, handle->fh, handle->fh_len);
+        doc_out->name_len = handle->doc_name_len;
+        doc_out->cred     = handle->doc_cred;
         chimera_vfs_close_ref_capture(&doc_out->close_ref, handle);
         memcpy(doc_out->parent_fh, handle->doc_parent_fh,
                handle->doc_parent_fh_len);

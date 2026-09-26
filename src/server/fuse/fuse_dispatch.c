@@ -62,9 +62,9 @@ chimera_fuse_request_alloc(
         req->buf_allocated = 1;
     }
 
-    req->channel = channel;
-    req->handle  = NULL;
-    req->file    = NULL;
+    req->channel  = channel;
+    req->compound = NULL;
+    req->file     = NULL;
 
     thread->active_requests++;
 
@@ -184,6 +184,12 @@ chimera_fuse_request_finish(struct chimera_fuse_request *req)
 {
     struct chimera_fuse_thread *thread = req->thread;
 
+    if (req->compound) {
+        chimera_vfs_compound_free(req->compound);
+        req->compound = NULL;
+    }
+
+    /* Lock compounds borrow this pin through their attempt cleanup. */
     if (req->handle) {
         chimera_vfs_release(thread->vfs_thread, req->handle);
         req->handle = NULL;
@@ -381,41 +387,6 @@ chimera_fuse_channel_dead(struct chimera_fuse_channel *channel)
                       channel->mount->mountpoint);
 } /* chimera_fuse_channel_dead */
 
-/* Marshal a request completed off-thread home for its reply. */
-void
-chimera_fuse_resume_post(struct chimera_fuse_request *req)
-{
-    struct chimera_fuse_thread *thread = req->thread;
-
-    evpl_mutex_lock(&thread->resume_lock);
-    req->next            = thread->resume_queue;
-    thread->resume_queue = req;
-    evpl_mutex_unlock(&thread->resume_lock);
-
-    evpl_ring_doorbell(&thread->resume_doorbell);
-} /* chimera_fuse_resume_post */
-
-void
-chimera_fuse_resume_doorbell(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
-{
-    struct chimera_fuse_thread  *thread = container_of(doorbell, struct chimera_fuse_thread, resume_doorbell);
-    struct chimera_fuse_request *queue, *req;
-
-    evpl_mutex_lock(&thread->resume_lock);
-    queue                = thread->resume_queue;
-    thread->resume_queue = NULL;
-    evpl_mutex_unlock(&thread->resume_lock);
-
-    while (queue) {
-        req   = queue;
-        queue = req->next;
-
-        chimera_fuse_lock_resume(req);
-    }
-} /* chimera_fuse_resume_doorbell */
-
 static void
 chimera_fuse_op_interrupt(
     struct chimera_fuse_request *req,
@@ -431,9 +402,7 @@ chimera_fuse_op_interrupt(
      * original request completes normally.  No reply either way: an
      * ENOSYS reply would disable interrupts connection-wide. */
     if (arglen >= sizeof(*in)) {
-        chimera_fuse_locks_interrupt(req->channel->mount,
-                                     req->thread->vfs_thread->vfs->vfs_state,
-                                     in->unique);
+        chimera_fuse_locks_interrupt(req->channel->mount, req->thread->vfs_thread->vfs->vfs_state, in->unique);
     }
 
     chimera_fuse_request_free(req->thread, req);

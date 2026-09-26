@@ -6,134 +6,84 @@
 #include "nfs4_status.h"
 #include "nfs4_state.h"
 #include "nfs4_session.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
+
+/*
+ * The special-stateid run: PUTFH, OPEN_CURRENT(meta), GETATTR(MODE),
+ * OPEN_CURRENT(data), DEALLOCATE.  A stateid DEALLOCATE is one op against the
+ * handle the state already holds, so the two shapes differ only in what
+ * precedes the punch, which is the last op in both.
+ */
+#define NFS4_DEALLOCATE_OP_TYPE 2
+
+/*
+ * The current filehandle of a special-stateid DEALLOCATE is not guaranteed to
+ * be a regular file: nothing has OPENed it, so no earlier op rejected the type.
+ * RFC 7862 §11.9: DEALLOCATE operates on a regular file, so a directory cfh is
+ * NFS4ERR_ISDIR rather than a backend-level success.
+ *
+ * The VFS error the gate sets is only a stop signal; the completion re-derives
+ * the NFSv4 status from the mode this op reported.
+ */
+static void
+chimera_nfs4_deallocate_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *top;
+
+    if (index != NFS4_DEALLOCATE_OP_TYPE || *status != CHIMERA_VFS_OK) {
+        return;
+    }
+
+    top = chimera_vfs_compound_op(compound, index);
+
+    if ((top->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISREG(top->attr.va_mode)) {
+        *status = CHIMERA_VFS_EINVAL;
+    }
+} /* chimera_nfs4_deallocate_gate */
 
 static void
 chimera_nfs4_deallocate_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request    *req = private_data;
-    struct DEALLOCATE4res *res = &req->res_compound.resarray[req->index].opdeallocate;
+    struct nfs_request                   *req = private_data;
+    struct DEALLOCATE4res                *res = &req->res_compound.resarray[req->index].opdeallocate;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                error_code;
+    uint32_t                              nops;
+
+    error_code = chimera_vfs_compound_status(compound);
+    nops       = chimera_vfs_compound_num_ops(compound);
 
     if (error_code == CHIMERA_VFS_OK) {
         res->dr_status = NFS4_OK;
+    } else if (nops > 1 + NFS4_DEALLOCATE_OP_TYPE &&
+               (op = chimera_vfs_compound_op(compound,
+                                             NFS4_DEALLOCATE_OP_TYPE)) &&
+               op->status != CHIMERA_VFS_OK &&
+               (op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+               !S_ISREG(op->attr.va_mode)) {
+        res->dr_status = chimera_nfs4_sparse_nonreg_status(op->attr.va_mode);
     } else {
         res->dr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
     }
+
+    chimera_vfs_compound_free(compound);
 
     if (req->nfs_state_ref) {
         nfs_state_table_release(&req->thread->shared->nfs4_state_table,
                                 req->nfs_state_ref, req->nfs_state_type,
                                 req->thread->vfs_thread);
         req->nfs_state_ref = NULL;
-    } else if (req->handle) {
-        /* Special stateid: release the on-the-fly handle we opened. */
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
     }
 
     chimera_nfs4_compound_complete(req, res->dr_status);
 } /* chimera_nfs4_deallocate_complete */
-
-static void
-chimera_nfs4_deallocate_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request     *req  = private_data;
-    struct DEALLOCATE4args *args = &req->args_compound->argarray[req->index].
-        opdeallocate;
-    struct DEALLOCATE4res  *res = &req->res_compound.resarray[req->index].
-        opdeallocate;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->dr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->dr_status);
-        return;
-    }
-
-    req->handle = handle;
-
-    chimera_vfs_allocate(req->thread->vfs_thread, &req->cred,
-                         handle,
-                         args->da_offset,
-                         args->da_length,
-                         CHIMERA_VFS_ALLOCATE_DEALLOCATE,
-                         0, 0,
-                         chimera_nfs4_deallocate_complete,
-                         req);
-} /* chimera_nfs4_deallocate_open_callback */
-
-static void
-chimera_nfs4_deallocate_typecheck_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request    *req = private_data;
-    struct DEALLOCATE4res *res = &req->res_compound.resarray[req->index].opdeallocate;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->dr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-        chimera_nfs4_compound_complete(req, res->dr_status);
-        return;
-    }
-
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-        !S_ISREG(attr->va_mode)) {
-        res->dr_status = chimera_nfs4_sparse_nonreg_status(attr->va_mode);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-        chimera_nfs4_compound_complete(req, res->dr_status);
-        return;
-    }
-
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-    req->handle = NULL;
-
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs4_deallocate_open_callback,
-                        req);
-} /* chimera_nfs4_deallocate_typecheck_complete */
-
-/*
- * The current filehandle of a special-stateid DEALLOCATE is not guaranteed to be
- * a regular file: nothing has OPENed it, so no earlier op rejected the type.
- * RFC 7862 §11.9: DEALLOCATE operates on a regular file, so a
- * directory cfh is NFS4ERR_ISDIR rather than a backend-level success.
- */
-static void
-chimera_nfs4_deallocate_typecheck_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request    *req = private_data;
-    struct DEALLOCATE4res *res = &req->res_compound.resarray[req->index].opdeallocate;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->dr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->dr_status);
-        return;
-    }
-
-    req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        CHIMERA_VFS_ATTR_MODE,
-                        chimera_nfs4_deallocate_typecheck_complete,
-                        req);
-} /* chimera_nfs4_deallocate_typecheck_open_callback */
 
 void
 chimera_nfs4_deallocate(
@@ -145,6 +95,7 @@ chimera_nfs4_deallocate(
     struct DEALLOCATE4args         *args  = &argop->opdeallocate;
     struct DEALLOCATE4res          *res   = &resop->opdeallocate;
     struct nfs_state_table         *table = &thread->shared->nfs4_state_table;
+    struct chimera_vfs_compound    *compound;
     void                           *state_void;
     uint8_t                         state_type;
     struct chimera_vfs_open_handle *state_handle;
@@ -193,13 +144,26 @@ chimera_nfs4_deallocate(
             chimera_nfs4_compound_complete(req, res->dr_status);
             return;
         }
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh,
-                            req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                            CHIMERA_VFS_OPEN_NOFOLLOW,
-                            chimera_nfs4_deallocate_typecheck_open_callback,
-                            req);
+        compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+        chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED |
+                                              CHIMERA_VFS_OPEN_PATH |
+                                              CHIMERA_VFS_OPEN_NOFOLLOW, 0);
+        chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED, 0);
+        chimera_vfs_compound_add_allocate(compound, NULL,
+                                          args->da_offset, args->da_length,
+                                          CHIMERA_VFS_ALLOCATE_DEALLOCATE,
+                                          0, 0);
+
+        chimera_vfs_compound_set_gate(compound, chimera_nfs4_deallocate_gate,
+                                      req);
+
+        chimera_vfs_compound_submit(compound,
+                                    chimera_nfs4_deallocate_complete, req);
         return;
     }
 
@@ -226,12 +190,15 @@ chimera_nfs4_deallocate(
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;
 
-    chimera_vfs_allocate(thread->vfs_thread, &req->cred,
-                         state_handle,
-                         args->da_offset,
-                         args->da_length,
-                         CHIMERA_VFS_ALLOCATE_DEALLOCATE,
-                         0, 0,
-                         chimera_nfs4_deallocate_complete,
-                         req);
+    /* The stateid names the object, so the run is the punch alone against the
+     * handle the state holds -- lent, and released with the state below.  No
+     * type check: the OPEN that minted the stateid established the type. */
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_allocate(compound, state_handle,
+                                      args->da_offset, args->da_length,
+                                      CHIMERA_VFS_ALLOCATE_DEALLOCATE, 0, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_deallocate_complete,
+                                req);
 } /* chimera_nfs4_deallocate */

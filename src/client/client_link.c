@@ -26,6 +26,10 @@ chimera_link(
     request->link.private_data    = private_data;
     request->link.source_path_len = source_path_len;
     request->link.dest_path_len   = dest_path_len;
+    /* link(2): a final-component symlink in the source is linked itself, not
+     * followed (linkat without AT_SYMLINK_FOLLOW).  The request is recycled
+     * unzeroed, so an unset word here would be the previous op's. */
+    request->link.source_lookup_flags = 0;
 
     while (dest_slash && *dest_slash == '/') {
         dest_slash++;

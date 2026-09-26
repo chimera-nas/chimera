@@ -40,107 +40,67 @@ chimera_attrs_to_stat(
  * for path-only mounts, where lookup returns no re-openable child fh.
  */
 static void
-chimera_stat_lookup_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_stat_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_client_request *request      = private_data;
-    struct chimera_client_thread  *thread       = request->thread;
-    chimera_stat_callback_t        callback     = request->stat.callback;
-    void                          *callback_arg = request->stat.private_data;
-    struct chimera_stat            st;
+    struct chimera_client_request        *request = private_data;
+    struct chimera_client_thread         *thread  = request->thread;
+    const struct chimera_vfs_compound_op *op;
+    chimera_stat_callback_t               callback     = request->stat.callback;
+    void                                 *callback_arg = request->stat.private_data;
+    struct chimera_stat                   st;
+    enum chimera_vfs_error                status;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, NULL, callback_arg);
-        return;
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        chimera_attrs_to_stat(&op->attr, &st);
     }
 
-    chimera_attrs_to_stat(attr, &st);
-
+    chimera_vfs_compound_free(compound);
     chimera_client_request_free(thread, request);
 
-    callback(thread, CHIMERA_VFS_OK, &st, callback_arg);
-} /* chimera_stat_lookup_complete */
+    callback(thread, status, status == CHIMERA_VFS_OK ? &st : NULL,
+             callback_arg);
+} /* chimera_stat_sequence_complete */
 
-static inline void
-chimera_stat_walk(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request)
-{
-    struct chimera_vfs_open_handle *parent = request->stat.handle;
-
-    chimera_vfs_lookup(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        parent ? parent->fh : thread->client->root_fh,
-        parent ? parent->fh_len : thread->client->root_fh_len,
-        request->stat.path,
-        request->stat.path_len,
-        CHIMERA_VFS_ATTR_MASK_STAT,
-        request->stat.flags,
-        chimera_stat_lookup_complete,
-        request);
-} /* chimera_stat_walk */
-
-/* Resolving a relative path under a non-directory dirfd is ENOTDIR, and the
- * answer comes from the descriptor's LIVE inode -- a directory whose name was
- * unlinked while the fd stayed open is still a directory, where re-resolving
- * its stale path would give a misleading ENOENT, and a path-only backend
- * (the SMB proxy) can answer no other way.  Same shape as utimensat's
- * dircheck. */
-static void
-chimera_stat_dircheck_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_client_request *request = private_data;
-    struct chimera_client_thread  *thread  = request->thread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_stat_callback_t callback     = request->stat.callback;
-        void                   *callback_arg = request->stat.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, NULL, callback_arg);
-        return;
-    }
-
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISDIR(attr->va_mode)) {
-        chimera_stat_callback_t callback     = request->stat.callback;
-        void                   *callback_arg = request->stat.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, CHIMERA_VFS_ENOTDIR, NULL, callback_arg);
-        return;
-    }
-
-    chimera_stat_walk(thread, request);
-} /* chimera_stat_dircheck_complete */
-
-/*
- * `handle`, when set, is the *at() family's directory descriptor: the walk
- * starts from that open directory instead of the export root, and the path is
- * relative to it.  NULL is AT_FDCWD (and any absolute path), which starts at
- * the root.
- */
 static inline void
 chimera_dispatch_stat(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
+    struct chimera_vfs_compound *compound;
+
+    /* `handle`, when set, is the *at() family's directory descriptor: the walk
+     * starts from that open directory and the path is relative to it.  NULL is
+     * AT_FDCWD (and any absolute path), which starts at the export root.
+     *
+     * chimera_fstatat() is the entry point that sets it -- an earlier version
+     * of this function assumed chimera_stat() was the only caller, resolved
+     * every path from the root, and so answered fstatat(dfd, "b") for the
+     * WRONG directory whenever dfd was not the root.  The descriptor is lent
+     * and checked to be a directory by the shared prelude -- see
+     * chimera_client_compound_at_dir for why it is lent rather than named. */
     if (request->stat.handle) {
-        chimera_vfs_getattr(
-            thread->vfs_thread,
-            chimera_client_req_cred(request),
-            request->stat.handle,
-            CHIMERA_VFS_ATTR_MASK_STAT,
-            chimera_stat_dircheck_complete,
-            request);
-        return;
+        compound = chimera_client_compound_at_dir(thread, request,
+                                                  request->stat.handle,
+                                                  request->stat.open_flags);
+    } else {
+        compound = chimera_client_compound_at_root(thread, request);
     }
 
-    chimera_stat_walk(thread, request);
+    /* One op for the whole path: the lookup returns the attributes with it, so
+    * there is no open and no getattr -- which is also what makes this work on
+    * a path-only mount, where the resolved child has no re-openable handle. */
+    chimera_vfs_compound_add_lookup_path(compound,
+                                         request->stat.path,
+                                         request->stat.path_len,
+                                         CHIMERA_VFS_ATTR_MASK_STAT,
+                                         request->stat.flags);
+
+    chimera_frontend_compound_submit(compound, chimera_stat_sequence_complete,
+                                     request);
 } /* chimera_dispatch_stat */

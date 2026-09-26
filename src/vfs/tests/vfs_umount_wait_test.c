@@ -40,11 +40,15 @@
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
+/* The pool lifecycle -- mkfs, mount, umount, rmfs -- is not a sequence and
+ * is not expressible as one.  It comes from the core's per-op header, which
+ * is where those four still live. */
 #include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
+#include "vfs/tests/compound_test_util.h"
 #include "common/logging.h"
 #include "common/mbt_watchdog.h"
 #include "prometheus-c.h"
@@ -98,35 +102,6 @@ umount_cb(
     ctx->done   = 1;
 } /* umount_cb */
 
-static void
-lookup_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    if (error_code == CHIMERA_VFS_OK) {
-        memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
-        ctx->fh_len = attr->va_fh_len;
-    }
-    ctx->done = 1;
-} /* lookup_cb */
-
-static void
-openfh_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct test_ctx *ctx = private_data;
-
-    ctx->status = error_code;
-    ctx->handle = oh;
-    ctx->done   = 1;
-} /* openfh_cb */
-
 int
 main(
     int    argc,
@@ -137,8 +112,6 @@ main(
     struct chimera_vfs_module_cfg module_cfgs[2];
     struct prometheus_metrics    *metrics;
     struct chimera_vfs_cred       cred;
-    uint8_t                       root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                      root_fh_len;
 
     chimera_log_init();
 
@@ -175,17 +148,13 @@ main(
 
     /* Take a handle on the mount root and keep it, so umount finds a
      * reference it cannot dispose of and has to wait on the poll timer. */
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, root_fh_len, "test", 4,
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
-                       lookup_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
+    assert(compound_test_mount_root(ctx.vfs_thread, ctx.evpl, &cred, "test",
+                                    ctx.fh, &ctx.fh_len) == CHIMERA_VFS_OK);
 
-    chimera_vfs_open_fh(ctx.vfs_thread, &cred, ctx.fh, ctx.fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
-    wait_done(&ctx);
-    assert(ctx.status == CHIMERA_VFS_OK);
+    assert(compound_test_open_fh(ctx.vfs_thread, ctx.evpl, &cred,
+                                 ctx.fh, ctx.fh_len,
+                                 CHIMERA_VFS_OPEN_INFERRED,
+                                 &ctx.handle) == CHIMERA_VFS_OK);
 
     /* The handle is still held, so this takes the wait path and ends in
      * EBUSY.  Reaching the assert at all is the point of the test. */

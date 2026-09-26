@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <sys/stat.h>
 #include "common/compiler.h"
 #include "common/thread.h"
 #ifdef _WIN32
@@ -17,7 +18,8 @@
 #include "common/macros.h"
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
+#include "common/compound_retry.h"
 #include "vfs/vfs_release.h"
 #include "common/logging.h"
 
@@ -59,7 +61,6 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_STATFS,
     CHIMERA_CLIENT_OP_FSTATFS,
     CHIMERA_CLIENT_OP_MKNOD,
-    CHIMERA_CLIENT_OP_LOCK,
     CHIMERA_CLIENT_OP_COPY_RANGE,
     CHIMERA_CLIENT_OP_CLONE_RANGE,
     CHIMERA_CLIENT_OP_ALLOCATE,
@@ -75,6 +76,10 @@ typedef void (*chimera_client_request_callback)(
 
 struct CHIMERA_ALIGNED(64) chimera_client_request {
     enum chimera_client_request_opcode opcode;
+    /* The op a sequence's gate judges, when one does.  The *at() stat family
+     * uses it to check that its directory descriptor is still a directory
+     * before resolving a path through it -- see chimera_dispatch_stat. */
+    int                                gate_index;
     struct chimera_client_thread      *thread;
     struct chimera_client_request     *prev;
     struct chimera_client_request     *next;
@@ -88,6 +93,13 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
      * back to thread->client->cred, so existing callers are unaffected. */
     int                                has_cred;
     struct chimera_vfs_cred            req_cred;
+
+    /* The sequence this request submitted, if any.
+     *
+     * Freed by the operation's own completion, NOT with the request: a request
+     * is declared on the stack in much of src/posix and never zeroed, so this
+     * field is only meaningful to the operations that set it. */
+    struct chimera_vfs_compound       *compound;
 
     ssize_t                            sync_result;
     struct chimera_vfs_open_handle    *sync_open_handle;
@@ -103,6 +115,18 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
     uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
 
+    /* NOTHING BELOW IS ZEROED.  A heap request is recycled onto the thread's
+     * free list as it was, and a stack request (most of src/posix) is whatever
+     * the stack held.  Every `open_flags` and every flag word in the union is
+     * therefore set explicitly by every entry point whose dispatcher reads it;
+     * a blanket memset would clear ~20KB of iovec and path arrays per call to
+     * save a handful of stores.
+     *
+     * `open_flags`, wherever it appears, is the CHIMERA_VFS_OPEN_* word the
+     * accompanying `handle` was REALLY opened with -- what PUTHANDLE promises
+     * the sequence.  The POSIX layer fills it from the descriptor's open file
+     * description; an SDK entry point, handed a bare handle, fills it with
+     * chimera_client_handle_open_flags(). */
     union {
         /* Synchronous handle close routed to a worker thread (see
          * chimera_posix_close_on_worker). */
@@ -139,8 +163,13 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
             char                    fsname[256];
         } rmfs;
 
+        /* `parent_handle`, where an operation has one, is the *at() family's
+         * directory descriptor and `dir_open_flags` what it was really opened
+         * with; `path` is then RELATIVE to it.  NULL is AT_FDCWD (and any
+         * absolute path), resolved from the export root. */
         struct {
             struct chimera_vfs_open_handle *parent_handle;
+            unsigned int                    dir_open_flags;
             chimera_open_callback_t         callback;
             void                           *private_data;
             unsigned int                    flags;
@@ -153,6 +182,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
+            unsigned int                    dir_open_flags;
             chimera_mkdir_callback_t        callback;
             void                           *private_data;
             int                             path_len;
@@ -175,6 +205,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             uint32_t                        result_count;
@@ -192,6 +223,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
          * the VFS core/backend works through. */
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             uint32_t                        result_count;
@@ -206,6 +238,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         /* For chimera_write - caller provides a simple buffer */
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             int                             niov;
@@ -218,6 +251,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         /* For chimera_writev - caller provides struct iovec array */
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             int                             niov;
@@ -231,6 +265,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         /* For chimera_writerv - caller provides evpl_iovec */
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        length;
             int                             niov;
@@ -276,15 +311,16 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
+            unsigned int                    dir_open_flags;
             chimera_remove_callback_t       callback;
             void                           *private_data;
             int                             path_len;
             int                             parent_len;
             int                             name_offset;
-            int                             child_fh_len;
             unsigned int                    flags; /* CHIMERA_VFS_REMOVE_* */
-            uint8_t                         child_fh[CHIMERA_VFS_FH_SIZE];
             char                            path[CHIMERA_VFS_PATH_MAX];
+            int                             child_fh_len;
+            uint8_t                         child_fh[CHIMERA_VFS_FH_SIZE];
         } remove;
 
         struct {
@@ -309,17 +345,18 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         } rename;
 
         struct {
-            struct chimera_vfs_open_handle *handle;
-            chimera_readlink_callback_t     callback;
-            void                           *private_data;
-            uint32_t                        target_maxlength;
-            char                           *target;
-            int                             path_len;
-            char                            path[CHIMERA_VFS_PATH_MAX];
+            chimera_readlink_callback_t callback;
+            void                       *private_data;
+            uint32_t                    target_maxlength;
+            char                       *target;
+            int                         path_len;
+            char                        path[CHIMERA_VFS_PATH_MAX];
         } readlink;
 
         struct {
+            /* The *at() family's directory descriptor, or NULL. */
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_stat_callback_t         callback;
             void                           *private_data;
             uint32_t                        flags;  /* CHIMERA_VFS_LOOKUP_FOLLOW for stat, 0 for lstat */
@@ -329,12 +366,14 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_fstat_callback_t        callback;
             void                           *private_data;
         } fstat;
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        cookie;
             chimera_readdir_callback_t      callback;
             chimera_readdir_complete_t      complete;
@@ -343,17 +382,25 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
+            unsigned int                    dir_open_flags;
+            /* Apply to a final-component symlink itself rather than to its
+             * target -- the *at() forms under AT_SYMLINK_NOFOLLOW.  Read by
+             * chimera_dispatch_setattr_at only, so only the callers that set
+             * parent_handle need set it; the path-based forms choose between
+             * chimera_dispatch_setattr and chimera_dispatch_lsetattr instead. */
+            int                             nofollow;
             chimera_setattr_callback_t      callback;
             void                           *private_data;
             int                             path_len;
-            int                             parent_len;
-            int                             name_offset;
             struct chimera_vfs_attrs        set_attr;
             char                            path[CHIMERA_VFS_PATH_MAX];
+            int                             parent_len;
+            int                             name_offset;
         } setattr;
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_fsetattr_callback_t     callback;
             void                           *private_data;
             struct chimera_vfs_attrs        set_attr;
@@ -361,12 +408,14 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_commit_callback_t       callback;
             void                           *private_data;
         } commit;
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint64_t                        length;
             uint32_t                        flags;
@@ -376,6 +425,7 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        what;   /* 0 = SEEK_DATA, 1 = SEEK_HOLE */
             chimera_seek_callback_t         callback;
@@ -383,38 +433,24 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         } seek;
 
         struct {
-            struct chimera_vfs_open_handle *handle;
-            chimera_statfs_callback_t       callback;
-            void                           *private_data;
-            int                             path_len;
-            char                            path[CHIMERA_VFS_PATH_MAX];
+            chimera_statfs_callback_t callback;
+            void                     *private_data;
+            int                       path_len;
+            char                      path[CHIMERA_VFS_PATH_MAX];
         } statfs;
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             chimera_fstatfs_callback_t      callback;
             void                           *private_data;
         } fstatfs;
 
         struct {
-            struct chimera_vfs_open_handle *handle;
-            uint64_t                        offset;
-            uint64_t                        length;
-            uint32_t                        lock_type;    /* CHIMERA_VFS_LOCK_{READ,WRITE,UNLOCK} */
-            uint32_t                        flags;        /* CHIMERA_VFS_LOCK_{WAIT,TEST} */
-            int32_t                         whence;       /* SEEK_SET or SEEK_END */
-            chimera_lock_callback_t         callback;
-            void                           *private_data;
-            /* Result fields populated by VFS callback */
-            uint32_t                        r_conflict_type;
-            uint64_t                        r_conflict_offset;
-            uint64_t                        r_conflict_length;
-            pid_t                           r_conflict_pid;
-        } lock;
-
-        struct {
             struct chimera_vfs_open_handle *src_handle;
             struct chimera_vfs_open_handle *dst_handle;
+            unsigned int                    src_open_flags;
+            unsigned int                    dst_open_flags;
             uint64_t                        src_offset;
             uint64_t                        dst_offset;
             uint64_t                        length;
@@ -427,6 +463,8 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
         struct {
             struct chimera_vfs_open_handle *src_handle;
             struct chimera_vfs_open_handle *dst_handle;
+            unsigned int                    src_open_flags;
+            unsigned int                    dst_open_flags;
             uint64_t                        src_offset;
             uint64_t                        dst_offset;
             uint64_t                        length;
@@ -440,18 +478,18 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
          * count even when the buffer is too small (so the caller can size a
          * retry); CHIMERA_VFS_ERANGE is returned in that case. */
         struct {
-            struct chimera_vfs_open_handle *handle;
-            chimera_setattr_callback_t      callback;
-            void                           *private_data;
-            int                             path_len;
-            struct chimera_acl             *acl_buf;
-            size_t                          acl_bufsize;
-            uint16_t                        r_acl_aces;
-            char                            path[CHIMERA_VFS_PATH_MAX];
+            chimera_setattr_callback_t callback;
+            void                      *private_data;
+            int                        path_len;
+            struct chimera_acl        *acl_buf;
+            size_t                     acl_bufsize;
+            uint16_t                   r_acl_aces;
+            char                       path[CHIMERA_VFS_PATH_MAX];
         } getacl;
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            unsigned int                    open_flags;
             uint64_t                        offset;
             uint32_t                        block_size;
             uint64_t                        block_count;
@@ -512,6 +550,149 @@ chimera_client_req_cred(const struct chimera_client_request *request)
 {
     return request->has_cred ? &request->req_cred : &request->thread->client->cred;
 } /* chimera_client_req_cred */
+
+/*
+ * What an open handle records of the flags it was opened with.
+ *
+ * The SDK hands out bare open handles, so an entry point that takes one back
+ * (chimera_fstat, chimera_commit, ...) has nothing but the handle to say how it
+ * was opened -- and a handle keeps only two things of its open: which cache it
+ * lives in, which says whether it was a PATH open, and its access mode, which
+ * says whether it was read-only.  Those two are reported; nothing else is
+ * claimed, because nothing else is known.  In particular INFERRED is never
+ * reported: it marks an open the VFS core made for its own traversal, and a
+ * caller's open is by definition not one of those.
+ *
+ * A caller that knows the real word -- the POSIX layer, whose open file
+ * description keeps the open(2) flags -- fills the request's open_flags itself
+ * and does not come through here.
+ */
+static inline unsigned int
+chimera_client_handle_open_flags(const struct chimera_vfs_open_handle *handle)
+{
+    unsigned int flags = 0;
+
+    if (handle->cache_id == CHIMERA_VFS_OPEN_ID_PATH) {
+        flags |= CHIMERA_VFS_OPEN_PATH;
+    }
+
+    if (handle->access_mode == CHIMERA_VFS_ACCESS_MODE_RO) {
+        flags |= CHIMERA_VFS_OPEN_READ_ONLY;
+    }
+
+    return flags;
+} /* chimera_client_handle_open_flags */
+
+/*
+ * Start a sequence at the export root.
+ *
+ * Every path-addressed operation in the SDK resolves from there, so the shape
+ * is always the same: select the root, then one op carrying the whole path.
+ * The client has no other starting point -- only the root file handle is
+ * re-openable on a path-only mount, which is the reason these operations are
+ * path-addressed at all.
+ */
+static inline struct chimera_vfs_compound *
+chimera_client_compound_at_root(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct chimera_vfs_compound *compound;
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          chimera_client_req_cred(request));
+
+    /* PUTROOT rather than PUTFH of thread->client->root_fh: the two resolve to
+     * the same bytes -- the client fills root_fh from chimera_vfs_get_root_fh()
+     * at mount, which is what PUTROOT's dispatch calls -- and naming it as the
+     * root says what the sequence means instead of carrying a copy of it. */
+    chimera_vfs_compound_add_putroot(compound);
+
+    request->compound = compound;
+
+    return compound;
+} /* chimera_client_compound_at_root */
+
+/*
+ * A directory descriptor has to BE a directory, and that has to be answered
+ * from the descriptor itself rather than from how the walk behind it failed:
+ * resolving a path through a regular file surfaces as ENOTDIR on some backends
+ * and ENOENT on others (the SMB proxy), and POSIX owes every *at() call
+ * ENOTDIR either way.  The gate asks the question of the GETATTR the sequence
+ * already ran (request->gate_index), so it costs no extra round trip.
+ */
+static inline void
+chimera_client_dircheck_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_client_request        *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+
+    if (*status != CHIMERA_VFS_OK || (int) index != request->gate_index) {
+        return;
+    }
+
+    op = chimera_vfs_compound_op(compound, index);
+
+    if ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(op->attr.va_mode)) {
+        *status = CHIMERA_VFS_ENOTDIR;
+    }
+} /* chimera_client_dircheck_gate */
+
+/*
+ * Start a sequence at an *at() family's directory descriptor.
+ *
+ * PUTHANDLE, not PUTFH: the descriptor is a handle we already hold, and the
+ * GETATTR that follows has to ask the LIVE inode.  Naming it by filehandle
+ * instead would make the executor re-open it, which would answer from a
+ * re-resolved name, so a directory unlinked while the fd stayed open would
+ * look like ENOENT instead of the directory it still is.  The flags lent
+ * are what the descriptor was really opened with.
+ *
+ * What follows the prelude is a PATH op -- LOOKUP_PATH, OPEN_PATH,
+ * CREATE_PATH, REMOVE_PATH -- resolving the caller's relative path against
+ * the descriptor's file handle, which the PUTHANDLE made current.  Not a
+ * name op through the lent handle, for three reasons that are one reason:
+ * the path walk is what the path-based entry points already run from the
+ * root.  It follows a symlink in the final component (a named OPEN through
+ * open_at does not, and fchmodat(dfd, "link") then changed the link rather
+ * than its target); it takes interior components (openat(dfd, "a/b")) on
+ * every backend, where a name op takes one name; and on a path-only mount
+ * it rebases onto the descriptor's interned path, where a LOOKUP_PATH of the
+ * interior would leave an object the name op could not re-open.  REMOVE_PATH
+ * additionally resolves the child itself and enforces the rmdir-vs-unlink
+ * assertion in the VFS core for every backend -- the NFSv4 proxy's REMOVE is
+ * type-agnostic on the wire -- which a REMOVE by name would leave to the
+ * backend.
+ */
+static inline struct chimera_vfs_compound *
+chimera_client_compound_at_dir(
+    struct chimera_client_thread   *thread,
+    struct chimera_client_request  *request,
+    struct chimera_vfs_open_handle *dir_handle,
+    unsigned int                    dir_open_flags)
+{
+    struct chimera_vfs_compound *compound;
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          chimera_client_req_cred(request));
+
+    request->compound = compound;
+
+    chimera_vfs_compound_add_puthandle(compound, dir_handle, dir_open_flags);
+
+    request->gate_index =
+        chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE);
+
+    chimera_vfs_compound_set_gate(compound, chimera_client_dircheck_gate,
+                                  request);
+
+    return compound;
+} /* chimera_client_compound_at_dir */
 
 static inline struct chimera_client_request *
 chimera_client_request_alloc(struct chimera_client_thread *thread)

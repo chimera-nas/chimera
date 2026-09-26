@@ -14,6 +14,110 @@
 #include "smb_common/smb2.h"
 #include "vfs/vfs_notify.h"
 
+SYMBOL_EXPORT void
+chimera_smb_notify_state_put(struct chimera_smb_notify_state *state)
+{
+    if (!state || atomic_fetch_sub(&state->refs, 1) != 1) {
+        return;
+    }
+    /* Never hold state->lock here: VFS emits take its registry lock before
+     * invoking our callback, which takes state->lock. Destroy waits for every
+     * in-flight callback before freeing the final state reference. */
+    if (state->watch) {
+        chimera_vfs_notify_watch_destroy(state->vfs_notify, state->watch);
+    }
+    evpl_mutex_destroy(&state->lock);
+    free(state);
+} /* chimera_smb_notify_state_put */
+
+struct chimera_smb_notify_state *
+chimera_smb_notify_detach(struct chimera_smb_open_file *open)
+{
+    unsigned int                     bucket = open->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+
+    evpl_mutex_lock(&open->tree->open_files_lock[bucket]);
+    struct chimera_smb_notify_state *state = open->notify_state;
+    open->notify_state = NULL;
+    evpl_mutex_unlock(&open->tree->open_files_lock[bucket]);
+    return state; /* transfer the attachment reference */
+} /* chimera_smb_notify_detach */
+
+uint32_t
+chimera_smb_notify_admit(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_session       *session,
+    struct chimera_smb_open_file     *open,
+    uint32_t                          mask,
+    int                               watch_tree,
+    struct chimera_smb_notify_state **result)
+{
+    struct chimera_smb_namespace_registry *registry = &thread->shared->namespace_registry;
+    struct chimera_vfs_file_state         *file     = open->share_file_state;
+
+    *result = NULL;
+    if (!file) {
+        return SMB2_STATUS_FILE_CLOSED;
+    }
+    /* Invalidation marks the session deleted under sessions_lock before its
+     * notify flush. Serialize watch publication against that cutoff, including
+     * admissions which began before PreviousSessionId parked a durable open. */
+    evpl_mutex_lock(&thread->shared->sessions_lock);
+    if (!session || !(session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) ||
+        (session->flags & CHIMERA_SMB_SESSION_DELETED)) {
+        evpl_mutex_unlock(&thread->shared->sessions_lock);
+        return SMB2_STATUS_NOTIFY_CLEANUP;
+    }
+    /* File state is retained by our open reference even if logical CLOSE has
+     * detached its backend handle. Namespace -> bucket -> notify-state is the
+     * admission order; no VFS watch call is made holding notify-state.lock. */
+    if (!chimera_smb_doc_mutation_begin(registry, file->fh, file->fh_len, NULL)) {
+        evpl_mutex_unlock(&thread->shared->sessions_lock);
+        return SMB2_STATUS_PENDING;
+    }
+    unsigned int                     bucket = open->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    evpl_mutex_lock(&open->tree->open_files_lock[bucket]);
+    uint32_t                         status = SMB2_STATUS_SUCCESS;
+    struct chimera_smb_notify_state *state  = open->notify_state;
+    if ((open->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) || !open->handle) {
+        status = SMB2_STATUS_FILE_CLOSED;
+    } else if (state) {
+        evpl_mutex_lock(&state->lock);
+        bool closing = state->closing;
+        evpl_mutex_unlock(&state->lock);
+        if (closing) {
+            status = SMB2_STATUS_FILE_CLOSED;
+        } else {
+            atomic_fetch_add(&state->refs, 1);
+            chimera_vfs_notify_watch_update(state->vfs_notify, state->watch, mask, watch_tree);
+            *result = state;
+        }
+    } else {
+        state = calloc(1, sizeof(*state));
+        if (!state) {
+            status = SMB2_STATUS_INSUFFICIENT_RESOURCES;
+        } else {
+            evpl_mutex_init(&state->lock, NULL);
+            atomic_init(&state->refs, 2); /* attachment + caller */
+            state->vfs_notify = thread->shared->vfs->vfs_notify;
+            state->watch      = chimera_vfs_notify_watch_create(state->vfs_notify,
+                                                                open->handle->fh, open->handle->fh_len, mask, watch_tree
+                                                                ,
+                                                                chimera_smb_notify_callback, state);
+            if (!state->watch) {
+                evpl_mutex_destroy(&state->lock);
+                free(state);
+                status = SMB2_STATUS_INSUFFICIENT_RESOURCES;
+            } else {
+                open->notify_state = state; *result = state;
+            }
+        }
+    }
+    evpl_mutex_unlock(&open->tree->open_files_lock[bucket]);
+    chimera_smb_doc_mutation_end(registry);
+    evpl_mutex_unlock(&thread->shared->sessions_lock);
+    return status;
+} /* chimera_smb_notify_admit */
+
 /* Map a Windows-style SMB2 CompletionFilter to a chimera VFS event mask.
  * The mapping is conservative: any VFS event class that *could* be of
  * interest given the requested filter bits is included.  Acceptable
@@ -442,7 +546,7 @@ chimera_smb_notify_q_contains(
     return 0;
 } /* chimera_smb_notify_q_contains */
 
-void
+SYMBOL_EXPORT void
 chimera_smb_notify_q_push(
     struct chimera_smb_notify_state   *state,
     struct chimera_smb_notify_request *nr)
@@ -482,7 +586,7 @@ chimera_smb_notify_q_unlink(
     return 0;
 } /* chimera_smb_notify_q_unlink */
 
-void
+SYMBOL_EXPORT void
 chimera_smb_notify_callback(
     struct chimera_vfs_notify_watch *watch,
     void                            *private_data)
@@ -502,7 +606,7 @@ chimera_smb_notify_callback(
     /* The OLDEST outstanding request is the one a change wakes; the rest wait
      * for the next one. */
     nr = state->q_head;
-    if (nr && !nr->on_ready_queue) {
+    if (nr && !state->closing && !nr->on_ready_queue) {
         thread             = nr->thread;
         nr->on_ready_queue = 1;
 
@@ -529,10 +633,9 @@ chimera_smb_notify_callback(
  * doorbell.  The doorbell handler honors nr->cleanup and completes the
  * request with STATUS_NOTIFY_CLEANUP rather than the event-delivery path.
  * ---------------------------------------------------------------- */
-int
-chimera_smb_notify_queue_cleanup(struct chimera_smb_open_file *open_file)
+static int
+smb_notify_state_cleanup(struct chimera_smb_notify_state *state)
 {
-    struct chimera_smb_notify_state   *state = open_file->notify_state;
     struct chimera_smb_notify_request *nr;
     struct chimera_server_smb_thread  *thread;
     int                                wake = 0;
@@ -542,34 +645,35 @@ chimera_smb_notify_queue_cleanup(struct chimera_smb_open_file *open_file)
     }
 
     evpl_mutex_lock(&state->lock);
+    if (!state->closing) {
+        state->cleanup_deleted = chimera_vfs_notify_watch_take_deleted(state->watch);
+        state->closing         = 1;
+    }
 
     /* EVERY outstanding request, not just the oldest: the handle is going
      * away, so there will never be another change, and one left queued would
      * never be answered at all. */
     for (nr = state->q_head; nr; nr = nr->q_next) {
-        if (nr->on_ready_queue) {
-            continue;
+        thread      = nr->thread;
+        nr->cleanup = 1;
+        if (!nr->on_ready_queue) {
+            nr->on_ready_queue = 1;
+            evpl_mutex_lock(&thread->notify_ready_lock);
+            nr->ready_next       = thread->notify_ready;
+            thread->notify_ready = nr;
+            evpl_mutex_unlock(&thread->notify_ready_lock);
         }
-        thread             = nr->thread;
-        nr->cleanup        = 1;
-        nr->on_ready_queue = 1;
-
-        evpl_mutex_lock(&thread->notify_ready_lock);
-        nr->ready_next       = thread->notify_ready;
-        thread->notify_ready = nr;
-        evpl_mutex_unlock(&thread->notify_ready_lock);
-
+        /* An already ready (possibly extracted) request must see cleanup too.
+         * Ring every owner, not just the last worker visited in the list. */
+        evpl_ring_doorbell(&thread->notify_doorbell);
         wake = 1;
     }
 
     evpl_mutex_unlock(&state->lock);
 
-    if (wake) {
-        evpl_ring_doorbell(&thread->notify_doorbell);
-    }
-
     return wake;
-} /* chimera_smb_notify_queue_cleanup */
+} /* smb_notify_state_cleanup */
+
 
 /* ----------------------------------------------------------------
  * Build and send an async CHANGE_NOTIFY response with events.
@@ -613,6 +717,7 @@ chimera_smb_notify_do_send_response(
     }
 
     evpl_mutex_lock(&state->lock);
+    cleanup |= state->closing || nr->cleanup;
 
     /* Bail if close/cancel claimed nr while it was sitting on the ready
      * queue: whoever took it off the watch's queue owns it now.
@@ -633,7 +738,14 @@ chimera_smb_notify_do_send_response(
      * request (delete-on-close on another handle).  That terminates the
      * notify with STATUS_DELETE_PENDING and, like the cleanup path, must
      * complete the request rather than leave it parked. */
-    deleted = chimera_vfs_notify_watch_take_deleted(state->watch);
+    if (state->closing) {
+        /* Preserve an independent deletion which preceded cleanup, exactly
+         * once as with take_deleted. Ignore a subsequent own-DOC removal. */
+        deleted                = state->cleanup_deleted;
+        state->cleanup_deleted = 0;
+    } else {
+        deleted = chimera_vfs_notify_watch_take_deleted(state->watch);
+    }
 
     if (nevents == 0 && !overflowed && !cleanup && !deleted) {
         /* Spurious wakeup — leave nr on the watch's queue so the next event
@@ -847,8 +959,7 @@ chimera_smb_notify_do_send_response(
 void
 chimera_smb_notify_send_response(struct chimera_smb_notify_request *nr)
 {
-    /* Doorbell path: the watch state is still attached to the open file. */
-    chimera_smb_notify_do_send_response(nr, nr->open_file->notify_state, 0);
+    chimera_smb_notify_do_send_response(nr, nr->state, 0);
 } /* chimera_smb_notify_send_response */
 
 /*
@@ -883,10 +994,14 @@ chimera_smb_notify_complete_cleanup(
 static int
 chimera_smb_notify_claim(struct chimera_smb_notify_request *nr)
 {
-    struct chimera_smb_open_file    *open_file = nr->open_file;
-    struct chimera_smb_notify_state *state     = open_file ? open_file->notify_state : NULL;
-    int                              owned     = 0;
+    struct chimera_smb_notify_state *state = nr->state;
+    int                              owned = 0;
 
+    if (nr->admitting) {
+        evpl_remove_timer(nr->thread->evpl, &nr->admission_timer);
+        nr->admitting = 0;
+        return 1;
+    }
     if (!state) {
         /* No state — already torn down.  Caller must not free again. */
         return 0;
@@ -928,8 +1043,10 @@ chimera_smb_notify_claim(struct chimera_smb_notify_request *nr)
  * Cancel a parked CHANGE_NOTIFY request — send STATUS_CANCELLED.
  * Must be called on the SMB thread.
  * ---------------------------------------------------------------- */
-void
-chimera_smb_notify_cancel(struct chimera_smb_notify_request *nr)
+static void
+smb_notify_fail(
+    struct chimera_smb_notify_request *nr,
+    uint32_t                           status)
 {
     struct evpl_iovec iov;
     uint8_t          *buf, *p;
@@ -949,7 +1066,7 @@ chimera_smb_notify_cancel(struct chimera_smb_notify_request *nr)
     buf = iov.data;
     memset(buf, 0, 77);
 
-    p = chimera_smb_notify_build_header(buf, nr, SMB2_STATUS_CANCELLED);
+    p = chimera_smb_notify_build_header(buf, nr, status);
 
     p[0] = 9; /* StructureSize */
     p[1] = 0;
@@ -964,7 +1081,62 @@ chimera_smb_notify_cancel(struct chimera_smb_notify_request *nr)
     chimera_smb_secure_send(nr->conn, &iov, smb2_len, &nr->secure);
 
     chimera_smb_notify_request_free(nr);
+} /* smb_notify_fail */
+
+void
+chimera_smb_notify_cancel(struct chimera_smb_notify_request *nr)
+{
+    smb_notify_fail(nr, SMB2_STATUS_CANCELLED);
 } /* chimera_smb_notify_cancel */
+
+static void
+smb_notify_admission_tick(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_smb_notify_request *nr = container_of(timer,
+                                                         struct chimera_smb_notify_request, admission_timer);
+    struct chimera_smb_notify_state   *state = NULL;
+    /* Connection session_handles belongs to this timer's worker; a live
+     * handle retains the session memory while admit checks global flags. */
+    struct chimera_smb_session_handle *session_handle;
+
+    HASH_FIND(hh, nr->conn->session_handles, &nr->session_id, sizeof(nr->session_id), session_handle);
+    uint32_t                           status = chimera_smb_notify_admit(nr->thread,
+                                                                         session_handle && session_handle->is_channel ?
+                                                                         session_handle->session : NULL, nr->open_file,
+                                                                         chimera_smb_map_completion_filter(nr->
+                                                                                                           completion_filter),
+                                                                         nr->watch_tree, &state);
+    if (status == SMB2_STATUS_PENDING) {
+        evpl_add_oneshot_timer(evpl, timer, smb_notify_admission_tick, 1000);
+        return;
+    }
+    if (status != SMB2_STATUS_SUCCESS) {
+        smb_notify_fail(nr, status); return;
+    }
+    evpl_mutex_lock(&state->lock);
+    if (state->closing) {
+        evpl_mutex_unlock(&state->lock);
+        chimera_smb_notify_state_put(state);
+        smb_notify_fail(nr, SMB2_STATUS_NOTIFY_CLEANUP);
+        return;
+    }
+    nr->admitting = 0;
+    nr->state     = state; /* admission reference transfers to parked request */
+    chimera_smb_notify_q_push(state, nr);
+    evpl_mutex_unlock(&state->lock);
+    /* Events/deletion may precede queue installation. Force one drain on the
+     * owning loop; an empty drain simply leaves the request parked. */
+    chimera_smb_notify_callback(state->watch, state);
+} /* smb_notify_admission_tick */
+
+void
+chimera_smb_notify_admission_start(struct chimera_smb_notify_request *nr)
+{
+    nr->admitting = 1;
+    evpl_add_oneshot_timer(nr->thread->evpl, &nr->admission_timer, smb_notify_admission_tick, 1000);
+} /* chimera_smb_notify_admission_start */
 
 /* ----------------------------------------------------------------
  * Drop a parked CHANGE_NOTIFY request without sending a reply.
@@ -984,70 +1156,22 @@ chimera_smb_notify_drop(struct chimera_smb_notify_request *nr)
     chimera_smb_notify_request_free(nr);
 } /* chimera_smb_notify_drop */
 
-/*
- * LOCK INVARIANT — DO NOT VIOLATE.
- *
- * This function takes state->lock briefly (to peek state->pending),
- * releases it, then calls chimera_vfs_notify_watch_destroy which
- * acquires bucket->lock and mount_entries_lock.  These two phases
- * are strictly sequential: at no point is state->lock held while
- * we reach into the VFS registry.
- *
- * chimera_vfs_notify_emit holds bucket->lock / mount_entries_lock
- * while invoking watch->callback (which then takes state->lock).
- * If a future change to this function (or any other) takes
- * state->lock and then bucket->lock / mount_entries_lock, it will
- * AB-BA deadlock against an in-flight emit callback.  See the
- * lock-graph block comment above chimera_vfs_notify_emit.
- */
-void
+/* Transfer the detached attachment reference into asynchronous cleanup.
+* state->lock protects closing and queue transitions; its final reference is
+* released only after dropping that lock. Last-reference watch destruction
+* acquires the VFS registry locks, whose callbacks themselves take state->lock,
+* so reversing those phases would deadlock against a concurrent emit. */
+SYMBOL_EXPORT void
 chimera_smb_notify_close(
     struct chimera_vfs_notify       *vfs_notify,
     struct chimera_smb_notify_state *state)
 {
-    struct chimera_smb_notify_request *nr;
-
-    if (!state) {
-        return;
-    }
-
-    /* Take a non-owning peek at the outstanding requests — complete_cleanup
-     * does the actual claim under state->lock, which also extracts each one
-     * from thread->notify_ready if a callback already queued it.  This is the
-     * key fix for the "ready-queued notify lost on close" race: the
-     * completion path is the only one that can pluck a queued-but-not-yet-
-     * dispatched request out of the ready queue.
-     *
-     * EVERY outstanding request, oldest first: the handle is going away, so
-     * one left behind would never be answered.  The peek re-reads the head
-     * each time rather than walking a snapshot, because completing one drops
-     * the lock and can free it.
-     *
-     * Per MS-SMB2 3.3.4.4, a pending CHANGE_NOTIFY whose handle is closed
-     * (or whose tree/session is torn down) completes with
-     * STATUS_NOTIFY_CLEANUP, carrying any buffered records — NOT
-     * STATUS_CANCELLED, which is reserved for an explicit SMB2 CANCEL. */
-    for (;;) {
-        evpl_mutex_lock(&state->lock);
-        nr = state->q_head;
-        evpl_mutex_unlock(&state->lock);
-
-        if (!nr) {
-            break;
-        }
-        chimera_smb_notify_complete_cleanup(nr, state);
-    }
-
-    if (state->watch) {
-        /* watch_destroy takes bucket->lock + mount_entries_lock.
-         * State->lock MUST NOT be held here — see the invariant block
-         * comment above this function. */
-        chimera_vfs_notify_watch_destroy(vfs_notify, state->watch);
-        state->watch = NULL;
-    }
-
-    evpl_mutex_destroy(&state->lock);
-    free(state);
+    (void) vfs_notify;
+    /* The caller transferred the detached attachment reference. Never send
+    * or free an nr owned by another worker. Queued requests retain their own
+    * state/watch reference until their owning loop sends or drops them. */
+    smb_notify_state_cleanup(state);
+    chimera_smb_notify_state_put(state);
 } /* chimera_smb_notify_close */
 
 struct chimera_smb_notify_request *
@@ -1056,15 +1180,20 @@ chimera_smb_notify_request_alloc(void)
     return calloc(1, sizeof(struct chimera_smb_notify_request));
 } /* chimera_smb_notify_request_alloc */
 
-void
+SYMBOL_EXPORT void
 chimera_smb_notify_request_free(struct chimera_smb_notify_request *nr)
 {
     /* Release the open_file reference held by this parked request */
     if (nr->open_file && nr->tree && nr->thread) {
         chimera_smb_open_file_release_nr(nr->thread, nr->tree, nr->open_file);
         nr->open_file = NULL;
+        chimera_smb_tree_memory_unpin(nr->thread->shared, nr->tree);
     }
 
+    chimera_smb_notify_state_put(nr->state);
+    if (nr->session) {
+        chimera_smb_session_memory_unpin(nr->thread->shared, nr->session);
+    }
     free(nr);
 } /* chimera_smb_notify_request_free */
 
@@ -1093,17 +1222,9 @@ chimera_smb_notify_doorbell_callback(
     for (nr = ready; nr; nr = next) {
         next           = nr->ready_next;
         nr->ready_next = NULL;
-        if (nr->cleanup) {
-            /* Session closed under a still-live connection (PreviousSessionId
-             * reconnect): complete with STATUS_NOTIFY_CLEANUP.  The watch
-             * state stays attached to the open (the open is torn down later
-             * by its own connection); pass it explicitly. */
-            nr->on_ready_queue = 0;
-            chimera_smb_notify_complete_cleanup(nr,
-                                                nr->open_file ? nr->open_file->notify_state : NULL);
-        } else {
-            chimera_smb_notify_send_response(nr);
-        }
+        /* cleanup/on_ready_queue are synchronized by state->lock inside
+         * send_response. Cross-worker CLOSE never frees this nr. */
+        chimera_smb_notify_send_response(nr);
     }
 } /* chimera_smb_notify_doorbell_callback */
 

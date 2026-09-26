@@ -21,12 +21,13 @@
 #endif /* ifdef _WIN32 */
 
 #include "nfs4_procs.h"
+#include "vfs/vfs_compound.h"
 #include "nfs4_state.h"
 #include "nfs4_status.h"
 #include "nfs4_callback.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_pnfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 
 #define NFS4_PNFS_STRIPE_UNIT    1048576U /* 1 MiB                              */
@@ -274,7 +275,8 @@ chimera_nfs4_getdeviceinfo(
  * layout_content4.loc_body opaque: one mirror, one data server holding the
  * whole file, addressed by its native (NFSv3) file handle.  ffl_flags leaves
  * NO_LAYOUTCOMMIT clear so the client reports the new size back via
- * LAYOUTCOMMIT (how the MDS, which doesn't share the DS backend, learns it).
+ * LAYOUTCOMMIT. The orchestrated path addresses the same authoritative
+ * object through the MDS proxy and directly through the DS.
  */
 static uint32_t
 chimera_nfs4_encode_ff_layout(
@@ -495,46 +497,40 @@ nfs_pnfs_devcache_find(
  */
 #define FF_BLOB_FH_SKIP (CHIMERA_VFS_MOUNTID_SIZE + 1)
 
-/*
- * LAYOUTGET is an async state machine.  The per-file pNFS layout state lives in
- * an opaque attribute the backend just persists, so the NFS server owns all the
- * logic: open the file -> GETATTR(PNFS_LAYOUT); if the blob is present, emit the
- * layout; otherwise steer to a DS, open its backing root, create the backing
- * file, SETATTR the blob onto the file, then emit.
- */
+/* LAYOUTGET asynchronously opens the authoritative object. Layouts come
+ * from the backend or reference that same object's configured NFS DS mount. */
 struct ff_layoutget_ctx {
     struct nfs_request             *req;
-    struct chimera_vfs_open_handle *mds_handle;
-    struct chimera_vfs_open_handle *ds_root_handle;
-    /* Held only across the truncate of an adopted backing file (ff_lg_reset_cb). */
-    struct chimera_vfs_open_handle *backing_handle;
     struct chimera_vfs_ds          *ds;
     uint64_t                        fileid;
-    struct chimera_vfs_attrs        set_attr;
+    char                            backing_name[CHIMERA_VFS_PNFS_BACKING_NAME_MAX];
+    uint32_t                        want_class;
+    struct nfs_client              *client;
+    struct chimera_vfs_open_handle *mds_handle;
     uint8_t                         blob[CHIMERA_VFS_PNFS_LAYOUT_MAX];
     uint32_t                        blob_len;
-    char                            backing_name[CHIMERA_VFS_PNFS_BACKING_NAME_MAX];
 };
 
 static void
-ff_lg_fail(
+ff_lg_complete(
     struct ff_layoutget_ctx *ctx,
     nfsstat4                 status)
 {
     struct nfs_request   *req = ctx->req;
     struct LAYOUTGET4res *res = &req->res_compound.resarray[req->index].oplayoutget;
 
-    if (ctx->ds_root_handle) {
-        chimera_vfs_release(req->thread->vfs_thread, ctx->ds_root_handle);
-        ctx->ds_root_handle = NULL;
-    }
     if (ctx->mds_handle) {
         chimera_vfs_release(req->thread->vfs_thread, ctx->mds_handle);
         ctx->mds_handle = NULL;
     }
+    if (ctx->client) {
+        nfs_client_finish_compound(ctx->client, &req->thread->shared->nfs4_state_table,
+                                   req->thread->vfs_thread);
+        ctx->client = NULL;
+    }
     res->logr_status = status;
     chimera_nfs4_compound_complete(req, status);
-} /* ff_lg_fail */
+} /* ff_lg_complete */
 
 /*
  * XDR size of one layout4 carrying a loc_body of body_len bytes: lo_offset (8)
@@ -553,30 +549,29 @@ lg_layout4_xdr_len(uint32_t body_len)
 static void
 ff_lg_emit(struct ff_layoutget_ctx *ctx)
 {
-    struct nfs_request      *req    = ctx->req;
-    struct LAYOUTGET4args   *args   = &req->args_compound->argarray[req->index].oplayoutget;
-    struct LAYOUTGET4res    *res    = &req->res_compound.resarray[req->index].oplayoutget;
-    struct nfs_state_table  *table  = &req->thread->shared->nfs4_state_table;
-    struct nfs_client       *client = req->session ? req->session->client_unified : NULL;
-    struct nfs_layout_state *layout;
-    const uint8_t           *deviceid, *backing_fh, *native_fh;
-    uint32_t                 backing_fh_len, native_fh_len, client_short_id;
-    uint8_t                 *body;
-    uint32_t                 body_len;
-    struct layout4          *lo;
-    int                      rc;
-    uint8_t                  ds_fhwire[CHIMERA_NFS_FH_MAX];
-    int                      ds_fhwire_len;
+    struct nfs_request     *req    = ctx->req;
+    struct LAYOUTGET4args  *args   = &req->args_compound->argarray[req->index].oplayoutget;
+    struct LAYOUTGET4res   *res    = &req->res_compound.resarray[req->index].oplayoutget;
+    struct nfs_state_table *table  = &req->thread->shared->nfs4_state_table;
+    struct nfs_client      *client = ctx->client;
+    const uint8_t          *deviceid, *backing_fh, *native_fh;
+    uint32_t                backing_fh_len, native_fh_len;
+    uint8_t                *body;
+    uint32_t                body_len;
+    struct layout4         *lo;
+    int                     rc;
+    uint8_t                 ds_fhwire[CHIMERA_NFS_FH_MAX];
+    int                     ds_fhwire_len;
 
     if (!client) {
-        ff_lg_fail(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
+        ff_lg_complete(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
         return;
     }
 
     if (chimera_vfs_pnfs_blob_unpack(ctx->blob, ctx->blob_len,
                                      &deviceid, &backing_fh,
                                      &backing_fh_len) != 0) {
-        ff_lg_fail(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
+        ff_lg_complete(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
         return;
     }
 
@@ -619,31 +614,24 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
      * fails must leave nothing registered, or the server would hold a layout
      * whose stateid the client never saw. */
     if (lg_layout4_xdr_len(body_len) > args->loga_maxcount) {
-        ff_lg_fail(ctx, NFS4ERR_TOOSMALL);
+        ff_lg_complete(ctx, NFS4ERR_TOOSMALL);
         return;
     }
 
-    client_short_id = (uint32_t) client->client_id;
-
-    layout = nfs_layout_state_find(client, req->fh, req->fhlen);
-    if (layout) {
-        /* One layout per (client, file), so a later RW LAYOUTGET over a
-         * layout first taken for READ widens that layout rather than making a
-         * second one -- otherwise the RW access the client just acquired is
-         * invisible to LAYOUTCOMMIT, which requires it. */
-        if (args->loga_iomode == LAYOUTIOMODE4_RW) {
-            layout->iomode = LAYOUTIOMODE4_RW;
-        }
-        nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
-    } else {
-        layout = nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
-                                         client_short_id, table,
-                                         &req->thread->shared->nfs4_layout_table,
-                                         &res->logr_resok4.logr_stateid);
+    if (!nfs_layout_table_grant_begin(&req->thread->shared->nfs4_layout_table, req->fh, req->fhlen)) {
+        ff_lg_complete(ctx, NFS4ERR_RECALLCONFLICT);
+        return;
     }
-
-    /* Remember what we handed out so CB_LAYOUTRECALL can name the same type. */
-    layout->layout_type = LAYOUT4_FLEX_FILES;
+    nfsstat4 grant_status = nfs_layout_state_grant(client, req->fh, req->fhlen,
+                                                   req->export_id, args->loga_iomode, LAYOUT4_FLEX_FILES, &args->
+                                                   loga_stateid, table,
+                                                   &req->thread->shared->nfs4_layout_table, &res->logr_resok4.
+                                                   logr_stateid);
+    nfs_layout_table_grant_end(&req->thread->shared->nfs4_layout_table, req->fh, req->fhlen);
+    if (grant_status != NFS4_OK) {
+        ff_lg_complete(ctx, grant_status);
+        return;
+    }
 
     /* Open the client's callback channel so a later conflicting op can recall
      * this layout; CB_LAYOUTRECALL rides the shared delegation channel. */
@@ -669,219 +657,8 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
         ctx->mds_handle = NULL;
     }
 
-    res->logr_status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    ff_lg_complete(ctx, NFS4_OK);
 } /* ff_lg_emit */
-
-static void
-ff_lg_setattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct ff_layoutget_ctx *ctx = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        ff_lg_fail(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
-        return;
-    }
-    ff_lg_emit(ctx);
-} /* ff_lg_setattr_cb */
-
-/* Record the freshly created backing file on the MDS inode as its layout. */
-static void
-ff_lg_commit_blob(struct ff_layoutget_ctx *ctx)
-{
-    struct nfs_request *req = ctx->req;
-
-    memset(&ctx->set_attr, 0, sizeof(ctx->set_attr));
-    ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_PNFS_LAYOUT;
-    ctx->set_attr.va_pnfs_len = ctx->blob_len;
-    memcpy(ctx->set_attr.va_pnfs, ctx->blob, ctx->blob_len);
-
-    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, ctx->mds_handle,
-                        &ctx->set_attr, 0, 0, ff_lg_setattr_cb, ctx);
-} /* ff_lg_commit_blob */
-
-/* The adopted backing file has been truncated; drop the handle and record the
- * layout.  A failure here would leave the new file holding a dead file's bytes,
- * so it fails the LAYOUTGET rather than granting a layout over them. */
-static void
-ff_lg_reset_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct ff_layoutget_ctx *ctx = private_data;
-
-    chimera_vfs_release(ctx->req->thread->vfs_thread, ctx->backing_handle);
-    ctx->backing_handle = NULL;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        ff_lg_fail(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
-        return;
-    }
-
-    ff_lg_commit_blob(ctx);
-} /* ff_lg_reset_cb */
-
-static void
-ff_lg_create_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
-{
-    struct ff_layoutget_ctx *ctx = private_data;
-    struct nfs_request      *req = ctx->req;
-
-    if (ctx->ds_root_handle) {
-        chimera_vfs_release(req->thread->vfs_thread, ctx->ds_root_handle);
-        ctx->ds_root_handle = NULL;
-    }
-
-    if (error_code != CHIMERA_VFS_OK ||
-        !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        ff_lg_fail(ctx, error_code != CHIMERA_VFS_OK
-                   ? chimera_nfs4_errno_to_nfsstat4(error_code)
-                   : NFS4ERR_LAYOUTTRYLATER);
-        return;
-    }
-
-    ctx->blob_len = chimera_vfs_pnfs_blob_pack(ctx->blob, ctx->ds->deviceid,
-                                               attr->va_fh, attr->va_fh_len);
-
-    /* Adopting an existing backing file means the name was reused, and the
-     * bytes behind it are a dead file's.  CHIMERA_VFS_OPEN_TRUNCATE above asks
-     * for them to be dropped, but a data server reached through the `nfs` VFS
-     * module never sees that flag -- the module does not implement it, so on the
-     * remote-DS path it is a silent no-op and the new file would start life
-     * holding the previous occupant's data.  Truncate explicitly whenever the
-     * open did not create the file, exactly as the non-pNFS write redirect does
-     * (chimera_vfs_pnfs_io_create_cb).  The handle stays open across it and is
-     * released by ff_lg_reset_cb. */
-    if (oh && !oh->r_created) {
-        ctx->backing_handle = oh;
-
-        memset(&ctx->set_attr, 0, sizeof(ctx->set_attr));
-        ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
-        ctx->set_attr.va_size     = 0;
-
-        chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, oh,
-                            &ctx->set_attr, 0, 0, ff_lg_reset_cb, ctx);
-        return;
-    }
-
-    if (oh) {
-        chimera_vfs_release(req->thread->vfs_thread, oh);
-    }
-
-    ff_lg_commit_blob(ctx);
-} /* ff_lg_create_cb */
-
-static void
-ff_lg_dsroot_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct ff_layoutget_ctx *ctx = private_data;
-    struct nfs_request      *req = ctx->req;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        ff_lg_fail(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
-        return;
-    }
-
-    ctx->ds_root_handle = handle;
-
-    /* One backing file per MDS file, flat on the DS.  Shared with the non-pNFS
-    * write redirect (vfs_pnfs_io.c), which must resolve the very same file. */
-    chimera_vfs_pnfs_backing_name(ctx->backing_name, ctx->mds_handle->fh,
-                                  ctx->fileid);
-
-    /* TRUNCATE: the backing name ends in the MDS fileid, which is reused once
-     * the original inode is gone, so without it a new file can inherit a dead
-     * file's bytes.
-     *
-     * Backing files are internal data containers; real access control is the
-     * client's OPEN against the MDS metadata file.  flex-files steers DS I/O
-     * with synthetic, per-iomode principals (ffds_user "0" for RW, "1" for
-     * READ), so the backing object must be reachable by both.  A dedicated DS
-     * in data_server mode serves them statelessly (bypassing the permission
-     * check), but a co-located DS (the MDS is also the data server, local
-     * backing) enforces it -- with mode 0600/owner-root the synthetic READ
-     * principal is denied and the client spins re-fetching the layout.  Create
-     * them world-rw so both topologies work. */
-    memset(&ctx->set_attr, 0, sizeof(ctx->set_attr));
-    ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
-    ctx->set_attr.va_mode     = S_IFREG | 0666;
-
-    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, ctx->ds_root_handle,
-                        ctx->backing_name, strlen(ctx->backing_name),
-                        CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_TRUNCATE |
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        &ctx->set_attr, CHIMERA_VFS_ATTR_FH, 0, 0,
-                        ff_lg_create_cb, ctx);
-} /* ff_lg_dsroot_cb */
-
-static void
-ff_lg_getattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct ff_layoutget_ctx *ctx = private_data;
-    struct nfs_request      *req = ctx->req;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        ff_lg_fail(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
-        return;
-    }
-
-    if (attr->va_set_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) {
-        ctx->blob_len = attr->va_pnfs_len;
-        memcpy(ctx->blob, attr->va_pnfs, attr->va_pnfs_len);
-        ff_lg_emit(ctx);
-        return;
-    }
-
-    /* No layout yet.  Granting one now is only safe while the file is still
-     * empty: the backing file we would create starts empty, so any bytes
-     * already on the metadata server would be stranded behind it and no reader
-     * could see both halves.  A file that already holds data is therefore
-     * permanently MDS-resident, and saying so plainly is the correct answer --
-     * RFC 8881 18.43.3 lists NFS4ERR_LAYOUTUNAVAILABLE for exactly this, and
-     * clients respond by doing their I/O through the metadata server.
-     *
-     * The VFS applies the same rule on the write path (chimera_vfs_pnfs_io
-     * materializes only for an empty file), so the two agree on which files are
-     * DS-resident and a file is never split between the two stores. */
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) && attr->va_size != 0) {
-        ff_lg_fail(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
-        return;
-    }
-
-    /* No layout yet -> steer to a data server and create the backing file. */
-    ctx->fileid = (attr->va_set_mask & CHIMERA_VFS_ATTR_INUM) ? attr->va_ino : 0;
-    ctx->ds     = chimera_vfs_pnfs_steer(req->thread->shared->vfs);
-    if (!ctx->ds) {
-        ff_lg_fail(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
-        return;
-    }
-
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        ctx->ds->root_fh, ctx->ds->root_fh_len,
-                        CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_INFERRED,
-                        ff_lg_dsroot_cb, ctx);
-} /* ff_lg_getattr_cb */
 
 /*
  * Backend-SOURCED path: the backend produced the layout itself; chimera only
@@ -904,17 +681,16 @@ lg_sourced_cb(
     struct LAYOUTGET4args   *args   = &req->args_compound->argarray[req->index].oplayoutget;
     struct LAYOUTGET4res    *res    = &req->res_compound.resarray[req->index].oplayoutget;
     struct nfs_state_table  *table  = &req->thread->shared->nfs4_state_table;
-    struct nfs_client       *client = req->session ? req->session->client_unified : NULL;
-    struct nfs_layout_state *layout;
-    uint32_t                 client_short_id, i, loc_type;
+    struct nfs_client       *client = ctx->client;
+    uint32_t                 i, loc_type;
     uint32_t                 layouts_len = 0;
 
     if (error_code != CHIMERA_VFS_OK) {
-        ff_lg_fail(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
+        ff_lg_complete(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
         return;
     }
     if (!client || num_segments == 0) {
-        ff_lg_fail(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
+        ff_lg_complete(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
         return;
     }
 
@@ -930,7 +706,7 @@ lg_sourced_cb(
             break;
     } /* switch */
     if (loc_type != args->loga_layout_type) {
-        ff_lg_fail(ctx, NFS4ERR_UNKNOWN_LAYOUTTYPE);
+        ff_lg_complete(ctx, NFS4ERR_UNKNOWN_LAYOUTTYPE);
         return;
     }
 
@@ -1006,28 +782,24 @@ lg_sourced_cb(
     /* Enforce loga_maxcount before taking any layout state, so a rejected
      * LAYOUTGET leaves nothing registered (see ff_lg_emit). */
     if (layouts_len > args->loga_maxcount) {
-        ff_lg_fail(ctx, NFS4ERR_TOOSMALL);
+        ff_lg_complete(ctx, NFS4ERR_TOOSMALL);
         return;
     }
 
-    client_short_id = (uint32_t) client->client_id;
-    layout          = nfs_layout_state_find(client, req->fh, req->fhlen);
-    if (layout) {
-        /* See ff_lg_emit(): widen an existing READ layout to RW. */
-        if (args->loga_iomode == LAYOUTIOMODE4_RW) {
-            layout->iomode = LAYOUTIOMODE4_RW;
-        }
-        nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
-    } else {
-        layout = nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
-                                         client_short_id, table,
-                                         &req->thread->shared->nfs4_layout_table,
-                                         &res->logr_resok4.logr_stateid);
+    if (!nfs_layout_table_grant_begin(&req->thread->shared->nfs4_layout_table, req->fh, req->fhlen)) {
+        ff_lg_complete(ctx, NFS4ERR_RECALLCONFLICT);
+        return;
     }
-
-    /* Remember the backend-sourced type: a block/SCSI holder must be recalled
-     * as block/SCSI or the client finds no matching layout to return. */
-    layout->layout_type = loc_type;
+    nfsstat4 grant_status = nfs_layout_state_grant(client, req->fh, req->fhlen,
+                                                   req->export_id, args->loga_iomode, loc_type, &args->loga_stateid,
+                                                   table,
+                                                   &req->thread->shared->nfs4_layout_table, &res->logr_resok4.
+                                                   logr_stateid);
+    nfs_layout_table_grant_end(&req->thread->shared->nfs4_layout_table, req->fh, req->fhlen);
+    if (grant_status != NFS4_OK) {
+        ff_lg_complete(ctx, grant_status);
+        return;
+    }
 
     /* Open the client's callback channel so a later conflicting op can recall
      * this layout; CB_LAYOUTRECALL rides the shared delegation channel. */
@@ -1040,72 +812,208 @@ lg_sourced_cb(
         ctx->mds_handle = NULL;
     }
 
-    res->logr_status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    ff_lg_complete(ctx, NFS4_OK);
 } /* lg_sourced_cb */
 
+#define NFS4_PNFS_LG2_OP_CREATE  2
+#define NFS4_PNFS_LG2_OP_RESET   3
+#define NFS4_PNFS_LG2_OP_SETATTR 5
+
 static void
-ff_lg_open_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+ff_lg_blob_run_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct ff_layoutget_ctx *ctx  = private_data;
-    struct nfs_request      *req  = ctx->req;
-    struct LAYOUTGET4args   *args = &req->args_compound->argarray[req->index].oplayoutget;
-    uint64_t                 caps;
+    struct ff_layoutget_ctx              *ctx = private_data;
+    const struct chimera_vfs_compound_op *cop;
+    struct chimera_vfs_compound_op       *sop;
+
+    if (index != NFS4_PNFS_LG2_OP_CREATE || *status != CHIMERA_VFS_OK) {
+        return;
+    }
+
+    cop = chimera_vfs_compound_op(compound, NFS4_PNFS_LG2_OP_CREATE);
+    sop = chimera_vfs_compound_op_edit(compound, NFS4_PNFS_LG2_OP_SETATTR);
+    /* Reused backing names must not expose the previous inode's contents.
+     * A remote NFS backend may ignore OPEN_TRUNCATE, so reset explicitly. */
+    struct chimera_vfs_compound_op *reset = chimera_vfs_compound_op_edit(
+        compound, NFS4_PNFS_LG2_OP_RESET);
+    reset->skip = cop->created;
+
+    if (!(cop->attr.va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        /* Nothing to record.  The completion reads the same absence and
+         * answers NFS4ERR_LAYOUTTRYLATER, as the per-op path did. */
+        sop->skip = 1;
+        return;
+    }
+
+    sop->skip                 = 0;
+    sop->set_attr.va_req_mask = 0;
+    sop->set_attr.va_set_mask = CHIMERA_VFS_ATTR_PNFS_LAYOUT;
+    sop->set_attr.va_pnfs_len = chimera_vfs_pnfs_blob_pack(sop->set_attr.va_pnfs,
+                                                           ctx->ds->deviceid,
+                                                           cop->attr.va_fh,
+                                                           cop->attr.va_fh_len);
+} /* ff_lg_blob_run_gate */
+
+static void
+ff_lg_blob_run_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct ff_layoutget_ctx              *ctx = private_data;
+    const struct chimera_vfs_compound_op *cop;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
-        ff_lg_fail(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
+        chimera_vfs_compound_free(compound);
+        ff_lg_complete(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
         return;
     }
 
-    ctx->mds_handle = handle;
-    caps            = handle->vfs_module->capabilities;
+    cop = chimera_vfs_compound_op(compound, NFS4_PNFS_LG2_OP_CREATE);
 
-    if (caps & CHIMERA_VFS_CAP_LAYOUT_SOURCE) {
-        /* Backend produces the layout.  Its class is fixed by its caps; the
-         * client's requested type must match it. */
-        uint32_t want_class, ok_type;
-
-        if (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI) {
-            want_class = CHIMERA_VFS_LAYOUT_CLASS_SCSI;
-            ok_type    = LAYOUT4_SCSI;
-        } else if (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK) {
-            want_class = CHIMERA_VFS_LAYOUT_CLASS_BLOCK;
-            ok_type    = LAYOUT4_BLOCK_VOLUME;
-        } else {
-            want_class = CHIMERA_VFS_LAYOUT_CLASS_FLEX;
-            ok_type    = LAYOUT4_FLEX_FILES;
-        }
-
-        if (args->loga_layout_type != ok_type) {
-            ff_lg_fail(ctx, NFS4ERR_UNKNOWN_LAYOUTTYPE);
-            return;
-        }
-
-        chimera_vfs_get_layout(req->thread->vfs_thread, &req->cred, handle,
-                               args->loga_offset, args->loga_length, args->loga_iomode,
-                               want_class, CHIMERA_VFS_LAYOUT_MAX_SEGMENTS,
-                               lg_sourced_cb, ctx);
+    if (!(cop->attr.va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        chimera_vfs_compound_free(compound);
+        ff_lg_complete(ctx, NFS4ERR_LAYOUTTRYLATER);
         return;
     }
 
-    if (caps & CHIMERA_VFS_CAP_LAYOUT) {
-        /* Orchestrated path: chimera produces a flex-files layout only. */
-        if (args->loga_layout_type != LAYOUT4_FLEX_FILES) {
-            ff_lg_fail(ctx, NFS4ERR_UNKNOWN_LAYOUTTYPE);
-            return;
-        }
-        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, handle,
-                            CHIMERA_VFS_ATTR_PNFS_LAYOUT | CHIMERA_VFS_ATTR_INUM |
-                            CHIMERA_VFS_ATTR_SIZE,
-                            ff_lg_getattr_cb, ctx);
+    ctx->blob_len = chimera_vfs_pnfs_blob_pack(ctx->blob, ctx->ds->deviceid,
+                                               cop->attr.va_fh, cop->attr.va_fh_len);
+
+    chimera_vfs_compound_free(compound);
+
+    ff_lg_emit(ctx);
+} /* ff_lg_blob_run_complete */
+
+static void
+ff_lg_start_blob_run(struct ff_layoutget_ctx *ctx)
+{
+    struct nfs_request          *req = ctx->req;
+    struct chimera_vfs_compound *compound;
+    struct chimera_vfs_attrs     set_attr;
+
+    ctx->ds = chimera_vfs_pnfs_steer(req->thread->shared->vfs);
+
+    if (!ctx->ds) {
+        ff_lg_complete(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
         return;
     }
 
-    ff_lg_fail(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
-} /* ff_lg_open_cb */
+    /* Use the same per-filesystem name as the ordinary I/O redirect. */
+    chimera_vfs_pnfs_backing_name(ctx->backing_name, req->fh, ctx->fileid);
+
+    /* TRUNCATE: the backing name ends in the MDS fileid, which is reused once
+     * the original inode is gone, so without it a new file can inherit a dead
+     * file's bytes.
+     *
+     * Backing files are internal data containers; real access control is the
+     * client's OPEN against the MDS metadata file.  flex-files steers DS I/O
+     * with synthetic, per-iomode principals (ffds_user "0" for RW, "1" for
+     * READ), so the backing object must be reachable by both.  A dedicated DS
+     * in data_server mode serves them statelessly (bypassing the permission
+     * check), but a co-located DS (the MDS is also the data server, local
+     * backing) enforces it -- with mode 0600/owner-root the synthetic READ
+     * principal is denied and the client spins re-fetching the layout.  Create
+     * them world-rw so both topologies work. */
+    memset(&set_attr, 0, sizeof(set_attr));
+    set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    set_attr.va_mode     = S_IFREG | 0666;
+
+    compound = chimera_vfs_compound_alloc(req->thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, ctx->ds->root_fh,
+                                   ctx->ds->root_fh_len);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_DIRECTORY |
+                                          CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_open(compound, ctx->backing_name,
+                                  (int) strlen(ctx->backing_name),
+                                  CHIMERA_VFS_OPEN_CREATE |
+                                  CHIMERA_VFS_OPEN_INFERRED, 0,
+                                  &set_attr, CHIMERA_VFS_ATTR_FH, 0, 0);
+
+    memset(&set_attr, 0, sizeof(set_attr));
+    set_attr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+    set_attr.va_size     = 0;
+    chimera_vfs_compound_add_setattr(compound, NULL, &set_attr, 0, 0);
+    chimera_vfs_compound_op_use_handle(compound, NFS4_PNFS_LG2_OP_RESET,
+                                       NFS4_PNFS_LG2_OP_CREATE);
+
+    /* Back to the MDS file, whose attributes record where its data now lives.
+    * Applied against the object's mode, as chimera_vfs_setattr applied it. */
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+
+    memset(&set_attr, 0, sizeof(set_attr));
+    chimera_vfs_compound_add_setattr(compound, NULL, &set_attr, 0, 0);
+
+    chimera_vfs_compound_set_gate(compound, ff_lg_blob_run_gate, ctx);
+    chimera_vfs_compound_submit(compound, ff_lg_blob_run_complete, ctx);
+} /* ff_lg_start_blob_run */
+
+/* Retain the authoritative MDS open until layout state is published. The
+ * first compound reads an existing layout or asks its native source; only
+ * an empty orchestrated object needs the backing-file creation compound. */
+static void
+ff_lg_run_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct ff_layoutget_ctx              *ctx    = private_data;
+    struct nfs_request                   *req    = ctx->req;
+    struct LAYOUTGET4args                *args   = &req->args_compound->argarray[req->index].oplayoutget;
+    enum chimera_vfs_error                status = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *query  = chimera_vfs_compound_op(compound, 3);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_free(compound);
+        ff_lg_complete(ctx, chimera_nfs4_errno_to_nfsstat4(status));
+        return;
+    }
+    ctx->mds_handle = chimera_vfs_compound_take_handle(compound, 2);
+    if (ctx->want_class) {
+        /* The emitter copies every descriptor into the reply/cache before it
+         * returns. The compound keeps the source arrays alive through it. */
+        lg_sourced_cb(status, query->layout_class, query->layout_num_segments,
+                      query->layout_segments, query->layout_num_devices,
+                      query->layout_devices, ctx);
+        chimera_vfs_compound_free(compound);
+        return;
+    }
+    const struct chimera_vfs_ds *ds = chimera_vfs_pnfs_find_backing(
+        req->thread->shared->vfs, ctx->mds_handle->fh, ctx->mds_handle->fh_len);
+    if (ds) {
+        ctx->blob_len = chimera_vfs_pnfs_blob_pack(ctx->blob, ds->deviceid,
+                                                   ctx->mds_handle->fh, ctx->mds_handle->fh_len);
+    } else if ((query->attr.va_set_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) && query->attr.va_pnfs_len) {
+        ctx->blob_len = query->attr.va_pnfs_len;
+        memcpy(ctx->blob, query->attr.va_pnfs, ctx->blob_len);
+    }
+    if (ctx->blob_len) {
+        chimera_vfs_compound_free(compound);
+        ff_lg_emit(ctx);
+        return;
+    }
+    /* Main's ordinary I/O redirect shares this exact storage mapping. Never
+     * replace existing MDS bytes with a new empty backing file. */
+    bool materialize = args->loga_layout_type == LAYOUT4_FLEX_FILES &&
+        (ctx->mds_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_LAYOUT) &&
+        !chimera_vfs_pnfs_fh_is_ds_backing(req->thread->shared->vfs, req->fh, req->fhlen) &&
+        (query->attr.va_set_mask & (CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_INUM)) ==
+        (CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_INUM) && !query->attr.va_size;
+    ctx->fileid = query->attr.va_ino;
+    chimera_vfs_compound_free(compound);
+    if (materialize) {
+        ff_lg_start_blob_run(ctx);
+    } else {
+        ff_lg_complete(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
+    }
+} /* ff_lg_run_complete */
 
 void
 chimera_nfs4_layoutget(
@@ -1176,31 +1084,38 @@ chimera_nfs4_layoutget(
      * nothing; NFS4ERR_OLD_STATEID is merely listed as permitted for the op
      * (§18.43.4), not required for this case.  LAYOUTRETURN is a single ordered
      * operation with no such ambiguity and keeps the strict check. */
-    client = req->session ? req->session->client_unified : NULL;
+    ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+    chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->req = req;
+    if (!req->session ||
+        nfs4_client_reserve_compound(&thread->shared->nfs4_shared_clients,
+                                     req->session->nfs4_session_clientid, &ctx->client) != NFS4_OK) {
+        ff_lg_complete(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
+        return;
+    }
+    client = ctx->client;
 
-    if (client && !nfs4_stateid_is_special(&args->loga_stateid)) {
-        struct nfs4_stateid_view view;
-
-        nfs4_stateid_decode(&view, &args->loga_stateid);
-
-        if (view.type == NFS4_STATEID_TYPE_LAYOUT) {
-            struct nfs_layout_state *layout =
-                nfs_layout_state_find(client, req->fh, req->fhlen);
-            uint32_t                 in_seqid = args->loga_stateid.seqid;
-
-            if (!layout) {
-                res->logr_status = NFS4ERR_BAD_STATEID;
-            } else if (in_seqid > layout->seqid) {
-                res->logr_status = NFS4ERR_BAD_STATEID;
-            } else {
-                res->logr_status = NFS4_OK;
-            }
-
-            if (res->logr_status != NFS4_OK) {
-                chimera_nfs4_compound_complete(req, res->logr_status);
-                return;
-            }
-        }
+    struct nfs4_stateid_view view;
+    nfs4_stateid_decode(&view, &args->loga_stateid);
+    if (view.type == NFS4_STATEID_TYPE_LAYOUT) {
+        res->logr_status = nfs_layout_state_check(client, req->fh, req->fhlen,
+                                                  &args->loga_stateid, &thread->shared->nfs4_state_table);
+    } else if (view.type == NFS4_STATEID_TYPE_DELEG) {
+        struct chimera_claim_actor actor;
+        res->logr_status = nfs_state_table_delegation_io(&thread->shared->nfs4_state_table,
+                                                         &args->loga_stateid, client, req->fh, req->fhlen,
+                                                         args->loga_iomode == LAYOUTIOMODE4_RW ?
+                                                         OPEN4_SHARE_ACCESS_WRITE : OPEN4_SHARE_ACCESS_READ, &actor);
+    } else {
+        res->logr_status = nfs_state_table_advise(&thread->shared->nfs4_state_table,
+                                                  &args->loga_stateid, client, req->fh, req->fhlen, req->
+                                                  principal_flavor,
+                                                  req->principal_machinename, req->principal_machinename_len);
+    }
+    if (res->logr_status != NFS4_OK) {
+        ff_lg_complete(ctx, res->logr_status);
+        return;
     }
 
     /* RFC 8881 §18.43.3 / §12.5.5.2: a LAYOUTGET that overlaps a recall in
@@ -1214,18 +1129,35 @@ chimera_nfs4_layoutget(
     if (nfs_layout_table_recall_active(&thread->shared->nfs4_layout_table,
                                        req->fh, (uint16_t) req->fhlen)) {
         res->logr_status = NFS4ERR_RECALLCONFLICT;
-        chimera_nfs4_compound_complete(req, res->logr_status);
+        ff_lg_complete(ctx, res->logr_status);
         return;
     }
 
-    ctx = xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
-    chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
-    memset(ctx, 0, sizeof(*ctx));
-    ctx->req = req;
-
-    /* Open the current FH, then drive the GETATTR/create/SETATTR chain. */
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->fh, req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED, ff_lg_open_cb, ctx);
+    uint64_t caps          = chimera_vfs_module_capabilities(thread->vfs_thread, req->fh, req->fhlen);
+    uint32_t expected_type = LAYOUT4_FLEX_FILES;
+    if (caps & CHIMERA_VFS_CAP_LAYOUT_SOURCE) {
+        ctx->want_class = (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_SCSI) ? CHIMERA_VFS_LAYOUT_CLASS_SCSI :
+            (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK) ? CHIMERA_VFS_LAYOUT_CLASS_BLOCK : CHIMERA_VFS_LAYOUT_CLASS_FLEX
+        ;
+        expected_type = ctx->want_class == CHIMERA_VFS_LAYOUT_CLASS_SCSI ? LAYOUT4_SCSI :
+            ctx->want_class == CHIMERA_VFS_LAYOUT_CLASS_BLOCK ? LAYOUT4_BLOCK_VOLUME : LAYOUT4_FLEX_FILES;
+    }
+    if (args->loga_layout_type != expected_type) {
+        ff_lg_complete(ctx, NFS4ERR_UNKNOWN_LAYOUTTYPE);
+        return;
+    }
+    struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_gethandle(compound);
+    if (ctx->want_class) {
+        chimera_vfs_compound_add_get_layout(compound, args->loga_offset, args->loga_length,
+                                            args->loga_iomode, ctx->want_class, CHIMERA_VFS_LAYOUT_MAX_SEGMENTS);
+    } else {
+        chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_PNFS_LAYOUT |
+                                         CHIMERA_VFS_ATTR_INUM | CHIMERA_VFS_ATTR_SIZE);
+    }
+    chimera_vfs_compound_submit(compound, ff_lg_run_complete, ctx);
 } /* chimera_nfs4_layoutget */
 
 void
@@ -1235,92 +1167,40 @@ chimera_nfs4_layoutreturn(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct LAYOUTRETURN4args *args = &argop->oplayoutreturn;
-    struct LAYOUTRETURN4res  *res  = &resop->oplayoutreturn;
-    struct nfs_client        *client;
+    struct LAYOUTRETURN4args *args   = &argop->oplayoutreturn;
+    struct LAYOUTRETURN4res  *res    = &resop->oplayoutreturn;
+    struct nfs_client        *client = NULL;
+    struct nfs_state_table   *table  = &thread->shared->nfs4_state_table;
 
     if (!chimera_vfs_pnfs_feature_enabled(thread->shared->vfs)) {
         res->lorr_status = NFS4ERR_NOTSUPP;
-        chimera_nfs4_compound_complete(req, res->lorr_status);
-        return;
+        goto complete;
     }
-
     if (args->lora_layout_type != LAYOUT4_FLEX_FILES &&
         args->lora_layout_type != LAYOUT4_BLOCK_VOLUME &&
         args->lora_layout_type != LAYOUT4_SCSI) {
         res->lorr_status = NFS4ERR_UNKNOWN_LAYOUTTYPE;
-        chimera_nfs4_compound_complete(req, res->lorr_status);
-        return;
+        goto complete;
     }
-
-    client = req->session ? req->session->client_unified : NULL;
-
-    /* RFC 8881 §18.44.3: a LAYOUTRETURN4_ALL makes the client believe every
-     * layout it held is gone, so the server has to forget them all.  Keeping
-     * them registered left the server-wide recall barrier standing for files
-     * the client had already given up, and a later conflicting op then parked
-     * behind a CB_LAYOUTRECALL to a client that was usually on its way out
-     * (RETURN ALL is what an unmount sends) until the recall deadline or the
-     * lease expired.  FSID stays a no-op: the fsid is a backend attribute the
-     * layout record does not carry, so selecting by it needs a getattr per
-     * record that this synchronous path cannot make. */
-    if (client &&
-        args->lora_layoutreturn.lr_returntype == LAYOUTRETURN4_ALL) {
-        nfs_layout_state_destroy_all(client,
-                                     &thread->shared->nfs4_state_table,
-                                     thread->vfs_thread);
+    if (!req->session || nfs4_client_reserve_compound(&thread->shared->nfs4_shared_clients,
+                                                      req->session->nfs4_session_clientid, &client) != NFS4_OK) {
+        res->lorr_status = NFS4ERR_BAD_STATEID;
+        goto complete;
     }
-
-    /* v1 tracks a single whole-file layout per file, so a FILE return drops
-     * the record entirely. */
-    if (client &&
-        args->lora_layoutreturn.lr_returntype == LAYOUTRETURN4_FILE) {
-        struct nfs_layout_state *layout =
-            nfs_layout_state_find(client, req->fh, req->fhlen);
-
-        if (layout) {
-            uint32_t in_seqid =
-                args->lora_layoutreturn.lr_layout.lrf_stateid.seqid;
-
-            /* RFC 8881 §18.44.3: for LAYOUTRETURN4_FILE the layout stateid's
-             * seqid MUST NOT be zero -- unlike the anonymous/current special
-             * stateids used elsewhere, a zero seqid here is rejected with
-             * NFS4ERR_BAD_STATEID rather than treated as a wildcard. */
-            if (in_seqid == 0) {
-                res->lorr_status = NFS4ERR_BAD_STATEID;
-                chimera_nfs4_compound_complete(req, res->lorr_status);
-                return;
-            }
-
-            /* RFC 8881 §12.5.3: the layout stateid carried by LAYOUTRETURN must
-             * match the server's current seqid for this layout.  A stale seqid
-             * is OLD_STATEID, a future one BAD_STATEID.  (LAYOUTGET applies the
-             * same rule, except that it also accepts a zero seqid.) */
-            if (in_seqid < layout->seqid) {
-                res->lorr_status = NFS4ERR_OLD_STATEID;
-                chimera_nfs4_compound_complete(req, res->lorr_status);
-                return;
-            }
-            if (in_seqid > layout->seqid) {
-                res->lorr_status = NFS4ERR_BAD_STATEID;
-                chimera_nfs4_compound_complete(req, res->lorr_status);
-                return;
-            }
-
-            /* Destroying the layout deregisters it from the server-wide table;
-             * if it was the last holder of this file, that resumes any
-             * operation deferred while its recall was outstanding (stage two). */
-            nfs_layout_state_destroy(layout,
-                                     &thread->shared->nfs4_state_table,
-                                     thread->vfs_thread);
-        }
+    res->lorr_status = NFS4_OK;
+    if (args->lora_layoutreturn.lr_returntype == LAYOUTRETURN4_ALL) {
+        nfs_layout_state_destroy_all(client, table, thread->vfs_thread);
+    } else if (args->lora_layoutreturn.lr_returntype == LAYOUTRETURN4_FILE) {
+        res->lorr_status = nfs_layout_state_return_file(client, req->fh, req->fhlen,
+                                                        &args->lora_layoutreturn.lr_layout.lrf_stateid, args->
+                                                        lora_layout_type,
+                                                        table, thread->vfs_thread);
     }
-
-    /* The whole layout is gone, so no layout stateid is returned
-     * (RFC 8881 §18.44.3). */
+    /* The whole FILE layout is gone; FSID retains the existing no-op behavior. */
     res->lorr_stateid.lrs_present = 0;
-    res->lorr_status              = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    nfs_client_finish_compound(client, table, thread->vfs_thread);
+ complete:
+    chimera_nfs4_compound_complete(req, res->lorr_status);
 } /* chimera_nfs4_layoutreturn */
 
 void
@@ -1388,146 +1268,106 @@ chimera_nfs4_layouterror(
     chimera_nfs4_compound_complete(req, res->ler_status);
 } /* chimera_nfs4_layouterror */
 
+#define NFS4_PNFS_LC_OP_GETATTR 2
+#define NFS4_PNFS_LC_OP_SETATTR 3
 static void
-chimera_nfs4_layoutcommit_setattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_nfs4_layoutcommit_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct nfs_request      *req = private_data;
-    struct LAYOUTCOMMIT4res *res = &req->res_compound.resarray[req->index].oplayoutcommit;
+    struct nfs_request                   *req  = private_data;
+    struct LAYOUTCOMMIT4args             *args =
+        &req->args_compound->argarray[req->index].oplayoutcommit;
+    const struct chimera_vfs_compound_op *gop;
+    struct chimera_vfs_compound_op       *sop;
+    uint64_t                              cur, want;
 
-    (void) pre_attr;
-    (void) set_attr;
-
-    chimera_nfs_info("LAYOUTCOMMIT req=%p setattr complete err=%d -> reply",
-                     req, error_code);
-
-    if (req->handle) {
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
-    }
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->locr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->locr_status);
+    if (index != NFS4_PNFS_LC_OP_GETATTR || *status != CHIMERA_VFS_OK) {
         return;
     }
 
-    res->locr_resok4.locr_newsize.ns_sizechanged = 1;
-    res->locr_resok4.locr_newsize.ns_size        =
-        (post_attr && (post_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE))
-        ? post_attr->va_size : 0;
+    sop = chimera_vfs_compound_op_edit(compound, NFS4_PNFS_LC_OP_SETATTR);
+    /* The layout authorized the completed data write. */
+    sop->setattr_after_write = 1;
+    gop                      = chimera_vfs_compound_op(compound, NFS4_PNFS_LC_OP_GETATTR);
 
-    res->locr_status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_layoutcommit_setattr_complete */
-
-/*
- * The client's reported high-water byte is in hand and the file is open: apply
- * it iff it extends the file.  loca_last_write_offset says how far the client
- * wrote THROUGH THE LAYOUT (RFC 8881 18.42.3); it is not a truncate request, so
- * a smaller value than the MDS already knows about -- a client that only
- * rewrote the front of a file, or raced a concurrent extension -- must leave
- * the size alone, and ns_sizechanged reports that honestly.
- */
-static void
-chimera_nfs4_layoutcommit_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request       *req  = private_data;
-    struct LAYOUTCOMMIT4args *args = &req->args_compound->argarray[req->index].oplayoutcommit;
-    struct LAYOUTCOMMIT4res  *res  = &req->res_compound.resarray[req->index].oplayoutcommit;
-    struct chimera_vfs_attrs *set_attr;
-    uint64_t                  cur, want;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle      = NULL;
-        res->locr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->locr_status);
+    if (!(gop->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
+        *status = CHIMERA_VFS_EIO;
         return;
     }
-
-    cur  = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
-    want = args->loca_last_write_offset.no_offset + 1;
+    cur  = gop->attr.va_size;
+    want = args->loca_last_write_offset.no_newoffset ? args->loca_last_write_offset.no_offset + 1 : cur;
 
     if (want <= cur && !args->loca_time_modify.nt_timechanged) {
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle                                  = NULL;
-        res->locr_resok4.locr_newsize.ns_sizechanged = 0;
-        res->locr_status                             = NFS4_OK;
-        chimera_nfs4_compound_complete(req, NFS4_OK);
+        /* The commit extends the file; it never shrinks it.  Nothing to
+         * apply, so the SETATTR does not run and ns_sizechanged says so. */
+        sop->skip = 1;
         return;
     }
 
-    /* Compound-lifetime storage so it outlives this async setattr. */
-    set_attr = xdr_dbuf_alloc_space(sizeof(*set_attr), req->encoding->dbuf);
-    chimera_nfs_abort_if(set_attr == NULL, "Failed to allocate space");
-
-    set_attr->va_req_mask = 0;
-    set_attr->va_set_mask = 0;
+    sop->skip                 = 0;
+    sop->set_attr.va_req_mask = 0;
+    sop->set_attr.va_set_mask = 0;
 
     if (want > cur) {
-        set_attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
-        set_attr->va_size      = want;
+        sop->set_attr.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
+        sop->set_attr.va_size      = want;
     }
 
     if (args->loca_time_modify.nt_timechanged) {
-        set_attr->va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
-        set_attr->va_mtime.tv_sec  = args->loca_time_modify.nt_time.seconds;
-        set_attr->va_mtime.tv_nsec = args->loca_time_modify.nt_time.nseconds;
+        sop->set_attr.va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
+        sop->set_attr.va_mtime.tv_sec  = args->loca_time_modify.nt_time.seconds;
+        sop->set_attr.va_mtime.tv_nsec = args->loca_time_modify.nt_time.nseconds;
     }
 
     chimera_nfs_info("LAYOUTCOMMIT req=%p size %llu -> %llu mtime_chg=%d",
                      req, (unsigned long long) cur, (unsigned long long) want,
                      args->loca_time_modify.nt_timechanged);
-    /* The layout already authorized the data write; only publish its metadata. */
-    chimera_vfs_setattr_after_write(req->thread->vfs_thread, &req->cred, req->handle,
-                                    set_attr, 0, CHIMERA_VFS_ATTR_SIZE,
-                                    chimera_nfs4_layoutcommit_setattr_complete, req);
-} /* chimera_nfs4_layoutcommit_getattr_complete */
+} /* chimera_nfs4_layoutcommit_gate */
 
 static void
-chimera_nfs4_layoutcommit_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs4_layoutcommit_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request       *req  = private_data;
-    struct LAYOUTCOMMIT4args *args = &req->args_compound->argarray[req->index].oplayoutcommit;
-    struct LAYOUTCOMMIT4res  *res  = &req->res_compound.resarray[req->index].oplayoutcommit;
+    struct nfs_request                   *req = private_data;
+    struct LAYOUTCOMMIT4res              *res =
+        &req->res_compound.resarray[req->index].oplayoutcommit;
+    const struct chimera_vfs_compound_op *sop;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    chimera_nfs_info("LAYOUTCOMMIT req=%p run complete err=%d -> reply",
+                     req, error_code);
 
     if (error_code != CHIMERA_VFS_OK) {
         res->locr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_compound_free(compound);
         chimera_nfs4_compound_complete(req, res->locr_status);
         return;
     }
 
-    req->handle = handle;
+    sop = chimera_vfs_compound_op(compound, NFS4_PNFS_LC_OP_SETATTR);
 
-    /* No new high-water byte reported: nothing to sync to the MDS. */
-    if (!args->loca_last_write_offset.no_newoffset) {
-        chimera_nfs_info("LAYOUTCOMMIT req=%p open ok, no new offset (no MDS size sync) -> reply",
-                         req);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle                                  = NULL;
+    /* A SETATTR the gate skipped is left CHIMERA_VFS_UNSET and did not run:
+     * the MDS already knew a size at least this high and no mtime was
+     * reported, so nothing changed and the reply says so honestly. */
+    if (sop->status == CHIMERA_VFS_OK) {
+        res->locr_resok4.locr_newsize.ns_sizechanged = !!(sop->applied_attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE);
+        res->locr_resok4.locr_newsize.ns_size        =
+            (sop->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? sop->attr.va_size : 0;
+    } else {
         res->locr_resok4.locr_newsize.ns_sizechanged = 0;
-        res->locr_status                             = NFS4_OK;
-        chimera_nfs4_compound_complete(req, NFS4_OK);
-        return;
     }
 
-    /* Read the size the MDS holds before deciding: the commit extends the file,
-     * it never shrinks it. */
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->handle,
-                        CHIMERA_VFS_ATTR_SIZE,
-                        chimera_nfs4_layoutcommit_getattr_complete, req);
-} /* chimera_nfs4_layoutcommit_open_callback */
+    chimera_vfs_compound_free(compound);
+
+    res->locr_status = NFS4_OK;
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_layoutcommit_complete */
 
 void
 chimera_nfs4_layoutcommit(
@@ -1536,10 +1376,10 @@ chimera_nfs4_layoutcommit(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct LAYOUTCOMMIT4args *args = &argop->oplayoutcommit;
-    struct LAYOUTCOMMIT4res  *res  = &resop->oplayoutcommit;
-    struct nfs_client        *client;
-    struct nfs_layout_state  *layout;
+    struct LAYOUTCOMMIT4args *args   = &argop->oplayoutcommit;
+    struct LAYOUTCOMMIT4res  *res    = &resop->oplayoutcommit;
+    struct nfs_layout_state  *layout = NULL;
+    struct nfs_state_table   *table  = &thread->shared->nfs4_state_table;
 
     req->handle = NULL;
 
@@ -1562,32 +1402,39 @@ chimera_nfs4_layoutcommit(
      * file is NFS4ERR_BAD_STATEID, and a layout held only for reading is
      * NFS4ERR_BADLAYOUT.  (Before this check any client could set any file's
      * size with a LAYOUTCOMMIT, including shrinking it.) */
-    client = req->session ? req->session->client_unified : NULL;
-    layout = client ? nfs_layout_state_find(client, req->fh, req->fhlen) : NULL;
-
-    if (!layout) {
+    if (!req->session || nfs_state_table_acquire_no_renew(table, &args->loca_stateid,
+                                                          NFS4_SLOT_TYPE_LAYOUT, (void **) &layout, NULL) != NFS4_OK ||
+        !layout) {
         res->locr_status = NFS4ERR_BAD_STATEID;
         chimera_nfs4_compound_complete(req, res->locr_status);
         return;
     }
-
-    /* RFC 8881 8.2.2: a zero seqid in an argument stateid means "the current
-     * one".  A non-zero one has to match, exactly as for LAYOUTRETURN. */
-    if (args->loca_stateid.seqid != 0) {
-        if (args->loca_stateid.seqid < layout->seqid) {
-            res->locr_status = NFS4ERR_OLD_STATEID;
-            chimera_nfs4_compound_complete(req, res->locr_status);
-            return;
-        }
-        if (args->loca_stateid.seqid > layout->seqid) {
-            res->locr_status = NFS4ERR_BAD_STATEID;
-            chimera_nfs4_compound_complete(req, res->locr_status);
-            return;
-        }
-    }
-
-    if (layout->iomode != LAYOUTIOMODE4_RW) {
+    /* Resolve the complete identity, not merely another layout for this FH.
+     * The acquired reference also retains the client's mutex through teardown. */
+    evpl_mutex_lock(&layout->client->lock);
+    res->locr_status = NFS4_OK;
+    if (atomic_load(&layout->destroyed) ||
+        layout->client_id != req->session->nfs4_session_clientid ||
+        layout->fh_len != req->fhlen || memcmp(layout->fh, req->fh, req->fhlen)) {
+        res->locr_status = NFS4ERR_BAD_STATEID;
+    } else if (args->loca_stateid.seqid && args->loca_stateid.seqid < layout->seqid) {
+        res->locr_status = NFS4ERR_OLD_STATEID;
+    } else if (args->loca_stateid.seqid && args->loca_stateid.seqid > layout->seqid) {
+        res->locr_status = NFS4ERR_BAD_STATEID;
+    } else if (layout->iomode != LAYOUTIOMODE4_RW) {
         res->locr_status = NFS4ERR_BADLAYOUT;
+    }
+    evpl_mutex_unlock(&layout->client->lock);
+    nfs_state_table_release(table, layout, NFS4_SLOT_TYPE_LAYOUT, thread->vfs_thread);
+    if (res->locr_status != NFS4_OK) {
+        chimera_nfs4_compound_complete(req, res->locr_status);
+        return;
+    }
+    if ((args->loca_last_write_offset.no_newoffset &&
+         args->loca_last_write_offset.no_offset == UINT64_MAX) ||
+        (args->loca_time_modify.nt_timechanged &&
+         args->loca_time_modify.nt_time.nseconds >= 1000000000)) {
+        res->locr_status = NFS4ERR_INVAL;
         chimera_nfs4_compound_complete(req, res->locr_status);
         return;
     }
@@ -1597,8 +1444,12 @@ chimera_nfs4_layoutcommit(
      * mark here so MDS metadata catches up. */
     chimera_nfs_info("LAYOUTCOMMIT enter req=%p fhlen=%u -> opening MDS file",
                      req, req->fhlen);
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh, req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs4_layoutcommit_open_callback, req);
+    struct chimera_vfs_attrs     set_attr = { 0 };
+    struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_SIZE);
+    chimera_vfs_compound_add_setattr(compound, NULL, &set_attr, 0, CHIMERA_VFS_ATTR_SIZE);
+    chimera_vfs_compound_set_gate(compound, chimera_nfs4_layoutcommit_gate, req);
+    chimera_vfs_compound_submit(compound, chimera_nfs4_layoutcommit_complete, req);
 } /* chimera_nfs4_layoutcommit */

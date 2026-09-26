@@ -14,7 +14,7 @@
 #include "nfs_internal.h"
 #include "nfs_kv_keys.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 
 #define NFS4_DRC_SESSION_MAGIC   0x3153534Eu /* "NSS1" */
 /* Bumped from "NRP1" when the cached bytes changed from the whole on-wire
@@ -122,6 +122,10 @@ nfs4_drc_persist_reply(
                                               NFS4_DRC_REPLY_HDR_LEN + len,
                                               seqid, buf, len);
 
+    /* A key-value write is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, stores a record in a backend's KV
+     * band rather than creating anything in a namespace, and takes a key and a
+     * value where every sequence op takes an object. */
     chimera_vfs_put_key(vfs_thread, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nfs4_drc_kv_done, ctx);
 } /* nfs4_drc_persist_reply */
@@ -139,6 +143,10 @@ nfs4_drc_delete_reply(
     ctx->value_len = 0;
     ctx->key_len   = nfs_kv_reply_key(ctx->key, sessionid, slotid, seqid);
 
+    /* A key-value delete is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, drops a record from a backend's KV
+     * band rather than unlinking a name from a directory, and takes a key where
+     * every sequence op takes an object. */
     chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
                            nfs4_drc_kv_done, ctx);
 } /* nfs4_drc_delete_reply */
@@ -296,6 +304,10 @@ nfs4_drc_persist_session(
     ctx->value_len = nfs4_drc_session_serialize(
         ctx->value, NFS4_DRC_SESSION_HDR_LEN + rec.mach_len + rec.owner_len, &rec);
 
+    /* A key-value write is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, stores a record in a backend's KV
+     * band rather than creating anything in a namespace, and takes a key and a
+     * value where every sequence op takes an object. */
     chimera_vfs_put_key(vfs_thread, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nfs4_drc_kv_done, ctx);
 } /* nfs4_drc_persist_session */
@@ -361,6 +373,10 @@ nfs4_drc_forget_complete(
         dctx->value_len = 0;
         dctx->key_len   = ctx->key_lens[i];
         memcpy(dctx->key, ctx->keys[i], ctx->key_lens[i]);
+        /* A key-value delete is not a file-system operation and has no compound op --
+         * it addresses none of the four cursors, drops a record from a backend's KV
+         * band rather than unlinking a name from a directory, and takes a key where
+         * every sequence op takes an object. */
         chimera_vfs_delete_key(ctx->vfs_thread, dctx->key, dctx->key_len,
                                nfs4_drc_kv_done, dctx);
     }
@@ -382,6 +398,10 @@ nfs4_drc_forget_session(
     sctx->value     = NULL;
     sctx->value_len = 0;
     sctx->key_len   = nfs_kv_session_key(sctx->key, sessionid);
+    /* A key-value delete is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, drops a record from a backend's KV
+     * band rather than unlinking a name from a directory, and takes a key where
+     * every sequence op takes an object. */
     chimera_vfs_delete_key(vfs_thread, sctx->key, sctx->key_len,
                            nfs4_drc_kv_done, sctx);
 
@@ -393,6 +413,10 @@ nfs4_drc_forget_session(
 
     /* No end key + flags 0: the search returns key-ordered results and the
      * callback stops once the sessionid in the key no longer matches. */
+    /* A key-value search is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, enumerates a backend's KV store
+     * rather than a namespace, and streams its answers through a per-record
+     * callback that no sequence result can hold. */
     chimera_vfs_search_keys(vfs_thread, ctx->start, slen,
                             NULL, 0, 0,
                             nfs4_drc_forget_scan_cb,
@@ -735,6 +759,10 @@ nfs4_drc_hydrate_session_complete(
      * The [hdr] + sessionid prefix selects exactly this session's reply band;
      * the callback stops once a key leaves it. */
     nfs_kv_reply_key(ctx->rstart, ctx->sessionid, 0, 0);
+    /* A key-value search is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, enumerates a backend's KV store
+     * rather than a namespace, and streams its answers through a per-record
+     * callback that no sequence result can hold. */
     chimera_vfs_search_keys(ctx->thread->vfs_thread,
                             ctx->rstart, CHIMERA_KV_REPLY_KEY_LEN,
                             NULL, 0, 0,
@@ -781,6 +809,10 @@ nfs4_drc_session_hydrate(
     memcpy(ctx->sessionid, sessionid, NFS4_SESSIONID_SIZE);
     nfs_kv_session_key(ctx->sstart, sessionid);
 
+    /* A key-value search is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, enumerates a backend's KV store
+     * rather than a namespace, and streams its answers through a per-record
+     * callback that no sequence result can hold. */
     chimera_vfs_search_keys(thread->vfs_thread,
                             ctx->sstart, CHIMERA_KV_SESSION_KEY_LEN,
                             NULL, 0, 0,

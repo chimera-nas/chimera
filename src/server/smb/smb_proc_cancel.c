@@ -5,6 +5,7 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_notify.h"
+#include "smb_compound.h"
 #include "smb_common/smb2.h"
 
 /*
@@ -87,7 +88,22 @@ chimera_smb_cancel(struct chimera_smb_request *request)
 
     if (match) {
         chimera_smb_notify_cancel(match);
-    } else if (async) {
+    } else {
+        if (chimera_smb_vfs_cancel(conn, request->smb2_hdr.session_id, target_id, async)) {
+            chimera_smb_complete_request(request, SMB2_STATUS_PENDING);
+            return;
+        }
+        for (struct chimera_smb_request *finite = conn->standalone_requests;
+             finite; finite = finite->standalone_next) {
+            if (finite->smb2_hdr.session_id == request->smb2_hdr.session_id &&
+                ((async && finite->async_id && finite->async_id == target_id) ||
+                 (!async && finite->smb2_hdr.message_id == target_id))) {
+                finite->standalone_cancel_requested = true;
+                chimera_vfs_compound_cancel(finite->standalone_vfs);
+                chimera_smb_complete_request(request, SMB2_STATUS_PENDING);
+                return;
+            }
+        }
         /* Search requests pending an async-interim.  A blocking byte-range LOCK
          * (MS-SMB2 3.3.5.14) parked on a conflicting range is cancellable: cancel
          * its VFS acquire and complete it with STATUS_CANCELLED (smb2.lock.cancel).
@@ -98,23 +114,24 @@ chimera_smb_cancel(struct chimera_smb_request *request)
 
         for (parked = conn->parked_requests; parked;
              parked = parked->async.park_next) {
-            if (parked->async_id == target_id) {
+            if ((async && parked->async_id == target_id) ||
+                (!async && target_id && parked->smb2_hdr.message_id == target_id) ||
+                (!async && !target_id && parked->smb2_hdr.session_id == request->smb2_hdr.session_id)) {
                 break;
             }
         }
 
         if (parked && parked->smb2_hdr.command == SMB2_LOCK &&
             parked->lock.parked && parked->lock.open_file) {
-            struct chimera_smb_request *abort =
-                chimera_smb_lock_abort_parked(request->compound->thread,
-                                              parked->lock.open_file);
-
-            /* abort_parked clears open_file->parked_lock_req and returns the same
-             * request; complete it with CANCELLED rather than the abort default
-             * (RANGE_NOT_LOCKED). */
-            if (abort) {
-                chimera_smb_lock_park_finish(abort, SMB2_STATUS_CANCELLED);
-            }
+            __atomic_store_n(&parked->lock.compound_cancel_status,
+                             SMB2_STATUS_CANCELLED, __ATOMIC_RELEASE);
+        } else if (parked && parked->namespace_mutation_wait) {
+            parked->namespace_mutation_wait = false;
+            chimera_smb_complete_request(parked, SMB2_STATUS_CANCELLED);
+        } else if (parked && parked->smb2_hdr.command == SMB2_CREATE &&
+                   parked->create_admission_wait) {
+            parked->create_admission_wait = false;
+            chimera_smb_complete_request(parked, SMB2_STATUS_CANCELLED);
         } else if (parked && parked->async.pipe_read) {
             /* A blocking named-pipe READ never completes on its own, so a
              * CANCEL resolves it with STATUS_CANCELLED.  complete_request

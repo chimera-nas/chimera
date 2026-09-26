@@ -362,6 +362,9 @@ chimera_vfs_request_alloc_common(
     /* Reset implicit-lease mediation state: requests are pooled and not
      * fully memset on reuse, so a prior op's owner/pin must not leak in. */
     request->io_owner_valid       = 0;
+    request->io_view.owner        = NULL;
+    request->io_view.excluded     = NULL;
+    request->io_view.num_excluded = 0;
     request->io_sync_wait         = 0;
     request->notify_gate          = NULL;
     request->notify_gate_wrapped  = 0;

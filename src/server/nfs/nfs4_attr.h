@@ -18,7 +18,6 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/vfs_idmap.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_pnfs.h"
 #include "nfs4_lease.h"
 #include "nfs_fh_wrap.h"
@@ -74,8 +73,8 @@ chimera_nfs4_change_from_attrs(const struct chimera_vfs_attrs *attr)
 
 /*
  * The single pNFS layouttype4 this file's backend supports, for FATTR4
- * advertisement: LAYOUT4_FLEX_FILES (0x4) for an orchestrated backend
- * (CHIMERA_VFS_CAP_LAYOUT) or a flex-sourcing backend, LAYOUT4_BLOCK_VOLUME
+ * advertisement: LAYOUT4_FLEX_FILES (0x4) for an authoritative DS-backed file
+ * or an orchestrated/flex-sourcing backend, LAYOUT4_BLOCK_VOLUME
  * (0x3) for a block-sourcing backend, LAYOUT4_SCSI (0x5) for a SCSI-sourcing
  * backend, or 0 when pNFS is off/unsupported.
  */
@@ -100,8 +99,9 @@ chimera_nfs4_pnfs_layout_type(
         }
         return (caps & CHIMERA_VFS_CAP_LAYOUT_CLASS_BLOCK) ? 0x3 : 0x4;
     }
-    if (caps & CHIMERA_VFS_CAP_LAYOUT) {
-        return 0x4;  /* orchestrated flex-files */
+    if ((caps & CHIMERA_VFS_CAP_LAYOUT) ||
+        chimera_vfs_pnfs_find_backing(vfs, fh, fhlen)) {
+        return 0x4; /* orchestrated or authoritative DS backing */
     }
     return 0;
 } /* chimera_nfs4_pnfs_layout_type */

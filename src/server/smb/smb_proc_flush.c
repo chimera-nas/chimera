@@ -6,7 +6,7 @@
 #include "smb_procs.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 
 /* Map a VFS commit error to the SMB2 status a client expects at FLUSH time.
  * FLUSH is where a write-back backend surfaces a deferred-write failure, so the
@@ -28,19 +28,32 @@ chimera_smb_flush_error_status(enum chimera_vfs_error error_code)
     } /* switch */
 } /* chimera_smb_flush_error_status */
 
+/*
+ * PUTHANDLE, COMMIT.
+ *
+ * The FileId's handle is LENT to the sequence: SMB bound granted_access to it
+ * at CREATE, so the sequence addresses that handle and no other, and does not
+ * release it -- the open file still owns it and chimera_smb_open_file_release
+ * is what lets go.
+ */
 static void
-chimera_smb_flush_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_smb_flush_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      status;
+
+    /* Read before the free: a freed sequence is recycled and reset. */
+    status = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     chimera_smb_open_file_release(request, request->flush.open_file);
 
-    chimera_smb_complete_request(request, chimera_smb_flush_error_status(error_code));
-} /* chimera_smb_flush_callback */
+    chimera_smb_complete_request(request, chimera_smb_flush_error_status(status));
+} /* chimera_smb_flush_sequence_complete */
 
 void
 chimera_smb_flush(struct chimera_smb_request *request)
@@ -74,16 +87,18 @@ chimera_smb_flush(struct chimera_smb_request *request)
         return;
     }
 
-    chimera_vfs_commit(
-        thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->flush.open_file->handle,
-        0,
-        0xffffffffffffffffULL,
-        0,
-        0,
-        chimera_smb_flush_callback,
-        request);
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->flush.open_file->handle,
+                                       request->flush.open_file->open_flags);
+
+    chimera_vfs_compound_add_commit(request->vfs_compound, 0,
+                                    0xffffffffffffffffULL, 0, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_flush_sequence_complete, request);
 } /* chimera_smb_ioctl */
 
 void
@@ -117,3 +132,49 @@ chimera_smb_parse_flush(
 
     return 0;
 } /* chimera_smb_parse_ioctl */
+static int
+smb_flush_compound_eligible(struct chimera_smb_request *request)
+{
+    (void) request;
+    return 1;
+} /* smb_flush_compound_eligible */
+
+static int
+smb_flush_compound_build(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    (void) command;
+    return chimera_vfs_compound_add_commit(compound, 0, UINT64_MAX, 0, 0);
+} /* smb_flush_compound_build */
+
+static void
+smb_flush_compound_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+
+    (void) compound;
+    (void) index;
+    (void) status;
+    if (!(command->open->granted_access & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA))) {
+        command->status = SMB2_STATUS_ACCESS_DENIED;
+    }
+} /* smb_flush_compound_prepare */
+
+static struct chimera_smb_file_id
+smb_flush_compound_file_id(struct chimera_smb_request *request)
+{
+    return request->flush.file_id;
+} /* smb_flush_compound_file_id */
+
+const struct smb_vfs_command_ops chimera_smb_flush_compound_ops = {
+    .file_id   = smb_flush_compound_file_id,
+    .map_error = chimera_smb_flush_error_status,
+    .eligible  = smb_flush_compound_eligible,
+    .build     = smb_flush_compound_build,
+    .prepare   = smb_flush_compound_prepare,
+};

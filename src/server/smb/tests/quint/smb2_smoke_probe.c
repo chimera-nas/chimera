@@ -27,6 +27,52 @@ static int failures = 0;
             }                                        \
         } while (0)
 
+/* A failed overwrite must leave bytes intact.  Include metadata-only opens:
+* truncation still needs a transient WRITE share grant for these handles. */
+static void
+check_refused_overwrites(
+    struct smb2_conn *c,
+    const char       *name)
+{
+    const uint32_t         dispositions[] = { MBT_FILE_OVERWRITE, MBT_FILE_OVERWRITE_IF, MBT_FILE_SUPERSEDE };
+    const uint32_t         accesses[]     = { MBT_FILE_ALL_ACCESS, MBT_FILE_READ_ATTRIBUTES };
+    const char             payload[]      = "preserve";
+    struct smb2_create_out held, refused, accepted;
+    uint8_t                bytes[32];
+    uint32_t               count, len, st;
+
+    st = smb2_create(c, name, MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_READ, NULL, &held);
+    CHECK(st == ST_SUCCESS, "overwrite fixture %s opens", name);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_write(c, held.file_id, 0, payload, 8, &count);
+    CHECK(st == ST_SUCCESS && count == 8, "overwrite fixture %s has data", name);
+    for (unsigned int i = 0; i < sizeof(dispositions) / sizeof(dispositions[0]); i++) {
+        for (unsigned int j = 0; j < sizeof(accesses) / sizeof(accesses[0]); j++) {
+            st = smb2_create(c, name, dispositions[i], accesses[j],
+                             MBT_FILE_SHARE_RWD, NULL, &refused);
+            CHECK(st == ST_SHARING_VIOLATION,
+                  "overwrite %s disposition%u access%u denied", name, dispositions[i], accesses[j]);
+            if (st == ST_SUCCESS) {
+                smb2_close(c, refused.file_id);
+            }
+            st = smb2_read(c, held.file_id, 0, 8, bytes, &len);
+            CHECK(st == ST_SUCCESS && len == 8 && memcmp(bytes, payload, 8) == 0,
+                  "refused overwrite %s preserves bytes", name);
+        }
+    }
+    smb2_close(c, held.file_id);
+    st = smb2_create(c, name, MBT_FILE_OVERWRITE, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &accepted);
+    CHECK(st == ST_SUCCESS && accepted.end_of_file == 0,
+          "admitted overwrite %s truncates and reports EOF0", name);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, accepted.file_id);
+    }
+} /* check_refused_overwrites */
+
 int
 main(
     int   argc,
@@ -80,6 +126,8 @@ main(
           c1.change_time, c2.change_time);
 
     smb2_close(c, c2.file_id);
+
+    check_refused_overwrites(c, "overwrite.txt");
 
     smb2_env_stop(&env);
 

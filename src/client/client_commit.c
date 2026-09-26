@@ -17,6 +17,7 @@ chimera_commit(
 
     request->opcode              = CHIMERA_CLIENT_OP_COMMIT;
     request->commit.handle       = handle;
+    request->commit.open_flags   = chimera_client_handle_open_flags(handle);
     request->commit.callback     = callback;
     request->commit.private_data = private_data;
 

@@ -31,9 +31,10 @@
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
+#include "s3_compound.h"
 #include "s3_procs.h"
 #include "s3_tagging.h"
 
@@ -62,7 +63,6 @@ chimera_s3_tagging_ctx_free(struct chimera_s3_request *request)
     }
     free(ctx->body_buf);
     free(ctx->names);
-    free(ctx->valbuf);
     free(ctx->resp_buf);
     free(ctx);
     request->tagging = NULL;
@@ -75,10 +75,6 @@ chimera_s3_tagging_request_cleanup(struct chimera_s3_request *request)
 
     if (!ctx) {
         return;
-    }
-    if (ctx->handle) {
-        chimera_vfs_release(request->thread->vfs, ctx->handle);
-        ctx->handle = NULL;
     }
     chimera_s3_tagging_ctx_free(request);
 } /* chimera_s3_tagging_request_cleanup */
@@ -406,21 +402,13 @@ chimera_s3_tagging_send_xml(
     }
 } /* chimera_s3_tagging_send_xml */
 
-/* Terminal helpers: release the open handle, free the ctx, finish the request. */
+/* Terminal response helper; compound teardown has already released handles. */
 static void
 chimera_s3_tagging_finish(
     struct evpl               *evpl,
     struct chimera_s3_request *request,
     enum chimera_s3_status     status)
 {
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
-
-    if (ctx && ctx->handle) {
-        chimera_vfs_release(thread->vfs, ctx->handle);
-        ctx->handle = NULL;
-    }
-
     /* No body: clear any stale Range-derived lengths so s3_server_respond
      * emits a clean 200/204 rather than a spurious 206. */
     request->file_offset      = 0;
@@ -437,398 +425,225 @@ chimera_s3_tagging_finish(
     }
 } /* chimera_s3_tagging_finish */
 
-/* ----- removal of the existing tag xattrs (shared set/delete prelude) -----
- * Walk the names returned by list_xattrs and remove every "user.s3.tag.*".
- * On completion calls ctx->after (set new tags, or finish). */
-
-static void chimera_s3_tagging_remove_next(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request);
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_remove_cb,
-                            (enum chimera_vfs_error error_code,
-                             const struct chimera_vfs_attrs *pre_attr,
-                             const struct chimera_vfs_attrs *post_attr,
-                             void *private_data),
-                            (error_code, pre_attr, post_attr, private_data))
-{
-    struct chimera_s3_request *request = private_data;
-
-    /* Ignore per-name errors (ENOENT from a racing remove); keep going. */
-    chimera_s3_tagging_remove_next(request->thread->evpl, request);
-} /* chimera_s3_tagging_remove_cb */
-
-static void
-chimera_s3_tagging_remove_next(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
-{
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
-    const char                      *name;
-    int                              namelen;
-
-    while (ctx->cur < ctx->names_len) {
-        name      = ctx->names + ctx->cur;
-        namelen   = strlen(name);
-        ctx->cur += namelen + 1;
-
-        if (namelen > CHIMERA_S3_TAG_PREFIX_LEN &&
-            memcmp(name, CHIMERA_S3_TAG_PREFIX, CHIMERA_S3_TAG_PREFIX_LEN) == 0) {
-            chimera_s3_request_get(request);
-
-            chimera_vfs_remove_xattr(thread->vfs, &request->cred,
-                                     ctx->handle, name, namelen,
-                                     chimera_s3_tagging_remove_cb, request);
-            return;
-        }
-    }
-
-    /* All existing tag xattrs removed; proceed to the next phase. */
-    ctx->after(evpl, request);
-} /* chimera_s3_tagging_remove_next */
-
-/* ----- list existing tag xattrs (entry to the remove phase) ----- */
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_list_for_remove_cb,
-                            (enum chimera_vfs_error error_code,
-                             const char *names,
-                             uint32_t names_len,
-                             uint32_t count,
-                             uint32_t eof,
-                             uint64_t cookie,
-                             void *private_data),
-                            (error_code, names, names_len, count, eof, cookie, private_data))
-{
-    struct chimera_s3_request     *request = private_data;
-    struct chimera_s3_tagging_ctx *ctx     = request->tagging;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        /* No xattrs (or backend has none): nothing to remove. */
-        ctx->names_len = 0;
-        ctx->cur       = 0;
-        ctx->after(request->thread->evpl, request);
-        return;
-    }
-
-    /* `names` points into the buffer we supplied (ctx->names); don't free it.
-     * Normalize the data to the front of the buffer and record its length. */
-    if (names != ctx->names && names_len) {
-        memmove(ctx->names, names, names_len);
-    }
-    ctx->names_len = names_len;
-    ctx->cur       = 0;
-
-    chimera_s3_tagging_remove_next(request->thread->evpl, request);
-} /* chimera_s3_tagging_list_for_remove_cb */
-
-/* Clear all existing tag xattrs on ctx->handle, then invoke `after`. */
-static void
-chimera_s3_tagging_clear_existing(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request,
-    void (                    *after )(
-        struct evpl               *evpl,
-        struct chimera_s3_request *request))
-{
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
-
-    ctx->after = after;
-
-    if (!ctx->names) {
-        ctx->names = malloc(CHIMERA_S3_TAG_XATTR_BUFSZ);
-    }
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_list_xattrs(thread->vfs, &request->cred,
-                            ctx->handle, 0,
-                            ctx->names, CHIMERA_S3_TAG_XATTR_BUFSZ,
-                            chimera_s3_tagging_list_for_remove_cb, request);
-} /* chimera_s3_tagging_clear_existing */
-
-/* ----- set the new tag set (write each tag as a user.s3.tag.<key> xattr) ----- */
-
-static void chimera_s3_tagging_set_next(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request);
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_set_cb,
-                            (enum chimera_vfs_error error_code,
-                             const struct chimera_vfs_attrs *pre_attr,
-                             const struct chimera_vfs_attrs *post_attr,
-                             void *private_data),
-                            (error_code, pre_attr, post_attr, private_data))
-{
-    struct chimera_s3_request *request = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_s3_tagging_finish(request->thread->evpl, request,
-                                  CHIMERA_S3_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    request->tagging->cur++;
-    chimera_s3_tagging_set_next(request->thread->evpl, request);
-} /* chimera_s3_tagging_set_cb */
-
-static void
-chimera_s3_tagging_set_next(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
-{
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
-    struct chimera_s3_tag           *t;
-    int                              namelen;
-
-    if (ctx->cur >= ctx->n_tags) {
-        /* All tags written. PUT tagging returns 200 with no body. */
-        chimera_s3_tagging_finish(evpl, request, CHIMERA_S3_STATUS_OK);
-        return;
-    }
-
-    t       = &ctx->tags[ctx->cur];
-    namelen = snprintf(ctx->set_name, sizeof(ctx->set_name),
-                       CHIMERA_S3_TAG_PREFIX "%s", t->key);
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_set_xattr(thread->vfs, &request->cred,
-                          ctx->handle, 0 /* create-or-replace */,
-                          ctx->set_name, namelen,
-                          t->val, strlen(t->val),
-                          chimera_s3_tagging_set_cb, request);
-} /* chimera_s3_tagging_set_next */
-
-/* ----- GET object?tagging: read each tag xattr's value, emit <Tagging> ----- */
-
-static void chimera_s3_tagging_get_next(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request);
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_get_value_cb,
-                            (enum chimera_vfs_error error_code,
-                             uint32_t value_len,
-                             void *private_data),
-                            (error_code, value_len, private_data))
-{
-    struct chimera_s3_request     *request = private_data;
-    struct chimera_s3_tagging_ctx *ctx     = request->tagging;
-    const char                    *name;
-    int                            namelen, keylen, vlen;
-
-    /* The name we just read sits at the prior cursor; recover it. */
-    name    = ctx->names + ctx->prev_cur;
-    namelen = strlen(name);
-    keylen  = namelen - CHIMERA_S3_TAG_PREFIX_LEN;
-
-    if (error_code == CHIMERA_VFS_OK && ctx->n_tags < CHIMERA_S3_TAG_MAX_TAGS &&
-        keylen > 0 && keylen <= CHIMERA_S3_TAG_MAX_KEY_LEN) {
-        struct chimera_s3_tag *t = &ctx->tags[ctx->n_tags++];
-
-        memcpy(t->key, name + CHIMERA_S3_TAG_PREFIX_LEN, keylen);
-        t->key[keylen] = '\0';
-
-        vlen = value_len;
-        if (vlen > CHIMERA_S3_TAG_MAX_VAL_LEN) {
-            vlen = CHIMERA_S3_TAG_MAX_VAL_LEN;
-        }
-        memcpy(t->val, ctx->valbuf, vlen);
-        t->val[vlen] = '\0';
-    }
-
-    chimera_s3_tagging_get_next(request->thread->evpl, request);
-} /* chimera_s3_tagging_get_value_cb */
-
-static void
-chimera_s3_tagging_get_next(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
-{
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
-    const char                      *name;
-    int                              namelen;
-
-    while (ctx->cur < ctx->names_len) {
-        name    = ctx->names + ctx->cur;
-        namelen = strlen(name);
-
-        if (namelen > CHIMERA_S3_TAG_PREFIX_LEN &&
-            memcmp(name, CHIMERA_S3_TAG_PREFIX, CHIMERA_S3_TAG_PREFIX_LEN) == 0) {
-            ctx->prev_cur = ctx->cur;
-            ctx->cur     += namelen + 1;
-            chimera_s3_request_get(request);
-
-            chimera_vfs_get_xattr(thread->vfs, &request->cred,
-                                  ctx->handle, name, namelen,
-                                  ctx->valbuf, CHIMERA_S3_TAG_VAL_BUFSZ - 1,
-                                  chimera_s3_tagging_get_value_cb, request);
-            return;
-        }
-        ctx->cur += namelen + 1;
-    }
-
-    /* Bucket-level GetBucketTagging with no tags returns 404 NoSuchTagSet
-     * (unlike GetObjectTagging, which returns an empty 200 tag set). */
-    if (request->path_len == 0 && ctx->n_tags == 0) {
-        chimera_s3_tagging_finish(evpl, request,
-                                  CHIMERA_S3_STATUS_NO_SUCH_TAG_SET);
-        return;
-    }
-
-    /* All tag values gathered: emit the response and finish. */
-    chimera_s3_tagging_send_xml(evpl, request);
-
-    if (ctx->handle) {
-        chimera_vfs_release(thread->vfs, ctx->handle);
-        ctx->handle = NULL;
-    }
-    chimera_s3_tagging_ctx_free(request);
-} /* chimera_s3_tagging_get_next */
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_get_list_cb,
-                            (enum chimera_vfs_error error_code,
-                             const char *names,
-                             uint32_t names_len,
-                             uint32_t count,
-                             uint32_t eof,
-                             uint64_t cookie,
-                             void *private_data),
-                            (error_code, names, names_len, count, eof, cookie, private_data))
-{
-    struct chimera_s3_request     *request = private_data;
-    struct chimera_s3_tagging_ctx *ctx     = request->tagging;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        names_len = 0;
-    }
-
-    /* `names` points into the buffer we supplied (ctx->names); don't free it.
-     * Normalize the data to the front of the buffer and record its length. */
-    if (names != ctx->names && names_len) {
-        memmove(ctx->names, names, names_len);
-    }
-    ctx->names_len = names_len;
-    ctx->cur       = 0;
-    ctx->n_tags    = 0;
-
-    if (!ctx->valbuf) {
-        ctx->valbuf = malloc(CHIMERA_S3_TAG_VAL_BUFSZ);
-    }
-
-    chimera_s3_tagging_get_next(request->thread->evpl, request);
-} /* chimera_s3_tagging_get_list_cb */
-
-/* ----- per-op continuations after the existing tag xattrs are cleared ----- */
-
+/* All intermediate callbacks below stage request-private data or describe the
+ * next operations. Only the compound completion emits a response. On replay,
+ * the initial LISTXATTRS resets staged names and GET results before rebuilding
+ * the dynamic suffix. Parsed PUT tags remain immutable. */
 enum chimera_s3_tagging_op {
     CHIMERA_S3_TAGGING_GET,
     CHIMERA_S3_TAGGING_PUT,
     CHIMERA_S3_TAGGING_DELETE,
 };
 
-/* PUT: existing tags cleared, now write the parsed tag set. */
-static void
-chimera_s3_tagging_put_after_clear(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
+int
+chimera_s3_tagging_compound_store(
+    struct chimera_vfs_compound *compound,
+    struct chimera_s3_request   *request)
 {
-    request->tagging->cur = 0;
-    chimera_s3_tagging_set_next(evpl, request);
-} /* chimera_s3_tagging_put_after_clear */
+    struct chimera_s3_tagging_ctx *ctx = request->tagging;
+    char                           name[CHIMERA_S3_TAG_PREFIX_LEN + CHIMERA_S3_TAG_MAX_KEY_LEN + 1];
 
-/* DELETE: existing tags cleared, respond 204 No Content. */
+    if (!ctx) {
+        return 0;
+    }
+    for (int i = 0; i < ctx->n_tags; i++) {
+        int len = snprintf(name, sizeof(name), CHIMERA_S3_TAG_PREFIX "%s", ctx->tags[i].key);
+        if (chimera_vfs_compound_add_setxattr(compound, 0, name, len,
+                                              ctx->tags[i].val, strlen(ctx->tags[i].val)) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+} /* chimera_s3_tagging_compound_store */
+
 static void
-chimera_s3_tagging_delete_after_clear(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
+chimera_s3_tagging_ignore_missing(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    chimera_s3_tagging_finish(evpl, request, CHIMERA_S3_STATUS_NO_CONTENT);
-} /* chimera_s3_tagging_delete_after_clear */
+    /* Preserve the old best-effort per-name removal policy. This is an
+     * operation result, never a backend compound-finish error. */
+    *status = CHIMERA_VFS_OK;
+} /* chimera_s3_tagging_ignore_missing */
 
-/* The handle is open: drive the requested operation. */
 static void
-chimera_s3_tagging_begin_op(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
+chimera_s3_tagging_value(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
 {
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
+    struct chimera_s3_request            *request = private_data;
+    struct chimera_s3_tagging_ctx        *ctx     = request->tagging;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
+    int                                   keylen  = op->name_len - CHIMERA_S3_TAG_PREFIX_LEN;
 
-    switch ((enum chimera_s3_tagging_op) ctx->op) {
-        case CHIMERA_S3_TAGGING_GET:
-            if (!ctx->names) {
-                ctx->names = malloc(CHIMERA_S3_TAG_XATTR_BUFSZ);
+    if (*status == CHIMERA_VFS_OK && ctx->n_tags < CHIMERA_S3_TAG_MAX_TAGS &&
+        keylen > 0 && keylen <= CHIMERA_S3_TAG_MAX_KEY_LEN) {
+        struct chimera_s3_tag *tag = &ctx->tags[ctx->n_tags++];
+        unsigned int           len = op->buffer_len;
+
+        memcpy(tag->key, op->name + CHIMERA_S3_TAG_PREFIX_LEN, keylen);
+        tag->key[keylen] = '\0';
+        if (len > CHIMERA_S3_TAG_MAX_VAL_LEN) {
+            len = CHIMERA_S3_TAG_MAX_VAL_LEN;
+        }
+        memcpy(tag->val, op->buffer, len);
+        tag->val[len] = '\0';
+    }
+    *status = CHIMERA_VFS_OK;
+} /* chimera_s3_tagging_value */
+
+static void
+chimera_s3_tagging_list(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_s3_request            *request = private_data;
+    struct chimera_s3_tagging_ctx        *ctx     = request->tagging;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
+    uint32_t                              off     = 0;
+    int                                   next;
+
+    if (op->cookie == 0) {
+        ctx->names_len = 0;
+        ctx->total     = 0;
+        if (ctx->op == CHIMERA_S3_TAGGING_GET) {
+            ctx->n_tags = 0;
+        }
+    }
+    if (*status == CHIMERA_VFS_OK) {
+        while (off < op->buffer_len) {
+            const char *name = (const char *) op->buffer + off;
+            size_t      len  = strnlen(name, op->buffer_len - off);
+            if (len == op->buffer_len - off) {
+                *status = CHIMERA_VFS_EIO;
+                return;
             }
-            chimera_s3_request_get(request);
-
-            chimera_vfs_list_xattrs(thread->vfs, &request->cred,
-                                    ctx->handle, 0,
-                                    ctx->names, CHIMERA_S3_TAG_XATTR_BUFSZ,
-                                    chimera_s3_tagging_get_list_cb, request);
-            break;
-        case CHIMERA_S3_TAGGING_PUT:
-            chimera_s3_tagging_clear_existing(evpl, request,
-                                              chimera_s3_tagging_put_after_clear);
-            break;
-        case CHIMERA_S3_TAGGING_DELETE:
-            chimera_s3_tagging_clear_existing(evpl, request,
-                                              chimera_s3_tagging_delete_after_clear);
-            break;
-    } /* switch */
-} /* chimera_s3_tagging_begin_op */
-
-/* ----- shared lookup + open prelude ----- */
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_open_cb,
-                            (enum chimera_vfs_error error_code,
-                             struct chimera_vfs_open_handle *oh,
-                             void *private_data),
-                            (error_code, oh, private_data))
-{
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_s3_tagging_finish(thread->evpl, request,
-                                  CHIMERA_S3_STATUS_NO_SUCH_KEY);
+            off += len + 1;
+            if (len <= CHIMERA_S3_TAG_PREFIX_LEN ||
+                memcmp(name, CHIMERA_S3_TAG_PREFIX, CHIMERA_S3_TAG_PREFIX_LEN)) {
+                continue;
+            }
+            ctx->total++;
+            /* Enumerate completely before scheduling removals: mutating the
+             * xattr list while walking backend cookies can skip names. */
+            {
+                if (ctx->names_len + len + 1 > CHIMERA_S3_TAG_BODY_HARD_CAP) {
+                    *status = CHIMERA_VFS_EOVERFLOW;
+                    return;
+                }
+                char *names = realloc(ctx->names, ctx->names_len + len + 1);
+                if (!names) {
+                    *status = CHIMERA_VFS_ENOSPC;
+                    return;
+                }
+                ctx->names = names;
+                memcpy(names + ctx->names_len, name, len + 1);
+                ctx->names_len += len + 1;
+            }
+        }
+        if (!op->eof) {
+            if (op->r_cookie == op->cookie) {
+                *status = CHIMERA_VFS_EIO;
+                return;
+            }
+            next = chimera_vfs_compound_add_listxattrs(compound, op->r_cookie,
+                                                       CHIMERA_S3_TAG_XATTR_BUFSZ);
+            if (next < 0) {
+                *status = CHIMERA_VFS_EOVERFLOW;
+                return;
+            }
+            chimera_vfs_compound_set_op_callbacks(compound, next, NULL,
+                                                  chimera_s3_tagging_list, request);
+            return;
+        }
+    }
+    /* Backends with no xattr support historically expose an empty tag set. */
+    *status = CHIMERA_VFS_OK;
+    /* Reserve the entire mutation suffix before any mutation is executed. */
+    if ((unsigned int) ctx->total + chimera_vfs_compound_num_ops(compound) +
+        ((ctx->op == CHIMERA_S3_TAGGING_PUT) ? ctx->n_tags : 0)
+        > CHIMERA_VFS_COMPOUND_MAX_OPS) {
+        *status = CHIMERA_VFS_EOVERFLOW;
         return;
     }
-
-    request->tagging->handle = oh;
-    chimera_s3_tagging_begin_op(thread->evpl, request);
-} /* chimera_s3_tagging_open_cb */
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_lookup_cb,
-                            (enum chimera_vfs_error error_code,
-                             struct chimera_vfs_attrs *attr,
-                             void *private_data),
-                            (error_code, attr, private_data))
-{
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-
-    if (error_code != CHIMERA_VFS_OK ||
-        !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        chimera_s3_tagging_finish(thread->evpl, request,
-                                  CHIMERA_S3_STATUS_NO_SUCH_KEY);
-        return;
+    for (int pos = 0; pos < ctx->names_len;) {
+        const char *name = ctx->names + pos;
+        int         len  = strlen(name);
+        pos += len + 1;
+        if (ctx->op == CHIMERA_S3_TAGGING_GET) {
+            next = chimera_vfs_compound_add_getxattr(compound, name, len,
+                                                     CHIMERA_S3_TAG_MAX_VAL_LEN);
+        } else {
+            next = chimera_vfs_compound_add_removexattr(compound, name, len);
+        }
+        if (next < 0) {
+            *status = CHIMERA_VFS_EOVERFLOW;
+            return;
+        }
+        chimera_vfs_compound_set_op_callbacks(compound, next, NULL,
+                                              ctx->op == CHIMERA_S3_TAGGING_GET ? chimera_s3_tagging_value :
+                                              chimera_s3_tagging_ignore_missing, request);
     }
+    if ((ctx->op == CHIMERA_S3_TAGGING_PUT) &&
+        chimera_s3_tagging_compound_store(compound, request) < 0) {
+        *status = CHIMERA_VFS_EOVERFLOW;
+    }
+} /* chimera_s3_tagging_list */
 
+static void
+chimera_s3_tagging_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+
+    struct chimera_s3_request     *request = private_data;
+    struct chimera_s3_tagging_ctx *ctx     = request->tagging;
+    struct evpl                   *evpl    = request->thread->evpl;
+    enum chimera_vfs_error         status  = chimera_vfs_compound_status(compound);
+    enum chimera_s3_status         error   = chimera_s3_compound_error(compound, request,
+                                                                       status == CHIMERA_VFS_ENOENT ?
+                                                                       CHIMERA_S3_STATUS_NO_SUCH_KEY :
+                                                                       CHIMERA_S3_STATUS_INTERNAL_ERROR);
+    int                            op = ctx->op;
+
+    chimera_vfs_compound_free(compound);
+    if (status != CHIMERA_VFS_OK) {
+        chimera_s3_tagging_finish(evpl, request, error);
+    } else if (op == CHIMERA_S3_TAGGING_GET) {
+        if (request->path_len == 0 && ctx->n_tags == 0) {
+            chimera_s3_tagging_finish(evpl, request, CHIMERA_S3_STATUS_NO_SUCH_TAG_SET);
+        } else {
+            chimera_s3_tagging_send_xml(evpl, request);
+            chimera_s3_tagging_ctx_free(request);
+        }
+    } else {
+        chimera_s3_tagging_finish(evpl, request,
+                                  op == CHIMERA_S3_TAGGING_DELETE ? CHIMERA_S3_STATUS_NO_CONTENT : CHIMERA_S3_STATUS_OK)
+        ;
+    }
+    chimera_s3_request_drop(private_data);
+} /* chimera_s3_tagging_complete */
+
+static void
+chimera_s3_tagging_submit(
+    struct chimera_vfs_compound *compound,
+    struct chimera_s3_request   *request)
+{
+    int index = chimera_vfs_compound_add_listxattrs(compound, 0,
+                                                    CHIMERA_S3_TAG_XATTR_BUFSZ);
+
+    chimera_vfs_compound_set_op_callbacks(compound, index, NULL,
+                                          chimera_s3_tagging_list, request);
     chimera_s3_request_get(request);
+    chimera_frontend_compound_submit(compound, chimera_s3_tagging_complete, request);
+} /* chimera_s3_tagging_submit */
 
-    chimera_vfs_open_fh(thread->vfs, &request->cred,
-                        attr->va_fh, attr->va_fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_s3_tagging_open_cb, request);
-} /* chimera_s3_tagging_lookup_cb */
-
-/* Resolve request->path under request->bucket_fh, open it, run the op. For an
- * empty path (bucket tagging) the bucket directory handle is opened directly.
- * The tag-set (for PUT) must already be parsed/validated into request->tagging. */
 static void
 chimera_s3_tagging_dispatch(
     struct evpl                     *evpl,
@@ -836,29 +651,17 @@ chimera_s3_tagging_dispatch(
     struct chimera_s3_request       *request,
     int                              op)
 {
-    struct chimera_s3_tagging_ctx *ctx = chimera_s3_tagging_ctx_alloc(request);
+    struct chimera_s3_tagging_ctx *ctx      = chimera_s3_tagging_ctx_alloc(request);
+    struct chimera_vfs_compound   *compound = chimera_s3_compound_alloc(request);
 
     ctx->op = op;
-
-    if (request->path_len == 0) {
-        /* Bucket-level tagging: the bucket directory FH is already in hand. */
-        chimera_s3_request_get(request);
-
-        chimera_vfs_open_fh(thread->vfs, &request->cred,
-                            request->bucket_fh, request->bucket_fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
-                            chimera_s3_tagging_open_cb, request);
-        return;
+    if (request->path_len) {
+        chimera_vfs_compound_add_lookup_path(compound, request->path,
+                                             request->path_len, CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW);
     }
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_lookup(thread->vfs, &request->cred,
-                       request->bucket_fh, request->bucket_fhlen,
-                       request->path, request->path_len,
-                       CHIMERA_VFS_ATTR_FH,
-                       CHIMERA_VFS_LOOKUP_FOLLOW,
-                       chimera_s3_tagging_lookup_cb, request);
+    chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_INFERRED |
+                                          (request->path_len ? 0 : CHIMERA_VFS_OPEN_DIRECTORY), 0);
+    chimera_s3_tagging_submit(compound, request);
 } /* chimera_s3_tagging_dispatch */
 
 /* ----- public entry points ----- */
@@ -956,273 +759,3 @@ chimera_s3_put_tagging_body_done(
 
     chimera_s3_put_tagging(evpl, thread, request);
 } /* chimera_s3_put_tagging_body_done */
-
-/* ----- store-by-path: PutObject x-amz-tagging / CompleteMultipartUpload ----- */
-
-static void
-chimera_s3_tagging_store_set_done(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
-{
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
-
-    void                             (*done)(
-        struct evpl *,
-        struct chimera_s3_request *) = ctx->store_done;
-
-    if (ctx->handle) {
-        chimera_vfs_release(thread->vfs, ctx->handle);
-        ctx->handle = NULL;
-    }
-    chimera_s3_tagging_ctx_free(request);
-
-    done(evpl, request);
-} /* chimera_s3_tagging_store_set_done */
-
-/* Override of set_next's terminal step for the store-by-path flow: instead of
- * emitting an HTTP response, hand control back to the caller's done_cb. */
-static void chimera_s3_tagging_store_set_next(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request);
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_store_set_cb,
-                            (enum chimera_vfs_error error_code,
-                             const struct chimera_vfs_attrs *pre_attr,
-                             const struct chimera_vfs_attrs *post_attr,
-                             void *private_data),
-                            (error_code, pre_attr, post_attr, private_data))
-{
-    struct chimera_s3_request *request = private_data;
-
-    request->tagging->cur++;
-    chimera_s3_tagging_store_set_next(request->thread->evpl, request);
-} /* chimera_s3_tagging_store_set_cb */
-
-static void
-chimera_s3_tagging_store_set_next(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
-{
-    struct chimera_server_s3_thread *thread = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
-    struct chimera_s3_tag           *t;
-    int                              namelen;
-
-    if (ctx->cur >= ctx->n_tags) {
-        chimera_s3_tagging_store_set_done(evpl, request);
-        return;
-    }
-
-    t       = &ctx->tags[ctx->cur];
-    namelen = snprintf(ctx->set_name, sizeof(ctx->set_name),
-                       CHIMERA_S3_TAG_PREFIX "%s", t->key);
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_set_xattr(thread->vfs, &request->cred,
-                          ctx->handle, 0,
-                          ctx->set_name, namelen,
-                          t->val, strlen(t->val),
-                          chimera_s3_tagging_store_set_cb, request);
-} /* chimera_s3_tagging_store_set_next */
-
-static void
-chimera_s3_tagging_store_after_clear(
-    struct evpl               *evpl,
-    struct chimera_s3_request *request)
-{
-    request->tagging->cur = 0;
-    chimera_s3_tagging_store_set_next(evpl, request);
-} /* chimera_s3_tagging_store_after_clear */
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_store_open_cb,
-                            (enum chimera_vfs_error error_code,
-                             struct chimera_vfs_open_handle *oh,
-                             void *private_data),
-                            (error_code, oh, private_data))
-{
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx     = request->tagging;
-
-    void                             (*done)(
-        struct evpl *,
-        struct chimera_s3_request *) = ctx->store_done;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        /* Best-effort: object tags couldn't be stored; proceed anyway. */
-        chimera_s3_tagging_ctx_free(request);
-        done(thread->evpl, request);
-        return;
-    }
-
-    ctx->handle = oh;
-    chimera_s3_tagging_clear_existing(thread->evpl, request,
-                                      chimera_s3_tagging_store_after_clear);
-} /* chimera_s3_tagging_store_open_cb */
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_store_lookup_cb,
-                            (enum chimera_vfs_error error_code,
-                             struct chimera_vfs_attrs *attr,
-                             void *private_data),
-                            (error_code, attr, private_data))
-{
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx     = request->tagging;
-
-    void                             (*done)(
-        struct evpl *,
-        struct chimera_s3_request *) = ctx->store_done;
-
-    if (error_code != CHIMERA_VFS_OK ||
-        !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-        chimera_s3_tagging_ctx_free(request);
-        done(thread->evpl, request);
-        return;
-    }
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_open_fh(thread->vfs, &request->cred,
-                        attr->va_fh, attr->va_fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_s3_tagging_store_open_cb, request);
-} /* chimera_s3_tagging_store_lookup_cb */
-
-void
-chimera_s3_tagging_store_by_path(
-    struct evpl                     *evpl,
-    struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request       *request,
-    void (                          *done_cb )(
-        struct evpl               *evpl,
-        struct chimera_s3_request *request))
-{
-    struct chimera_s3_tagging_ctx *ctx = request->tagging;
-
-    if (!ctx || ctx->n_tags == 0) {
-        if (ctx) {
-            chimera_s3_tagging_ctx_free(request);
-        }
-        done_cb(evpl, request);
-        return;
-    }
-
-    ctx->store_done = done_cb;
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_lookup(thread->vfs, &request->cred,
-                       request->bucket_fh, request->bucket_fhlen,
-                       request->path, request->path_len,
-                       CHIMERA_VFS_ATTR_FH,
-                       CHIMERA_VFS_LOOKUP_FOLLOW,
-                       chimera_s3_tagging_store_lookup_cb, request);
-} /* chimera_s3_tagging_store_by_path */
-
-/* ----- HEAD object: x-amz-tagging-count ----- */
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_count_list_cb,
-                            (enum chimera_vfs_error error_code,
-                             const char *names,
-                             uint32_t names_len,
-                             uint32_t count,
-                             uint32_t eof,
-                             uint64_t cookie,
-                             void *private_data),
-                            (error_code, names, names_len, count, eof, cookie, private_data))
-{
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx     = request->tagging;
-
-    void                             (*done)(
-        struct evpl *,
-        struct chimera_s3_request *) = ctx->store_done;
-    uint32_t                         off = 0;
-    int                              n   = 0;
-    char                             hdr[16];
-
-    if (error_code == CHIMERA_VFS_OK) {
-        while (off < names_len) {
-            const char *name    = names + off;
-            int         namelen = strlen(name);
-
-            if (namelen > CHIMERA_S3_TAG_PREFIX_LEN &&
-                memcmp(name, CHIMERA_S3_TAG_PREFIX, CHIMERA_S3_TAG_PREFIX_LEN) == 0) {
-                n++;
-            }
-            off += namelen + 1;
-        }
-    }
-
-    snprintf(hdr, sizeof(hdr), "%d", n);
-    chimera_s3_response_add_header(request, "x-amz-tagging-count", hdr);
-
-    if (ctx->handle) {
-        chimera_vfs_release(thread->vfs, ctx->handle);
-        ctx->handle = NULL;
-    }
-    chimera_s3_tagging_ctx_free(request);
-
-    done(thread->evpl, request);
-} /* chimera_s3_tagging_count_list_cb */
-
-CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_tagging_count_open_cb,
-                            (enum chimera_vfs_error error_code,
-                             struct chimera_vfs_open_handle *oh,
-                             void *private_data),
-                            (error_code, oh, private_data))
-{
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_s3_tagging_ctx   *ctx     = request->tagging;
-
-    void                             (*done)(
-        struct evpl *,
-        struct chimera_s3_request *) = ctx->store_done;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_s3_tagging_ctx_free(request);
-        done(thread->evpl, request);
-        return;
-    }
-
-    ctx->handle = oh;
-
-    if (!ctx->names) {
-        ctx->names = malloc(CHIMERA_S3_TAG_XATTR_BUFSZ);
-    }
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_list_xattrs(thread->vfs, &request->cred,
-                            ctx->handle, 0,
-                            ctx->names, CHIMERA_S3_TAG_XATTR_BUFSZ,
-                            chimera_s3_tagging_count_list_cb, request);
-} /* chimera_s3_tagging_count_open_cb */
-
-void
-chimera_s3_tagging_count_for_head(
-    struct evpl                     *evpl,
-    struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request       *request,
-    const void                      *fh,
-    int                              fh_len,
-    void (                          *done_cb )(
-        struct evpl               *evpl,
-        struct chimera_s3_request *request))
-{
-    struct chimera_s3_tagging_ctx *ctx = chimera_s3_tagging_ctx_alloc(request);
-
-    ctx->store_done = done_cb;
-
-    chimera_s3_request_get(request);
-
-    chimera_vfs_open_fh(thread->vfs, &request->cred,
-                        fh, fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_s3_tagging_count_open_cb, request);
-} /* chimera_s3_tagging_count_for_head */

@@ -147,6 +147,16 @@ test.
   backend — roughly 18-22 for the inum-varint modules (memfs, diskfs, cairn),
   33 for smb, 26-42 for linux, and up to 64 for the nfs proxy
 - **VFS Operations**: All VFS modules implement common interface with chimera_vfs_attrs
+- **Sequence Executor**: `src/vfs/vfs_compound.h` is the VFS entrance. A
+  protocol front end, the client and the SDK build a whole sequence of
+  operations, submit it, and get one callback; ops address the sequence's four
+  cursors rather than being handed file handles. The per-op API
+  (`src/vfs/vfs_internal_procs.h`) is the executor's own implementation
+  vocabulary and is not includable from above the VFS. The calls that are not
+  sequence ops — lifecycle and synchronous queries (`vfs.h`), reference drops,
+  claim transitions (`vfs_claim.h`), notify, the key-value store (`vfs_kv.h`)
+  — are enumerated in `vfs_compound.h`'s preamble, each because it addresses
+  no object through the cursors and mutates nothing the sequence holds.
 - **Threading**: Core threads + delegation threads model
 - **High-Performance Networking**: Support for kernel bypass (RDMA, XLIO)
 

@@ -64,6 +64,7 @@ chimera_posix_pwrite(
     req.write.callback     = chimera_posix_pwrite_callback;
     req.write.private_data = &comp;
     req.write.handle       = entry->handle;
+    req.write.open_flags   = chimera_posix_fd_open_flags(entry);
     req.write.offset       = (uint64_t) offset;  // Use caller-provided offset
     req.write.length       = count;
     req.write.buf          = buf;

@@ -364,6 +364,8 @@ chimera_smb_server_init(
     evpl_mutex_init(&shared->sessions_lock, NULL);
     evpl_mutex_init(&shared->shares_lock, NULL);
     evpl_mutex_init(&shared->trees_lock, NULL);
+    chimera_smb_namespace_init(&shared->namespace_registry);
+    chimera_smb_lease_key_init(&shared->lease_keys);
     evpl_mutex_init(&shared->threads_lock, NULL);
 
     /* Seed the persistent-id allocator with a random, nonzero base so ids do
@@ -428,6 +430,8 @@ chimera_smb_server_destroy(void *data)
     }
 #endif /* ifdef CHIMERA_HAVE_GSSAPI */
 
+    chimera_smb_namespace_destroy(&shared->namespace_registry);
+    chimera_smb_lease_key_destroy(&shared->lease_keys);
     evpl_mutex_destroy(&shared->threads_lock);
 
     free(shared);
@@ -1110,13 +1114,14 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     chimera_smb_compound_free(thread, compound);
 } /* chimera_smb_compound_reply */
 
-void
-chimera_smb_complete_request(
+static void
+chimera_smb_publish_request_status(
     struct chimera_smb_request *request,
     unsigned int                status)
 {
-    struct chimera_smb_compound *compound = request->compound;
-
+    if (request->identity_busy && status == SMB2_STATUS_FILE_CLOSED) {
+        status = SMB2_STATUS_FILE_NOT_AVAILABLE;
+    }
     /* If an async-interim is pending for this request, retire it.  An interim
      * STATUS_PENDING has already gone out (request->async_id is set), so the
      * reply builder below will tag the final response with
@@ -1137,6 +1142,39 @@ chimera_smb_complete_request(
 
     request->status = status;
 
+} /* chimera_smb_publish_request_status */
+
+SYMBOL_EXPORT void
+chimera_smb_complete_request(
+    struct chimera_smb_request *request,
+    unsigned int                status)
+{
+    struct chimera_smb_compound *compound = request->compound;
+
+    if (request->smb2_hdr.command == SMB2_CREATE &&
+        status != SMB2_STATUS_SUCCESS && status != SMB2_STATUS_PENDING &&
+        chimera_smb_create_cleanup_failed_record(request, status)) {
+        return;
+    }
+
+    if (status != SMB2_STATUS_PENDING) {
+        request->create_admission_wait   = false;
+        request->namespace_mutation_wait = false;
+        chimera_smb_lease_key_end(request);
+        if (request->namespace_open_token) {
+            chimera_smb_namespace_open_end(request->namespace_open_token);
+            free(request->namespace_open_token);
+            request->namespace_open_token = NULL;
+        }
+    }
+
+    if (request->namespace_fence) {
+        chimera_smb_doc_fence_release(request->namespace_fence);
+        free(request->namespace_fence);
+        request->namespace_fence = NULL;
+    }
+    chimera_vfs_claim_access_fence_release(&request->namespace_access_fence);
+    chimera_smb_publish_request_status(request, status);
     compound->complete_requests++;
 
     /* Update saved session/tree state regardless of success/failure so that
@@ -1163,6 +1201,22 @@ chimera_smb_complete_request(
     chimera_smb_compound_advance(compound);
 } /* chimera_smb_complete_request */
 
+/* Results are already accepted and staged by the VFS runtime. Advance once,
+* without re-entering legacy handlers for commands in the accepted batch. */
+void
+chimera_smb_compound_complete_batch(
+    struct chimera_smb_compound *compound,
+    unsigned int                 count)
+{
+    for (unsigned int i = 0; i < count; i++) {
+        struct chimera_smb_request *request =
+            compound->requests[compound->complete_requests + i];
+        chimera_smb_publish_request_status(request, request->status);
+    }
+    compound->complete_requests += count;
+    chimera_smb_compound_advance(compound);
+} /* chimera_smb_compound_complete_batch */
+
 static inline void
 chimera_smb_compound_advance(struct chimera_smb_compound *compound)
 {
@@ -1176,6 +1230,25 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
      * completed request (via chimera_smb_complete_request), so this ends each
      * request's span exactly once. */
     smb_trace_op_end(compound);
+
+    if (compound->conn->generation != compound->conn_generation || compound->conn->disconnecting) {
+        /* Both native completion and a drained legacy admission wait reach
+         * here. Never dispatch a parsed suffix during connection teardown.
+         * These unexecuted handlers still own their parsed input buffers. */
+        for (int i = compound->complete_requests; i < compound->num_requests; i++) {
+            struct chimera_smb_request *slot = compound->requests[i];
+            if (slot->flags & CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED) {
+                continue;
+            }
+            if (slot->smb2_hdr.command == SMB2_WRITE) {
+                evpl_iovecs_release(compound->thread->evpl, slot->write.iov, slot->write.niov);
+            } else if (slot->smb2_hdr.command == SMB2_SESSION_SETUP) {
+                evpl_iovecs_release(compound->thread->evpl, slot->session_setup.input_iov,
+                                    slot->session_setup.input_niov);
+            }
+        }
+        compound->complete_requests = compound->num_requests;
+    }
 
     if (compound->complete_requests >= compound->num_requests) {
         chimera_smb_compound_reply(compound);
@@ -1252,6 +1325,25 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
         return;
     }
 
+    /* LOGOFF may remove this channel after the entire wire was parsed. Its
+     * retained snapshots still sign replies, but cannot authorize a suffix.
+     * Also catch session deletion by a sibling channel before touching trees. */
+    if (unlikely(request->session_handle &&
+                 ((request->session_handle->session->flags & CHIMERA_SMB_SESSION_DELETED) ||
+                  request->session_handle->logged_off ||
+                  (!request->session_handle->is_channel &&
+                   request->smb2_hdr.command != SMB2_SESSION_SETUP)))) {
+        if (request->smb2_hdr.command == SMB2_WRITE) {
+            evpl_iovecs_release(compound->thread->evpl, request->write.iov, request->write.niov);
+        }
+        if (request->smb2_hdr.command == SMB2_SESSION_SETUP) {
+            evpl_iovecs_release(compound->thread->evpl, request->session_setup.input_iov,
+                                request->session_setup.input_niov);
+        }
+        chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
+        return;
+    }
+
     /* Global encrypt-all (MS-SMB2 3.3.5.2.9): when the session negotiated
      * Session.EncryptData every post-session-setup request MUST arrive
      * encrypted, and signing does NOT substitute for encryption -- an
@@ -1305,6 +1397,14 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
         return;
     }
 
+    if (unlikely(request->tree && request->tree->compound_tearing_down)) {
+        if (request->smb2_hdr.command == SMB2_WRITE) {
+            evpl_iovecs_release(compound->thread->evpl, request->write.iov, request->write.niov);
+        }
+        chimera_smb_complete_request(request, SMB2_STATUS_NETWORK_NAME_DELETED);
+        return;
+    }
+
     /* Per-share transport encryption (MS-SMB2 3.3.5.2.11): a share that requires
      * encryption (SMB2_SHAREFLAG_ENCRYPT_DATA) rejects any request that did not
      * arrive encrypted with STATUS_ACCESS_DENIED.  The TREE_CONNECT that
@@ -1323,6 +1423,10 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
             evpl_iovecs_release(compound->thread->evpl, request->write.iov, request->write.niov);
         }
         chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
+    if (chimera_smb_vfs_compound_try(compound)) {
         return;
     }
 
@@ -2100,6 +2204,7 @@ chimera_smb_server_handle_smb2(
                                         evpl_iovec_cursor_consumed(request_cursor));
             if (unlikely(smb_cursor_seek_to(request_cursor, request->smb2_hdr.next_command) != 0)) {
                 chimera_smb_error("SMB2 compound NextCommand skip out of range; closing connection");
+                chimera_smb_compound_free(thread, compound);
                 evpl_close(evpl, conn->bind);
                 return;
             }
@@ -2912,6 +3017,11 @@ chimera_smb_server_thread_destroy(void *data)
     struct chimera_server_smb_thread **tpp;
     bool                               last_thread;
 
+    /* Binds were closed by libevpl before entering this destructor. Drain
+     * reply/finish timers and logical retirements before removing doorbells,
+     * recycling pools, or allowing the VFS thread/event loop to be destroyed. */
+    chimera_smb_open_file_retire_drain(thread);
+
     /* Unregister from the process-global thread list first so a peer thread's
      * resume broadcast can no longer ring this thread's (about-to-be-removed)
      * resume doorbell.  evpl_remove_doorbell below then runs on this thread. */
@@ -2937,6 +3047,7 @@ chimera_smb_server_thread_destroy(void *data)
     if (last_thread && thread->shared->config.persistent_handles) {
         chimera_smb_durable_drain_all(thread);
     }
+    chimera_smb_open_file_retire_drain(thread);
 
     while (thread->free_compounds) {
         compound = thread->free_compounds;
@@ -3107,6 +3218,7 @@ chimera_smb_remove_share(
              * on the way out, so freeing here regardless was a
              * heap-use-after-free. */
             LL_DELETE(shared->shares, share);
+            __atomic_store_n(&share->retired, true, __ATOMIC_RELEASE);
             found = 1;
             break;
         }

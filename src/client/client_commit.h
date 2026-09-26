@@ -7,38 +7,42 @@
 #include "client_internal.h"
 
 static void
-chimera_commit_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_commit_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_client_request *request        = private_data;
     struct chimera_client_thread  *client_thread  = request->thread;
     chimera_commit_callback_t      callback       = request->commit.callback;
     void                          *callback_arg   = request->commit.private_data;
     int                            heap_allocated = request->heap_allocated;
+    enum chimera_vfs_error         status         = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
 
     if (heap_allocated) {
         chimera_client_request_free(client_thread, request);
     }
 
-    callback(client_thread, error_code, callback_arg);
-} /* chimera_commit_complete */
+    callback(client_thread, status, callback_arg);
+} /* chimera_commit_sequence_complete */
 
 static inline void
 chimera_dispatch_commit(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_commit(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->commit.handle,
-        0,  /* offset - sync entire file */
-        0,  /* count - sync entire file */
-        0,  /* pre_attr_mask */
-        0,  /* post_attr_mask */
-        chimera_commit_complete,
-        request);
+    request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                                   chimera_client_req_cred(request));
+
+    /* COMMIT flushes data, so it wants the data open the caller already has.
+     * The PUTHANDLE carries what that handle was really opened with -- see
+     * open_flags on the request. */
+    chimera_vfs_compound_add_puthandle(request->compound,
+                                       request->commit.handle,
+                                       request->commit.open_flags);
+    chimera_vfs_compound_add_commit(request->compound, 0, 0, 0, 0);
+
+    chimera_frontend_compound_submit(request->compound,
+                                     chimera_commit_sequence_complete, request);
 } /* chimera_dispatch_commit */

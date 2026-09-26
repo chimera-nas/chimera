@@ -274,3 +274,26 @@ chimera_vfs_pnfs_steer(struct chimera_vfs *vfs)
 
     return NULL;
 } /* chimera_vfs_pnfs_steer */
+
+SYMBOL_EXPORT const struct chimera_vfs_ds *
+chimera_vfs_pnfs_find_backing(
+    const struct chimera_vfs *vfs,
+    const void               *fh,
+    uint32_t                  fh_len)
+{
+    /* An NFS-proxy handle prefixes its native DS handle with mount ID and
+     * server index. Comparing both excludes another mount or mirror. */
+    const uint32_t prefix = CHIMERA_VFS_MOUNTID_SIZE + 1;
+
+    if (!chimera_vfs_pnfs_enabled(vfs) || !fh || fh_len <= prefix) {
+        return NULL;
+    }
+    for (int i = 0; i < vfs->pnfs->num_ds; i++) {
+        const struct chimera_vfs_ds *ds = &vfs->pnfs->ds[i];
+        if (!ds->backing_local && ds->root_fh_len > prefix &&
+            !memcmp(ds->root_fh, fh, prefix)) {
+            return ds;
+        }
+    }
+    return NULL;
+} /* chimera_vfs_pnfs_find_backing */

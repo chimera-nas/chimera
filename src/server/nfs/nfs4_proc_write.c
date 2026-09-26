@@ -7,8 +7,7 @@
 #include "nfs4_status.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
+#include "vfs/vfs_compound.h"
 #include "evpl/evpl.h"
 #include <sys/stat.h>
 #ifdef _WIN32
@@ -21,18 +20,20 @@ chimera_nfs4_write_stateid_is_special(const struct stateid4 *sid)
     return nfs4_stateid_is_special(sid);
 } /* chimera_nfs4_write_stateid_is_special */
 
+/*
+ * Marshal the reply and put back everything the request still holds.  Reached
+ * from the sequence completion, and directly for a zero-length WRITE, which has
+ * nothing to ask a backend.
+ */
 static void
-chimera_nfs4_write_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_nfs4_write_finish(
+    struct nfs_request    *req,
+    enum chimera_vfs_error error_code,
+    uint32_t               length,
+    uint32_t               sync)
 {
-    struct nfs_request *req  = private_data;
-    struct WRITE4args  *args = req->args_write4;
-    struct WRITE4res   *res  = &req->res_compound.resarray[req->index].opwrite;
+    struct WRITE4args *args = req->args_write4;
+    struct WRITE4res  *res  = &req->res_compound.resarray[req->index].opwrite;
 
     /* Release write iovecs here on the server thread, not in VFS backend.
      * The iovecs were allocated on this thread and must be released here
@@ -60,78 +61,74 @@ chimera_nfs4_write_complete(
                                 req->nfs_state_ref, req->nfs_state_type,
                                 req->thread->vfs_thread);
         req->nfs_state_ref = NULL;
-    } else if (req->handle) {
-        /* Anonymous stateid: release the on-the-fly handle we opened. */
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        req->handle = NULL;
     }
 
     chimera_nfs4_compound_complete(req, res->status);
+} /* chimera_nfs4_write_finish */
+
+/*
+ * PUTFH, OPEN_CURRENT, WRITE for a stateid that carries no handle, and the
+ * WRITE alone against the handle an open or lock stateid holds.  The payload
+ * iovecs are BORROWED by the run, as they were by the per-op call, and are
+ * released above once it is over.
+ */
+static void
+chimera_nfs4_write_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct nfs_request                   *req = private_data;
+    const struct chimera_vfs_compound_op *wop;
+    enum chimera_vfs_error                error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    wop = chimera_vfs_compound_op(compound,
+                                  chimera_vfs_compound_num_ops(compound) - 1);
+
+    uint32_t                              length = wop->written;
+    uint32_t                              sync   = wop->committed;
+
+    chimera_vfs_compound_free(compound);
+
+    chimera_nfs4_write_finish(req, error_code, length, sync);
 } /* chimera_nfs4_write_complete */
 
+/*
+ * The shape for a stateid with no handle of its own -- an anonymous or special
+ * one, a pNFS data-server write, or a (write) delegation stateid.  The object
+ * is the current file handle and the sequence opens it, with the same
+ * REGULAR_ONLY data open the per-op path used.
+ *
+ * `io_owner` says whose I/O it is when a delegation authorizes it; without it
+ * the claim layer recalls the very delegation the write is being done under.
+ * owner_lo is chimera_vfs_hash of the FILE HANDLE and nothing else, so it is
+ * computable here, before anything is open.
+ */
 static void
-chimera_nfs4_write_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs4_write_by_fh(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    const struct chimera_claim_actor *io_owner)
 {
-    struct nfs_request *req  = private_data;
-    struct WRITE4args  *args = &req->args_compound->argarray[req->index].opwrite;
-    struct WRITE4res   *res  = &req->res_compound.resarray[req->index].opwrite;
+    struct WRITE4args           *args = req->args_write4;
+    struct chimera_vfs_compound *compound;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        evpl_iovecs_release(req->thread->evpl, args->data.iov, args->data.niov);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
 
-    req->handle      = handle;
-    req->args_write4 = args;
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_NOFOLLOW |
+                                          CHIMERA_VFS_OPEN_REGULAR_ONLY, 0);
+    chimera_vfs_compound_add_write(compound, NULL,
+                                   args->offset, args->data.length,
+                                   args->stable,
+                                   args->data.iov, args->data.niov,
+                                   0, 0, io_owner);
 
-    if (req->io_owner_from_deleg) {
-        /* A delegation-authorized write: present the delegation holder's own
-         * claim actor (same protocol/client/fh as the cache claim created at
-         * OPEN) so the VFS I/O path recognises the writer as the delegation
-         * holder and does not recall the client's own delegation.  Other
-         * (anonymous-stateid / pNFS-DS) on-the-fly writes keep the implicit
-         * claim so they still recall *other* clients' conflicting claims. */
-        struct chimera_claim_actor io_owner = {
-            .owner          = {
-                .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
-                .client_key = req->session->client_unified->client_id,
-                .owner_lo   = handle->fh_hash,
-                .owner_hi   = 0,
-            },
-        };
-
-        chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
-                                handle,
-                                args->offset,
-                                args->data.length,
-                                args->stable,       /* 3-level requested stability */
-                                0,
-                                0,
-                                args->data.iov,
-                                args->data.niov,
-                                &io_owner,
-                                chimera_nfs4_write_complete,
-                                req);
-        return;
-    }
-
-    chimera_vfs_write(req->thread->vfs_thread, &req->cred,
-                      handle,
-                      args->offset,
-                      args->data.length,
-                      args->stable,               /* 3-level requested stability */
-                      0,
-                      0,
-                      args->data.iov,
-                      args->data.niov,
-                      chimera_nfs4_write_complete,
-                      req);
-} /* chimera_nfs4_write_open_callback */
+    chimera_vfs_compound_submit(compound, chimera_nfs4_write_complete, req);
+} /* chimera_nfs4_write_by_fh */
 
 void
 chimera_nfs4_write(
@@ -215,14 +212,9 @@ chimera_nfs4_write(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh,
-                            req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED |
-                            CHIMERA_VFS_OPEN_NOFOLLOW |
-                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
-                            chimera_nfs4_write_open_callback,
-                            req);
+        req->args_write4 = args;
+
+        chimera_nfs4_write_by_fh(thread, req, NULL);
         return;
     }
 
@@ -264,14 +256,21 @@ chimera_nfs4_write(
          * not recall the client's own delegation. */
         req->io_owner_from_deleg = (req->session &&
                                     req->session->client_unified);
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->fh,
-                            req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED |
-                            CHIMERA_VFS_OPEN_NOFOLLOW |
-                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
-                            chimera_nfs4_write_open_callback,
-                            req);
+
+        if (req->io_owner_from_deleg) {
+            struct chimera_claim_actor io_owner = {
+                .owner          = {
+                    .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+                    .client_key = req->session->client_unified->client_id,
+                    .owner_lo   = chimera_vfs_hash(req->fh,               req->fhlen),
+                    .owner_hi   = 0,
+                },
+            };
+
+            chimera_nfs4_write_by_fh(thread, req, &io_owner);
+        } else {
+            chimera_nfs4_write_by_fh(thread, req, NULL);
+        }
         return;
     }
 
@@ -336,11 +335,11 @@ chimera_nfs4_write(
     req->args_write4    = args;
 
     if (args->data.length == 0) {
-        chimera_nfs4_write_complete(CHIMERA_VFS_OK, 0, FILE_SYNC4, NULL, NULL, req);
+        chimera_nfs4_write_finish(req, CHIMERA_VFS_OK, 0, FILE_SYNC4);
         return;
     }
 
-    struct chimera_claim_actor io_owner = {
+    struct chimera_claim_actor   io_owner = {
         .owner          = {
             .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
             .client_key = open_state->owner->client->client_id,
@@ -349,16 +348,16 @@ chimera_nfs4_write(
         },
     };
 
-    chimera_vfs_write_owned(thread->vfs_thread, &req->cred,
-                            state_handle,
-                            args->offset,
-                            args->data.length,
-                            args->stable,         /* 3-level requested stability */
-                            0,
-                            0,
-                            args->data.iov,
-                            args->data.niov,
-                            &io_owner,
-                            chimera_nfs4_write_complete,
-                            req);
+    /* The stateid names the object, so the run is the WRITE alone against the
+     * handle the state holds -- lent, and released with the state above. */
+    struct chimera_vfs_compound *compound =
+        chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_write(compound, state_handle,
+                                   args->offset, args->data.length,
+                                   args->stable,
+                                   args->data.iov, args->data.niov,
+                                   0, 0, &io_owner);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_write_complete, req);
 } /* chimera_nfs4_write */

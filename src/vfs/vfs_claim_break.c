@@ -849,8 +849,8 @@ chimera_vfs_claim_trigger_ns_full(
     struct chimera_vfs_state             *state,
     struct chimera_vfs_file_state        *file,
     const struct chimera_vfs_open_handle *skip_handle,
-    bool                                  flush_only,
-    const struct chimera_claim_actor     *actor)
+    const struct chimera_claim_actor     *skip_actor,
+    bool                                  flush_only)
 {
     bool had;
 
@@ -867,9 +867,10 @@ chimera_vfs_claim_trigger_ns_full(
             if (cur->used == 0 || !chimera_vfs_claim_revocable(cur)) {
                 continue;
             }
-            if (actor ? (chimera_claim_owner_equal(&cur->owner, &actor->owner) ||
-                         chimera_claim_owner_same_lease(&cur->owner, &actor->owner))
-                      : (skip_handle && cur->op_handle == skip_handle)) {
+            if ((skip_handle && cur->op_handle == skip_handle) ||
+                (skip_actor &&
+                 (chimera_claim_owner_equal(&cur->owner, &skip_actor->owner) ||
+                  chimera_claim_owner_same_key(&cur->owner, &skip_actor->owner)))) {
                 continue;
             }
             is_deleg = chimera_vfs_claim_awaited(cur);
@@ -934,9 +935,10 @@ chimera_vfs_claim_trigger_ns_full(
              cur = cur->next) {
             uint8_t mask = block_mask;
 
-            if (actor ? (chimera_claim_owner_equal(&cur->owner, &actor->owner) ||
-                         chimera_claim_owner_same_lease(&cur->owner, &actor->owner))
-                      : (skip_handle && cur->op_handle == skip_handle)) {
+            if ((skip_handle && cur->op_handle == skip_handle) ||
+                (skip_actor &&
+                 (chimera_claim_owner_equal(&cur->owner, &skip_actor->owner) ||
+                  chimera_claim_owner_same_key(&cur->owner, &skip_actor->owner)))) {
                 continue;
             }
             if (chimera_vfs_claim_awaited(cur)) {
@@ -1047,7 +1049,7 @@ chimera_vfs_claim_break_caching(
         return false;
     }
 
-    had = chimera_vfs_claim_trigger_ns_full(state, file, NULL, false, NULL);
+    had = chimera_vfs_claim_trigger_ns_full(state, file, NULL, NULL, false);
 
     chimera_vfs_state_put(state, file);
     return had;

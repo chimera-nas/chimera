@@ -119,6 +119,33 @@ add_test(chimera/vfs/umount_wait_test vfs_umount_wait_test)
 # zero_range reproducer / regression: VFS zero_range (DEALLOCATE+ALLOCATE) data
 # integrity, parameterized by backend.  memfs/linux confirm the invariant holds
 # (and that the model checker is sound); the diskfs cases reproduce the bug.
+# The VFS compound executor: sequence chaining, one callback, and the
+# stop-at-first-failure rule.  memfs only -- what is under test is the
+# executor, not any backend.
+add_executable(vfs_compound_test vfs_compound_test.c)
+target_link_libraries(vfs_compound_test chimera_vfs chimera_vfs_memfs
+    chimera_vfs_memkv evpl)
+# Quick tier: this is the executor's only direct coverage, and everything that
+# drives it (the NFS4 encoder) is quick-tier too.  Registered in the extended
+# tier it would sit unrun while the code under it changed.
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/vfs/compound COMMAND vfs_compound_test)
+set_tests_properties(chimera/vfs/compound PROPERTIES LABELS "vfs" TIMEOUT 60)
+add_executable(vfs_compound_groups_test vfs_compound_groups_test.c)
+target_link_libraries(vfs_compound_groups_test chimera_vfs chimera_vfs_memfs
+    chimera_vfs_memkv evpl)
+add_test(NAME chimera/vfs/compound_groups COMMAND vfs_compound_groups_test)
+add_executable(vfs_claim_journal_test vfs_claim_journal_test.c)
+target_link_libraries(vfs_claim_journal_test chimera_vfs)
+add_test(NAME chimera/vfs/claim_journal COMMAND vfs_claim_journal_test)
+set_tests_properties(chimera/vfs/claim_journal PROPERTIES TIMEOUT 60 LABELS "vfs")
+add_executable(vfs_claim_access_test vfs_claim_access_test.c)
+target_link_libraries(vfs_claim_access_test chimera_vfs)
+add_test(NAME chimera/vfs/claim_access COMMAND vfs_claim_access_test)
+set_tests_properties(chimera/vfs/claim_access PROPERTIES TIMEOUT 60 LABELS "vfs")
+set_tests_properties(chimera/vfs/compound_groups PROPERTIES LABELS "vfs" TIMEOUT 60)
+set(CHIMERA_TEST_TIER extended)
+
 add_executable(vfs_zerorange_test vfs_zerorange_test.c)
 target_link_libraries(vfs_zerorange_test chimera_vfs chimera_vfs_memfs
     chimera_vfs_diskfs chimera_vfs_memkv evpl)
@@ -210,3 +237,8 @@ get_property(_vfs_tests DIRECTORY PROPERTY TESTS)
 if(_vfs_tests)
     set_property(TEST ${_vfs_tests} APPEND PROPERTY LABELS vfs)
 endif()
+
+add_executable(vfs_compound_retry_test vfs_compound_retry_test.c)
+target_link_libraries(vfs_compound_retry_test chimera_vfs chimera_vfs_memfs chimera_vfs_memkv evpl)
+add_test(NAME chimera/vfs/compound_retry COMMAND vfs_compound_retry_test)
+set_tests_properties(chimera/vfs/compound_retry PROPERTIES LABELS "vfs" TIMEOUT 60)

@@ -88,6 +88,7 @@ chimera_posix_lseek_hole_data(
 
     req.opcode            = CHIMERA_CLIENT_OP_SEEK;
     req.seek.handle       = entry->handle;
+    req.seek.open_flags   = chimera_posix_fd_open_flags(entry);
     req.seek.offset       = probe ? 0 : (uint64_t) offset;
     req.seek.what         = what;
     req.seek.callback     = chimera_posix_seek_callback;

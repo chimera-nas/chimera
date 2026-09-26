@@ -42,11 +42,16 @@
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
+/* The pool lifecycle -- mkfs, mount, umount, rmfs -- is not a sequence and
+ * is not expressible as one.  It comes from the core's per-op header, which
+ * is where those four still live. */
 #include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
+#include "vfs/tests/compound_test_util.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_sid.h"
 #include "common/logging.h"
@@ -214,32 +219,59 @@ getattr_cb(
     ctx->done = 1;
 } /* getattr_cb */
 
+/* GETATTR the open file, recording everything the round trip is about: the
+ * mask, the POSIX identity, and the SIDs and ACL the op copied BY VALUE (so
+ * they are live until the compound is freed, which is after this reads them). */
 static void
 do_getattr(
     struct test_ctx               *ctx,
     const struct chimera_vfs_cred *cred)
 {
-    chimera_vfs_getattr(ctx->vfs_thread, cred, ctx->handle,
-                        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL |
-                        CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID,
-                        getattr_cb, ctx);
-    wait_done(ctx);
+    struct chimera_vfs_compound          *cp;
+    const struct chimera_vfs_compound_op *op;
+    const struct chimera_vfs_attrs       *attr;
+    int                                   i_getattr;
+
+    cp        = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    i_getattr = chimera_vfs_compound_add_getattr(cp,
+                                                 CHIMERA_VFS_ATTR_MASK_STAT |
+                                                 CHIMERA_VFS_ATTR_ACL |
+                                                 CHIMERA_VFS_ATTR_OWNER_SID |
+                                                 CHIMERA_VFS_ATTR_GROUP_SID);
+    chimera_vfs_compound_op_set_handle(cp, (uint32_t) i_getattr, ctx->handle);
+
+    ctx->status = compound_test_run(ctx->evpl, cp);
     assert(ctx->status == CHIMERA_VFS_OK);
+
+    memset(&ctx->got_owner_sid, 0, sizeof(ctx->got_owner_sid));
+    memset(&ctx->got_group_sid, 0, sizeof(ctx->got_group_sid));
+    memset(ctx->got_acl_storage, 0, sizeof(ctx->got_acl_storage));
+
+    op   = chimera_vfs_compound_op(cp, (uint32_t) i_getattr);
+    attr = &op->attr;
+
+    ctx->got_mask = attr->va_set_mask;
+    ctx->got_uid  = attr->va_uid;
+    ctx->got_gid  = attr->va_gid;
+    ctx->got_mode = attr->va_mode;
+    ctx->got_size = attr->va_size;
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) && attr->va_owner_sid) {
+        ctx->got_owner_sid = *attr->va_owner_sid;
+    }
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) && attr->va_group_sid) {
+        ctx->got_group_sid = *attr->va_group_sid;
+    }
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attr->va_acl &&
+        attr->va_acl->num_aces <= TEST_MAX_ACES) {
+        memcpy(ctx->got_acl_storage, attr->va_acl,
+               chimera_acl_size(attr->va_acl->num_aces));
+    }
+
+    chimera_vfs_compound_free(cp);
 } /* do_getattr */
 
-static void
-do_setattr(
-    struct test_ctx               *ctx,
-    const struct chimera_vfs_cred *cred,
-    struct chimera_vfs_attrs      *sattr)
-{
-    chimera_vfs_setattr(ctx->vfs_thread, cred, ctx->handle, sattr, 0, 0,
-                        setattr_cb, ctx);
-    wait_done(ctx);
-    assert(ctx->status == CHIMERA_VFS_OK);
-} /* do_setattr */
-
-/* Like do_setattr, but hands the status back so a gate refusal can be
+/* SETATTR the open file, handing the status back so a gate refusal can be
  * asserted rather than aborting the test. */
 static enum chimera_vfs_error
 setattr_status(
@@ -247,11 +279,25 @@ setattr_status(
     const struct chimera_vfs_cred *cred,
     struct chimera_vfs_attrs      *sattr)
 {
-    chimera_vfs_setattr(ctx->vfs_thread, cred, ctx->handle, sattr, 0, 0,
-                        setattr_cb, ctx);
-    wait_done(ctx);
+    struct chimera_vfs_compound *cp;
+
+    cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    chimera_vfs_compound_add_setattr(cp, ctx->handle, sattr, 0, 0);
+
+    ctx->status = compound_test_run(ctx->evpl, cp);
+    chimera_vfs_compound_free(cp);
+
     return ctx->status;
 } /* setattr_status */
+
+static void
+do_setattr(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    struct chimera_vfs_attrs      *sattr)
+{
+    assert(setattr_status(ctx, cred, sattr) == CHIMERA_VFS_OK);
+} /* do_setattr */
 
 /* Look `name` up under `dir_fh` and open it; leaves the handle in ctx->handle. */
 static void
@@ -262,17 +308,14 @@ open_child(
     uint32_t                       dir_fh_len,
     const char                    *name)
 {
-    chimera_vfs_lookup(ctx->vfs_thread, cred, dir_fh, dir_fh_len, name,
-                       strlen(name),
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
-                       lookup_cb, ctx);
-    wait_done(ctx);
-    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(compound_test_lookup(ctx->vfs_thread, ctx->evpl, cred,
+                                dir_fh, dir_fh_len, name,
+                                ctx->fh, &ctx->fh_len) == CHIMERA_VFS_OK);
 
-    chimera_vfs_open_fh(ctx->vfs_thread, cred, ctx->fh, ctx->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
-    wait_done(ctx);
-    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(compound_test_open_fh(ctx->vfs_thread, ctx->evpl, cred,
+                                 ctx->fh, ctx->fh_len,
+                                 CHIMERA_VFS_OPEN_INFERRED,
+                                 &ctx->handle) == CHIMERA_VFS_OK);
 } /* open_child */
 
 /* Create `name` (0644, uid/gid 1000) under `dir`; leaves the file open in
@@ -284,7 +327,9 @@ create_file(
     struct chimera_vfs_open_handle *dir,
     const char                     *name)
 {
-    struct chimera_vfs_attrs sattr;
+    struct chimera_vfs_compound *cp;
+    struct chimera_vfs_attrs     sattr;
+    int                          i_open;
 
     memset(&sattr, 0, sizeof(sattr));
     sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
@@ -293,12 +338,19 @@ create_file(
     sattr.va_uid  = 1000;
     sattr.va_gid  = 1000;
 
-    chimera_vfs_open_at(ctx->vfs_thread, cred, dir, name, strlen(name),
-                        CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
-                        0, 0, openat_cb, ctx);
-    wait_done(ctx);
+    cp = chimera_vfs_compound_alloc(ctx->vfs_thread, cred);
+    chimera_vfs_compound_add_puthandle(cp, dir, CHIMERA_VFS_OPEN_INFERRED);
+    i_open = chimera_vfs_compound_add_open(cp, name, (int) strlen(name),
+                                           CHIMERA_VFS_OPEN_CREATE, 0, &sattr,
+                                           CHIMERA_VFS_ATTR_FH, 0, 0);
+
+    ctx->status = compound_test_run(ctx->evpl, cp);
     assert(ctx->status == CHIMERA_VFS_OK);
+
+    ctx->handle = chimera_vfs_compound_take_handle(cp, (uint32_t) i_open);
     assert(ctx->handle != NULL);
+
+    chimera_vfs_compound_free(cp);
 } /* create_file */
 
 /* Per-backend wiring, mirroring vfs_zerorange_test. */
@@ -391,19 +443,13 @@ mount_root(
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
 
-    chimera_vfs_get_root_fh(root_fh, root_fh_len);
-    chimera_vfs_lookup(ctx->vfs_thread, cred, root_fh, *root_fh_len, "test", 4,
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
-                       lookup_cb, ctx);
-    wait_done(ctx);
-    assert(ctx->status == CHIMERA_VFS_OK);
-    memcpy(root_fh, ctx->fh, ctx->fh_len);
-    *root_fh_len = ctx->fh_len;
+    assert(compound_test_mount_root(ctx->vfs_thread, ctx->evpl, cred, "test",
+                                    root_fh, root_fh_len) == CHIMERA_VFS_OK);
 
-    chimera_vfs_open_fh(ctx->vfs_thread, cred, root_fh, *root_fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
-    wait_done(ctx);
-    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(compound_test_open_fh(ctx->vfs_thread, ctx->evpl, cred,
+                                 root_fh, *root_fh_len,
+                                 CHIMERA_VFS_OPEN_INFERRED,
+                                 &ctx->handle) == CHIMERA_VFS_OK);
     return ctx->handle;
 } /* mount_root */
 

@@ -8,7 +8,7 @@
 #include "nfs4_session.h"
 #include "nfs4_stateid.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_compound.h"
 
 #define CHIMERA_NFS4_COPY_IO_SIZE (128 * 1024)
 #define CHIMERA_NFS4_COPY_IOV_MAX 256
@@ -114,19 +114,90 @@ static void
 chimera_nfs4_copy_rw_step(
     struct nfs4_copy_state_refs *refs);
 
-static void
-chimera_nfs4_copy_write_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct nfs4_copy_state_refs *refs = private_data;
-    struct nfs_request          *req  = refs->req;
+/*
+ * A CHUNK of the read/write fallback, for two endpoints no backend can copy
+ * between directly: READ the source, WRITE what came back to the destination,
+ * as ONE run.  The gate is what joins them -- it reads how much the READ
+ * actually produced and points the WRITE at exactly those iovecs and that many
+ * bytes, which is the step the caller used to take between two calls.
+ *
+ * The data references belong to the run for its whole duration, so the WRITE
+ * borrows them on the ordinary terms and the completion takes and releases
+ * them.  A read that produced nothing skips the WRITE: there is nothing to
+ * write and the copy is over.
+ */
+#define NFS4_COPY_OP_READ  0
+#define NFS4_COPY_OP_WRITE 1
 
-    evpl_iovecs_release(req->thread->evpl, refs->rw_iov, refs->rw_niov);
+static void
+chimera_nfs4_copy_rw_gate(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_compound_op       *edit;
+
+    if (index != NFS4_COPY_OP_READ || *status != CHIMERA_VFS_OK) {
+        return;
+    }
+
+    op   = chimera_vfs_compound_op(compound, index);
+    edit = chimera_vfs_compound_op_edit(compound, NFS4_COPY_OP_WRITE);
+
+    if (!edit) {
+        return;
+    }
+
+    if (op->read_len == 0) {
+        edit->skip = 1;
+        return;
+    }
+
+    edit->count  = op->read_len;
+    edit->w_iov  = op->iov;
+    edit->w_niov = op->niov;
+} /* chimera_nfs4_copy_rw_gate */
+
+static void
+chimera_nfs4_copy_rw_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct nfs4_copy_state_refs          *refs = private_data;
+    struct nfs_request                   *req  = refs->req;
+    const struct chimera_vfs_compound_op *rop, *wop;
+    struct evpl_iovec                    *iov  = NULL;
+    int                                   niov = 0;
+    enum chimera_vfs_error                error_code;
+    uint32_t                              length, read_len;
+
+    error_code = chimera_vfs_compound_status(compound);
+
+    rop = chimera_vfs_compound_op(compound, NFS4_COPY_OP_READ);
+    wop = chimera_vfs_compound_op(compound, NFS4_COPY_OP_WRITE);
+
+    chimera_vfs_compound_take_iov(compound, NFS4_COPY_OP_READ, &iov, &niov);
+
+    read_len     = rop->read_len;
+    refs->rw_eof = rop->eof_read;
+    length       = wop->written;
+
+    if (error_code == CHIMERA_VFS_OK && wop->status != CHIMERA_VFS_OK &&
+        rop->read_len != 0) {
+        /* The WRITE was skipped although the READ produced bytes: impossible
+         * unless the gate did not run, and a silent short copy is worse than
+         * saying so. */
+        error_code = CHIMERA_VFS_EIO;
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    if (niov) {
+        evpl_iovecs_release(req->thread->evpl, iov, niov);
+    }
+
     refs->rw_niov = 0;
 
     if (error_code != CHIMERA_VFS_OK) {
@@ -134,7 +205,12 @@ chimera_nfs4_copy_write_complete(
         return;
     }
 
-    if (length != refs->rw_count) {
+    if (read_len == 0) {
+        chimera_nfs4_copy_finish(req, refs, CHIMERA_VFS_OK);
+        return;
+    }
+
+    if (length != read_len) {
         chimera_nfs4_copy_finish(req, refs, CHIMERA_VFS_EIO);
         return;
     }
@@ -152,73 +228,44 @@ chimera_nfs4_copy_write_complete(
     }
 
     chimera_nfs4_copy_rw_step(refs);
-} /* chimera_nfs4_copy_write_complete */
+} /* chimera_nfs4_copy_rw_complete */
 
 static void
-chimera_nfs4_copy_read_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  count,
-    uint32_t                  eof,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
 {
-    struct nfs4_copy_state_refs    *refs = private_data;
-    struct nfs_request             *req  = refs->req;
+    struct nfs_request             *req = refs->req;
+    struct chimera_vfs_open_handle *src_handle;
     struct chimera_vfs_open_handle *dst_handle;
+    struct chimera_vfs_compound    *compound;
+    uint64_t                        chunk;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs4_copy_finish(req, refs, error_code);
-        return;
+    chunk = CHIMERA_NFS4_COPY_IO_SIZE;
+    if (refs->remaining < chunk) {
+        chunk = refs->remaining;
     }
 
-    if (count == 0) {
-        chimera_nfs4_copy_finish(req, refs, CHIMERA_VFS_OK);
-        return;
-    }
+    /* The handles copy_begin settled: the stateid's, or the one COPY opened
+     * for itself when the stateid was a special one and named no open. */
+    src_handle    = refs->src_handle;
+    dst_handle    = refs->dst_handle;
+    refs->rw_niov = CHIMERA_NFS4_COPY_IOV_MAX;
 
-    /* Take the iovecs the read actually returned, which are NOT necessarily the
-     * scratch slots we handed down: a backend advertising
-     * CAP_READ_PROVIDES_BUFFERS may either fill our array in place (memfs) or
-     * hand back one of its own (the nfs proxy returns the RPC reply's buffers,
-     * replacing request->read.iov outright).  Reusing rw_iov unconditionally
-     * would write from never-initialised slots.  We own whatever comes back --
-     * neither the caller nor the reply path releases it -- so copy the refs into
-     * rw_iov and let copy_write_complete release them as before.
-     *
-     * The refs must be CLONED rather than copied: the returned array may live
-     * in the backend's RPC reply, which does not outlive this callback, and an
-     * iovec is not relocatable by assignment (in iovec-trace builds its canary
-     * records the address of the struct that owns it).  Cloning takes our own
-     * reference at our own address; the originals are ours to drop, since for a
-     * backend-provided read neither the VFS core nor a reply path releases
-     * them. */
-    if (niov > CHIMERA_NFS4_COPY_IOV_MAX) {
-        evpl_iovecs_release(req->thread->evpl, iov, niov);
-        chimera_nfs4_copy_finish(req, refs, CHIMERA_VFS_EIO);
-        return;
-    }
-
-    if (iov != refs->rw_iov) {
-        int i;
-
-        for (i = 0; i < niov; i++) {
-            evpl_iovec_clone(&refs->rw_iov[i], &iov[i]);
-        }
-        evpl_iovecs_release(req->thread->evpl, iov, niov);
-    }
-
-    /* COPY may have opened this endpoint for an anonymous stateid. Use the
-     * handle resolved by copy_begin, just as the native copy-range path does. */
-    dst_handle     = refs->dst_handle;
-    refs->rw_count = count;
-    refs->rw_eof   = eof;
-    refs->rw_niov  = niov;
-
-    /* As the read above: the destination's own holder must not be blocked by
-     * its own share reservation. */
-    struct chimera_claim_actor io_owner = {
+    /* Attribute the read to the client that holds the source stateid, as
+     * READ does, and the write to the one that holds the destination's.  Left
+     * unowned each is admitted as the per-file implicit claim, which carries no
+     * client identity -- so a copy whose source the same client has open with a
+     * deny share is refused by that client's own share reservation
+     * (NFS4ERR_ACCESS). */
+    struct chimera_claim_actor src_owner = {
+        .owner          = {
+            .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+            .client_key = chimera_nfs4_copy_state_client(refs->src_state,
+                                                         refs->src_type),
+            .owner_lo = src_handle->fh_hash,
+            .owner_hi = 0,
+        },
+    };
+    struct chimera_claim_actor dst_owner = {
         .owner          = {
             .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
             .client_key = chimera_nfs4_copy_state_client(refs->dst_state,
@@ -228,75 +275,42 @@ chimera_nfs4_copy_read_complete(
         },
     };
 
-    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
-                            dst_handle,
-                            refs->dst_offset,
-                            count,
-                            1,
-                            0,
-                            0,
-                            refs->rw_iov,
-                            refs->rw_niov,
-                            &io_owner,
-                            chimera_nfs4_copy_write_complete,
-                            refs);
-} /* chimera_nfs4_copy_read_complete */
+    compound = chimera_vfs_compound_alloc(req->thread->vfs_thread, &req->cred);
 
-static void
-chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
-{
-    struct nfs_request             *req = refs->req;
-    struct chimera_vfs_open_handle *src_handle;
-    uint64_t                        chunk;
+    chimera_vfs_compound_add_read(compound, src_handle,
+                                  refs->src_offset, (uint32_t) chunk,
+                                  refs->rw_iov, CHIMERA_NFS4_COPY_IOV_MAX,
+                                  0, &src_owner, NULL, 0);
+    chimera_vfs_compound_add_write(compound, dst_handle,
+                                   refs->dst_offset, (uint32_t) chunk,
+                                   1,
+                                   NULL, 0,
+                                   0, 0, &dst_owner);
 
-    chunk = CHIMERA_NFS4_COPY_IO_SIZE;
-    if (refs->remaining < chunk) {
-        chunk = refs->remaining;
-    }
+    chimera_vfs_compound_set_gate(compound, chimera_nfs4_copy_rw_gate, refs);
 
-    src_handle    = refs->src_handle;
-    refs->rw_niov = CHIMERA_NFS4_COPY_IOV_MAX;
-
-    /* Attribute the read to the client that holds the source stateid, as
-     * READ does.  Left unowned it is admitted as the per-file implicit claim,
-     * which carries no client identity -- so a copy whose source the same
-     * client has open with a deny share is refused by that client's own share
-     * reservation (NFS4ERR_ACCESS). */
-    struct chimera_claim_actor io_owner = {
-        .owner          = {
-            .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
-            .client_key = chimera_nfs4_copy_state_client(refs->src_state,
-                                                         refs->src_type),
-            .owner_lo = src_handle->fh_hash,
-            .owner_hi = 0,
-        },
-    };
-
-    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
-                           src_handle,
-                           refs->src_offset,
-                           (uint32_t) chunk,
-                           refs->rw_iov,
-                           refs->rw_niov,
-                           0,
-                           &io_owner,
-                           chimera_nfs4_copy_read_complete,
-                           refs);
+    chimera_vfs_compound_submit(compound, chimera_nfs4_copy_rw_complete, refs);
 } /* chimera_nfs4_copy_rw_step */
 
 static void
 chimera_nfs4_copy_complete(
-    enum chimera_vfs_error    error_code,
-    uint64_t                  length,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request          *req  = private_data;
-    struct COPY4res             *res  = &req->res_compound.resarray[req->index].opcopy;
-    struct nfs4_copy_state_refs *refs = req->nfs_state_ref;
+    struct nfs_request                   *req  = private_data;
+    struct COPY4res                      *res  = &req->res_compound.resarray[req->index].opcopy;
+    struct nfs4_copy_state_refs          *refs = req->nfs_state_ref;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                error_code;
+    uint64_t                              length;
 
     req->nfs_state_ref = NULL;
+
+    error_code = chimera_vfs_compound_status(compound);
+    op         = chimera_vfs_compound_op(compound, 0);
+    length     = op->written;
+
+    chimera_vfs_compound_free(compound);
 
     if (error_code == CHIMERA_VFS_OK) {
         refs->copied                                  = length;
@@ -334,22 +348,28 @@ chimera_nfs4_copy_start(
  * until the handle is open, hence the extra round trip. */
 static void
 chimera_nfs4_copy_srcattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs4_copy_state_refs *refs = private_data;
-    struct nfs_request          *req  = refs->req;
-    nfsstat4                     status;
-    uint64_t                     size;
+    struct nfs4_copy_state_refs          *refs = private_data;
+    struct nfs_request                   *req  = refs->req;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                error_code;
+    nfsstat4                              status;
+    uint64_t                              size;
+
+    error_code = chimera_vfs_compound_status(compound);
+    op         = chimera_vfs_compound_op(compound, 0);
+    size       = (op->attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) ?
+        op->attr.va_size : 0;
+
+    chimera_vfs_compound_free(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_nfs4_copy_fail(refs,
                                chimera_nfs4_errno_to_nfsstat4(error_code));
         return;
     }
-
-    size = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
 
     if (refs->req_count == 0) {
         if (refs->src_offset > size) {
@@ -428,11 +448,16 @@ chimera_nfs4_copy_begin(struct nfs4_copy_state_refs *refs)
     refs->src_handle = src_handle;
     refs->dst_handle = dst_handle;
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        src_handle,
-                        CHIMERA_VFS_ATTR_SIZE,
-                        chimera_nfs4_copy_srcattr_complete,
-                        refs);
+    /* The stat addresses the source handle, not the current object: one op. */
+    struct chimera_vfs_compound *compound =
+        chimera_vfs_compound_alloc(req->thread->vfs_thread, &req->cred);
+    int                          idx =
+        chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_SIZE);
+
+    chimera_vfs_compound_op_set_handle(compound, (uint32_t) idx, src_handle);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_copy_srcattr_complete,
+                                refs);
 } /* chimera_nfs4_copy_begin */
 
 static void
@@ -446,17 +471,17 @@ chimera_nfs4_copy_start(struct nfs4_copy_state_refs *refs)
 
     if (src_handle->vfs_module == dst_handle->vfs_module &&
         (dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
-        chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred,
-                               src_handle,
-                               refs->src_offset,
-                               dst_handle,
-                               refs->dst_offset,
-                               refs->remaining,
-                               0,
-                               0,
-                               0,
-                               chimera_nfs4_copy_complete,
-                               req);
+        /* One op: the range op takes BOTH objects from the caller and never
+         * addresses the current one. */
+        struct chimera_vfs_compound *compound =
+            chimera_vfs_compound_alloc(req->thread->vfs_thread, &req->cred);
+
+        chimera_vfs_compound_add_copy_range(compound,
+                                            src_handle, refs->src_offset,
+                                            dst_handle, refs->dst_offset,
+                                            refs->remaining, 0, 0, 0);
+
+        chimera_vfs_compound_submit(compound, chimera_nfs4_copy_complete, req);
     } else {
         chimera_nfs4_copy_rw_step(refs);
     }
@@ -475,52 +500,76 @@ chimera_nfs4_copy_fail(
     chimera_nfs4_compound_complete(req, res->cr_status);
 } /* chimera_nfs4_copy_fail */
 
+/*
+ * A special stateid names no open, so COPY opens the filehandle the compound
+ * supplied and keeps the handle for the transfer: PUTFH, OPEN_CURRENT,
+ * GETHANDLE, the last op transferring ownership out of the run.
+ */
+#define NFS4_COPY_OP_GETHANDLE 2
+
 static void
 chimera_nfs4_copy_dst_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct nfs4_copy_state_refs *refs = private_data;
+    enum chimera_vfs_error       error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_free(compound);
         chimera_nfs4_copy_fail(refs,
                                chimera_nfs4_errno_to_nfsstat4(error_code));
         return;
     }
 
-    refs->dst_own = handle;
+    refs->dst_own = chimera_vfs_compound_take_handle(compound,
+                                                     NFS4_COPY_OP_GETHANDLE);
+
+    chimera_vfs_compound_free(compound);
+
     chimera_nfs4_copy_begin(refs);
 } /* chimera_nfs4_copy_dst_open_complete */
 
 static void
 chimera_nfs4_copy_open_dst(struct nfs4_copy_state_refs *refs)
 {
-    struct nfs_request *req = refs->req;
+    struct nfs_request          *req = refs->req;
+    struct chimera_vfs_compound *compound;
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs4_copy_dst_open_complete,
-                        refs);
+    compound = chimera_vfs_compound_alloc(req->thread->vfs_thread, &req->cred);
+
+    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_gethandle(compound);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs4_copy_dst_open_complete,
+                                refs);
 } /* chimera_nfs4_copy_open_dst */
 
 static void
 chimera_nfs4_copy_src_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct nfs4_copy_state_refs *refs = private_data;
+    enum chimera_vfs_error       error_code;
+
+    error_code = chimera_vfs_compound_status(compound);
 
     if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_compound_free(compound);
         chimera_nfs4_copy_fail(refs,
                                chimera_nfs4_errno_to_nfsstat4(error_code));
         return;
     }
 
-    refs->src_own = handle;
+    refs->src_own = chimera_vfs_compound_take_handle(compound,
+                                                     NFS4_COPY_OP_GETHANDLE);
+
+    chimera_vfs_compound_free(compound);
 
     if (refs->dst_special) {
         chimera_nfs4_copy_open_dst(refs);
@@ -623,13 +672,18 @@ chimera_nfs4_copy(
     }
 
     if (refs->src_special) {
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                            req->saved_fh,
-                            req->saved_fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED |
-                            CHIMERA_VFS_OPEN_READ_ONLY,
-                            chimera_nfs4_copy_src_open_complete,
-                            refs);
+        struct chimera_vfs_compound *compound =
+            chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+
+        chimera_vfs_compound_add_putfh(compound, req->saved_fh,
+                                       req->saved_fhlen);
+        chimera_vfs_compound_add_open_current(compound,
+                                              CHIMERA_VFS_OPEN_INFERRED |
+                                              CHIMERA_VFS_OPEN_READ_ONLY, 0);
+        chimera_vfs_compound_add_gethandle(compound);
+
+        chimera_vfs_compound_submit(compound,
+                                    chimera_nfs4_copy_src_open_complete, refs);
     } else if (refs->dst_special) {
         chimera_nfs4_copy_open_dst(refs);
     } else {

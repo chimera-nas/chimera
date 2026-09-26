@@ -252,11 +252,11 @@ chimera_writerv(
     chimera_write_callback_t        callback,
     void                           *private_data);
 
-/* Zero-copy read into caller-provided evpl_iovec(s).  Like chimera_read(), but
- * the data lands directly in `iov` (over RDMA the buffers become the server's
- * write target -- no copy).  The caller owns `iov` (borrow): keep the buffers
- * alive until the callback fires, then release them.  The callback reports the
- * byte count and eof; the data is already in the caller's buffers. */
+/* Read into caller-provided evpl_iovec(s). The caller owns the destination:
+ * keep its buffers alive until the callback. Compound attempts read into
+ * private buffers; only accepted bytes are copied into the destination.
+ * Failure leaves destination bytes untouched. The callback reports count/eof.
+ * Destination capacity must cover the bytes returned by the requested read. */
 typedef void (*chimera_read_into_callback_t)(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,
@@ -478,6 +478,24 @@ struct chimera_dirent {
     int      namelen;
 };
 
+/*
+ * Called once per entry, in directory order, before `complete`.  Return 0 to
+ * take the entry and go on; non-zero to take it and stop there, in which
+ * case `complete` reports eof clear and THIS entry's cookie -- a resume from
+ * that cookie returns what follows the entry, so a caller that stopped on it
+ * has lost nothing.
+ *
+ * The callback must be REVERSIBLE, and must not emit.  chimera_readdir runs
+ * as a VFS sequence, and the VFS may execute a sequence more than once
+ * before it completes (a retry after a conflict); each execution drives the
+ * callback again from the same starting cookie.  So whatever the callback
+ * keeps has to be REPLACEABLE rather than appended to -- a buffer indexed
+ * by cookie, a page the caller rebuilds from its first entry, the single
+ * entry readdir(3) holds -- and nothing may be sent, written to a stream, or
+ * otherwise made visible outside the caller until `complete` fires.  A
+ * callback that appends to a list, or that writes each entry to a socket as
+ * it arrives, will see duplicates on a re-run.
+ */
 typedef int (*chimera_readdir_callback_t)(
     struct chimera_client_thread *thread,
     const struct chimera_dirent  *dirent,
@@ -490,6 +508,10 @@ typedef void (*chimera_readdir_complete_t)(
     int                           eof,
     void                         *private_data);
 
+/* Enumerate one accepted page (at most 512 entries). A nonzero entry-callback
+ * return stops after that delivered entry. Resume with the completion cookie;
+ * eof is true only when the accepted directory suffix has all been delivered.
+ * Entry callbacks are never invoked by a rejected compound attempt. */
 void
 chimera_readdir(
     struct chimera_client_thread   *thread,
@@ -538,15 +560,6 @@ typedef void (*chimera_seek_callback_t)(
     enum chimera_vfs_error        status,
     int                           eof,
     uint64_t                      offset,
-    void                         *private_data);
-
-typedef void (*chimera_lock_callback_t)(
-    struct chimera_client_thread *client,
-    enum chimera_vfs_error        status,
-    uint32_t                      conflict_type,
-    uint64_t                      conflict_offset,
-    uint64_t                      conflict_length,
-    pid_t                         conflict_pid,
     void                         *private_data);
 
 // Filesystem statistics

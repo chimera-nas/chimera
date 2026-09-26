@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/range.h"
 #include <string.h>
 #include <stdlib.h>
 #include "common/thread.h"
@@ -14,9 +15,9 @@
 #include "nfs_nlm_state.h"
 #include "nfs_nlm_granted.h"
 #include "nfs_nsm.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_compound.h"
 
 /*
  * The FH opens below are internal lock-bookkeeping opens (the client already
@@ -68,6 +69,194 @@ nlm_conn_peer_addr(
  * EOF), but the VFS range layer uses UINT64_MAX for to-EOF (length 0 is a real
  * zero-byte range).  Translate when handing a length to a VFS claim/probe. */
 #define NLM_POSIX_LEN_TO_VFS(l) ((l) == 0 ? UINT64_MAX : (l))
+
+/* NLM uses POSIX replacement geometry. Prepare every remainder before
+ * changing either the protocol list or the claim core; publish the whole
+ * carve atomically so a partial unlock/downgrade never drops outside coverage.
+ * The caller holds nlm_state.mutex and releases retired handles on its own
+ * worker after dropping that mutex. Pending LOCK reservations are excluded. */
+static struct chimera_range_endpoint
+nlm_range_end(
+    uint64_t offset,
+    uint64_t length)
+{
+    return !length || chimera_range_end(offset, length).carry
+        ? chimera_range_eof() : chimera_range_end(offset, length);
+} /* nlm_range_end */
+
+static bool
+nlm_same_owner_file(
+    const struct nlm_lock_entry *entry,
+    const struct nlm_lock_entry *request)
+{
+    return !entry->pending && entry->claim_inserted &&
+           entry->svid == request->svid && entry->oh_len == request->oh_len &&
+           entry->fh_len == request->fh_len &&
+           !memcmp(entry->oh, request->oh, entry->oh_len) &&
+           !memcmp(entry->fh, request->fh, entry->fh_len) &&
+           nlm_ranges_overlap(entry->offset, entry->length, request->offset, request->length);
+} /* nlm_same_owner_file */
+
+/* Reserve before admission, including room for all currently pending LOCKs
+ * to split a confirmed interval later. A normalized owner range set gains at
+ * most one extra entry per pending acquisition after its sentinel is inserted.
+ * Every later admission/unlock repeats this reservation under the same mutex. */
+static bool
+nlm_carve_prepare_locked(
+    struct nlm_client     *client,
+    struct nlm_lock_entry *request)
+{
+    struct nlm_lock_entry *entry;
+    size_t                 count = 1;
+
+    DL_FOREACH(client->locks, entry)
+    {
+        count++;
+    }
+    if (count > UINT32_MAX / 2 || count > SIZE_MAX / (2 * sizeof(*client->carve_previous))) {
+        return false;
+    }
+    if (client->carve_capacity < count * 2) {
+        struct chimera_vfs_claim **scratch = realloc(client->carve_previous,
+                                                     count * 2 * sizeof(*scratch));
+        if (!scratch) {
+            return false;
+        }
+        client->carve_previous = scratch;
+        client->carve_capacity = count * 2;
+    }
+    request->carve_spare[0] = nlm_lock_entry_alloc();
+    request->carve_spare[1] = nlm_lock_entry_alloc();
+    return request->carve_spare[0] && request->carve_spare[1];
+} /* nlm_carve_prepare_locked */
+
+static void
+nlm_carve_spares_free(struct nlm_lock_entry *request)
+{
+    for (int i = 0; i < 2; i++) {
+        free(request->carve_spare[i]);
+        request->carve_spare[i] = NULL;
+    }
+} /* nlm_carve_spares_free */
+
+static void
+nlm_carve_locked(
+    struct chimera_server_nfs_thread *thread,
+    struct nlm_client                *client,
+    struct nlm_lock_entry            *request,
+    struct nlm_lock_entry           **retired,
+    struct chimera_vfs_file_state   **changed)
+{
+    struct nlm_lock_entry        *entry, *next, *fragments = NULL;
+    struct chimera_vfs_claim    **previous = client->carve_previous;
+    struct chimera_vfs_claim     *replacement[2];
+    uint32_t                      count = 0, nprevious = 0, nreplacement = 0;
+    struct chimera_range_endpoint end = nlm_range_end(request->offset, request->length);
+
+    *retired = NULL;
+    *changed = NULL;
+    DL_FOREACH(client->locks, entry)
+    {
+        if (entry != request && nlm_same_owner_file(entry, request)) {
+            count++;
+        }
+    }
+    if (!count) {
+        nlm_carve_spares_free(request);
+        return;
+    }
+    chimera_nfs_abort_if(count > client->carve_capacity, "NLM carve scratch exhausted");
+    DL_FOREACH(client->locks, entry)
+    {
+        if (entry == request || !nlm_same_owner_file(entry, request)) {
+            continue;
+        }
+        previous[nprevious++] = &entry->claim;
+        struct chimera_range_endpoint old_end = nlm_range_end(entry->offset, entry->length);
+        for (int side = 0; side < 2; side++) {
+            uint64_t                      start;
+            struct chimera_range_endpoint stop;
+            if (!side) {
+                if (entry->offset >= request->offset) {
+                    continue;
+                }
+                start = entry->offset;
+                stop  = chimera_range_offset(request->offset);
+            } else {
+                if (chimera_range_compare(old_end, end) <= 0) {
+                    continue;
+                }
+                start = end.value;
+                stop  = old_end;
+            }
+            chimera_nfs_abort_if(nreplacement >= 2, "NLM owner ranges not normalized");
+            struct nlm_lock_entry *fragment = request->carve_spare[nreplacement];
+            request->carve_spare[nreplacement] = NULL;
+            chimera_nfs_abort_if(!fragment, "NLM carve fragment not reserved");
+            /* Copy identity only: claims, tickets and linked-list pointers
+             * contain live linkage and must never be copied into a fragment. */
+            memcpy(fragment->fh, entry->fh, entry->fh_len);
+            fragment->fh_len = entry->fh_len;
+            memcpy(fragment->oh, entry->oh, entry->oh_len);
+            fragment->oh_len     = entry->oh_len;
+            fragment->svid       = entry->svid;
+            fragment->exclusive  = entry->exclusive;
+            fragment->offset     = start;
+            fragment->length     = stop.carry ? 0 : (stop.value - start);
+            fragment->handle     = entry->handle;
+            fragment->file_state = entry->file_state;
+            chimera_vfs_claim_init_range(&fragment->claim, fragment->exclusive,
+                                         false, start, NLM_POSIX_LEN_TO_VFS(fragment->length), &entry->claim.owner);
+            replacement[nreplacement++] = &fragment->claim;
+            DL_APPEND(fragments, fragment);
+        }
+    }
+    /* All fallible allocations are complete. Each published fragment owns
+     * one handle and one existing-file-state reference. */
+    DL_FOREACH(fragments, entry)
+    {
+        struct chimera_vfs_open_handle *handle = entry->handle;
+
+        entry->file_state = chimera_vfs_state_get(thread->vfs->vfs_state,
+                                                  handle->fh, handle->fh_len, handle->fh_hash, false);
+        chimera_nfs_abort_if(!entry->file_state, "NLM fragment lost pinned file state");
+        chimera_vfs_dup_handle(thread->vfs_thread, handle);
+        entry->claim_inserted = true;
+    }
+    *changed = previous[0]->file;
+    chimera_vfs_claim_range_publish(*changed, previous, nprevious,
+                                    replacement, nreplacement);
+    DL_FOREACH_SAFE(client->locks, entry, next)
+    {
+        if (entry == request || !nlm_same_owner_file(entry, request)) {
+            continue;
+        }
+        DL_DELETE(client->locks, entry);
+        entry->claim_inserted = false;
+        entry->next           = *retired;
+        *retired              = entry;
+    }
+    DL_FOREACH_SAFE(fragments, entry, next)
+    {
+        DL_DELETE(fragments, entry);
+        DL_APPEND(client->locks, entry);
+    }
+    nlm_carve_spares_free(request);
+} /* nlm_carve_locked */
+
+static void
+nlm_release_retired(
+    struct chimera_server_nfs_thread *thread,
+    struct nlm_lock_entry            *retired)
+{
+    while (retired) {
+        struct nlm_lock_entry *entry = retired;
+        retired = entry->next;
+        chimera_vfs_state_put(thread->vfs->vfs_state, entry->file_state);
+        chimera_vfs_release(thread->vfs_thread, entry->handle);
+        nlm_lock_entry_free(entry);
+    }
+} /* nlm_release_retired */
 
 /* Map NLM caller_name (hostname) to a claim owner.client_key. */
 static inline uint64_t
@@ -193,7 +382,11 @@ struct nlm_test_ctx {
     struct evpl                      *evpl;
     struct evpl_rpc2_encoding        *encoding;
     struct evpl_rpc2_conn            *conn;
-    struct chimera_vfs_open_handle   *handle;
+    /* The probe, built before the run and read by the executor while the
+     * CLAIM_TEST op runs.  Never inserted, so nothing keeps a pointer to it
+     * afterwards -- but it has to outlive the submission, which the build's
+     * stack frame would not. */
+    struct chimera_vfs_claim          probe;
     xdr_opaque                        cookie;
     uint8_t                           cookie_buf[LM_MAXSTRLEN];
     uint64_t                          offset;
@@ -209,84 +402,68 @@ struct nlm_test_ctx {
     uint32_t                          fh_len;
 };
 
+/* PUTFH seats the object, OPEN_CURRENT opens it, and the CLAIM_TEST asks the
+ * question.  The open is a PATH open because a probe reads only the file
+ * handle -- and because a data open of a FIFO blocks, which is the whole
+ * reason the compound's probe ops want one. */
+#define NLM_TEST_OP_PROBE 2
+
 static void
-chimera_nfs_nlm4_test_open_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+chimera_nfs_nlm4_test_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nlm_test_ctx              *ctx       = private_data;
-    struct chimera_server_nfs_thread *thread    = ctx->thread;
-    struct chimera_server_nfs_shared *shared    = thread->shared;
-    struct evpl                      *evpl      = ctx->evpl;
-    struct evpl_rpc2_encoding        *encoding  = ctx->encoding;
-    struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
-    struct chimera_vfs_file_state    *file_state;
-    struct chimera_claim_owner        owner;
-    struct chimera_vfs_claim          probe;
-    struct chimera_vfs_claim_conflict conflict;
-    enum chimera_vfs_claim_result     result;
-    struct nlm4_testres               res;
-    int                               rc;
+    struct nlm_test_ctx                  *ctx      = private_data;
+    struct chimera_server_nfs_thread     *thread   = ctx->thread;
+    struct chimera_server_nfs_shared     *shared   = thread->shared;
+    struct evpl                          *evpl     = ctx->evpl;
+    struct evpl_rpc2_encoding            *encoding = ctx->encoding;
+    const struct chimera_vfs_compound_op *vop;
+    enum chimera_vfs_error                error_code;
+    struct nlm4_testres                   res;
+    int                                   rc;
 
     res.cookie.len  = ctx->cookie.len;
     res.cookie.data = ctx->cookie.data;
 
+    error_code = chimera_vfs_compound_status(compound);
+
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs_debug("NLM TEST open failed: error %d -> NLM4_STALE_FH", error_code);
+        chimera_nfs_debug("NLM TEST failed: error %d -> NLM4_STALE_FH",
+                          error_code);
         res.test_stat.stat = NLM4_STALE_FH;
         goto send_reply;
     }
 
-    file_state = chimera_vfs_state_get(vfs_state,
-                                       handle->fh, handle->fh_len,
-                                       handle->fh_hash, false);
+    /* A denial is an ANSWER, so the op succeeded and the run went on -- the
+     * probe never fails for being refused.  A file nobody holds a claim on
+     * answers GRANTED without the executor having to invent the "no state
+     * means no holders" case this used to make for itself. */
+    vop = chimera_vfs_compound_op(compound, NLM_TEST_OP_PROBE);
 
-    if (!file_state) {
-        /* No state on this file means no claims held — TEST grants. */
-        chimera_vfs_release(thread->vfs_thread, handle);
-        res.test_stat.stat = NLM4_GRANTED;
-        goto send_reply;
-    }
-
-    memset(&owner, 0, sizeof(owner));
-    owner.proto      = CHIMERA_CLAIM_PROTO_NLM;
-    owner.client_key = nlm_owner_client_key(ctx->caller_name);
-    owner.owner_lo   = nlm_owner_owner_lo(ctx->oh, ctx->oh_len, ctx->svid);
-
-    chimera_vfs_claim_init_range(&probe, ctx->exclusive, /* smb */ false,
-                                 ctx->offset,
-                                 NLM_POSIX_LEN_TO_VFS(ctx->length),
-                                 &owner);
-
-    memset(&conflict, 0, sizeof(conflict));
-
-    result = chimera_vfs_claim_test(file_state, &probe, &conflict);
-
-    if (result == CHIMERA_CLAIM_GRANTED) {
+    if (vop->claim_result == CHIMERA_CLAIM_GRANTED) {
         res.test_stat.stat = NLM4_GRANTED;
     } else {
         res.test_stat.stat = NLM4_DENIED;
         /* WRITE_LT iff the holder's used bits include a write-implying
          * capability (a write delegation reports exclusive though it holds
          * no LW). */
-        res.test_stat.holder.exclusive = (conflict.used &
+        res.test_stat.holder.exclusive = (vop->conflict.used &
                                           (CHIMERA_CLAIM_W |
                                            CHIMERA_CLAIM_CW |
                                            CHIMERA_CLAIM_LW)) != 0;
         res.test_stat.holder.svid     = 0;  /* not exposed by the claim core */
         res.test_stat.holder.oh.len   = 0;
         res.test_stat.holder.oh.data  = NULL;
-        res.test_stat.holder.l_offset = conflict.offset;
+        res.test_stat.holder.l_offset = vop->conflict.offset;
         /* conflict.length already uses UINT64_MAX for a to-EOF/whole-file
          * holder, which is exactly the NLM to-EOF sentinel. */
-        res.test_stat.holder.l_len = conflict.length;
+        res.test_stat.holder.l_len = vop->conflict.length;
     }
 
-    chimera_vfs_state_put(vfs_state, file_state);
-    chimera_vfs_release(thread->vfs_thread, handle);
-
  send_reply:
+    chimera_vfs_compound_free(compound);
+
     chimera_nfs_debug("NLM TEST cb: stat=%d", res.test_stat.stat);
 
     if (ctx->proc == 16) {
@@ -298,7 +475,7 @@ chimera_nfs_nlm4_test_open_cb(
         chimera_nfs_abort_if(rc, "Failed to send NLM TEST reply");
     }
     free(ctx);
-} /* chimera_nfs_nlm4_test_open_cb */
+} /* chimera_nfs_nlm4_test_complete */
 
 /* -------------------------------------------------------------------------
  * LOCK procedure callbacks
@@ -336,6 +513,7 @@ struct nlm_lock_ctx {
 struct nlm_lock_resume {
     struct nlm_lock_ctx            *ctx;
     struct nlm_lock_entry          *entry;  /* free after its handle    */
+    struct nlm_lock_entry          *retired; /* carved entries, detached */
     struct chimera_vfs_open_handle *handle; /* release on ctx->thread   */
     struct nlm_grant_request        grant;  /* when deliver             */
     bool                            deliver;
@@ -453,6 +631,7 @@ chimera_nfs_nlm4_lock_resume_run(
     struct nlm4_res                   res;
     int                               rc = 0;
 
+    nlm_release_retired(thread, r->retired);
     if (r->handle) {
         chimera_vfs_release(thread->vfs_thread, r->handle);
     }
@@ -606,10 +785,15 @@ chimera_nfs_nlm4_lock_acquire_cb(
     work.ctx = ctx;
 
     if (result == CHIMERA_CLAIM_GRANTED) {
-        bool reaped;
+        bool                           reaped;
+        struct chimera_vfs_file_state *changed = NULL;
 
         evpl_mutex_lock(&shared->nlm_state.mutex);
         reaped = entry->reaped;
+        if (!reaped) {
+            nlm_carve_locked(thread, ctx->client, entry,
+                             &work.retired, &changed);
+        }
         if (reaped) {
             /* The client was reaped (FREE_ALL, SM_NOTIFY, or its last
              * connection dropped) while this acquire was in flight, and the
@@ -632,6 +816,9 @@ chimera_nfs_nlm4_lock_acquire_cb(
         }
         evpl_mutex_unlock(&shared->nlm_state.mutex);
 
+        if (changed) {
+            chimera_vfs_claim_replacement_complete(changed);
+        }
         if (reaped) {
             chimera_nfs_debug(
                 "NLM LOCK: grant landed for reaped client '%s'; releasing",
@@ -805,6 +992,34 @@ chimera_nfs_nlm4_lock_open_cb(
                               chimera_nfs_nlm4_lock_blocked_cb, ctx);
 } /* chimera_nfs_nlm4_lock_open_cb */
 
+/* PUTFH, OPEN(current), GETHANDLE: the open the LOCK needs is an ordinary
+ * sequence -- it is the CLAIM behind it that cannot be one (see the note on
+ * chimera_nfs_nlm4_do_lock), so only the claim stays out of band. */
+#define NLM_LOCK_OP_GETHANDLE 2
+
+static void
+chimera_nfs_nlm4_lock_open_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct nlm_lock_ctx            *ctx    = private_data;
+    enum chimera_vfs_error          status = chimera_vfs_compound_status(compound);
+    struct chimera_vfs_open_handle *handle = NULL;
+
+    if (status == CHIMERA_VFS_OK) {
+        handle = chimera_vfs_compound_take_handle(compound,
+                                                  NLM_LOCK_OP_GETHANDLE);
+    }
+
+    chimera_vfs_compound_free(compound);
+
+    if (status == CHIMERA_VFS_OK && !handle) {
+        status = CHIMERA_VFS_EIO;
+    }
+
+    chimera_nfs_nlm4_lock_open_cb(status, handle, ctx);
+} /* chimera_nfs_nlm4_lock_open_complete */
+
 /* -------------------------------------------------------------------------
  * UNLOCK procedure callbacks
  * ---------------------------------------------------------------------- */
@@ -847,6 +1062,8 @@ chimera_nfs_nlm4_do_test(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nlm_test_ctx              *ctx;
+    struct chimera_vfs_compound      *compound;
+    struct chimera_claim_owner        owner;
     uint8_t                           vfh[CHIMERA_VFS_FH_SIZE];
     int                               vfh_len;
     uint16_t                          vexp;
@@ -933,14 +1150,26 @@ chimera_nfs_nlm4_do_test(
         memcpy(ctx->cookie_buf, args->cookie.data, args->cookie.len);
     }
 
-    /* Conflict detection is delegated to vfs_state — the test_open_cb
-     * does the lookup and probe synchronously once the FH is validated. */
-    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred,
-                        vfh,
-                        vfh_len,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs_nlm4_test_open_cb,
-                        ctx);
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_NLM;
+    owner.client_key = nlm_owner_client_key(ctx->caller_name);
+    owner.owner_lo   = nlm_owner_owner_lo(ctx->oh, ctx->oh_len, ctx->svid);
+
+    chimera_vfs_claim_init_range(&ctx->probe, ctx->exclusive, /* smb */ false,
+                                 ctx->offset,
+                                 NLM_POSIX_LEN_TO_VFS(ctx->length),
+                                 &owner);
+
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          &nlm_system_cred);
+
+    chimera_vfs_compound_add_putfh(compound, vfh, vfh_len);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED |
+                                          CHIMERA_VFS_OPEN_PATH, 0);
+    chimera_vfs_compound_add_claim_test(compound, &ctx->probe, 0);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs_nlm4_test_complete, ctx);
 } /* chimera_nfs_nlm4_do_test */
 
 void
@@ -955,6 +1184,36 @@ chimera_nfs_nlm4_test(
     chimera_nfs_nlm4_do_test(evpl, conn, cred, args, encoding, private_data, 1);
 } /* chimera_nfs_nlm4_test */
 
+/*
+ * LOCK'S CLAIM IS DELIBERATELY NOT A SEQUENCE OP, and the reason is not a hop
+ * that could be shortened.  (The open it needs IS a sequence -- see
+ * chimera_nfs_nlm4_lock_open_complete.  Only the acquire stays out of band.)
+ *
+ * `entry->pending` means "not held yet" to every other NLM RPC on the file --
+ * nlm_client_find_lock_in_range (nfs_nlm_state.h) SKIPS a pending entry, so an
+ * UNLOCK covering the range would answer NLM4_GRANTED for a lock that is in
+ * fact held.  The acquire callback therefore clears it where the claim core
+ * answers, on whatever thread that is, before anything else can run.
+ *
+ * A sequence gives the caller no such moment.  Its whole contract is that the
+ * caller is not between the operations: a CLAIM's answer reaches the caller in
+ * the completion, marshalled home to the submitting thread, and there is no
+ * hook in between by design.  So the clear could only happen a doorbell hop
+ * later, widening the window rather than closing it -- and closing it from the
+ * other side means changing what `pending` means to UNLOCK, which is an NLM
+ * semantics change and not a conversion.  (The reaper's exactly-once hand-off
+ * in nlm_client_release_all_locks would have to move with it: it arbitrates on
+ * chimera_vfs_claim_cancel's return, and a sequenced LOCK would arbitrate on
+ * chimera_vfs_compound_cancel_post's, which promises nothing synchronously.)
+ *
+ * A claim transition is one of the VFS's enumerated non-sequence entry points
+ * for exactly this kind of reason, and it reaches the claim core through
+ * vfs_claim.h rather than through the per-op API.
+ *
+ * TEST does not have the problem and IS a sequence throughout -- see
+ * chimera_nfs_nlm4_do_test: a probe inserts nothing, so there is no state to
+ * settle at the moment of the answer.
+ */
 static void
 chimera_nfs_nlm4_do_lock(
     struct evpl               *evpl,
@@ -968,6 +1227,7 @@ chimera_nfs_nlm4_do_lock(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
+    struct chimera_vfs_compound      *compound;
     struct nlm_lock_entry            *entry;
     struct nlm_lock_ctx              *ctx;
     struct nlm_client                *client;
@@ -1101,11 +1361,11 @@ chimera_nfs_nlm4_do_lock(
      * vfs_state before either has been linked; the in-flight `pending`
      * sentinel inserted below catches that, but we also short-circuit
      * idempotent re-LOCKs of an already-held range to NLM4_GRANTED. */
-    if (nlm_client_find_lock(client,
-                             entry->oh, entry->oh_len,
-                             entry->svid,
-                             entry->fh, entry->fh_len,
-                             entry->offset, entry->length)) {
+    struct nlm_lock_entry *duplicate = nlm_client_find_lock(client,
+                                                            entry->oh, entry->oh_len, entry->svid, entry->fh, entry->
+                                                            fh_len,
+                                                            entry->offset, entry->length);
+    if (duplicate && duplicate->exclusive == entry->exclusive) {
         evpl_mutex_unlock(&shared->nlm_state.mutex);
         chimera_nfs_debug("NLM LOCK: duplicate lock request -> NLM4_GRANTED (idempotent)");
         res.cookie.len  = ctx->cookie.len;
@@ -1130,6 +1390,14 @@ chimera_nfs_nlm4_do_lock(
         return;
     }
 
+    if (!nlm_carve_prepare_locked(client, entry)) {
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
+        nlm_lock_entry_free(entry);
+        free(ctx);
+        nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_DENIED_NOLOCKS, proc);
+        return;
+    }
+
     /* Pre-insert the pending entry so concurrent requests see it immediately */
     DL_APPEND(client->locks, entry);
 
@@ -1145,12 +1413,16 @@ chimera_nfs_nlm4_do_lock(
         evpl_mutex_unlock(&shared->nlm_state.mutex);
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred,
-                        vfh,
-                        vfh_len,
-                        CHIMERA_VFS_OPEN_INFERRED,
-                        chimera_nfs_nlm4_lock_open_cb,
-                        ctx);
+    compound = chimera_vfs_compound_alloc(thread->vfs_thread,
+                                          &nlm_system_cred);
+
+    chimera_vfs_compound_add_putfh(compound, vfh, vfh_len);
+    chimera_vfs_compound_add_open_current(compound,
+                                          CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_gethandle(compound);
+
+    chimera_vfs_compound_submit(compound, chimera_nfs_nlm4_lock_open_complete,
+                                ctx);
 } /* chimera_nfs_nlm4_do_lock */
 
 void
@@ -1280,11 +1552,9 @@ chimera_nfs_nlm4_do_unlock(
     void                      *private_data,
     int                        proc)
 {
-    struct chimera_server_nfs_thread *thread    = private_data;
-    struct chimera_server_nfs_shared *shared    = thread->shared;
-    struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
+    struct chimera_server_nfs_thread *thread = private_data;
+    struct chimera_server_nfs_shared *shared = thread->shared;
     struct nlm_client                *client;
-    struct nlm_lock_entry            *entry;
     struct nlm4_res                   res;
     char                              safe_hostname[LM_MAXSTRLEN + 1];
     size_t                            hn_len;
@@ -1332,74 +1602,29 @@ chimera_nfs_nlm4_do_unlock(
         return;
     }
 
-    /* Sweep every lock this owner holds within the range: UNLOCK releases
-     * the covered locks (RFC 1813), and clients routinely unlock [0, ~0) at
-     * close(2) to drop everything they still hold on the file.  Exact-match
-     * lookup alone left those locks -- and the open handles pinning their
-     * files -- held forever.  Entries are unhooked under the mutex, chained,
-     * and released outside it (same ownership discipline as the single-entry
-     * path replaced here). */
-    struct nlm_lock_entry *sweep = NULL;
-
-    while ((entry = nlm_client_find_lock_in_range(
-                client,
-                args->alock.oh.data,
-                args->alock.oh.len,
-                args->alock.svid,
-                args->alock.fh.data,
-                args->alock.fh.len,
-                args->alock.l_offset,
-                NLM_TO_POSIX_LEN(args->alock.l_len))) != NULL) {
-        DL_DELETE(client->locks, entry);
-        entry->next = sweep;
-        sweep       = entry;
+    struct nlm_lock_entry          request = { 0 }, *retired = NULL;
+    struct chimera_vfs_file_state *changed = NULL;
+    request.oh_len = args->alock.oh.len < LM_MAXSTRLEN ? args->alock.oh.len : LM_MAXSTRLEN;
+    memcpy(request.oh, args->alock.oh.data, request.oh_len);
+    request.fh_len = args->alock.fh.len < NFS4_FHSIZE ? args->alock.fh.len : NFS4_FHSIZE;
+    memcpy(request.fh, args->alock.fh.data, request.fh_len);
+    request.svid   = args->alock.svid;
+    request.offset = args->alock.l_offset;
+    request.length = NLM_TO_POSIX_LEN(args->alock.l_len);
+    bool                           carved = nlm_carve_prepare_locked(client, &request);
+    if (carved) {
+        nlm_carve_locked(thread, client, &request, &retired, &changed);
     }
-
-    if (!sweep) {
-        evpl_mutex_unlock(&shared->nlm_state.mutex);
-        chimera_nfs_debug("NLM UNLOCK: lock entry not found -> NLM4_GRANTED");
-        /* Lock not found -- treat as already unlocked */
-        res.cookie.len  = args->cookie.len;
-        res.cookie.data = args->cookie.data;
-        res.stat        = NLM4_GRANTED;
-        if (proc == 18) {
-            shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
-                                                         nlm4_res_sent_cb,
-                                                         NULL);
-        } else {
-            rc = shared->nlm_v4.send_reply_NLMPROC4_UNLOCK(evpl, NULL, &res, encoding);
-            chimera_nfs_abort_if(rc, "Failed to send NLM UNLOCK reply");
-        }
-        return;
-    }
-
+    nlm_carve_spares_free(&request);
     evpl_mutex_unlock(&shared->nlm_state.mutex);
-
-    /* Release each swept lock: the claim (sync), the file_state ref (sync),
-     * and the open handle that was held for the lock's lifetime.  RFC 1813
-     * requires NLM4_GRANTED. */
-    while (sweep) {
-        entry = sweep;
-        sweep = entry->next;
-
-        if (entry->claim_inserted) {
-            chimera_vfs_claim_release_ranged(thread->vfs_thread, vfs_state,
-                                             entry->file_state, &entry->claim);
-            entry->claim_inserted = false;
-        }
-        if (entry->file_state) {
-            chimera_vfs_state_put(vfs_state, entry->file_state);
-            entry->file_state = NULL;
-        }
-        if (entry->handle) {
-            chimera_vfs_release(thread->vfs_thread, entry->handle);
-        }
-        nlm_lock_entry_free(entry);
+    if (changed) {
+        chimera_vfs_claim_replacement_complete(changed);
     }
+    nlm_release_retired(thread, retired);
 
     res.cookie.len  = args->cookie.len;
     res.cookie.data = args->cookie.data;
-    res.stat        = NLM4_GRANTED;
+    res.stat        = carved ? NLM4_GRANTED : NLM4_DENIED_NOLOCKS;
 
     if (proc == 18) {
         shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,

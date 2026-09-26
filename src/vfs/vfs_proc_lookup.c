@@ -7,7 +7,7 @@
 #ifdef _WIN32
 #include "common/platform.h"
 #endif /* ifdef _WIN32 */
-#include "vfs_procs.h"
+#include "vfs_internal_procs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
 #include "common/misc.h"

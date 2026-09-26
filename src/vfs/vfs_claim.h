@@ -54,6 +54,11 @@ struct chimera_vfs_file_state {
     /* Claim class lists (all guarded by file->lock). */
     struct chimera_vfs_claim           *claims[CHIMERA_CLAIM_CLASS_COUNT];
 
+    /* ACCESS insertion barrier, guarded by lock. Existing claims and pure
+     * admission queries are unchanged. Holder refs pin this file. */
+    const void                         *access_fence_cookie;
+    uint32_t                            access_fence_refs;
+
     /* Owner/key-indexed cache grants on this file; each grant's embedded
      * claim is also on claims[CACHE]. */
     struct chimera_vfs_claim_grant     *grants;
@@ -112,6 +117,10 @@ struct chimera_vfs_file_state {
     /* SMB protocol annex (delete-on-close deferral, stream holders).  Kept
      * verbatim: honest protocol bookkeeping, not arbitration. */
     uint8_t                             delete_pending;
+    /* SMB unlink has taken the intent; old opens must not re-arm it. */
+    uint8_t                             smb_delete_started;
+    /* SMB-owned copied delete metadata; protected by lock, no open pointers. */
+    void                               *smb_pending_delete;
     uint32_t                            stream_holders;
 
     uint32_t                            refcount;
@@ -352,7 +361,11 @@ chimera_vfs_claim_init_deny_probe(
 /* Synchronous acquire: admit-or-break-or-deny, no ticket.  On GRANTED the
  * claim is inserted (ownership with the core until release).  On BREAKING
  * the recalls have been started; the caller retries (or uses the ticketed
- * form).  conflict_out (optional) is filled BY VALUE. */
+ * form). An ACCESS insertion fence returns DENIED with admission_fenced set,
+ * without recalls or holder eviction. New acquires must not wait on this
+ * control conflict while holding partial reservations. Existing queued tickets
+ * remain queued until the fence releases. Pure test APIs ignore the fence.
+ * conflict_out (optional) is filled BY VALUE. */
 enum chimera_vfs_claim_result
 chimera_vfs_claim_try_acquire(
     struct chimera_vfs_state          *state,
@@ -409,6 +422,69 @@ chimera_vfs_claim_release_open(
     struct chimera_vfs_claim       *claim,
     struct chimera_vfs_claim_grant *grant);
 
+/* Publish an already admitted, unbreakable ACCESS reservation at a stable
+ * address. source must be linked on file; destination is either unlinked or
+ * a same-owner claim whose used/advertised/denied masks source subsumes.
+ * Neither claim may have a cache grant or backend projection. Copies source,
+ * including its callbacks and handle identity, into destination and detaches
+ * source atomically under file->lock. Clears the borrowed admission view.
+ * source == destination is allowed. The caller retains all file references.
+ *
+ * Infallible after admission: invalid inputs are programming errors. No
+ * callbacks or waiter pumping occur: the effective standing reservation is
+ * unchanged, so this is safe while a protocol holds its publication lock. */
+void
+chimera_vfs_claim_move_replace(
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *destination,
+    struct chimera_vfs_claim      *source);
+
+/* Accepted replacement with the same constraints as move_replace, except the
+ * admitted source may narrow destination. No callbacks run here. Returns true
+ * if masks narrowed: caller must then call replacement_complete after its
+ * publication locks are released. Keep file referenced through that call. */
+bool
+chimera_vfs_claim_replace_deferred(
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *destination,
+    struct chimera_vfs_claim      *source);
+
+void
+chimera_vfs_claim_replacement_complete(
+    struct chimera_vfs_file_state *file);
+
+/* Atomically publish a preallocated local range set. previous contains the
+ * frozen public ranges and all admitted attempt ranges being replaced; every
+ * claim must be linked on file, unbreakable, unprojected, and of the same owner
+ * and construct. replacement contains distinct, fresh unlinked claims whose
+ * extents and modes are covered by that previous union. An empty replacement
+ * unlocks the set. The caller freezes protocol mutation and holds all storage
+ * and file references throughout publication.
+ *
+ * No allocation, admission, callbacks, or reference changes occur here. All
+ * inputs are checked before any linkage changes; invalid inputs are invariant
+ * violations. Detached previous claims remain caller-owned and may still be
+ * compound results. Call replacement_complete after publishing protocol state
+ * and dropping its locks, even when replacement is empty. */
+void
+chimera_vfs_claim_range_publish(
+    struct chimera_vfs_file_state   *file,
+    struct chimera_vfs_claim *const *previous,
+    uint32_t                         num_previous,
+    struct chimera_vfs_claim *const *replacement,
+    uint32_t                         num_replacement);
+
+/* Accepted close may retire several lock owners on one file. Unlike range
+ * replacement this permits different owners, but only local unprojected,
+ * unbreakable RANGE claims. Validates the entire list before atomically
+ * detaching it. No callbacks or reference changes; call replacement_complete
+ * after protocol publication and after dropping protocol locks. */
+void
+chimera_vfs_claim_range_retire(
+    struct chimera_vfs_file_state   *file,
+    struct chimera_vfs_claim *const *claims,
+    uint32_t                         num_claims);
+
 /* Shrink an inserted ACCESS claim's masks in place (truncating-open W drop,
  * OPEN_DOWNGRADE).  Never conflicts; pumps waiters. */
 void
@@ -439,6 +515,37 @@ chimera_vfs_claim_test(
     struct chimera_vfs_file_state     *file,
     const struct chimera_vfs_claim    *probe,
     struct chimera_vfs_claim_conflict *conflict_out);
+
+/* GETLK observation: only published advisory/SMB byte-range locks count.
+ * Cache claims and provisional admission holds are excluded; no recalls or
+ * admission changes occur. A NULL file is unlocked. Conflict is copied. */
+enum chimera_vfs_claim_result
+chimera_vfs_claim_test_locks(
+    struct chimera_vfs_file_state     *file,
+    const struct chimera_vfs_claim    *probe,
+    struct chimera_vfs_claim_conflict *conflict_out);
+
+/* Pure admission against attempt-private, same-file normalized range claims
+ * followed by the public file claims. probe->admit_excluded applies to the
+ * public claims. Private ranges are immutable, caller-held, unbreakable
+ * claims; they are never recalled or courtesy-reclaimed. NULL file tests only
+ * the private ranges, for a subsequent ordinary acquisition by the executor. */
+enum chimera_vfs_claim_result
+chimera_vfs_claim_test_range_view(
+    struct chimera_vfs_file_state         *file,
+    const struct chimera_vfs_claim        *probe,
+    const struct chimera_vfs_claim *const *ranges,
+    uint32_t                               num_ranges,
+    struct chimera_vfs_claim_conflict     *conflict_out);
+
+/* Pure capability check for local compound range admission. NFSv4/NLM ranges
+ * follow the existing local-only projection policy. POSIX ranges on a module
+ * declaring backend range arbitration require the ticketed projection path. */
+bool
+chimera_vfs_claim_range_is_local(
+    struct chimera_vfs_thread            *thread,
+    const struct chimera_vfs_open_handle *handle,
+    const struct chimera_vfs_claim       *claim);
 
 /* Exactly-once cancel of a ticket whose acquire has not completed.  Never
  * blocks, and never re-enters the caller: safe to call with the caller's
@@ -539,6 +646,68 @@ chimera_vfs_claim_grant_coalesce(
     uint8_t                           want,
     int                               upgrade_ok);
 
+/* Atomic protocol membership variants. The next-link address points to an
+* object-pointer field in a fully initialized, break-visible protocol member.
+* Coalescing links that member under file->lock together with its reference;
+* acquisition also handles fresh insertion and racing same-owner collapse.
+* Thus a last-member CLOSE cannot revoke the grant between reference acquisition
+* and member attachment. No separate add-member step follows success. These
+* APIs may recall peers just like acquire/coalesce; use only in coordination or
+* accepted protocol work, never in retryable pure callbacks. Failure leaves the
+* member unattached; callers retain the file pin until releasing their grant.
+* initial_epoch seeds only a fresh grant before its claim is visible; coalesced
+* grants retain their epoch, including a racing first-acquire collapse. */
+struct chimera_vfs_claim_grant *
+chimera_vfs_claim_grant_coalesce_member(
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner,
+    uint8_t                           want,
+    int                               upgrade_ok,
+    void                             *member,
+    void                             *member_next);
+
+enum chimera_vfs_claim_result
+chimera_vfs_claim_grant_acquire_member(
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_file_state      *file,
+    const struct chimera_vfs_claim     *template_claim,
+    int                                 upgrade_ok,
+    uint8_t                             is_v2,
+    uint16_t                            initial_epoch,
+    enum chimera_vfs_claim_grant_flavor flavor,
+    void                               *member,
+    void                               *member_next,
+    struct chimera_vfs_claim_grant    **grant_out,
+    struct chimera_vfs_claim_conflict  *conflict_out);
+
+/* Accepted-only opportunistic legacy oplock publication. Caller holds file->lock
+ * and supplies zeroed heap candidate storage plus a fully initialized member
+ * whose next link is NULL. Admission caps EX/BATCH to II then NONE, without allocations,
+ * callbacks, peer recall or waiter pumping. False leaves candidate caller-owned;
+ * true transfers it to ordinary grant_release ownership. Caller installs protocol
+ * grant/ACCESS own_cache links before unlocking. This is not retryable work. */
+bool chimera_vfs_claim_grant_publish_oplock_locked(
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_claim_grant *candidate,
+    const struct chimera_vfs_claim *template_claim,
+    void                           *member);
+
+/* Accepted-only RqLs or DIR_LEASE publication, with the same lock/storage requirements as
+ * publish_oplock_locked. May atomically join/upgrade a same-key grant (preserving
+ * version and advancing epoch only for an accepted strict-superset upgrade),
+ * or publish candidate with initial_epoch, or decline NULL.
+ * No allocation/recall/pump. Candidate transfers only when returned verbatim;
+ * otherwise it stays caller-owned. Caller installs grant/ACCESS links before
+ * unlocking. A zero-bit request still joins an existing grant. */
+struct chimera_vfs_claim_grant * chimera_vfs_claim_grant_publish_rqls_locked(
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_claim_grant *candidate,
+    const struct chimera_vfs_claim *template_claim,
+    uint8_t                         is_v2,
+    uint16_t                        initial_epoch,
+    void                           *member,
+    void                           *member_next);
+
 /* Deferred-open rescue upgrade (refcount-1 + IDLE + sole cache claim). */
 uint8_t
 chimera_vfs_claim_grant_try_upgrade(
@@ -556,11 +725,73 @@ chimera_vfs_claim_grant_cap_mode(
     const struct chimera_vfs_claim *template_claim,
     bool                            strict);
 
+/* Pin a claim's cache grant without changing rights, epoch, membership, or
+ * waking waiters. Caller holds file->lock AND keeps a file-state reference
+ * alive through the matching grant_release. Returns NULL for grant-less claims.
+ * A transient pin is not a protocol member: never use refcount as a member
+ * count, or infer last-member retirement from it. Release outside file->lock. */
+struct chimera_vfs_claim_grant *
+chimera_vfs_claim_pin_grant(
+    struct chimera_vfs_claim *claim);
+
 void
 chimera_vfs_claim_grant_release(
     struct chimera_vfs_state       *state,
     struct chimera_vfs_claim_grant *grant,
     bool                            pump);
+
+/* Coalesce-or-cap-or-acquire a cache grant in one call: the settle loop SMB's
+ * create path used to run by hand (coalesce onto a same-owner / same-lease
+ * grant and upgrade; else cap the requested mode to what is grantable without
+ * breaking a peer, then acquire, stepping CW -> CR|H -> CR on a residual
+ * conflict until it grants or only a break remains).  `template_claim`
+ * carries construct / owner / used / break_cb / op_handle / policy_tag /
+ * cb_private exactly as the caller builds it with chimera_vfs_claim_init_*;
+ * it is copied, never inserted, and the construct is re-derived from the
+ * mode at every step (a legacy oplock is II / EX / BATCH by its bits; an
+ * RqLs or directory lease keeps its construct).  `cap_strict` is the
+ * stat-open strict cap (0 at the CR floor instead of CR).  Two policy inputs
+ * SMB used to read by hand are read here, from claim state: a LEGACY oplock
+ * request by a client that already holds an RqLs H lease on the file asks for
+ * nothing, and by one holding a non-H lease is capped to CR (MS-SMB2
+ * 3.3.5.9, smb2.lease.oplock).
+ *
+ * On GRANTED, *grant_out is the (possibly coalesced) grant, with `member_seed`
+ * stored as a FRESH grant's member head under the insert (*member_seeded
+ * reports it; false on a coalesce hit or a racing-create collapse, where the
+ * caller registers its member on the returned grant itself, as for
+ * chimera_vfs_claim_grant_acquire).  On any other result *grant_out is NULL
+ * and *conflict_out names the holder -- or is ZERO (construct NONE) when the
+ * request capped to nothing rather than met a holder: a LEASE_NONE request
+ * with no lease to join, a strict cap behind a holder, the own-H-lease rule.
+ * The caller reports that as "no oplock / no lease", not as a refusal.
+ *
+ * The v2 epoch seeding (grant->epoch = request epoch + 1) and the protocol
+ * member registration on a coalesced grant are the caller's, as before.
+ *
+ * Only the coalition constructs (RQLS, OPLOCK_*, DIR_LEASE) cap and step; a
+ * single-holder cache template (DELEG_R/W, FUSE_GRANT) is tried exactly once
+ * at its own mode -- a capped delegation is not a thing -- so this is safe to
+ * hand any cache-class template.  No new arbitration: grant_coalesce +
+ * grant_cap_mode + grant_acquire with the settle loop internalized. */
+enum chimera_vfs_claim_result
+chimera_vfs_claim_grant_settle(
+    struct chimera_vfs_state          *state,
+    struct chimera_vfs_file_state     *file,
+    const struct chimera_vfs_claim    *template_claim,
+    uint8_t                            is_v2,
+    bool                               cap_strict,
+    void                              *member_seed,
+    bool                              *member_seeded,
+    struct chimera_vfs_claim_grant   **grant_out,
+    struct chimera_vfs_claim_conflict *conflict_out);
+
+/* Drop cache rights only when no protocol member remains, keeping grant
+ * storage/refcount intact for ACCESS own_cache anchors awaiting retirement.
+ * The member-empty check and revoke are atomic under file->lock. Caller owns
+ * a grant reference; this function pumps waiters outside the lock. */
+void chimera_vfs_claim_grant_revoke_empty(
+    struct chimera_vfs_claim_grant *grant);
 
 /* Same-client cache queries used by the SMB create path's grant-capping
  * policy (the sole-opener rule lives HERE, not in the admission masks). */
@@ -714,6 +945,12 @@ chimera_vfs_claim_break_caching(
     uint8_t                   fh_len,
     uint64_t                  fh_hash);
 
+/* Pure NS_FULL blocking snapshot. Caller retains file; no refs, callbacks,
+ * break initiation, or lease changes occur. */
+bool
+chimera_vfs_claim_has_caching(
+    struct chimera_vfs_file_state *file);
+
 /* -------------------------------------------------------------------- */
 /* I/O path                                                             */
 /* -------------------------------------------------------------------- */
@@ -757,6 +994,31 @@ chimera_vfs_io_recall_single(
     uint8_t                     retain,
     void (                     *next )(
         struct chimera_vfs_request *request));
+
+/* Cancel a recall parked on its drain (chimera_vfs_io_recall_single /
+ * chimera_vfs_io_recall): unlink the request's io-wait ticket so `next` is
+ * never invoked.  The breaks the recall kicked stay kicked -- a recall hands
+ * nobody anything, so abandoning the wait is safe the way abandoning a queued
+ * acquire is.  Called on the request's OWNING thread only, and never blocks.
+ *
+ *   true  -- the ticket was still parked and is now unlinked.  The request
+ *            is the core's from here: it is finished and freed inside this
+ *            call, or -- if a pump had already posted its resume to the
+ *            owning thread's drain -- when that drain reaches it, which is
+ *            why the caller must be the owning thread (the drain cannot be
+ *            running concurrently) and must drop its pointer now.
+ *   false -- the recall has drained and `next` is running or has run; the
+ *            request is `next`'s.  Only reachable while the request is
+ *            alive, which the caller knows because `next` frees it: a
+ *            caller that keeps its pointer until `next` runs, and calls this
+ *            only before then, never passes a dead request.
+ *
+ * Symmetric with chimera_vfs_claim_cancel for a queued acquire: the return
+ * value is the whole arbitration.  The compound executor is the caller. */
+bool
+chimera_vfs_claim_recall_cancel(
+    struct chimera_vfs_state   *state,
+    struct chimera_vfs_request *request);
 
 /* Mandatory-lock I/O predicate (SMB data path only; inline local bool).
  * Zero-length reads are exempt before the walk.  MAND rows are stamped on
@@ -925,3 +1187,62 @@ chimera_vfs_state_stream_holder_dec(
 uint32_t
 chimera_vfs_state_stream_holders(
     struct chimera_vfs_file_state *file);
+
+/* --------------------------------------------------------------------
+ * Backend lease projection (CHIMERA_VFS_CAP_CLAIM_AGGREGATE)
+ * -------------------------------------------------------------------- */
+
+typedef void (*chimera_vfs_claim_acquire_backend_cb_t)(
+    enum chimera_vfs_error                     error_code,
+    uint8_t                                    granted,
+    uint64_t                                   token,
+    const struct chimera_claim_range_conflict *conflict,
+    void                                      *private_data);
+
+typedef void (*chimera_vfs_claim_release_backend_cb_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_claim_acquire_backend(
+    struct chimera_vfs_thread             *thread,
+    const uint8_t                         *fh,
+    uint8_t                                fh_len,
+    uint64_t                               fh_hash,
+    uint8_t                                klass,
+    uint8_t                                rev_used,
+    uint8_t                                bind_deny,
+    uint8_t                                exclusive,
+    uint8_t                                flags,
+    int32_t                                whence,
+    uint64_t                               offset,
+    uint64_t                               length,
+    const struct chimera_claim_owner      *owner,
+    uint64_t                               prev_token,
+    void (                                *recall_cb )(
+        void          *recall_arg,
+        const uint8_t *fh,
+        uint8_t        fh_len,
+        uint64_t       fh_hash,
+        uint64_t       token,
+        uint8_t        retain),
+    void                                  *recall_arg,
+    chimera_vfs_claim_acquire_backend_cb_t callback,
+    void                                  *private_data);
+
+void
+chimera_vfs_claim_release_backend(
+    struct chimera_vfs_thread             *thread,
+    const uint8_t                         *fh,
+    uint8_t                                fh_len,
+    uint64_t                               fh_hash,
+    uint8_t                                klass,
+    uint64_t                               token,
+    uint8_t                                retained,
+    /* Only read when token == 0 (release a RANGE by geometry). */
+    int32_t                                whence,
+    uint64_t                               offset,
+    uint64_t                               length,
+    const struct chimera_claim_owner      *owner,
+    chimera_vfs_claim_release_backend_cb_t callback,
+    void                                  *private_data);

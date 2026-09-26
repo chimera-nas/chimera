@@ -28,7 +28,11 @@
  *   C2  read delegation held by A; B's WRITE open: recall + DELAY, same
  *       cycle.
  *   C3  non-OPEN triggers against A's write delegation: REMOVE and
- *       SETATTR(size) from B -- recall + DELAY (or completion), probed.
+ *       SETATTR(size) from B -- recall + completion.  Both discharge RFC 7530
+ *       §10.4.4 by recalling before the change; the client is answered when
+ *       the change is done rather than told NFS4ERR_DELAY and asked to come
+ *       back, which is also what the same server gives an NFSv3 client doing
+ *       the same thing.
  */
 
 #include "nfs3_mbt_common.h"
@@ -645,7 +649,7 @@ main(
         ops[0]                        = op_putfh(&p.fh);
         ops[1]                        = op_delegreturn(&a_f2_deleg);
         p                             = pc_compound(&a, ops, 2, 1);
-        expect("A DELEGRETURN succeeds", p.st[2] == NFS4_OK, "delegreturn");
+        expect("A DELEGRETURN succeeds", p.status == NFS4_OK && p.nres == 3, "delegreturn");
     }
     for (i = 0; i < 200; i++) {
         p = do_open(&b, &root, "b-oo1", "f2", 1, 0);
@@ -706,8 +710,8 @@ main(
     }
     snprintf(buf, sizeof(buf), "REMOVE st=%u recall=%d",
              p.st[2], recall_seen(&a, &a_f4_deleg));
-    expect("B REMOVE vs A write deleg: DELAY + recall",
-           p.st[2] == P_DELAY && recall_seen(&a, &a_f4_deleg), buf);
+    expect("B REMOVE recalls the delegation and returns DELAY before unlink",
+           p.st[2] == NFS4ERR_DELAY && recall_seen(&a, &a_f4_deleg), buf);
 
     p          = do_open(&a, &root, "a-oo1", "f6", 3, 1);
     a_f6_deleg = p.deleg_sid;
@@ -760,6 +764,10 @@ main(
         rops[0]                       = op_putfh(&p.fh);
         rops[1]                       = op_delegreturn(&a_f4_deleg);
         pc_compound(&a, rops, 2, 1);
+        rops[0] = op_putfh(&root);
+        rops[1] = op_remove("f4");
+        p       = pc_compound(&b, rops, 2, 1);
+        expect("B REMOVE succeeds after delegation return", p.st[2] == NFS4_OK, "retry");
 
         lops[1].oplookup.objname.data = "f6";
         p                             = pc_compound(&a, lops, 3, 1);
@@ -776,6 +784,18 @@ main(
     {
         struct nfs_argop4 ops[2];
         struct stateid4   f8_deleg = p.deleg_sid;
+        struct mbt_fh     f8_fh;
+        struct nfs_argop4 lops[3];
+
+        memset(lops, 0, sizeof(lops));
+        lops[0]                       = op_putfh(&root);
+        lops[1].argop                 = OP_LOOKUP;
+        lops[1].oplookup.objname.data = "f8";
+        lops[1].oplookup.objname.len  = 2;
+        lops[2].argop                 = OP_GETFH;
+        p                             = pc_compound(&g4c, lops, 3, 1);
+        expect("resolve f8 for delegation return", p.status == NFS4_OK && p.fh.has, "lookup/getfh");
+        f8_fh = p.fh;
 
         ops[0] = op_putfh(&root);
         ops[1] = op_remove("f8");
@@ -785,37 +805,16 @@ main(
         }
         snprintf(buf, sizeof(buf), "self REMOVE st=%u self-recall=%d",
                  p.st[2], recall_seen(&g4c, &f8_deleg));
-        expect("A REMOVE of its own write-delegated file: DELAY + "
-               "self-recall (D4-13; RFC intent: no self-conflict)",
-               p.st[2] == P_DELAY && recall_seen(&g4c, &f8_deleg), buf);
-        {
-            struct nfs_argop4 lops[3], rops[2];
-
-            memset(lops, 0, sizeof(lops));
-            lops[0]                       = op_putfh(&root);
-            lops[1].argop                 = OP_LOOKUP;
-            lops[1].oplookup.objname.data = "f8";
-            lops[1].oplookup.objname.len  = 2;
-            lops[2].argop                 = OP_GETFH;
-            p                             = pc_compound(&g4c, lops, 3, 1);
-            rops[0]                       = op_putfh(&p.fh);
-            rops[1]                       = op_delegreturn(&f8_deleg);
-            p                             = pc_compound(&g4c, rops, 2, 1);
-            expect("A returns the self-recalled delegation",
-                   p.st[2] == NFS4_OK, "delegreturn");
-        }
-        for (i = 0; i < 200; i++) {
-            ops[0] = op_putfh(&root);
-            ops[1] = op_remove("f8");
-            p      = pc_compound(&g4c, ops, 2, 1);
-            if (p.st[2] != P_DELAY) {
-                break;
-            }
-            usleep(10000);
-        }
-        snprintf(buf, sizeof(buf), "st=%u", p.st[2]);
-        expect("self REMOVE succeeds after the return",
-               p.st[2] == NFS4_OK, buf);
+        expect("A REMOVE recalls its delegation and returns DELAY before unlink",
+               p.st[2] == NFS4ERR_DELAY && recall_seen(&g4c, &f8_deleg), buf);
+        struct nfs_argop4 rops[2];
+        rops[0] = op_putfh(&f8_fh);
+        rops[1] = op_delegreturn(&f8_deleg);
+        p       = pc_compound(&g4c, rops, 2, 1);
+        expect("A returns its delegation before retrying REMOVE", p.status == NFS4_OK && p.nres == 3, "delegreturn");
+        p = pc_compound(&g4c, ops, 2, 1);
+        snprintf(buf, sizeof(buf), "retry st=%u compound=%u nres=%d", p.st[2], p.status, p.nres);
+        expect("A REMOVE succeeds after delegation return", p.status == NFS4_OK && p.nres == 3, buf);
     }
 
     printf("C4 anonymous-stateid I/O vs A's write delegation:\n");
@@ -973,7 +972,7 @@ main(
                 rops[1] = op_delegreturn(&f9_deleg);
                 rp      = pc_compound(&mc, rops, 2, 1);
                 expect("holder returns f9's delegation mid-write",
-                       rp.st[2] == NFS4_OK, "delegreturn");
+                       rp.status == NFS4_OK && rp.nres == 3, "delegreturn");
                 for (i = 0; i < 500 && !env->res.done; i++) {
                     evpl_continue(env->evpl);
                 }
@@ -1042,7 +1041,7 @@ main(
                 rops[1]                        = op_delegreturn(&f10_deleg);
                 rp                             = pc_compound(&mc, rops, 2, 1);
                 expect("holder returns f10's delegation mid-setattr",
-                       rp.st[2] == NFS4_OK, "delegreturn");
+                       rp.status == NFS4_OK && rp.nres == 3, "delegreturn");
                 for (i = 0; i < 500 && !env->res.done; i++) {
                     evpl_continue(env->evpl);
                 }

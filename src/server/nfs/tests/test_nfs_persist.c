@@ -148,6 +148,94 @@ test_recovery_record_roundtrip(void)
     printf("ok: recovery_record_roundtrip\n");
 } /* test_recovery_record_roundtrip */
 
+/* The OPEN and LOCK reclaim gate runs inside retryable VFS checkpoints. It
+ * must only inspect recovery state, including on repeated accepted checks. */
+static void
+check_recovery_gate_pure(
+    struct nfs_recovery    *rec,
+    const struct nfs_client*client,
+    bool                    reclaim,
+    nfsstat4                expected)
+{
+    struct nfs_recovery_record*records[2], *record;
+    bool                       reclaimed[2];
+    uint32_t                   count    = 0;
+    uint32_t                   pending  = rec->pending_reclaim;
+    uint64_t                   deadline = rec->grace_end_ns;
+    uint64_t                   boot     = rec->current_boot_id;
+    uint64_t                   touched  = client->last_touch_ns;
+    uint32_t                   pins     = atomic_load(&client->compound_pins);
+    int                        load     = atomic_load(&rec->load_state);
+    bool                       grace    = rec->in_grace;
+
+    for (record = rec->to_reclaim; record; record = record->hh.next) {
+        CHECK(count < 2);
+        records[count]     = record;
+        reclaimed[count++] = record->reclaimed;
+    }
+    for (unsigned attempt = 0; attempt < 4; attempt++) {
+        CHECK(nfs_recovery_open_check(rec, client, reclaim) == expected);
+        CHECK(rec->pending_reclaim == pending);
+        CHECK(rec->grace_end_ns == deadline && rec->in_grace == grace);
+        CHECK(rec->current_boot_id == boot && atomic_load(&rec->load_state) == load);
+        CHECK(client->last_touch_ns == touched && atomic_load(&client->compound_pins) == pins);
+        CHECK(HASH_COUNT(rec->to_reclaim) == count);
+        for (uint32_t i = 0; i < count; i++) {
+            HASH_FIND(hh, rec->to_reclaim, records[i]->owner_string, records[i]->owner_len, record);
+            CHECK(record == records[i] && record->reclaimed == reclaimed[i]);
+        }
+    }
+} /* check_recovery_gate_pure */
+
+static void
+test_reclaim_lock_gate_purity(void)
+{
+    struct nfs_recovery        rec = { 0 };
+    struct nfs_recovery_record known = { 0 }, peer = { 0 };
+    struct nfs_client          client = { 0 }, unknown = { 0 };
+
+    CHECK(evpl_mutex_init(&rec.lock, NULL) == 0);
+    atomic_init(&rec.load_state, NFS_REC_LOAD_READY);
+    atomic_init(&client.compound_pins, 1);
+    atomic_init(&unknown.compound_pins, 1);
+    memcpy(client.owner_string, "known", 5);
+    client.owner_len     = 5;
+    client.last_touch_ns = 12345;
+    memcpy(unknown.owner_string, "unknown", 7);
+    unknown.owner_len     = 7;
+    unknown.last_touch_ns = 67890;
+    memcpy(known.owner_string, client.owner_string, client.owner_len);
+    known.owner_len = client.owner_len;
+    memcpy(peer.owner_string, "peer", 4);
+    peer.owner_len = 4;
+    HASH_ADD_KEYPTR(hh, rec.to_reclaim, known.owner_string, known.owner_len, &known);
+    HASH_ADD_KEYPTR(hh, rec.to_reclaim, peer.owner_string, peer.owner_len, &peer);
+    rec.pending_reclaim = 2;
+    rec.current_boot_id = 42;
+    rec.grace_end_ns    = 987654321;
+    rec.in_grace        = true;
+
+    check_recovery_gate_pure(&rec, &client, false, NFS4ERR_GRACE);
+    check_recovery_gate_pure(&rec, &client, true, NFS4_OK);
+    check_recovery_gate_pure(&rec, &unknown, true, NFS4ERR_RECLAIM_BAD);
+    rec.in_grace = false;
+    check_recovery_gate_pure(&rec, &client, true, NFS4ERR_NO_GRACE);
+    check_recovery_gate_pure(&rec, &client, false, NFS4_OK);
+    rec.in_grace = true;
+
+    /* Complete one client's recovery while the peer keeps global grace open. */
+    nfs_recovery_reclaim_complete(&rec, &client);
+    CHECK(known.reclaimed && !peer.reclaimed);
+    CHECK(rec.in_grace && rec.pending_reclaim == 1);
+    check_recovery_gate_pure(&rec, &client, true, NFS4ERR_NO_GRACE);
+    check_recovery_gate_pure(&rec, &client, false, NFS4ERR_GRACE);
+
+    HASH_DEL(rec.to_reclaim, &known);
+    HASH_DEL(rec.to_reclaim, &peer);
+    CHECK(evpl_mutex_destroy(&rec.lock) == 0);
+    printf("ok: reclaim_lock_gate_purity\n");
+} /* test_reclaim_lock_gate_purity */
+
 static void
 test_epoch_record_roundtrip(void)
 {
@@ -1275,6 +1363,7 @@ main(void)
 
     test_key_encoding();
     test_recovery_record_roundtrip();
+    test_reclaim_lock_gate_purity();
     test_epoch_record_roundtrip();
     test_session_record_roundtrip();
     test_reply_record_roundtrip();

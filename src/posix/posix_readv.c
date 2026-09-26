@@ -127,6 +127,7 @@ chimera_posix_readv_internal(
     req.read.callback     = chimera_posix_readv_callback;
     req.read.private_data = &comp;
     req.read.handle       = entry->handle;
+    req.read.open_flags   = chimera_posix_fd_open_flags(entry);
     req.read.offset       = use_fd_offset ? entry->ofd->offset : (uint64_t) offset;
     req.read.length       = total_len;
     req.read.buf          = (void *) iov;  // Store user iovec pointer

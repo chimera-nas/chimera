@@ -6,93 +6,79 @@
 
 #include "client_internal.h"
 
-static void chimera_readlink_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data);
-
 static void
-chimera_readlink_complete(
-    enum chimera_vfs_error    error_code,
-    int                       targetlen,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_readlink_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_client_request  *request        = private_data;
-    struct chimera_client_thread   *thread         = request->thread;
-    struct chimera_vfs_open_handle *handle         = request->readlink.handle;
-    chimera_readlink_callback_t     callback       = request->readlink.callback;
-    void                           *callback_arg   = request->readlink.private_data;
-    char                           *target         = request->readlink.target;
-    int                             heap_allocated = request->heap_allocated;
+    struct chimera_client_request        *request = private_data;
+    struct chimera_client_thread         *thread  = request->thread;
+    const struct chimera_vfs_compound_op *op;
+    chimera_readlink_callback_t           callback       = request->readlink.callback;
+    void                                 *callback_arg   = request->readlink.private_data;
+    char                                 *target         = request->readlink.target;
+    int                                   heap_allocated = request->heap_allocated;
+    enum chimera_vfs_error                status;
+    int                                   len = 0;
 
+    status = chimera_vfs_compound_status(compound);
+
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+
+        /* The sequence read into its own buffer; copy out what the caller has
+         * room for, as the per-op readlink bounded it on the way in. */
+        len = (int) op->target_len;
+
+        if (len > request->readlink.target_maxlength) {
+            len = request->readlink.target_maxlength;
+        }
+
+        if (len > 0) {
+            memcpy(target, op->target, len);
+        }
+    }
+
+    /* The compound owns and releases the handle used for this request. */
     if (heap_allocated) {
         chimera_client_request_free(thread, request);
     }
 
-    chimera_vfs_release(thread->vfs_thread, handle);
+    chimera_vfs_compound_free(compound);
 
-    callback(thread, error_code, target, targetlen, callback_arg);
-
-} /* chimera_readlink_complete */
-
-static void
-chimera_readlink_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
-{
-    struct chimera_client_request *request = private_data;
-
-    (void) attr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        struct chimera_client_thread *thread       = request->thread;
-        chimera_readlink_callback_t   callback     = request->readlink.callback;
-        void                         *callback_arg = request->readlink.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, NULL, 0, callback_arg);
-        return;
-    }
-
-    request->readlink.handle = oh;
-
-    chimera_vfs_readlink(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        oh,
-        request->readlink.target,
-        request->readlink.target_maxlength,
-        0,
-        chimera_readlink_complete,
-        request);
-
-} /* chimera_readlink_open_complete */
+    callback(thread, status, status == CHIMERA_VFS_OK ? target : NULL, len,
+             callback_arg);
+} /* chimera_readlink_sequence_complete */
 
 static inline void
 chimera_dispatch_readlink(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
+    struct chimera_vfs_compound *compound;
+    int                          open_idx, link_idx;
+
+    compound = chimera_client_compound_at_root(thread, request);
+
     /*
-     * Resolve the path through chimera_vfs_open so this works for both
-     * path-only backends (which return no re-openable child fh from lookup)
-     * and FH-relative backends.  NOFOLLOW keeps the final symlink itself
-     * (its target is what we want to read), rather than following it.
+     * Resolve the path through an OPEN so this works for both path-only
+     * backends (which return no re-openable child fh from lookup) and
+     * FH-relative backends.  NOFOLLOW keeps the final symlink itself (its
+     * target is what we want to read), rather than following it.
      */
-    chimera_vfs_open(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
-        request->readlink.path,
-        request->readlink.path_len,
-        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_NOFOLLOW,
-        NULL, /* set_attr */
-        0,    /* attr_mask */
-        chimera_readlink_open_complete,
-        request);
+    open_idx = chimera_vfs_compound_add_open_path(
+        compound, request->readlink.path, request->readlink.path_len,
+        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
+        CHIMERA_VFS_OPEN_NOFOLLOW, NULL, 0);
+
+    link_idx = chimera_vfs_compound_add_readlink(compound);
+
+    if (open_idx >= 0 && link_idx >= 0) {
+        chimera_vfs_compound_op_use_handle(compound, (uint32_t) link_idx,
+                                           (uint32_t) open_idx);
+    }
+
+    chimera_frontend_compound_submit(compound, chimera_readlink_sequence_complete,
+                                     request);
 } /* chimera_dispatch_readlink */

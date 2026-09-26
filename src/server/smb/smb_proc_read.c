@@ -9,6 +9,25 @@
 #include "smb_session.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_compound.h"
+
+/* Map a VFS read error to the SMB2 status a client expects.  Every failure used
+ * to collapse to INTERNAL_ERROR; the cases here are the ones the other
+ * data-path handlers (FLUSH, SET_INFO) already tell apart. */
+static inline uint32_t
+chimera_smb_read_error_status(enum chimera_vfs_error error_code)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_OK:     return SMB2_STATUS_SUCCESS;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:  return SMB2_STATUS_ACCESS_DENIED;
+        case CHIMERA_VFS_EISDIR: return SMB2_STATUS_FILE_IS_A_DIRECTORY;
+        case CHIMERA_VFS_EINVAL: return SMB2_STATUS_INVALID_PARAMETER;
+        case CHIMERA_VFS_ESTALE: return SMB2_STATUS_FILE_CLOSED;
+        case CHIMERA_VFS_EIO:    return SMB2_STATUS_IO_DEVICE_ERROR;
+        default:                 return SMB2_STATUS_INTERNAL_ERROR;
+    } /* switch */
+} /* chimera_smb_read_error_status */
 
 /*
  * Completion for one SMB2_CHANNEL_RDMA_V1 read transfer (RDMA Write to a client
@@ -44,6 +63,58 @@ chimera_smb_rdma_write_callback(
     }
 } /* chimera_smb_rdma_write_callback */
 
+static void chimera_smb_read_callback(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  count,
+    uint32_t                  eof,
+    struct evpl_iovec        *iov,
+    int                       niov,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data);
+
+/*
+ * PUTHANDLE, READ.
+ *
+ * The FileId's handle is LENT: SMB bound granted_access to it at CREATE and
+ * the byte-range check above ran against that same handle, so the sequence
+ * must act on it and not on one of its own.  The PUTHANDLE says what that
+ * handle was really opened with (open_file->open_flags), not what the READ
+ * happens to want.  The descriptor array is the
+ * request's and stays the request's -- an evpl_iovec records the address of
+ * the struct that owns it, so it cannot be written into the sequence and
+ * copied out afterwards.
+ */
+static void
+chimera_smb_read_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct evpl_iovec                    *iov  = NULL;
+    int                                   niov = 0;
+    enum chimera_vfs_error                status;
+    uint32_t                              last, count = 0, eof = 0;
+
+    status = chimera_vfs_compound_status(compound);
+    last   = chimera_vfs_compound_num_ops(compound) - 1;
+
+    if (status == CHIMERA_VFS_OK) {
+        op    = chimera_vfs_compound_op(compound, last);
+        count = op->read_len;
+        eof   = op->eof_read;
+
+        /* The buffers go to the reply, which releases them, so they leave the
+         * sequence's ownership before it is torn down. */
+        chimera_vfs_compound_take_iov(compound, last, &iov, &niov);
+    }
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
+    chimera_smb_read_callback(status, count, eof, iov, niov, NULL, request);
+} /* chimera_smb_read_sequence_complete */
+
 static void
 chimera_smb_read_callback(
     enum chimera_vfs_error    error_code,
@@ -77,7 +148,7 @@ chimera_smb_read_callback(
      * instead, so those iovecs must be released here to avoid a leak. */
     if (error_code) {
         evpl_iovecs_release(evpl, request->read.iov, niov);
-        chimera_smb_complete_request(private_data, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(private_data, chimera_smb_read_error_status(error_code));
         return;
     }
 
@@ -278,21 +349,9 @@ chimera_smb_read(struct chimera_smb_request *request)
                                        request->channel_sequence, 0);
 
     struct chimera_claim_actor io_owner = {
-        .owner          = {
-            .proto      = CHIMERA_CLAIM_PROTO_SMB2,
-            .client_key = request->session_handle->session->client_key,
-            .owner_lo   = request->read.open_file->file_id.pid,
-            .owner_hi   = request->read.open_file->file_id.vid,
-        },
-        .op_handle      = request->read.open_file->handle,
+        .owner     = chimera_smb_open_actor_owner(request->read.open_file),
+        .op_handle = request->read.open_file->handle,
     };
-
-    /* Carry the open's grant LeaseKey (when it holds one) so the actor
-     * self-exempts against its own (or a coalesced peer's) cache. */
-    if (request->read.open_file->grant) {
-        memcpy(io_owner.owner.key,
-               request->read.open_file->grant->claim.owner.key, 16);
-    }
 
     /* Mandatory byte-range lock enforcement: an exclusive lock held by a
      * different open denies reads of the locked range.  A zero-length read
@@ -314,18 +373,23 @@ chimera_smb_read(struct chimera_smb_request *request)
 
     /* Attribute the read to this open's owner so it is mediated against
      * other holders without recalling the client's own oplock/lease. */
-    chimera_vfs_read_owned(
-        thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->read.open_file->handle,
-        request->read.offset,
-        request->read.length,
-        request->read.iov,
-        request->read.niov,
-        0,
-        &io_owner,
-        chimera_smb_read_callback,
-        request);
+    request->vfs_compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, &request->session_handle->session->cred);
+
+    chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                       request->read.open_file->handle,
+                                       request->read.open_file->open_flags);
+
+    chimera_vfs_compound_add_read(request->vfs_compound, NULL,
+                                  request->read.offset,
+                                  request->read.length,
+                                  request->read.iov,
+                                  request->read.niov,
+                                  0,
+                                  &io_owner, NULL, 0);
+
+    chimera_vfs_compound_submit(request->vfs_compound,
+                                chimera_smb_read_sequence_complete, request);
 } /* chimera_smb_read */
 
 
@@ -420,5 +484,240 @@ chimera_smb_read_reply(
         evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* remaining */
 
         evpl_iovec_cursor_inject(reply_cursor, request->read.iov, request->read.niov, request->read.r_length);
+        request->read.niov = 0;
     }
 } /* chimera_smb_write_reply */
+
+/* Compound builder: checks and results remain private until accepted finish. */
+struct smb_read_output {
+    void         (*done)(
+        struct smb_vfs_command *,
+        unsigned int);
+    unsigned int pending;
+    int          failed;
+};
+
+static int
+smb_read_compound_eligible(struct chimera_smb_request *request)
+{
+    return request->read.channel == 0 || request->read.channel == SMB2_CHANNEL_RDMA_V1;
+} /* smb_read_compound_eligible */
+
+static int
+smb_read_compound_build(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct chimera_smb_request *request = command->request;
+    struct chimera_smb_session *session = request->session_handle->session;
+
+    if (request->read.channel == SMB2_CHANNEL_RDMA_V1) {
+        command->private_data = calloc(1, sizeof(struct smb_read_output));
+    }
+    command->actor.owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+    command->actor.owner.client_key = session->client_key;
+    command->actor.owner.owner_lo   = command->open->file_id.pid;
+    command->actor.owner.owner_hi   = command->open->file_id.vid;
+    if (command->open->grant) {
+        memcpy(command->actor.owner.key, command->open->grant->claim.owner.key, 16);
+    }
+    return chimera_vfs_compound_add_read(compound, command->handle, request->read.offset, request->read.length, request
+                                         ->read.iov, 256, 0, &command->actor, NULL, 0);
+} /* smb_read_compound_build */
+
+static void
+smb_read_compound_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command       *command = private_data;
+    struct chimera_smb_request   *request = command->request;
+    struct chimera_smb_open_file *open    = command->open;
+    struct smb_vfs_open_state    *state   = command->state;
+    unsigned int                  result  = SMB2_STATUS_SUCCESS;
+
+    (void) compound;
+    (void) index;
+    (void) status;
+
+    if (open->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+        result = SMB2_STATUS_INVALID_DEVICE_REQUEST;
+    } else if (!(open->desired_access &
+                 (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE | SMB2_GENERIC_READ |
+                  SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED))) {
+        result = SMB2_STATUS_ACCESS_DENIED;
+    } else if (request->read.offset > INT64_MAX ||
+               request->read.offset + request->read.length > INT64_MAX ||
+               request->read.length > command->max_read) {
+        result = SMB2_STATUS_INVALID_PARAMETER;
+    } else if (request->read.channel == SMB2_CHANNEL_RDMA_V1 &&
+               !evpl_bind_is_rdma(request->compound->conn->bind)) {
+        result = SMB2_STATUS_INVALID_PARAMETER;
+    } else if (request->read.channel == SMB2_CHANNEL_RDMA_V1 && !command->private_data) {
+        result = SMB2_STATUS_INSUFFICIENT_RESOURCES;
+    } else {
+        uint64_t capacity = 0;
+        if (request->read.channel == SMB2_CHANNEL_RDMA_V1) {
+            for (uint32_t i = 0; i < request->read.num_rdma_elements; i++) {
+                capacity += request->read.rdma_elements[i].length;
+            }
+            if (capacity < request->read.length) {
+                command->status = SMB2_STATUS_INVALID_PARAMETER;
+                return;
+            }
+        }
+        /* The overlay makes the sequence visible to later commands while the
+         * public open remains unchanged if finish is rejected. */
+        if (!state->channel_sequence_valid ||
+            (uint16_t) (request->channel_sequence - state->channel_sequence) < 0x8000) {
+            state->channel_sequence       = request->channel_sequence;
+            state->channel_sequence_valid = 1;
+            state->sequence_dirty         = 1;
+        }
+        if (request->read.length && chimera_vfs_compound_io_denied(compound, command->handle,
+                                                                   request->read.offset, request->read.length, false, &
+                                                                   command->actor)) {
+            result = SMB2_STATUS_FILE_LOCK_CONFLICT;
+        }
+    }
+    command->status = result;
+} /* smb_read_compound_prepare */
+
+static void
+smb_read_compound_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command               *command = private_data;
+    struct chimera_smb_request           *request = command->request;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
+
+    if (*status != CHIMERA_VFS_OK) {
+        return;
+    }
+    command->state->position       = request->read.offset + op->read_len;
+    command->state->position_dirty = 1;
+    if ((request->read.length && !op->read_len) || op->read_len < request->read.minimum) {
+        command->status = SMB2_STATUS_END_OF_FILE;
+        *status         = CHIMERA_VFS_EINVAL;
+    }
+} /* smb_read_compound_complete */
+
+static void
+smb_read_compound_publish(
+    struct chimera_vfs_compound *compound,
+    struct smb_vfs_command      *command)
+{
+    struct chimera_smb_request           *request = command->request;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, command->result);
+    struct evpl_iovec                    *iov;
+    int                                   niov;
+
+    if (command->status == SMB2_STATUS_SUCCESS && command->publish_live) {
+        chimera_vfs_compound_take_iov(compound, command->result, &iov, &niov);
+        request->read.niov        = niov;
+        request->read.r_length    = op->read_len;
+        command->reply_data_owned = 1;
+    }
+} /* smb_read_compound_publish */
+
+static void
+smb_read_output_done(
+    int   status,
+    void *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+    struct smb_read_output *output  = command->private_data;
+
+    if (status) {
+        output->failed = 1;
+    }
+    if (--output->pending == 0) {
+        output->done(command, output->failed ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    }
+} /* smb_read_output_done */
+
+static void
+smb_read_compound_publish_async(
+    struct smb_vfs_command *command,
+    void ( *done )(struct smb_vfs_command *, unsigned int))
+{
+    struct chimera_smb_request *request = command->request;
+    struct smb_read_output     *output  = command->private_data;
+    struct evpl_iovec_cursor    cursor;
+    struct evpl_iovec           chunks[256];
+    uint32_t                    remaining = request->read.r_length;
+
+    if (request->read.channel != SMB2_CHANNEL_RDMA_V1) {
+        done(command, SMB2_STATUS_SUCCESS);
+        return;
+    }
+    output->done = done;
+    /* Launch sentinel prevents an inline completion from freeing command
+     * storage before the complete descriptor list has been submitted. */
+    output->pending = 1;
+    output->failed  = 0;
+    evpl_iovec_cursor_init(&cursor, request->read.iov, request->read.niov);
+    for (uint32_t i = 0; i < request->read.num_rdma_elements && remaining; i++) {
+        uint32_t length = request->read.rdma_elements[i].length;
+        int      niov;
+        if (length > remaining) {
+            length = remaining;
+        }
+        if (!length) {
+            continue;
+        }
+        /* Clone each slice: two descriptors can split one backend iovec and
+         * therefore need separate references. evpl takes these clones. */
+        niov = evpl_iovec_cursor_move(&cursor, chunks, 256, length, 1);
+        output->pending++;
+        evpl_rdma_write(request->compound->thread->evpl, request->compound->conn->bind,
+                        request->read.rdma_elements[i].token, request->read.rdma_elements[i].offset,
+                        chunks, niov, EVPL_RDMA_FLAG_TAKE_REF, smb_read_output_done, command);
+        remaining -= length;
+    }
+    evpl_iovecs_release(request->compound->thread->evpl, request->read.iov, request->read.niov);
+    request->read.niov = 0;
+    smb_read_output_done(remaining != 0, command);
+} /* smb_read_compound_publish_async */
+
+static void
+smb_read_compound_release(struct smb_vfs_command *command)
+{
+    free(command->private_data);
+    command->private_data = NULL;
+} /* smb_read_compound_release */
+
+static void
+smb_read_compound_reply_release(struct smb_vfs_command *command)
+{
+    if (command->reply_data_owned) {
+        struct chimera_smb_request *request = command->request;
+        evpl_iovecs_release(request->compound->thread->evpl,
+                            request->read.iov, request->read.niov);
+        request->read.niov        = 0;
+        command->reply_data_owned = 0;
+    }
+} /* smb_read_compound_reply_release */
+
+static struct chimera_smb_file_id
+smb_read_compound_file_id(struct chimera_smb_request *request)
+{
+    return request->read.file_id;
+} /* smb_read_compound_file_id */
+
+const struct smb_vfs_command_ops chimera_smb_read_compound_ops = {
+    .file_id       = smb_read_compound_file_id,
+    .eligible      = smb_read_compound_eligible,
+    .build         = smb_read_compound_build,
+    .prepare       = smb_read_compound_prepare,
+    .complete      = smb_read_compound_complete,
+    .publish       = smb_read_compound_publish,
+    .publish_async = smb_read_compound_publish_async,
+    .release       = smb_read_compound_release,
+    .reply_release = smb_read_compound_reply_release,
+};

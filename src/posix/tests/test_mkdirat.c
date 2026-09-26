@@ -52,6 +52,63 @@ main(
         posix_test_fail(&env);
     }
 
+    /* A real directory descriptor, opened with O_DIRECTORY this time: a
+     * single-component name, then one below a directory just made. */
+    {
+        int dfd = chimera_posix_open("/test/mkdirat_test", O_RDONLY | O_DIRECTORY);
+
+        if (dfd < 0) {
+            fprintf(stderr, "open mkdirat_test failed: %s\n", strerror(errno));
+            posix_test_fail(&env);
+        }
+
+        rc = chimera_posix_mkdirat(dfd, "a", 0755);
+        if (rc != 0) {
+            fprintf(stderr, "mkdirat(dfd, a) failed: %s\n", strerror(errno));
+            posix_test_fail(&env);
+        }
+
+        rc = chimera_posix_mkdirat(dfd, "a/b", 0755);
+        if (rc != 0) {
+            fprintf(stderr, "mkdirat(dfd, a/b) failed: %s\n", strerror(errno));
+            posix_test_fail(&env);
+        }
+
+        rc = chimera_posix_fstatat(dfd, "a/b", &st, 0);
+        if (rc != 0 || !S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "fstatat(dfd, a/b) failed: %s\n", strerror(errno));
+            posix_test_fail(&env);
+        }
+
+        rc = chimera_posix_mkdirat(dfd, "a/b", 0755);
+        if (rc == 0 || errno != EEXIST) {
+            fprintf(stderr, "mkdirat(dfd, a/b) again expected EEXIST, got rc=%d errno=%s\n",
+                    rc, strerror(errno));
+            posix_test_fail(&env);
+        }
+
+        rc = chimera_posix_mkdirat(dfd, "missing/c", 0755);
+        if (rc == 0 || errno != ENOENT) {
+            fprintf(stderr, "mkdirat(dfd, missing/c) expected ENOENT, got rc=%d errno=%s\n",
+                    rc, strerror(errno));
+            posix_test_fail(&env);
+        }
+
+        rc = chimera_posix_unlinkat(dfd, "a/b", AT_REMOVEDIR);
+        if (rc != 0) {
+            fprintf(stderr, "unlinkat(dfd, a/b, AT_REMOVEDIR) failed: %s\n", strerror(errno));
+            posix_test_fail(&env);
+        }
+
+        rc = chimera_posix_unlinkat(dfd, "a", AT_REMOVEDIR);
+        if (rc != 0) {
+            fprintf(stderr, "unlinkat(dfd, a, AT_REMOVEDIR) failed: %s\n", strerror(errno));
+            posix_test_fail(&env);
+        }
+
+        chimera_posix_close(dfd);
+    }
+
     // Cleanup with unlinkat + AT_REMOVEDIR
     rc = chimera_posix_unlinkat(AT_FDCWD, "/test/mkdirat_test", AT_REMOVEDIR);
     if (rc != 0) {

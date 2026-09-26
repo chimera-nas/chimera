@@ -15,7 +15,6 @@
 
 #include "fuse_internal.h"
 #include "fuse_attr.h"
-#include "vfs/vfs_procs.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_acl.h"
 
@@ -56,17 +55,29 @@ chimera_fuse_attr_out_reply(
 
 /* --- GETATTR --- */
 
+/*
+ * One sequence, however the kernel named the object.
+ *
+ * When it named an open file the sequence addresses that handle and has no
+ * current object at all; when it named a node the sequence starts from its file
+ * handle and opens it itself.  Either way the request no longer carries the
+ * open, or the stage that took it.
+ */
 static void
-chimera_fuse_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_fuse_getattr_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req   = private_data;
-    struct chimera_fuse_mount   *mount = req->channel->mount;
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_fuse_mount            *mount  = req->channel->mount;
+    enum chimera_vfs_error                status = chimera_vfs_compound_status(compound);
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
@@ -74,39 +85,19 @@ chimera_fuse_getattr_complete(
      * (or was invalidated), which makes this the natural rearm point for a
      * broken grant -- and for stat-only files, the point coverage begins. */
     if (req->fh_len) {
-        if (S_ISREG(attr->va_mode)) {
+        if (S_ISREG(op->attr.va_mode)) {
             chimera_fuse_grant_ensure(req->thread, mount, req->nodeid,
                                       req->fh, req->fh_len,
                                       chimera_fuse_fh_hash(req->fh,
                                                            req->fh_len));
-        } else if (S_ISDIR(attr->va_mode)) {
+        } else if (S_ISDIR(op->attr.va_mode)) {
             chimera_fuse_watch_dir(req->thread, mount, req->nodeid,
                                    req->fh, req->fh_len);
         }
     }
 
-    chimera_fuse_attr_out_reply(req, attr);
-} /* chimera_fuse_getattr_complete */
-
-static void
-chimera_fuse_getattr_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    req->handle = oh;
-
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, oh,
-                        CHIMERA_VFS_ATTR_MASK_STAT,
-                        chimera_fuse_getattr_complete, req);
-} /* chimera_fuse_getattr_open_callback */
+    chimera_fuse_attr_out_reply(req, &op->attr);
+} /* chimera_fuse_getattr_sequence_complete */
 
 void
 chimera_fuse_op_getattr(
@@ -118,7 +109,8 @@ chimera_fuse_op_getattr(
     const struct fuse_getattr_in *in = arg;
 
     if (arglen >= sizeof(*in) && (in->getattr_flags & FUSE_GETATTR_FH)) {
-        struct chimera_vfs_open_handle *oh = chimera_fuse_file(in->fh)->handle;
+        struct chimera_fuse_open_file  *file = chimera_fuse_file(in->fh);
+        struct chimera_vfs_open_handle *oh   = file->handle;
 
         /* The completion's grant rearm reads the handle from req->fh. */
         memcpy(req->fh, oh->fh, oh->fh_len);
@@ -131,11 +123,19 @@ chimera_fuse_op_getattr(
                                                     req->nodeid,
                                                     req->fh, req->fh_len);
 
-        /* The kernel named an open file; use its handle directly (it stays
-         * owned by the open, so req->handle stays NULL). */
-        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, oh,
-                            CHIMERA_VFS_ATTR_MASK_STAT,
-                            chimera_fuse_getattr_complete, req);
+        req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                                   &req->cred);
+
+        /* The kernel named an open file; the sequence borrows that handle,
+         * flagged as OPEN opened it, and has no current object of its own. */
+        chimera_vfs_compound_add_puthandle(req->compound, oh, file->open_flags);
+
+        chimera_vfs_compound_add_getattr(req->compound,
+                                         CHIMERA_VFS_ATTR_MASK_STAT);
+
+        chimera_vfs_compound_submit(req->compound,
+                                    chimera_fuse_getattr_sequence_complete,
+                                    req);
         return;
     }
 
@@ -149,52 +149,43 @@ chimera_fuse_op_getattr(
                                                 req->nodeid,
                                                 req->fh, req->fh_len);
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_fuse_getattr_open_callback, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
+    chimera_vfs_compound_add_getattr(req->compound,
+                                     CHIMERA_VFS_ATTR_MASK_STAT);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_getattr_sequence_complete, req);
 } /* chimera_fuse_op_getattr */
 
 /* --- SETATTR --- */
 
 static void
-chimera_fuse_setattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_fuse_setattr_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status = chimera_vfs_compound_status(compound);
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
-    chimera_fuse_attr_out_reply(req, post_attr);
-} /* chimera_fuse_setattr_complete */
-
-static void
-chimera_fuse_setattr_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    req->handle = oh;
-
-    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, oh,
-                        &req->u.setattr.set_attr,
-                        0, CHIMERA_VFS_ATTR_MASK_STAT,
-                        chimera_fuse_setattr_complete, req);
-} /* chimera_fuse_setattr_open_callback */
+    chimera_fuse_attr_out_reply(req, &op->attr);
+} /* chimera_fuse_setattr_sequence_complete */
 
 void
 chimera_fuse_op_setattr(
@@ -204,6 +195,7 @@ chimera_fuse_op_setattr(
     uint32_t                     arglen)
 {
     const struct fuse_setattr_in *in = arg;
+    int                           idx;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -220,11 +212,18 @@ chimera_fuse_op_setattr(
          * writable descriptor survive an intervening chmod.  The path-based
          * form (truncate(2)) deliberately does not, and still uses
          * chimera_vfs_setattr below. */
-        chimera_vfs_fsetattr(req->thread->vfs_thread, &req->cred,
-                             chimera_fuse_file(in->fh)->handle,
-                             &req->u.setattr.set_attr,
-                             0, CHIMERA_VFS_ATTR_MASK_STAT,
-                             chimera_fuse_setattr_complete, req);
+        req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                                   &req->cred);
+
+        idx = chimera_vfs_compound_add_setattr(req->compound,
+                                               chimera_fuse_file(in->fh)->handle,
+                                               &req->u.setattr.set_attr,
+                                               0, CHIMERA_VFS_ATTR_MASK_STAT);
+        (void) idx;
+
+        chimera_vfs_compound_submit(req->compound,
+                                    chimera_fuse_setattr_sequence_complete,
+                                    req);
         return;
     }
 
@@ -233,50 +232,60 @@ chimera_fuse_op_setattr(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_fuse_setattr_open_callback, req);
+    /* No handle: the sequence applies the attributes against the object's own
+     * mode, which is truncate(2) rather than ftruncate(2) -- the distinction
+     * the op's handle argument carries. */
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
+    /* The reply carries only the attributes after the change; nothing here
+     * reads them before it. */
+    chimera_vfs_compound_add_setattr(req->compound, NULL,
+                                     &req->u.setattr.set_attr,
+                                     0, CHIMERA_VFS_ATTR_MASK_STAT);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_setattr_sequence_complete, req);
 } /* chimera_fuse_op_setattr */
 
 /* --- READLINK --- */
 
+/*
+ * The sequence owns the target it read, so it is copied into the reply rather
+ * than read into it -- one copy of a path, in exchange for the request no
+ * longer opening the object itself.
+ */
 static void
-chimera_fuse_readlink_complete(
-    enum chimera_vfs_error    error_code,
-    int                       targetlen,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_fuse_readlink_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint32_t                              len;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
-    chimera_fuse_reply(req, 0, chimera_fuse_reply_space(req), targetlen);
-} /* chimera_fuse_readlink_complete */
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+    len = op->target_len > 4096 ? 4096 : op->target_len;
 
-static void
-chimera_fuse_readlink_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
+    memcpy(chimera_fuse_reply_space(req), op->target, len);
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    req->handle = oh;
-
-    chimera_vfs_readlink(req->thread->vfs_thread, &req->cred, oh,
-                         chimera_fuse_reply_space(req), 4096, 0,
-                         chimera_fuse_readlink_complete, req);
-} /* chimera_fuse_readlink_open_callback */
+    chimera_fuse_reply(req, 0, chimera_fuse_reply_space(req), len);
+} /* chimera_fuse_readlink_sequence_complete */
 
 void
 chimera_fuse_op_readlink(
@@ -290,54 +299,47 @@ chimera_fuse_op_readlink(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_fuse_readlink_open_callback, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
+    chimera_vfs_compound_add_readlink(req->compound);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_readlink_sequence_complete, req);
 } /* chimera_fuse_op_readlink */
 
 /* --- STATFS --- */
 
 static void
-chimera_fuse_statfs_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_fuse_statfs_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
-    struct fuse_statfs_out       out;
+    struct chimera_fuse_request          *req = private_data;
+    const struct chimera_vfs_compound_op *op;
+    struct fuse_statfs_out                out;
+    enum chimera_vfs_error                status = chimera_vfs_compound_status(compound);
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
     memset(&out, 0, sizeof(out));
 
-    chimera_fuse_statfs_from_vfs(&out.st, attr);
+    chimera_fuse_statfs_from_vfs(&out.st, &op->attr);
 
     chimera_fuse_reply(req, 0, &out, sizeof(out));
-} /* chimera_fuse_statfs_complete */
-
-static void
-chimera_fuse_statfs_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    req->handle = oh;
-
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, oh,
-                        CHIMERA_VFS_ATTR_MASK_STATFS,
-                        chimera_fuse_statfs_complete, req);
-} /* chimera_fuse_statfs_open_callback */
+} /* chimera_fuse_statfs_sequence_complete */
 
 void
 chimera_fuse_op_statfs(
@@ -351,29 +353,37 @@ chimera_fuse_op_statfs(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_fuse_statfs_open_callback, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
+    chimera_vfs_compound_add_getattr(req->compound,
+                                     CHIMERA_VFS_ATTR_MASK_STATFS);
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_statfs_sequence_complete, req);
 } /* chimera_fuse_op_statfs */
 
 /* --- ACCESS --- */
 
-static void
-chimera_fuse_access_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+/*
+ * The decision is the sequence's, not ours.
+ *
+ * An ACCESS op answers while the object's ACL is still the backend's to read;
+ * a sequence's ATTRIBUTES deliberately carry no ACL, because a backend owns the
+ * one it reports only for the duration of its own completion.  Asking for the
+ * attributes and judging them here would therefore answer from mode bits alone
+ * on any object that has an ACL.
+ */
+static uint32_t
+chimera_fuse_access_requested(const struct fuse_access_in *in)
 {
-    struct chimera_fuse_request *req       = private_data;
-    const struct fuse_in_header *hdr       = chimera_fuse_request_hdr(req);
-    const struct fuse_access_in *in        = (const struct fuse_access_in *) (hdr + 1);
-    uint32_t                     requested = 0;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
+    uint32_t requested = 0;
 
     if (in->mask & R_OK) {
         requested |= CHIMERA_ACE_READ_DATA;
@@ -385,50 +395,60 @@ chimera_fuse_access_complete(
         requested |= CHIMERA_ACE_EXECUTE;
     }
 
-    /* access(X_OK) on a non-directory with no execute bit anywhere is EACCES
-     * even for a privileged caller: POSIX makes root's implicit execute
-     * permission conditional on at least one of S_IXUSR/S_IXGRP/S_IXOTH being
-     * set, and the DAC override in chimera_vfs_access_check() grants
-     * ACE_EXECUTE unconditionally.  Withhold that ONE bit here rather than
-     * weakening the override, exactly as the NFSv4 ACCESS handler does (RFC
-     * 8881 18.1.4, chimera_nfs4_access_complete).  Directories are exempt on
-     * purpose: search permission on a directory is not gated this way. */
-    if ((requested & CHIMERA_ACE_EXECUTE) &&
-        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-        !S_ISDIR(attr->va_mode) &&
-        !(attr->va_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+    return requested;
+} /* chimera_fuse_access_requested */
+
+static void
+chimera_fuse_access_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct chimera_fuse_request          *req = private_data;
+    const struct fuse_in_header          *hdr = chimera_fuse_request_hdr(req);
+    const struct fuse_access_in          *in  =
+        (const struct fuse_access_in *) (hdr + 1);
+    const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status;
+    uint32_t                              requested;
+
+    status = chimera_vfs_compound_status(compound);
+
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
+        return;
+    }
+
+    op = chimera_vfs_compound_op(compound,
+                                 chimera_vfs_compound_num_ops(compound) - 1);
+    requested = chimera_fuse_access_requested(in);
+
+    if (requested && (op->granted & requested) != requested) {
         chimera_fuse_reply(req, EACCES, NULL, 0);
         return;
     }
 
-    if (requested &&
-        !chimera_vfs_access_allowed(attr, &req->cred, requested)) {
+    /* access(X_OK) on a non-directory with no execute bit anywhere is EACCES
+     * even for a privileged caller: POSIX makes root's implicit execute
+     * permission conditional on at least one of S_IXUSR/S_IXGRP/S_IXOTH being
+     * set, and the DAC override in chimera_vfs_access_check() grants
+     * ACE_EXECUTE unconditionally.  Withhold that ONE bit rather than
+     * weakening the override, exactly as the NFSv4 ACCESS handler does (RFC
+     * 8881 18.1.4, chimera_nfs4_access_fill).  Directories are exempt on
+     * purpose: search permission on a directory is not gated this way.
+     *
+     * The attributes come off the ACCESS op, which the executor fills the same
+     * way the standalone getattr did -- so the sequence answers this exactly as
+     * the op-at-a-time path did. */
+    if ((requested & CHIMERA_ACE_EXECUTE) &&
+        (op->attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISDIR(op->attr.va_mode) &&
+        !(op->attr.va_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
         chimera_fuse_reply(req, EACCES, NULL, 0);
         return;
     }
 
     chimera_fuse_reply(req, 0, NULL, 0);
-} /* chimera_fuse_access_complete */
-
-static void
-chimera_fuse_access_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    req->handle = oh;
-
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, oh,
-                        CHIMERA_VFS_ATTR_MASK_STAT,
-                        chimera_fuse_access_complete, req);
-} /* chimera_fuse_access_open_callback */
+} /* chimera_fuse_access_sequence_complete */
 
 void
 chimera_fuse_op_access(
@@ -447,8 +467,18 @@ chimera_fuse_op_access(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_fuse_access_open_callback, req);
+    req->compound = chimera_vfs_compound_alloc(req->thread->vfs_thread,
+                                               &req->cred);
+
+    chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
+    /* The open the sequence used to do for this op, said out loud. */
+    chimera_vfs_compound_add_open_current(req->compound,
+                                          CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                          0);
+
+    chimera_vfs_compound_add_access(req->compound,
+                                    chimera_fuse_access_requested(arg));
+
+    chimera_vfs_compound_submit(req->compound,
+                                chimera_fuse_access_sequence_complete, req);
 } /* chimera_fuse_op_access */

@@ -28,11 +28,11 @@ chimera_posix_mkdirat_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    // If we have a parent handle (from a real fd), use mkdir_at dispatch
+    /* A real dirfd resolves relative to the descriptor; AT_FDCWD and an
+     * absolute path take the path-based mkdir from the export root. */
     if (request->mkdir.parent_handle) {
         chimera_dispatch_mkdir_at(thread, request->mkdir.parent_handle, request);
     } else {
-        // Use the normal path-based mkdir
         chimera_dispatch_mkdir(thread, request);
     }
 } /* chimera_posix_mkdirat_exec */
@@ -51,10 +51,16 @@ chimera_posix_mkdirat(
     int                             path_len;
     const char                     *slash;
 
+    /* An empty path names nothing -- see openat. */
+    if (pathname[0] == '\0') {
+        errno = ENOENT;
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
-    // Handle AT_FDCWD case
-    if (dirfd == AT_FDCWD) {
+    /* An absolute path ignores dirfd entirely (POSIX) -- see openat. */
+    if (dirfd == AT_FDCWD || pathname[0] == '/') {
         if (pathname[0] == '/') {
             path_len = strlen(pathname);
             memcpy(req.mkdir.path, pathname, path_len);
@@ -88,10 +94,11 @@ chimera_posix_mkdirat(
         path_len = strlen(pathname);
         memcpy(req.mkdir.path, pathname, path_len);
 
-        req.mkdir.parent_handle = dir_entry->handle;
-        req.mkdir.path_len      = path_len;
-        req.mkdir.parent_len    = 0;
-        req.mkdir.name_offset   = 0;
+        req.mkdir.parent_handle  = dir_entry->handle;
+        req.mkdir.dir_open_flags = chimera_posix_fd_open_flags(dir_entry);
+        req.mkdir.path_len       = path_len;
+        req.mkdir.parent_len     = 0;
+        req.mkdir.name_offset    = 0;
     }
 
     req.opcode             = CHIMERA_CLIENT_OP_MKDIR;

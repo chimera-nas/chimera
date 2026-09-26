@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -22,7 +22,13 @@ chimera_readdir(
     request->readdir.complete     = complete;
     request->readdir.private_data = private_data;
     request->readdir.handle       = handle;
-    request->readdir.cookie       = cookie;
+    /* A bare handle does not record CHIMERA_VFS_OPEN_DIRECTORY, and the
+     * sequence will not serve a READDIR from a lent handle without it.  The
+     * contract of this call is that `handle` is an open directory, so the
+     * bit is a real flag of the caller's open and is restored here. */
+    request->readdir.open_flags = chimera_client_handle_open_flags(handle) |
+        CHIMERA_VFS_OPEN_DIRECTORY;
+    request->readdir.cookie = cookie;
 
     chimera_dispatch_readdir(thread, request);
 } /* chimera_readdir */

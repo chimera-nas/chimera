@@ -20,6 +20,15 @@
  * owning-thread doorbell resume — R63/R65) is preserved bit for bit.
  */
 
+static bool
+chimera_vfs_io_is_write(const struct chimera_vfs_request *request)
+{
+    return request->opcode == CHIMERA_VFS_OP_WRITE ||
+           request->opcode == CHIMERA_VFS_OP_COPY_RANGE ||
+           request->opcode == CHIMERA_VFS_OP_CLONE_RANGE ||
+           request->opcode == CHIMERA_VFS_OP_ALLOCATE;
+} /* chimera_vfs_io_is_write */
+
 static void
 chimera_vfs_implicit_break_cb(
     struct chimera_vfs_claim *claim,
@@ -371,6 +380,16 @@ chimera_vfs_state_io_resume(struct chimera_vfs_request *request)
     struct chimera_vfs_file_state *file = request->io_lease_file;
 
     if (!file) {
+        /* A recall cancelled after a pump had posted it (chimera_vfs_claim_
+         * recall_cancel): the ticket is gone and so is its continuation, and
+         * the one posted resume -- this one -- is the last reference to the
+         * request.  Finish it as its continuation would have, minus the
+         * continuation. */
+        if ((request->io_recall_single || request->io_recall_all) &&
+            !request->io_next) {
+            chimera_vfs_complete(request);
+            chimera_vfs_request_free(request->thread, request);
+        }
         return;
     }
 
@@ -450,8 +469,8 @@ chimera_vfs_io_try(
     if (request->io_recall_all) {
         if (chimera_vfs_claim_trigger_ns_full(state, file,
                                               request->io_handle,
-                                              request->io_recall_flush_only,
-                                              request->io_owner_valid ? &request->io_owner : NULL)) {
+                                              request->io_owner_valid ? &request->io_owner : NULL,
+                                              request->io_recall_flush_only)) {
             evpl_mutex_lock(&file->lock);
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
@@ -470,7 +489,7 @@ chimera_vfs_io_try(
         return;
     }
 
-    need = (request->opcode == CHIMERA_VFS_OP_WRITE)
+    need = chimera_vfs_io_is_write(request)
         ? CHIMERA_CLAIM_W : CHIMERA_CLAIM_R;
 
     evpl_mutex_lock(&file->lock);
@@ -495,14 +514,20 @@ chimera_vfs_io_try(
 
     chimera_vfs_implicit_owner(file, &iowner);
     memset(&probe, 0, sizeof(probe));
-    probe.construct  = CHIMERA_CONSTRUCT_IMPLICIT;
-    probe.klass      = CHIMERA_CLAIM_CLASS_ACCESS;
-    probe.used       = target;
-    probe.advertised = target;
-    probe.owner      = iowner;
-    probe.length     = UINT64_MAX;
-    probe.break_cb   = chimera_vfs_implicit_break_cb;
-    probe.cb_private = state;
+    probe.construct = CHIMERA_CONSTRUCT_IMPLICIT;
+    probe.klass     = CHIMERA_CLAIM_CLASS_ACCESS;
+    /* Judge this request's access, not previously cached bits. A scoped
+     * write may have admitted W past a still-pinned deny-W holder; ordinary
+     * later reads must neither inherit that exemption nor request W merely
+     * because the shared implicit claim has cached it. */
+    probe.used               = need;
+    probe.advertised         = need;
+    probe.owner              = iowner;
+    probe.length             = UINT64_MAX;
+    probe.break_cb           = chimera_vfs_implicit_break_cb;
+    probe.cb_private         = state;
+    probe.admit_excluded     = request->io_view.excluded;
+    probe.admit_num_excluded = request->io_view.num_excluded;
 
     {
         struct chimera_vfs_claim *conflict = NULL;
@@ -543,6 +568,11 @@ chimera_vfs_io_try(
 
         if (!was_active) {
             file->implicit_claim = probe;
+            /* A private admission decision must never lend its exemption or
+             * borrowed pointers to the shared cached claim. Every subsequent
+             * anonymous request performs its own admission check above. */
+            file->implicit_claim.admit_excluded     = NULL;
+            file->implicit_claim.admit_num_excluded = 0;
             chimera_vfs_claim_link_locked(file, &file->implicit_claim);
             file->implicit_active = 1;
             activated             = true;
@@ -631,7 +661,7 @@ chimera_vfs_io_claim_acquire(
      * victims, the writer PARKS until its break acks -- the invalidation
      * must be visible before the write returns, not merely begun. */
     if (actor) {
-        if (request->opcode == CHIMERA_VFS_OP_WRITE) {
+        if (chimera_vfs_io_is_write(request)) {
             chimera_vfs_claim_invalidate(state, key_fh, key_fh_len,
                                          key_fh_hash,
                                          CHIMERA_TRIGGER_WRITE, actor, 0);
@@ -752,6 +782,62 @@ chimera_vfs_io_recall_single(
 
     chimera_vfs_io_try(state, file, request);
 } /* chimera_vfs_io_recall_single */
+
+SYMBOL_EXPORT bool
+chimera_vfs_claim_recall_cancel(
+    struct chimera_vfs_state   *state,
+    struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_file_state      *file   = request->io_lease_file;
+    struct chimera_vfs_pending_acquire *ticket = &request->io_lease_ticket;
+    bool                                posted;
+    bool                                queued;
+
+    /* Never parked, or the drain already ran io_try for it (which clears
+     * io_lease_file only on the way into `next`). */
+    if (!file) {
+        return false;
+    }
+
+    /* `wait` is the pump's "resume posted" mark (chimera_vfs_claim_pump_io):
+     * read under the lock the pump sets it under, before the unpark clears
+     * it.  A posted request is on the owning thread's pending_io_resume list
+     * -- or in the drain's own batch, if this cancel is running from inside
+     * that drain -- and only the drain can take it off, so it is not freed
+     * here; io_lease_file NULL and io_next NULL are what tell the drain
+     * (chimera_vfs_state_io_resume) that the request it has reached was
+     * cancelled and is its to finish. */
+    evpl_mutex_lock(&file->lock);
+    posted = ticket->queued && ticket->wait;
+    queued = chimera_vfs_io_unpark_locked(file, request);
+    evpl_mutex_unlock(&file->lock);
+
+    if (!queued) {
+        return false;
+    }
+
+    /* The barrier position the ticket held is free: re-post whoever was
+     * behind it, as io_try does when a request proceeds. */
+    chimera_vfs_claim_pump_io(state, file);
+
+    /* io_lease_file NULL with io_next NULL is the mark the drain reads: a
+     * recall request in that shape was cancelled and is the drain's to
+     * finish.  io_recall_single / io_recall_all stay set -- they are what
+     * tells the drain this is a recall at all. */
+    request->io_lease_file = NULL;
+    request->io_next       = NULL;
+
+    /* The reference the recall took for its wait. */
+    request->io_owns_lease_ref = 0;
+    chimera_vfs_state_put(state, file);
+
+    if (!posted) {
+        chimera_vfs_complete(request);
+        chimera_vfs_request_free(request->thread, request);
+    }
+
+    return true;
+} /* chimera_vfs_claim_recall_cancel */
 
 SYMBOL_EXPORT void
 chimera_vfs_io_claim_release(struct chimera_vfs_request *request)

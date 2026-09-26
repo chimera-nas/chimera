@@ -16,6 +16,7 @@
 #include "nfs4_xdr.h"
 #include "nfs4_stateid.h"
 #include "nfs4_lease.h"
+#include "nfs4_change.h"
 
 struct nfs_request;
 #include "vfs/vfs.h"
@@ -131,9 +132,10 @@ struct nfs4_cb_path {
 /*
  * Per-owner replay cache.  RFC 7530 §9.1.7: when an owner-sequenced op is
  * retransmitted with the same seqid, the server must return the original
- * reply.  Phase 4 caches the structured fields most clients depend on
- * (status + stateid).  A fully byte-perfect replay (cinfo, attrset, ...)
- * is deferred; in practice Linux clients re-fetch those via GETATTR.
+ * reply. Stateid replies and LOCK denial bodies are owned value snapshots;
+ * no request-buffer pointer may escape into an owner or a slot tombstone.
+ * OPEN replies additionally retain cinfo/attrset, output FH and the complete
+ * delegation, including owned permission-principal bytes.
  */
 struct nfs4_replay_cache {
     uint32_t        seqid;     /* seqid this entry replies to */
@@ -145,6 +147,23 @@ struct nfs4_replay_cache {
      * nfs4_replay_record and filled in by the OPEN completion path. */
     uint32_t        rflags;
     uint8_t         valid;
+    bool            lock_denied_valid;
+    bool            open_valid;
+    union {
+        struct {
+            uint64_t offset, length, clientid;
+            uint32_t locktype, owner_len;
+            uint8_t  owner[NFS4_OPAQUE_LIMIT];
+        } denied;
+        struct {
+            struct change_info4     cinfo;
+            uint32_t                num_attrset, attrset[3], fh_len, delegation_type;
+            uint8_t                 fh[NFS4_FHSIZE];
+            struct open_delegation4 delegation;
+            uint32_t                delegation_who_len;
+            uint8_t                 delegation_who[NFS4_OPAQUE_LIMIT];
+        } open;
+    };
 };
 
 /*
@@ -192,10 +211,12 @@ nfs4_replay_record(
     nfsstat4                  status,
     const struct stateid4    *stateid)
 {
-    replay->seqid  = seqid;
-    replay->op     = op;
-    replay->status = status;
-    replay->rflags = 0;
+    replay->seqid             = seqid;
+    replay->op                = op;
+    replay->status            = status;
+    replay->rflags            = 0;
+    replay->lock_denied_valid = false;
+    replay->open_valid        = false;
     if (stateid) {
         replay->stateid = *stateid;
     } else {
@@ -235,6 +256,65 @@ nfs4_seqid_should_advance(nfsstat4 status)
     } // switch
 } /* nfs4_seqid_should_advance */
 
+/* All attempt-time methods only copy private values. Construction captures
+ * the owner under its reservation; reset restores that exact snapshot. */
+struct nfs4_owner_replay_journal {
+    uint32_t                 initial_seqid, seqid;
+    struct nfs4_replay_cache initial_replay, replay;
+    bool                     dirty;
+    bool                     initial_confirmed, confirmed;
+};
+
+SYMBOL_EXPORT void nfs4_replay_record_lock(
+    struct nfs4_replay_cache *replay,
+    uint32_t                  seqid,
+    const struct LOCK4res    *response);
+/* owner_storage needs NFS4_OPAQUE_LIMIT bytes only for a nonempty denial.
+ * Copy while holding the owner's lock; response never borrows cache storage. */
+SYMBOL_EXPORT bool nfs4_replay_fill_lock(
+    const struct nfs4_replay_cache *replay,
+    struct LOCK4res                *response,
+    uint8_t                        *owner_storage);
+SYMBOL_EXPORT void nfs4_owner_replay_reset(
+    struct nfs4_owner_replay_journal *journal);
+SYMBOL_EXPORT int nfs4_owner_replay_classify(
+    const struct nfs4_owner_replay_journal *journal,
+    uint32_t                                incoming,
+    uint32_t                                op);
+SYMBOL_EXPORT void nfs4_owner_replay_record(
+    struct nfs4_owner_replay_journal *journal,
+    uint32_t                          incoming,
+    uint32_t                          op,
+    nfsstat4                          status,
+    const struct stateid4            *stateid);
+SYMBOL_EXPORT void nfs4_owner_replay_record_lock(
+    struct nfs4_owner_replay_journal *journal,
+    uint32_t                          incoming,
+    const struct LOCK4res            *response);
+
+/* OPEN snapshots own every delegation arm. Record rejects malformed or
+ * oversized reply fields; fill copies attributes, FH and permission principal
+ * into caller-owned storage and never exposes cache pointers. */
+SYMBOL_EXPORT bool nfs4_replay_record_open(
+    struct nfs4_replay_cache *replay,
+    uint32_t                  seqid,
+    const struct OPEN4res    *response,
+    const uint8_t            *fh,
+    uint32_t                  fh_len);
+SYMBOL_EXPORT bool nfs4_replay_fill_open(
+    const struct nfs4_replay_cache *replay,
+    struct OPEN4res                *response,
+    uint32_t                        attr_storage[3],
+    uint8_t                         fh_storage[NFS4_FHSIZE],
+    uint32_t                       *fh_len,
+    uint8_t                         who_storage[NFS4_OPAQUE_LIMIT]);
+SYMBOL_EXPORT bool nfs4_owner_replay_record_open(
+    struct nfs4_owner_replay_journal *journal,
+    uint32_t                          incoming,
+    const struct OPEN4res            *response,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len);
+
 struct nfs_client {
     uint64_t                 client_id;
     uint64_t                 verifier;
@@ -261,6 +341,11 @@ struct nfs_client {
      * A reclaimed client is not revived by a returning op. */
     _Atomic uint8_t          reclaim_pending;
     uint64_t                 last_touch_ns;
+    /* Request-level reservations protect unpublished compound OPEN state from
+     * lease teardown until the compound has accepted or discarded its attempt. */
+    _Atomic uint32_t         compound_pins;
+    bool                     compound_destroy_pending;
+    bool                     teardown_started; /* under lock; memory refs may remain */
 
     /* Owners are hashed by their byte string. */
     struct nfs_open_owner   *open_owners_by_str;
@@ -291,16 +376,35 @@ struct nfs_client {
     evpl_mutex_t             lock;
 };
 
+/* Construction/completion lifetime bracket for compounds that need the client
+* but no owner reservation (for example v4.0 LOCKT). Caller must already hold
+* a valid client pointer while acquiring the pin. No renewal or callbacks at
+* reserve; finish may perform delayed teardown and belongs after callbacks. */
+SYMBOL_EXPORT bool nfs_client_reserve_compound(
+    struct nfs_client *client);
+/* Caller already owns a compound pin. Extend that lifetime for an asynchronous
+ * callback even when destruction has been requested since the original pin. */
+SYMBOL_EXPORT void nfs_client_duplicate_compound_pin(
+    struct nfs_client *client);
+SYMBOL_EXPORT void nfs_client_finish_compound(
+    struct nfs_client         *client,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
 struct nfs_open_owner {
-    struct nfs_client       *client;       /* borrowed; client outlives owners */
-    uint8_t                  owner[NFS4_OPAQUE_LIMIT];
-    uint16_t                 owner_len;
-    uint32_t                 seqid;        /* 4.0 RFC 7530 §9.1.7; 4.1+ unused */
-    bool                     confirmed;    /* 4.0 OPEN_CONFIRM gate */
-    struct nfs4_replay_cache replay;       /* 4.0 only */
-    struct nfs_open_state   *states_by_fh; /* uthash keyed on {fh, fh_len} */
-    UT_hash_handle           hh;
-    evpl_mutex_t             lock;
+    struct nfs_client                 *client; /* borrowed; client outlives owners */
+    uint8_t                            owner[NFS4_OPAQUE_LIMIT];
+    uint16_t                           owner_len;
+    uint32_t                           seqid; /* 4.0 RFC 7530 §9.1.7; 4.1+ unused */
+    bool                               confirmed; /* 4.0 OPEN_CONFIRM gate */
+    struct nfs4_replay_cache           replay; /* 4.0 only */
+    struct nfs_open_state             *compound_pending; /* reserved fresh OPEN */
+    const void                        *compound_close_group;
+    uint32_t                           compound_close_count; /* protected by client + owner locks */
+    struct nfs_open_owner_reservation *compound_reservation;
+    struct nfs_open_state             *states_by_fh; /* uthash keyed on {fh, fh_len} */
+    UT_hash_handle                     hh;
+    evpl_mutex_t                       lock;
 
     /* Lifetime: starts at 1 for the hash-table slot.  find_or_create returns
      * the owner with one extra caller ref (taken under client->lock, the only
@@ -308,61 +412,67 @@ struct nfs_open_owner {
      * borrows the owner across an async VFS round-trip holds that ref.  Client
      * teardown HASH_DELETEs the owner and drops the slot ref; the last put()
      * destroys the lock and frees the struct. */
-    _Atomic uint32_t         refcount;
+    _Atomic uint32_t                   refcount;
 };
 
 struct nfs_open_state {
-    struct nfs_open_owner          *owner;
-    uint32_t                        principal_flavor;
-    uint32_t                        principal_machinename_len;
-    char                            principal_machinename[NFS4_OPAQUE_LIMIT];
-    uint8_t                         fh[NFS4_FHSIZE];
-    uint16_t                        fh_len;
-    uint32_t                        share_access;       /* OPEN4_SHARE_ACCESS_* */
-    uint32_t                        share_deny;         /* OPEN4_SHARE_DENY_*   */
+    struct nfs_open_owner             *owner;
+    uint32_t                           principal_flavor;
+    uint32_t                           principal_machinename_len;
+    char                               principal_machinename[NFS4_OPAQUE_LIMIT];
+    uint8_t                            fh[NFS4_FHSIZE];
+    uint16_t                           fh_len;
+    uint32_t                           share_access;    /* OPEN4_SHARE_ACCESS_* */
+    uint32_t                           share_deny;      /* OPEN4_SHARE_DENY_*   */
     /* Set of (share_access, share_deny) pairs this open-owner has OPENed on
      * this file, one bit per (access<<2 | deny) combo.  OPEN_DOWNGRADE must
      * land on the union of some subset of these events (RFC 7530 §16.19.4),
      * not merely a subset of the current bits, so the two dimensions must be
      * checked jointly -- an independent per-dimension history cannot tell
      * "OPEN(READ,NONE)+OPEN(WRITE,WRITE)" from "OPEN(READ,WRITE)+OPEN(WRITE,NONE)". */
-    uint16_t                        share_combos;
-    uint32_t                        seqid;              /* stateid.seqid */
+    uint16_t                           share_combos;
+    _Atomic uint32_t                   seqid;           /* stateid.seqid; pure TEST_STATEID snapshot */
 
     /* Slot identity (decoded from stateid.other). */
-    uint8_t                         shard;
-    uint32_t                        slot_idx;
-    uint32_t                        generation;
+    uint8_t                            shard;
+    uint32_t                           slot_idx;
+    uint32_t                           generation;
 
-    struct chimera_vfs_open_handle *handle;             /* +1 via chimera_vfs_dup_handle */
+    struct chimera_vfs_open_handle    *handle;          /* +1 via chimera_vfs_dup_handle */
 
     /* Retained companion handle after an access upgrade.  In-flight I/O may
      * still use it; when the primary is write-only, reads use this handle.
      * Two complementary handles cover the complete READ|WRITE union. */
-    struct chimera_vfs_open_handle *handle_superseded;
+    struct chimera_vfs_open_handle    *handle_superseded;
 
-    struct nfs_lock_state          *locks;              /* utlist via next_in_open */
-    UT_hash_handle                  hh;                 /* by fh in owner->states_by_fh */
+    struct nfs_lock_state             *locks;           /* utlist via next_in_open */
+    UT_hash_handle                     hh;              /* by fh in owner->states_by_fh */
 
     /* Claim-core ACCESS reservation (NFS4_OPEN construct) for cross-protocol
      * (NLM/SMB) share-mode coordination.  Held while the open_state is alive;
      * released in open_state_cleanup. */
-    struct chimera_vfs_claim        share_claim;
-    struct chimera_vfs_file_state  *share_file_state;
-    bool                            share_claim_held;
+    struct chimera_vfs_claim           share_claim;
+    struct chimera_vfs_file_state     *share_file_state;
+    bool                               share_claim_held;
 
     /* For an NFSv4 named-attribute (stream) open: a stream_holder taken on the
      * BASE file's vfs_state so a cross-protocol base delete-on-close defers while
      * this stream is open (the NFSv4 analogue of the SMB ADS stream holder).
      * NULL for an ordinary file open; released in open_state_cleanup. */
-    struct chimera_vfs_file_state  *base_stream_file_state;
+    struct chimera_vfs_file_state     *base_stream_file_state;
 
     /* Lifetime: starts at 1 for the state's slot; each acquire bumps it.
      * destroy() flips `destroyed` and drops the +1.  When refcount reaches
      * zero AND destroyed is set, the handle is released and the struct
      * freed by the last release. */
-    _Atomic uint32_t                refcount;
-    _Atomic uint8_t                 destroyed;
+    _Atomic uint32_t                   refcount;
+    _Atomic uint8_t                    destroyed;
+    /* Published state remains installed while an attempt provisionally closes
+     * it. New acquire calls return DELAY; finish either destroys or releases. */
+    _Atomic uint8_t                    compound_closing;
+    const void                        *compound_close_group; /* pinned reservation identity */
+    _Atomic uint8_t                    compound_reserved;
+    struct nfs_open_owner_reservation *compound_reservation;
 };
 
 struct nfs_lock_owner {
@@ -377,12 +487,16 @@ struct nfs_lock_owner {
 
     /* Lifetime: same refcount contract as nfs_open_owner (see above). */
     _Atomic uint32_t         refcount;
+    /* Construction-time lock journal freezes; cookie/count under client and
+     * owner locks, atomic flag readable by the state-table acquire gate. */
+    _Atomic uint32_t         compound_pins;
+    const void              *compound_group;
 };
 
 struct nfs_lock_state {
     struct nfs_lock_owner          *lock_owner;
     struct nfs_open_state          *open_state;
-    uint32_t                        seqid;
+    _Atomic uint32_t                seqid;
 
     uint8_t                         shard;
     uint32_t                        slot_idx;
@@ -412,6 +526,8 @@ struct nfs_lock_state {
 
     _Atomic uint32_t                refcount;
     _Atomic uint8_t                 destroyed;
+    _Atomic uint8_t                 compound_reserved;
+    const void                     *compound_group;
 };
 
 /* Delegation recall lifecycle (cb_recall_state). */
@@ -433,70 +549,103 @@ struct nfs_lock_state {
  * after releasing the claim.
  */
 struct nfs_delegation {
-    struct nfs_client             *client;        /* borrowed; lists this deleg */
-    uint8_t                        type;          /* OPEN_DELEGATE_READ / WRITE */
+    struct nfs_client                     *client; /* borrowed; lists this deleg */
+    uint8_t                                type;   /* OPEN_DELEGATE_READ / WRITE */
 
-    uint8_t                        fh[NFS4_FHSIZE];
-    uint16_t                       fh_len;
-    uint64_t                       fh_hash;
+    uint8_t                                fh[NFS4_FHSIZE];
+    uint16_t                               fh_len;
+    uint64_t                               fh_hash;
     /* Export the file belongs to, so the (internal, unwrapped) fh above can be
      * re-wrapped to the client's on-wire form when sent in a CB_RECALL /
      * CB_GETATTR callback. */
-    uint16_t                       export_id;
+    uint16_t                               export_id;
 
     /* Slot identity (decoded from stateid.other). */
-    uint8_t                        shard;
-    uint32_t                       slot_idx;
-    uint32_t                       generation;
-    uint32_t                       seqid;          /* stateid.seqid */
+    uint8_t                                shard;
+    uint32_t                               slot_idx;
+    uint32_t                               generation;
+    _Atomic uint32_t                       seqid;  /* stateid.seqid */
 
     /* Claim-core cache claim that backs the delegation (NFSv4 keeps its
      * hand-rolled one-deleg-per-(client,fh); the grant machinery is not
      * used).  Conflicting acquirers break it, invoking
      * nfs4_delegation_break_cb. */
-    struct chimera_vfs_claim       claim;
-    struct chimera_vfs_file_state *file_state;
-    bool                           lease_held;
+    struct chimera_vfs_claim               claim;
+    struct chimera_vfs_file_state         *file_state;
+    bool                                   lease_held;
 
     /*
      * RFC 7530/8881 §10.4.3 server-side change-attribute combine state.  The
      * server caches the file's NFSv4 change attribute at grant time (`sc`) and,
-     * on each peer GETATTR that runs CB_GETATTR, compares the holder's reported
-     * value (`cc`) against `sc`:
-     *   cc == sc  -> the holder has not modified; the server returns its own
-     *                LOCAL change/time_metadata/time_modify (NOT the holder's).
-     *   cc != sc  -> the holder has modified; the server synthesises
-     *                time_metadata/time_modify from the current time, computes a
-     *                new server change value nsc >= sc + 1, returns nsc, replaces
-     *                the cached sc with nsc, and guarantees each returned nsc
-     *                STRICTLY exceeds the previously returned one (monotonicity).
+     * marks the delegation dirty once the holder reports a different change
+     * or size. Dirty remains set until return/revocation: a client may report
+     * the same cc for every later modification. Each dirty query synthesises
+     * a strictly increasing change and uses the holder's current size.
      * `combine_lock` guards these fields, which may be read/updated from any
      * requester thread that runs a peer GETATTR against this delegation.
      */
-    evpl_mutex_t           combine_lock;
-    uint64_t               combine_sc;              /* cached change attr (sc) */
-    uint64_t               combine_last;            /* last nsc returned to a peer */
-    bool                   combine_valid;           /* sc captured at grant     */
+    evpl_mutex_t                           combine_lock;
+    uint64_t                               combine_sc;      /* cached change attr (sc) */
+    uint64_t                               combine_last;    /* last nsc returned to a peer */
+    bool                                   combine_valid;   /* sc captured at grant     */
+    bool                                   combine_dirty;   /* sticky for delegation lifetime */
+    struct nfs_delegation_combine_journal *combine_reservation;
 
-    _Atomic uint8_t        cb_recall_state;         /* NFS4_DELEG_* */
+    _Atomic uint8_t                        cb_recall_state; /* NFS4_DELEG_* */
     /* Count of CB_RECALL retransmits attempted because the client's callback
      * session was not yet usable (CB_SEQUENCE returned NFS4ERR_BADSESSION right
      * after a CREATE_SESSION, before the client finished registering the new
      * session).  Bounds the retransmit loop below the recall deadline. */
-    _Atomic uint8_t        cb_recall_retries;
+    _Atomic uint8_t                        cb_recall_retries;
     /* Set when the delegation was force-revoked (recall unanswered /
      * conflicting access) rather than returned.  A revoked stateid resolves to
      * NFS4ERR_DELEG_REVOKED until the client FREE_STATEIDs it. */
-    _Atomic uint8_t        revoked;
+    _Atomic uint8_t                        revoked;
 
-    struct nfs_delegation *next_in_client;          /* utlist on client->delegations */
+    struct nfs_delegation                 *next_in_client;  /* utlist on client->delegations */
     /* Single-link queue for cross-thread recall marshalling (owner thread's
      * doorbell drains it); see nfs4_callback.c. */
-    struct nfs_delegation *recall_qnext;
+    struct nfs_delegation                 *recall_qnext;
 
-    _Atomic uint32_t       refcount;
-    _Atomic uint8_t        destroyed;
+    _Atomic uint32_t                       refcount;
+    _Atomic uint8_t                        destroyed;
 };
+
+/* One journal per delegation per compound. Reservation takes its own reference
+ * to an already-pinned delegation. Reset/apply touch only these private values;
+ * callbacks and captured timestamps are separate request-lifetime inputs. */
+struct nfs_delegation_combine_journal {
+    struct nfs_delegation *deleg;
+    const void            *cookie;
+    uint64_t               initial_sc, initial_last, sc, last;
+    bool                   initial_valid, valid, applied;
+    bool                   initial_dirty, dirty;
+};
+
+SYMBOL_EXPORT nfsstat4 nfs_delegation_combine_reserve(
+    struct nfs_delegation                 *deleg,
+    const void                            *cookie,
+    struct nfs_delegation_combine_journal *journal);
+SYMBOL_EXPORT void nfs_delegation_combine_reset(
+    struct nfs_delegation_combine_journal *journal);
+SYMBOL_EXPORT nfsstat4 nfs_delegation_combine_apply(
+    struct nfs_delegation_combine_journal *journal,
+    uint64_t                               client_change,
+    bool                                  *modified,
+    uint64_t                              *server_change);
+/* Merge one successful callback reply into attempt-private attributes. */
+SYMBOL_EXPORT nfsstat4 nfs_delegation_combine_attrs(
+    struct nfs_delegation_combine_journal *journal,
+    uint64_t                               client_change,
+    bool                                   got_size,
+    uint64_t                               client_size,
+    const struct timespec                 *query_time,
+    struct chimera_vfs_attrs              *attrs);
+SYMBOL_EXPORT void nfs_delegation_combine_finish(
+    struct nfs_delegation_combine_journal *journal,
+    bool                                   accepted,
+    struct nfs_state_table                *table,
+    struct chimera_vfs_thread             *vfs_thread);
 
 /*
  * pNFS layout state (NFSv4.1+), one per {client, file handle}.
@@ -510,11 +659,12 @@ struct nfs_delegation {
 struct nfs_layout_table;
 
 struct nfs_layout_state {
-    struct nfs_client       *client;    /* borrowed; client outlives the layout */
+    struct nfs_client       *client;    /* holds a memory ref through final layout put */
+    uint64_t                 client_id; /* immutable; permits safe client pinning */
     uint8_t                  fh[NFS4_FHSIZE];
     uint16_t                 fh_len;
     uint16_t                 export_id; /* to re-wrap fh for CB_LAYOUTRECALL */
-    uint32_t                 seqid;     /* server-incremented layout stateid seqid */
+    _Atomic uint32_t         seqid;     /* server-incremented layout stateid seqid */
     uint32_t                 iomode;    /* current LAYOUTIOMODE4 */
 
     /* layouttype4 granted for this file (RFC 8881 3.3.13): flex-files, block
@@ -534,10 +684,6 @@ struct nfs_layout_state {
 
     UT_hash_handle           hh;        /* by fh in client->layouts_by_fh */
 
-    /* Link on an owner thread's cb_layoutrecall_queue while a CB_LAYOUTRECALL
-     * is being marshalled cross-thread (see nfs4_cb_recall_holder). */
-    struct nfs_layout_state *recall_qnext;
-
     _Atomic uint32_t         refcount;
     _Atomic uint8_t          destroyed;
 };
@@ -546,7 +692,11 @@ struct nfs_layout_state {
  * holders under its shard lock, then the recaller works with them unlocked). */
 void nfs_layout_state_get(
     struct nfs_layout_state *st);
-void nfs_layout_state_put(
+SYMBOL_EXPORT void nfs_layout_state_put(
+    struct nfs_layout_state *st);
+/* Caller owns a layout reference. Retain its client through a recall, including
+ * deferred teardown; unlike operation admission, expired clients may be pinned. */
+SYMBOL_EXPORT struct nfs_client * nfs_layout_state_reserve_client(
     struct nfs_layout_state *st);
 
 /*
@@ -557,19 +707,21 @@ void nfs_layout_state_put(
  * incremented on every (re)use to detect stale stateids (ABA).
  */
 
-#define NFS4_SLOT_TYPE_FREE    0
-#define NFS4_SLOT_TYPE_OPEN    1
-#define NFS4_SLOT_TYPE_LOCK    2
+#define NFS4_SLOT_TYPE_FREE     0
+#define NFS4_SLOT_TYPE_OPEN     1
+#define NFS4_SLOT_TYPE_LOCK     2
 /* A slot whose state was torn down because the owning client was purged
  * (lease expiry / reboot / DESTROY_CLIENTID).  Distinct from FREE so a stateid
  * minted by the purged client resolves to NFS4ERR_EXPIRED rather than
  * NFS4ERR_BAD_STATEID (RFC 7530 §8.1.3).  The slot is on the free list and
  * reverts to a normal type when reallocated. */
-#define NFS4_SLOT_TYPE_EXPIRED 3
+#define NFS4_SLOT_TYPE_EXPIRED  3
 /* An OPEN/WRITE delegation's stateid slot. */
-#define NFS4_SLOT_TYPE_DELEG   4
+#define NFS4_SLOT_TYPE_DELEG    4
 /* A pNFS layout's stateid slot. */
-#define NFS4_SLOT_TYPE_LAYOUT  5
+#define NFS4_SLOT_TYPE_LAYOUT   5
+/* Allocated privately; never resolvable by a wire stateid before commit. */
+#define NFS4_SLOT_TYPE_RESERVED 6
 
 struct nfs_state_slot {
     void                    *state;
@@ -590,10 +742,11 @@ struct nfs_state_shard {
 };
 
 struct nfs_state_table {
-    struct nfs_state_shard shards[NFS_STATE_NUM_SHARDS];
+    struct nfs_state_shard    shards[NFS_STATE_NUM_SHARDS];
+    struct nfs4_change_table *change_table;
     /* Per-server-instance epoch stamped into every stateid; see
      * nfs4_stateid.h.  Set once at nfs_state_table_init. */
-    uint32_t               epoch;
+    uint32_t                  epoch;
 };
 
 /* Select backend access from the open's retained handles, including after a
@@ -830,6 +983,17 @@ SYMBOL_EXPORT nfsstat4 nfs_state_table_acquire(
     void                  **out_state,
     uint8_t                *out_type);
 
+/* Attempt-private acquire: holds the same state reference as acquire(), but
+ * never renews/revives the owning client's lease. Use during retryable callouts
+ * and release with nfs_state_table_release. Accepted publication may renew via
+ * nfs_client_touch while the corresponding client lifetime is protected. */
+SYMBOL_EXPORT nfsstat4 nfs_state_table_acquire_no_renew(
+    struct nfs_state_table *table,
+    const struct stateid4  *sid,
+    uint8_t                 want_type,
+    void                  **out_state,
+    uint8_t                *out_type);
+
 /* Lookup a replay tombstone left by a just-destroyed state slot.  This is
  * intentionally narrow: NFSv4.0 CLOSE retransmits can arrive after the
  * original CLOSE invalidated the stateid, but must still receive the cached
@@ -854,6 +1018,40 @@ SYMBOL_EXPORT void nfs_state_table_release(
 SYMBOL_EXPORT nfsstat4 nfs_state_table_validate(
     struct nfs_state_table *table,
     const struct stateid4  *sid);
+
+/* Pure TEST_STATEID snapshot: no references, lease renewal or cleanup. Checks
+ * session-client identity and sequence, including frozen public states. */
+SYMBOL_EXPORT nfsstat4 nfs_state_table_test_stateid(
+    struct nfs_state_table  *table,
+    const struct stateid4   *sid,
+    const struct nfs_client *session_client);
+
+/* Pure advisory validation of OPEN/LOCK identity, client, FH, principal and
+ * sequence. Takes no references and never renews or releases protocol state.
+ * Caller handles current/special stateids before calling. */
+SYMBOL_EXPORT nfsstat4 nfs_state_table_advise(
+    struct nfs_state_table  *table,
+    const struct stateid4   *sid,
+    const struct nfs_client *session_client,
+    const uint8_t           *fh,
+    uint32_t                 fh_len,
+    uint32_t                 principal_flavor,
+    const char              *principal_name,
+    uint32_t                 principal_len);
+
+/* Pure delegation I/O authorization. Copies only the claim actor, never a
+ * borrowed state/client pointer, and does not renew leases or take references.
+ * Caller authenticates and pins session_client for the attempt; delegation
+ * records currently carry no independent RPC-principal binding. Special/current
+ * stateids are resolved by the caller. Layout stateids are not MDS I/O grants. */
+SYMBOL_EXPORT nfsstat4 nfs_state_table_delegation_io(
+    struct nfs_state_table     *table,
+    const struct stateid4      *sid,
+    const struct nfs_client    *session_client,
+    const uint8_t              *fh,
+    uint32_t                    fh_len,
+    uint32_t                    want_access,
+    struct chimera_claim_actor *out_actor);
 
 /*
  * Lifecycle API for client / owner / state objects.  Phase 2 callers use
@@ -891,6 +1089,281 @@ nfs_client_expire_state(
  * one caller-owned reference held (taken under client->lock); the caller must
  * release it with nfs_open_owner_put() when done, or transfer it onto a request
  * that borrows the owner across an async VFS round-trip. */
+#define NFS4_COMPOUND_OWNER_MAX_STATES 128
+
+/* Construction-owned reservation. Existing states remain public but frozen;
+ * candidates have reserved, unpublished slot identities. The adapter keeps
+ * all execution-time rights, seqids and handles in its own attempt journal. */
+struct nfs_open_owner_reservation {
+    struct nfs_open_owner           *owner;
+    const void                      *cookie;
+    uint32_t                         num_existing;
+    uint32_t                         num_candidates;
+    struct nfs_open_state           *existing[NFS4_COMPOUND_OWNER_MAX_STATES];
+    struct nfs_open_state           *candidates[NFS4_COMPOUND_OWNER_MAX_STATES];
+    bool                             candidate_published[NFS4_COMPOUND_OWNER_MAX_STATES];
+    uint32_t                         num_locks;
+    struct nfs_lock_state           *locks[NFS4_COMPOUND_OWNER_MAX_STATES];
+    struct nfs4_owner_replay_journal owner_replay;
+};
+
+struct nfs_lock_owner_reservation {
+    struct nfs_lock_owner           *owner;
+    const void                      *cookie;
+    uint32_t                         num_existing, num_candidates;
+    struct nfs_lock_state           *existing[NFS4_COMPOUND_OWNER_MAX_STATES];
+    struct nfs_lock_state           *candidates[NFS4_COMPOUND_OWNER_MAX_STATES];
+    bool                             candidate_published[NFS4_COMPOUND_OWNER_MAX_STATES];
+    struct nfs4_owner_replay_journal owner_replay;
+};
+
+/* Accepted completion only, before publishing CLOSE slot tombstones.
+ * Does nothing if no advancing outcome was recorded in this attempt. */
+SYMBOL_EXPORT void nfs_open_owner_publish_replay(
+    struct nfs_open_owner_reservation *reservation);
+/* Accepted OPEN_CONFIRM with no later OPEN/DOWNGRADE replacement: publishes
+ * only the frozen state's sequence. Owner confirmation is published with the
+ * replay journal; neither operation touches claims or invokes callbacks. */
+SYMBOL_EXPORT void nfs_open_owner_confirm_compound(
+    struct nfs_open_owner_reservation *reservation,
+    struct nfs_open_state             *target,
+    uint32_t                           seqid);
+SYMBOL_EXPORT void nfs_lock_owner_publish_replay(
+    struct nfs_lock_owner_reservation *reservation);
+
+struct nfs_lock_range_journal;
+
+/* Construction-time closure discovery. Copy parent OPEN identities for this
+ * lock owner's states whose parents are not frozen by cookie. No pointer
+ * escapes the client/owner locks. Reserve returned parents and repeat for
+ * newly discovered lock owners until the bounded closure is complete. */
+SYMBOL_EXPORT nfsstat4 nfs_lock_owner_compound_parents(
+    struct nfs_client      *client,
+    const void             *owner_bytes,
+    uint16_t                owner_len,
+    const void             *cookie,
+    struct nfs_state_table *table,
+    struct stateid4        *out,
+    uint32_t                capacity,
+    uint32_t               *count);
+
+struct nfs_open_state_compound_update {
+    const uint8_t                  *fh;
+    uint16_t                        fh_len;
+    uint32_t                        share_access;
+    uint32_t                        share_deny;
+    uint16_t                        share_combos;
+    uint32_t                        seqid;
+    struct chimera_vfs_open_handle *handle;
+    struct chimera_vfs_file_state  *claim_file;
+    struct chimera_vfs_claim       *admitted_claim;
+};
+
+/* Reserve once per owner before execution. No lease renewal occurs. Active
+* borrowers, child locks, other groups and unsupported shapes return DELAY.
+* cookie must remain live until finish; the caller owns the returned object.
+* num_candidates may be zero for a group only modifying existing states. */
+SYMBOL_EXPORT nfsstat4
+nfs_open_owner_reserve_compound(
+    struct nfs_client                  *client,
+    const void                         *owner_bytes,
+    uint16_t                            owner_len,
+    uint32_t                            principal_flavor,
+    const char                         *principal_name,
+    uint32_t                            principal_len,
+    const void                         *cookie,
+    uint32_t                            num_candidates,
+    struct nfs_state_table             *table,
+    struct chimera_vfs_thread          *vfs_thread,
+    struct nfs_open_owner_reservation **out_reservation);
+
+/* LOCK-capable variant: additionally freezes child lock slots and pins their
+ * owners under the same cookie. Finish lock-owner journals before this group. */
+SYMBOL_EXPORT nfsstat4
+nfs_open_owner_reserve_compound_locks(
+    struct nfs_client                  *client,
+    const void                         *owner_bytes,
+    uint16_t                            owner_len,
+    uint32_t                            principal_flavor,
+    const char                         *principal_name,
+    uint32_t                            principal_len,
+    const void                         *cookie,
+    uint32_t                            num_candidates,
+    struct nfs_state_table             *table,
+    struct chimera_vfs_thread          *vfs_thread,
+    struct nfs_open_owner_reservation **out_reservation);
+
+/* Reserve after the parent OPEN groups: every existing state of this owner
+* must already be frozen by the same cookie. Finish this reservation before
+* those parent groups. New candidate identities remain table-invisible until
+* accepted apply; ordinary owner/state borrowers are excluded meanwhile. */
+SYMBOL_EXPORT nfsstat4
+nfs_lock_owner_reserve_compound(
+    struct nfs_client                  *client,
+    const void                         *owner_bytes,
+    uint16_t                            owner_len,
+    const void                         *cookie,
+    uint32_t                            num_candidates,
+    struct nfs_state_table             *table,
+    struct chimera_vfs_thread          *vfs_thread,
+    struct nfs_lock_owner_reservation **out_reservation);
+
+SYMBOL_EXPORT void
+nfs_lock_owner_finish_compound(
+    struct nfs_lock_owner_reservation *reservation,
+    struct nfs_state_table            *table,
+    struct chimera_vfs_thread         *vfs_thread);
+
+/* Range geometry belongs to a retry-local journal. Allocate before execution;
+ * NULL target starts empty. A non-NULL target must be frozen. At most 256
+ * original intervals and NFS4_COMPOUND_OWNER_MAX_STATES modifying operations
+ * are supported; projected or
+ * overlapping mixed-mode legacy lists return NULL for protocol fallback.
+ * Operations never allocate, publish or invoke VFS.
+ * A failed LOCK must not call lock(); only successfully admitted claims enter
+ * the private coverage set. Reset after the compound releases attempt claims. */
+SYMBOL_EXPORT struct nfs_lock_range_journal *
+nfs_lock_range_journal_alloc(
+    struct nfs_lock_state *target,
+    uint32_t               max_modifications);
+SYMBOL_EXPORT void nfs_lock_range_journal_reset(
+    struct nfs_lock_range_journal *journal);
+SYMBOL_EXPORT void nfs_lock_range_journal_free(
+    struct nfs_lock_range_journal *journal);
+SYMBOL_EXPORT bool nfs_lock_range_journal_lock(
+    struct nfs_lock_range_journal *journal,
+    uint64_t                       offset,
+    uint64_t                       length,
+    bool                           write,
+    struct chimera_vfs_claim      *admitted);
+SYMBOL_EXPORT bool nfs_lock_range_journal_unlock(
+    struct nfs_lock_range_journal *journal,
+    uint64_t                       offset,
+    uint64_t                       length);
+SYMBOL_EXPORT const struct chimera_vfs_claim * const *
+nfs_lock_range_journal_previous(
+    const struct nfs_lock_range_journal *journal,
+    uint32_t                            *count);
+SYMBOL_EXPORT const struct chimera_vfs_claim * const *
+nfs_lock_range_journal_current(
+    const struct nfs_lock_range_journal *journal,
+    uint32_t                            *count);
+SYMBOL_EXPORT bool nfs_lock_range_journal_empty(
+    const struct nfs_lock_range_journal *journal);
+
+/* Accepted CLOSE only. Detach original and tentative physical claims;
+ * lease nodes remain owned by frozen children and tentative claims by the
+ * compound. Returns an owned file-state reference (NULL for empty journals).
+ * After protocol publication, invoke claim_replacement_complete and state_put
+ * outside protocol locks. */
+SYMBOL_EXPORT struct chimera_vfs_file_state * nfs_lock_range_journal_retire(
+    struct nfs_lock_range_journal *journal,
+    struct chimera_vfs_thread     *vfs_thread);
+
+/* Accepted-only, infallible publication; consumes the owned handle reference.
+ * Parent must be a published OPEN still reserved by this cookie. */
+SYMBOL_EXPORT void nfs_lock_state_apply_compound(
+    struct nfs_lock_owner_reservation *reservation,
+    struct nfs_lock_state             *target,
+    struct nfs_open_state             *parent,
+    struct chimera_vfs_open_handle    *handle,
+    uint32_t                           seqid,
+    struct nfs_lock_range_journal     *journal,
+    struct nfs_state_table            *table,
+    struct chimera_vfs_thread         *vfs_thread);
+
+/* Accepted-completion only. Consumes the update's owned handle/file-state
+ * reference and moves its admitted SHARE claim into target. Publication and
+ * replacement cannot fail after the backend has accepted the attempt. Narrowed
+ * claims wake waiters only after publication locks have been released. */
+SYMBOL_EXPORT void
+nfs_open_owner_apply_compound(
+    struct nfs_open_owner_reservation           *reservation,
+    struct nfs_open_state                       *target,
+    const struct nfs_open_state_compound_update *update,
+    struct nfs_state_table                      *table,
+    struct chimera_vfs_thread                   *vfs_thread);
+
+SYMBOL_EXPORT void
+nfs_open_owner_close_compound(
+    struct nfs_open_owner_reservation *reservation,
+    struct nfs_open_state             *target,
+    uint32_t                           final_seqid,
+    struct nfs_state_table            *table,
+    struct chimera_vfs_thread         *vfs_thread);
+
+/* After attempt resources are released or transferred, unfreeze surviving
+ * public states and free unused candidates. Safe after either abort or
+ * accepted publication; every reservation must be finished exactly once. */
+SYMBOL_EXPORT void
+nfs_open_owner_finish_compound(
+    struct nfs_open_owner_reservation *reservation,
+    struct nfs_state_table            *table,
+    struct chimera_vfs_thread         *vfs_thread);
+
+/* Reserve an unpublished state for a fresh v4.1 OPEN owner. Returns NULL when
+ * the owner already has state or another request is preparing its first OPEN;
+ * those cases continue through the established OPEN path. This runs during
+ * request construction, never in a pure execution callback. */
+SYMBOL_EXPORT struct nfs_open_state *
+nfs_open_state_reserve_compound(
+    struct nfs_client      *client,
+    const void             *owner_bytes,
+    uint16_t                owner_len,
+    uint32_t                principal_flavor,
+    const char             *principal_name,
+    uint32_t                principal_len,
+    uint32_t                access,
+    uint32_t                deny,
+    struct nfs_state_table *table,
+    struct stateid4        *stateid);
+
+SYMBOL_EXPORT void
+nfs_open_state_publish_compound(
+    struct nfs_open_state  *state,
+    struct nfs_state_table *table);
+
+/* After VFS attempt resources have been released/transferred, drop the owner
+ * reservation. published=false frees the unpublished slot and state. */
+SYMBOL_EXPORT void
+nfs_open_state_finish_compound(
+    struct nfs_open_state     *state,
+    bool                       published,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
+/* Reserve an existing v4.1+ OPEN for CLOSE without renewing its lease or
+ * modifying its seqid, slot, handle or claims. Caller supplies its live session
+ * client. A successful reservation pins the client and state until finish.
+ * reservation_group is a non-NULL cookie that outlives all its reservations.
+ * Different states of one owner may share a group; competing groups, active
+ * state/owner users and child locks return DELAY; v4.0 stays legacy.
+ * out_state exposes the pinned claim for an attempt-local exclusion view. */
+SYMBOL_EXPORT nfsstat4
+nfs_open_state_reserve_close_compound(
+    struct nfs_state_table    *table,
+    const struct stateid4     *stateid,
+    struct nfs_client         *client,
+    const uint8_t             *fh,
+    uint16_t                   fh_len,
+    uint32_t                   principal_flavor,
+    const char                *principal_name,
+    uint32_t                   principal_len,
+    const void                *reservation_group,
+    struct chimera_vfs_thread *vfs_thread,
+    struct nfs_open_state    **out_state,
+    struct stateid4           *out_reply_stateid);
+
+/* accepted=true publishes CLOSE and releases its claims/handle after the
+ * finish decision. accepted=false only releases the provisional reservation.
+ * This cannot fail and consumes the reservation's state reference. */
+SYMBOL_EXPORT void
+nfs_open_state_finish_close_compound(
+    struct nfs_open_state     *state,
+    bool                       accepted,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
 SYMBOL_EXPORT struct nfs_open_owner *
 nfs_open_owner_find_or_create(
     struct nfs_client *client,
@@ -993,6 +1466,27 @@ nfs_client_check_io_denied(
     uint16_t               fh_len,
     uint32_t               requested_access);
 
+/* Exclusions are pinned CLOSE reservations owned by the calling attempt. */
+SYMBOL_EXPORT nfsstat4
+nfs_client_check_share_conflict_except(
+    struct nfs_client            *client,
+    struct nfs_open_owner        *requesting_owner,
+    const uint8_t                *fh,
+    uint16_t                      fh_len,
+    uint32_t                      requested_access,
+    uint32_t                      requested_deny,
+    struct nfs_open_state *const *closed,
+    uint32_t                      num_closed);
+SYMBOL_EXPORT nfsstat4
+nfs_client_check_io_denied_except(
+    struct nfs_client            *client,
+    struct nfs_open_owner        *requesting_owner,
+    const uint8_t                *fh,
+    uint16_t                      fh_len,
+    uint32_t                      requested_access,
+    struct nfs_open_state *const *closed,
+    uint32_t                      num_closed);
+
 /* True if `client` holds any open state keyed by `fh` (i.e. it has this file
  * open).  Used to keep a filehandle valid after its last link is removed
  * while an open still references the inode (RFC 7530 §16.26.5). */
@@ -1001,6 +1495,16 @@ nfs_client_has_open_state_for_fh(
     struct nfs_client *client,
     const uint8_t     *fh,
     uint16_t           fh_len);
+
+/* Attempt-local liveness view: pinned, logically closed states do not keep
+ * an unlinked filehandle live. Other callers still see the public states. */
+SYMBOL_EXPORT bool
+nfs_client_has_open_state_for_fh_except(
+    struct nfs_client            *client,
+    const uint8_t                *fh,
+    uint16_t                      fh_len,
+    struct nfs_open_state *const *closed,
+    uint32_t                      num_closed);
 
 /* True if `client` holds any leased state -- opens, locks, delegations or
  * layouts.  DESTROY_CLIENTID must return NFS4ERR_CLIENTID_BUSY while it does
@@ -1186,13 +1690,44 @@ nfs_layout_state_create(
 
 /* Advance the layout stateid seqid and re-encode (subsequent LAYOUTGET /
  * LAYOUTRETURN on an existing layout). */
+/* Caller pins client. Check and final grant serialize with FILE returns. */
+SYMBOL_EXPORT nfsstat4 nfs_layout_state_check(
+    struct nfs_client      *client,
+    const uint8_t          *fh,
+    uint16_t                fh_len,
+    const struct stateid4  *sid,
+    struct nfs_state_table *table);
+SYMBOL_EXPORT nfsstat4 nfs_layout_state_grant(
+    struct nfs_client       *client,
+    const uint8_t           *fh,
+    uint16_t                 fh_len,
+    uint16_t                 export_id,
+    uint32_t                 iomode,
+    uint32_t                 layout_type,
+    const struct stateid4   *input,
+    struct nfs_state_table  *table,
+    struct nfs_layout_table *layout_table,
+    struct stateid4         *output);
+
 SYMBOL_EXPORT void
 nfs_layout_state_bump(
     struct nfs_layout_state *state,
-    uint32_t                 client_short_id,
+    uint32_t                 epoch,
     struct stateid4         *out_stateid);
 
 /* Tear down a layout_state (LAYOUTRETURN / client teardown). */
+/* The caller pins client. Validate and return the held FILE layout atomically;
+ * an already absent layout remains an idempotent success. */
+SYMBOL_EXPORT nfsstat4
+nfs_layout_state_return_file(
+    struct nfs_client         *client,
+    const uint8_t             *fh,
+    uint16_t                   fh_len,
+    const struct stateid4     *sid,
+    uint32_t                   layout_type,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
 SYMBOL_EXPORT void
 nfs_layout_state_destroy(
     struct nfs_layout_state   *state,

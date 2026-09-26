@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "nfs_internal.h"
+#include "nfs_write_payload.h"
 #include "nfs4_open_state.h"
 #include "nfs4_pnfs.h"
 #include "vfs/sdk/vfs_error.h"
@@ -93,11 +94,8 @@ chimera_vfs_nfs4_write(
     struct COMPOUND4args                     args;
     struct nfs_argop4                        argarray[3];
     struct evpl_rpc2_cred                    rpc2_cred;
-    struct evpl_iovec                       *ds_iov;
     uint8_t                                 *fh;
     int                                      fhlen;
-    int                                      parked;
-    int                                      i;
 
     if (!server_thread) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -149,9 +147,12 @@ chimera_vfs_nfs4_write(
     /* Op 2: WRITE */
     argarray[2].argop = OP_WRITE;
 
-    /* Use the stateid from the open state, or anonymous stateid if not available */
+    /* Session I/O uses the latest version of this state identity. Another
+     * local handle can coalesce an OPEN and advance its version while this
+     * handle still retains the original OPEN reply (RFC 8881 section 8.2.2). */
     if (open_state) {
-        argarray[2].opwrite.stateid = open_state->stateid;
+        argarray[2].opwrite.stateid       = open_state->stateid;
+        argarray[2].opwrite.stateid.seqid = 0;
     } else {
         /* Anonymous stateid */
         memset(&argarray[2].opwrite.stateid, 0, sizeof(argarray[2].opwrite.stateid));
@@ -161,27 +162,6 @@ chimera_vfs_nfs4_write(
     argarray[2].opwrite.offset = request->write.offset;
     argarray[2].opwrite.stable = request->write.sync;  /* 3-level UNSTABLE/DATA_SYNC/FILE_SYNC */
 
-    /* The WRITE4 marshaller MOVES (consumes + frees) the payload iovecs into
-     * the outgoing RPC message, but our payload is BORROWED from whoever
-     * dispatched this VFS write -- when that is chimera's own NFS server layer,
-     * chimera_nfs4_write_complete releases the very same iovecs once we
-     * complete.  Handing the marshaller the originals lets it free them out
-     * from under that release: heap-use-after-free in evpl_iovecs_release.
-     * (The pNFS DS write path has always cloned for this reason; this path is
-     * only reached with server-owned iovecs when chimera fronts a remote NFS
-     * server, which is why it went unnoticed.)
-     *
-     * So hand over CLONES -- each takes its own buffer reference, dropped when
-     * the RPC message is released -- and leave the borrowed originals intact.
-     * If the compound PARKS instead of sending, the marshaller never ran and
-     * the clones are still ours: drop them, because the replay rebuilds these
-     * args (and re-clones) from scratch. */
-
-    ds_iov = malloc((size_t) request->write.niov * sizeof(*ds_iov));
-    for (i = 0; i < request->write.niov; i++) {
-        evpl_iovec_clone(&ds_iov[i], &request->write.iov[i]);
-    }
-    argarray[2].opwrite.data.iov    = ds_iov;
     argarray[2].opwrite.data.niov   = request->write.niov;
     argarray[2].opwrite.data.length = request->write.length;
 
@@ -189,7 +169,15 @@ chimera_vfs_nfs4_write(
                                request->thread->vfs->machine_name,
                                request->thread->vfs->machine_name_len);
 
-    parked = chimera_nfs4_compound_call(
+    int                payload_niov = request->write.niov;
+    struct evpl_iovec *payload      = chimera_nfs_write_payload_clone(request->write.iov, payload_niov);
+    if (!payload) {
+        request->status = CHIMERA_VFS_ENOSPC;
+        request->complete(request);
+        return;
+    }
+    argarray[2].opwrite.data.iov = payload;
+    chimera_nfs4_compound_call(
         thread,
         shared,
         server_thread,
@@ -200,10 +188,5 @@ chimera_vfs_nfs4_write(
         chimera_nfs4_write_callback,
         request,
         chimera_vfs_nfs4_dispatch, private_data);
-
-
-    if (parked) {
-        evpl_iovecs_release(thread->evpl, ds_iov, request->write.niov);
-    }
-    free(ds_iov);
-} /* chimera_vfs_nfs4_write */
+    chimera_nfs_write_payload_discard(thread->evpl, payload, payload_niov);
+} /* chimera_nfs4_write */
