@@ -79,7 +79,7 @@ check_failure(int worker)
     }
 
     assert(waitpid(pid, &status, 0) == pid);
-    rewind(output);
+    assert(fseek(output, 0, SEEK_SET) == 0);
     length = fread(text, 1, sizeof(text) - 1, output);
     assert(!ferror(output));
     assert(feof(output));
