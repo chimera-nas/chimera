@@ -15,6 +15,10 @@ TESTBIN=${2:?usage: fuse_multimount_test.sh <chimera_binary> <test_binary>}
 
 set -u
 
+. "$(dirname "$0")/fuse_test_common.sh"
+
+fuse_test_require_uring
+
 SESSION=$(mktemp -d)
 CFG="$SESSION/config.json"
 LOG="$SESSION/daemon.log"
@@ -74,6 +78,8 @@ mountpoint -q "$MNT_A" || fail "$MNT_A is not a mountpoint"
 mountpoint -q "$MNT_B" || fail "$MNT_B is not a mountpoint"
 
 "$TESTBIN" "$MNT_A" "$MNT_B" || fail "$(basename "$TESTBIN") reported failures"
+
+fuse_test_check_uring "$LOG"
 
 umount "$MNT_A" || fail "clean unmount of $MNT_A failed"
 umount "$MNT_B" || fail "clean unmount of $MNT_B failed"

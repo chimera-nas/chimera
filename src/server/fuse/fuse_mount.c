@@ -241,14 +241,27 @@ chimera_fuse_init_handshake(
      * flags2 entirely.  Build hosts older than that (ubuntu22's headers, for
      * one) have neither the flag nor the struct members, so the whole
      * high-word exchange is compiled out there and the session negotiates on
-     * the 32-bit word alone.  We ask for exactly one high flag: without it, mmap
-     * of a file opened FOPEN_DIRECT_IO fails, which would make the
+     * the 32-bit word alone.  We ask for DIRECT_IO_ALLOW_MMAP (without it,
+     * mmap of a file opened FOPEN_DIRECT_IO fails, which would make the
      * direct_io mount option a functional regression rather than a
-     * performance trade. */
+     * performance trade) and, below, OVER_IO_URING. */
     want2 = 0;
 #ifdef FUSE_DIRECT_IO_ALLOW_MMAP
     want2 |= FUSE_DIRECT_IO_ALLOW_MMAP;
 #endif /* ifdef FUSE_DIRECT_IO_ALLOW_MMAP */
+
+#if CHIMERA_FUSE_HAVE_URING
+    /* Offered by the kernel only when the fuse module has enable_uring set.
+     * A simulated kernel has no ring to register against. */
+    if (mount->shared->io_uring && mount->uring_depth &&
+        mount->synthetic_fd < 0) {
+        mount->uring_nr_queues = chimera_fuse_uring_nr_queues();
+
+        if (mount->uring_nr_queues > 0) {
+            want2 |= FUSE_OVER_IO_URING;
+        }
+    }
+#endif /* if CHIMERA_FUSE_HAVE_URING */
 
     kernel_flags = in->flags;
 
@@ -278,6 +291,10 @@ chimera_fuse_init_handshake(
 #ifdef FUSE_DIRECT_IO_ALLOW_MMAP
     mount->direct_io_mmap = (agreed & FUSE_DIRECT_IO_ALLOW_MMAP) ? 1 : 0;
 #endif /* ifdef FUSE_DIRECT_IO_ALLOW_MMAP */
+
+#if CHIMERA_FUSE_HAVE_URING
+    mount->uring = (agreed & FUSE_OVER_IO_URING) ? 1 : 0;
+#endif /* if CHIMERA_FUSE_HAVE_URING */
 
     if (out.flags & FUSE_MAX_PAGES) {
         mount->max_write = CHIMERA_FUSE_MAX_WRITE;
@@ -310,11 +327,12 @@ chimera_fuse_init_handshake(
     }
 
     chimera_fuse_info(
-        "fuse mount %s: negotiated ABI 7.%u max_write %u flags 0x%llx%s%s",
+        "fuse mount %s: negotiated ABI 7.%u max_write %u flags 0x%llx%s%s%s",
         mount->mountpoint, mount->proto_minor,
         mount->max_write, (unsigned long long) agreed,
         mount->direct_io ? " direct_io" : "",
-        (mount->direct_io && !mount->direct_io_mmap) ? " (no mmap)" : "");
+        (mount->direct_io && !mount->direct_io_mmap) ? " (no mmap)" : "",
+        mount->uring ? " io_uring" : "");
 
     return 0;
 } /* chimera_fuse_init_handshake */

@@ -516,6 +516,17 @@ int
 chimera_server_config_get_fuse_enabled(
     const struct chimera_server_config *config);
 
+/* Carry FUSE requests over io_uring when the kernel offers it (default on);
+ * off keeps every mount on plain /dev/fuse reads. */
+void
+chimera_server_config_set_fuse_io_uring(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+int
+chimera_server_config_get_fuse_io_uring(
+    const struct chimera_server_config *config);
+
 void
 chimera_server_config_set_nfs_data_server(
     struct chimera_server_config *config,
