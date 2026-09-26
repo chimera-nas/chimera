@@ -7,6 +7,7 @@ include(CheckFunctionExists)
 
 set(CMAKE_REQUIRED_LIBRARIES rocksdb)
 check_symbol_exists(rocksdb_transaction_get_pinned "rocksdb/c.h" HAVE_ROCKSDB_TXN_GET_PINNED)
+check_symbol_exists(rocksdb_transaction_get_pinned_for_update "rocksdb/c.h" HAVE_ROCKSDB_TXN_GET_PINNED_FOR_UPDATE)
 # rocksdb_flush_wal has been a librocksdb export since 5.8, but some distro
 # headers (the same older ones missing transaction_get_pinned) fail to
 # declare it.  Detect the declaration and the symbol separately so we can
@@ -21,8 +22,8 @@ add_library(chimera_vfs_cairn ${CHIMERA_LIBRARY_TYPE}
 
 target_link_libraries(chimera_vfs_cairn evpl jansson rocksdb)
 
-if (NOT HAVE_ROCKSDB_TXN_GET_PINNED)
-    message(STATUS "RocksDB lacks rocksdb_transaction_get_pinned, using compat shim")
+if (NOT HAVE_ROCKSDB_TXN_GET_PINNED OR NOT HAVE_ROCKSDB_TXN_GET_PINNED_FOR_UPDATE)
+    message(STATUS "RocksDB lacks pinned transaction read APIs, using compat shim")
     target_compile_definitions(chimera_vfs_cairn PRIVATE ROCKSDB_LEGACY_COMPAT=1)
 endif()
 

@@ -44,6 +44,27 @@ if(CAIRN_ENABLED)
 	add_executable(vfs_sync_delegation_test vfs_sync_delegation_test.c)
 	target_link_libraries(vfs_sync_delegation_test chimera_vfs chimera_vfs_cairn evpl)
 	add_test(chimera/vfs/sync_delegation_test vfs_sync_delegation_test)
+
+    # The sequential protocol models cannot force a stale inode read to race
+    # with a rename. Keep this deterministic backend interleaving in quick CI,
+    # including the non-pinned compatibility path used by older RocksDB.
+    set(_cairn_saved_tier "${CHIMERA_TEST_TIER}")
+    set(CHIMERA_TEST_TIER quick)
+    foreach(variant native compat)
+        add_executable(vfs_cairn_conflict_${variant}_test vfs_cairn_conflict_test.c)
+        target_link_libraries(vfs_cairn_conflict_${variant}_test
+            chimera_vfs evpl jansson rocksdb)
+        target_compile_definitions(vfs_cairn_conflict_${variant}_test PRIVATE
+            $<TARGET_PROPERTY:chimera_vfs_cairn,COMPILE_DEFINITIONS>)
+        if(variant STREQUAL "compat")
+            target_compile_definitions(vfs_cairn_conflict_${variant}_test PRIVATE
+                ROCKSDB_LEGACY_COMPAT=1)
+        endif()
+        add_test(NAME chimera/vfs/cairn_conflict_${variant}
+            COMMAND vfs_cairn_conflict_${variant}_test)
+        set_tests_properties(chimera/vfs/cairn_conflict_${variant} PROPERTIES TIMEOUT 30)
+    endforeach()
+    set(CHIMERA_TEST_TIER "${_cairn_saved_tier}")
 endif()
 
 add_executable(vfs_notify_test vfs_notify_test.c)

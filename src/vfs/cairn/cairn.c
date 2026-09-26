@@ -638,9 +638,14 @@ cairn_meta_get_pinned(
         return rocksdb_get_pinned(shared->meta_base_db, thread->read_meta_opts,
                                   (const char *) key, klen, err);
     }
-    return rocksdb_transaction_get_pinned(cairn_get_meta_txn(thread),
-                                          shared->read_options,
-                                          (const char *) key, klen, err);
+    /* Track the read before another worker can commit a change. An ordinary
+     * transactional Get does not register a conflict: a later Put can then
+     * overwrite a newer inode with the old read (e.g. CLOSE restoring nlink
+     * after a concurrent rename-over). GetForUpdate makes that commit fail
+     * and lets cairn_thread_commit replay the operation against fresh state. */
+    return rocksdb_transaction_get_pinned_for_update(cairn_get_meta_txn(thread),
+                                                     shared->read_options,
+                                                     (const char *) key, klen, 1, err);
 } /* cairn_meta_get_pinned */
 
 static inline int
