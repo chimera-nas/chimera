@@ -18,6 +18,13 @@ endif()
 
 # CUDA is enabled later with enable_language(), once the platform gate below
 # has run and the toolkit probe has decided whether there is one to enable.
+# Let CMAKE_MSVC_DEBUG_INFORMATION_FORMAT choose MSVC's debug-information
+# format instead of the /Zi baked into the default flags; the ccache block
+# below depends on it.  The policy is read when project() enables C.
+if(POLICY CMP0141)
+    cmake_policy(SET CMP0141 NEW)
+endif()
+
 project(chimera LANGUAGES C)
 
 # Platform gate.  Chimera is developed on Linux and a good deal of the stack --
@@ -203,10 +210,18 @@ endif()
 # devcontainer points it at the persistent /build/ccache volume so all worktrees
 # share one cache, and CI additionally sets an HTTP remote (CCACHE_REMOTE_STORAGE
 # -> the Nexus raw repo).  A plain local build with neither set falls back to
-# ccache's default (~/.cache/ccache).
+# ccache's default (~/.cache/ccache).  The Visual Studio generators ignore a
+# compiler launcher, so on Windows this takes effect under Ninja only.
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
     set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    # ccache cannot cache /Zi, which writes one PDB shared by every object in
+    # a target.  Embed the debug information in each object (/Z7) instead; the
+    # linker still produces the PDB.
+    if(MSVC)
+        set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
+            "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
+    endif()
     if(CUDA_ENABLED)
         set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
     endif()

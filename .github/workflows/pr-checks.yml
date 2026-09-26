@@ -242,6 +242,16 @@ jobs:
       # there refuses the repository as dubiously owned.  -U0 keeps hunk
       # headers to exactly the changed runs, with no context lines to subtract
       # back out.
+      # Restore only, like the ccache: build-test.yml's push to main is the
+      # sole writer.  See the model corpus cache note at the top of that file.
+      - name: Restore the model corpus cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/specs-corpus-cache
+          key: specs-corpus-v1-devcontainer-amd64-${{ github.sha }}
+          restore-keys: |
+            specs-corpus-v1-devcontainer-amd64-
+
       - name: Capture the pull request diff
         if: ${{ github.event_name == 'pull_request' }}
         run: git diff -U0 HEAD^1 HEAD > pr.diff
@@ -268,6 +278,8 @@ jobs:
             -e RUN_URL="$RUN_URL" \
             -e GH_REPO="$GH_REPO" \
             -e PR_HEAD_SHA="$PR_HEAD_SHA" \
+            -e SPECS_CORPUS_CACHE_DIR=/specs-corpus-cache \
+            -v "${{ runner.temp }}/specs-corpus-cache:/specs-corpus-cache" \
             -v "${{ github.workspace }}:/workspace" \
             -v /build \
             -w /build \

@@ -555,6 +555,16 @@ jobs:
           restore-keys: |
             ccache-v2-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
 
+      # Restore only, like the ccache: build-test.yml's push to main is the
+      # sole writer.  See the model corpus cache note at the top of that file.
+      - name: Restore the model corpus cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/specs-corpus-cache
+          key: specs-corpus-v1-${{ matrix.image_name }}-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: |
+            specs-corpus-v1-${{ matrix.image_name }}-${{ matrix.arch }}-
+
       - name: Configure, build, and test inside the container
         run: |
           # EVPL_IO_URING_ENTRIES below sizes the io_uring rings to a test
@@ -570,7 +580,9 @@ jobs:
             -e CCACHE_MAXSIZE \
             -e EVPL_IO_URING_ENTRIES=1024 \
             -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
+            -e SPECS_CORPUS_CACHE_DIR=/specs-corpus-cache \
             -v "${{ runner.temp }}/ccache:/ccache" \
+            -v "${{ runner.temp }}/specs-corpus-cache:/specs-corpus-cache" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
@@ -654,12 +666,24 @@ jobs:
           restore-keys: |
             ccache-v2-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-
 
+      # Restore only, like the ccache: build-test.yml's push to main is the
+      # sole writer.  See the model corpus cache note at the top of that file.
+      - name: Restore the model corpus cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/specs-corpus-cache
+          key: specs-corpus-v1-devcontainer-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: |
+            specs-corpus-v1-devcontainer-${{ matrix.arch }}-
+
       - name: Configure and build inside the container
         run: |
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
             -e CCACHE_MAXSIZE \
+            -e SPECS_CORPUS_CACHE_DIR=/specs-corpus-cache \
             -v "${{ runner.temp }}/ccache:/ccache" \
+            -v "${{ runner.temp }}/specs-corpus-cache:/specs-corpus-cache" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
@@ -964,6 +988,16 @@ jobs:
           restore-keys: |
             ccache-v2-macos-${{ matrix.build_type }}-
 
+      # Restore only, like the ccache: build-test.yml's push to main is the
+      # sole writer.  See the model corpus cache note at the top of that file.
+      - name: Restore the model corpus cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/specs-corpus-cache
+          key: specs-corpus-v1-macos-${{ github.sha }}
+          restore-keys: |
+            specs-corpus-v1-macos-
+
       # quint from the mirrored darwin payload rather than the npm registry and
       # the GitHub releases endpoint.  Only the Rust evaluator is platform
       # specific -- quint itself is JavaScript -- so this is the same tree the
@@ -1008,6 +1042,7 @@ jobs:
         env:
           CCACHE_DIR: ${{ runner.temp }}/ccache
           CCACHE_MAXSIZE: 2G
+          SPECS_CORPUS_CACHE_DIR: ${{ runner.temp }}/specs-corpus-cache
         run: |
           # Counters ride along in the restored cache; zero them so the stats
           # below describe this run alone.
@@ -1457,6 +1492,16 @@ jobs:
           restore-keys: |
             ccache-v2-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
 
+      # Restore only, like the ccache: build-test.yml's push to main is the
+      # sole writer.  See the model corpus cache note at the top of that file.
+      - name: Restore the model corpus cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/specs-corpus-cache
+          key: specs-corpus-v1-${{ matrix.image_name }}-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: |
+            specs-corpus-v1-${{ matrix.image_name }}-${{ matrix.arch }}-
+
       # Drives the analyzer per TU instead of through scan-build, so the results
       # are cacheable.  See build-test.yml for why scan-build cannot be.
       - name: Run the clang static analyzer
@@ -1467,7 +1512,9 @@ jobs:
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
             -e CCACHE_MAXSIZE \
+            -e SPECS_CORPUS_CACHE_DIR=/specs-corpus-cache \
             -v "${{ runner.temp }}/ccache:/ccache" \
+            -v "${{ runner.temp }}/specs-corpus-cache:/specs-corpus-cache" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/scan-report:/scan-report" \
             -v /build \
