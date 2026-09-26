@@ -122,6 +122,7 @@ the canonical place to set them.
 | `nfs_max_exports` | int | `4096` | Maximum number of NFS exports that may exist at once (1..65535). Distinct from the export id space, which is always 1..65535; creating an export past this cap fails. |
 | `data_server` | bool | `false` | pNFS data-server mode: bind only the NFSv4 service (no portmap/mount/NLM) so a DS can share a host with its MDS. |
 | `fuse_enabled` | bool | `false` | Serve the `fuse_mounts` section as local kernel FUSE mounts. Linux only; the daemon must run as root to issue the mounts. |
+| `fuse_io_uring` | bool | `true` | Carry FUSE requests over io_uring (FUSE-over-io_uring) whenever the kernel offers it: Linux 6.14+ with the `fuse` module's `enable_uring` parameter set. Otherwise, or when `false`, mounts use plain `/dev/fuse` reads and writes. |
 | `kv_module` | string | - | Key-value module used to persist server state. |
 | `state_dir` | string | `<prefix>/share/state` | Directory for persisted NFS/SMB state. |
 | `smb_persistent_handles` | bool | `false` | Enable SMB durable/persistent handles (needed for Continuous Availability). |
@@ -271,10 +272,25 @@ mountpoint directory, which must exist.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | required | VFS path to mount (`/<mount-name>[/subdir]`, or `/` for the whole namespace). |
-| `options` | string | - | Comma-separated: `allow_other` (other users may access the mount), `no_default_permissions` (skip kernel mode-bit enforcement), `attr_timeout_ms=<n>` / `entry_timeout_ms=<n>` (kernel attribute/entry cache lifetimes, default `1000`), `negative_timeout_ms=<n>` (kernel negative-dentry lifetime; defaults to `entry_timeout_ms` under `coherence=sync` and `0` under `coherence=ttl`), `coherence=sync\|ttl` (default `sync`), `direct_io` and `parallel_direct_writes` (default off; see below). |
+| `options` | string | - | Comma-separated: `allow_other` (other users may access the mount), `no_default_permissions` (skip kernel mode-bit enforcement), `attr_timeout_ms=<n>` / `entry_timeout_ms=<n>` (kernel attribute/entry cache lifetimes, default `1000`), `negative_timeout_ms=<n>` (kernel negative-dentry lifetime; defaults to `entry_timeout_ms` under `coherence=sync` and `0` under `coherence=ttl`), `coherence=sync\|ttl` (default `sync`), `direct_io` and `parallel_direct_writes` (default off; see below), `uring_depth=<n>` (io_uring entries per kernel queue, default `16` or `CHIMERA_FUSE_URING_DEPTH`; `0` keeps this mount off io_uring). |
 
 Notes:
 
+- With `fuse_io_uring` in effect the kernel keeps one request queue per
+  possible CPU, and every queue needs `uring_depth` entries before the mount
+  switches over. The depth is how many requests callers on one CPU can have
+  in flight before the rest wait in the kernel. Each entry reserves about
+  1 MiB of buffer (the maximum request size), so a mount reserves roughly
+  `CPUs x uring_depth` MiB — 768 MiB on a 48-CPU host at the default of 16.
+  Pages become resident only as requests fill them (an idle mount costs
+  little), but an entry that has carried a large read or write keeps them, so
+  sustained large I/O from every CPU approaches the full reservation.
+  The `CHIMERA_FUSE_URING_DEPTH` environment variable (0 to 1024) replaces
+  the default for every mount without its own `uring_depth`; CI sets it to 2. The kernel
+  offers io_uring only when the `fuse` module has `enable_uring` set
+  (`echo Y > /sys/module/fuse/parameters/enable_uring`, or
+  `fuse.enable_uring=1` on the kernel command line). The daemon logs
+  `serving requests over io_uring` once the first request arrives that way.
 - The FUSE request header carries only uid/gid, so backends cannot see
   supplementary groups; the default `default_permissions` mode has the kernel
   do mode-bit checks with the caller's full group list.

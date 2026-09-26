@@ -13,9 +13,13 @@ OPTIONS=${4:-}
 
 . "$(dirname "$0")/fuse_test_common.sh"
 
+fuse_test_require_uring
+
 fuse_test_start "$BIN" "$BACKEND" "/" "$OPTIONS"
 
 "$TESTBIN" "$MNT" || fail "fuse_posix_test reported failures"
+
+fuse_test_check_uring "$LOG"
 
 fuse_test_stop
 

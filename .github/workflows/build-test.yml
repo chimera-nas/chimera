@@ -532,10 +532,13 @@ jobs:
           # process and takes an unrelated test with it.  The VFS backend has
           # separate rings: 256 in-flight requests reserve 1024 entries per
           # worker, down from 4096; the request limit shrinks with the ring.
+          # FUSE-over-io_uring entries reserve ~1 MiB each per CPU queue, so
+          # a FUSE mount keeps 2 per queue instead of 16.
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
             -e EVPL_IO_URING_ENTRIES=1024 \
             -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
+            -e CHIMERA_FUSE_URING_DEPTH=2 \
             -e CCACHE_MAXSIZE \
             -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
@@ -884,10 +887,13 @@ jobs:
           # process and takes an unrelated test with it.  The VFS backend has
           # separate rings: 256 in-flight requests reserve 1024 entries per
           # worker, down from 4096; the request limit shrinks with the ring.
+          # FUSE-over-io_uring entries reserve ~1 MiB each per CPU queue, so
+          # a FUSE mount keeps 2 per queue instead of 16.
           docker run --rm --privileged \
             -e CCACHE_DIR=/ccache \
             -e EVPL_IO_URING_ENTRIES=1024 \
             -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
+            -e CHIMERA_FUSE_URING_DEPTH=2 \
             -e CCACHE_MAXSIZE \
             -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \

@@ -25,11 +25,15 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sched.h>
 #ifdef _WIN32
 #include "common/platform.h"
 #else  /* ifdef _WIN32 */
 #include <sys/time.h>
 #endif /* ifdef _WIN32 */
+
+/* Comfortably more than the default ring entries per kernel queue. */
+#define CHIMERA_LOCK_TEST_WAITERS 8
 
 static int failures;
 
@@ -302,6 +306,71 @@ main(
     close(fda);
     close(pipefd[0]);
     close(pipefd[1]);
+
+    /* --- more blocked waiters than one CPU has ring entries ---
+     *
+     * Over io_uring the kernel queues a request on the entries of the CPU
+     * its caller runs on, and a parked F_SETLKW keeps its entry.  Pin the
+     * holder and every waiter to one CPU so the waiters outnumber that
+     * queue's entries; the holder's unlock must still get through.  On a
+     * plain /dev/fuse mount this is just a many-waiter handoff. */
+    {
+        cpu_set_t cpus;
+        pid_t     waiters[CHIMERA_LOCK_TEST_WAITERS];
+        int       i, done = 0;
+
+        CPU_ZERO(&cpus);
+        CPU_SET(sched_getcpu(), &cpus);
+        CHECK(sched_setaffinity(0, sizeof(cpus), &cpus) == 0,
+              "pinned to one CPU");
+
+        fda = open(path_a, O_RDWR);
+        CHECK(fda >= 0 && try_lock(fda, F_WRLCK, 0, 0) == 0,
+              "holder takes the whole-file lock");
+
+        for (i = 0; i < CHIMERA_LOCK_TEST_WAITERS; i++) {
+            waiters[i] = fork();
+
+            if (waiters[i] == 0) {
+                int          cfd = open(path_a, O_RDWR);
+                struct flock wfl = {
+                    .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0
+                };
+
+                if (cfd < 0 || fcntl(cfd, F_SETLKW, &wfl) != 0) {
+                    _exit(2);
+                }
+                _exit(0); /* exit releases */
+            }
+        }
+
+        usleep(500000); /* let every waiter park */
+
+        CHECK(try_lock(fda, F_UNLCK, 0, 0) == 0,
+              "holder unlocks with %d waiters parked", CHIMERA_LOCK_TEST_WAITERS);
+
+        alarm(10);
+
+        for (i = 0; i < CHIMERA_LOCK_TEST_WAITERS; i++) {
+            if (waitpid(waiters[i], &status, 0) == waiters[i] &&
+                WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                done++;
+            }
+        }
+
+        alarm(0);
+
+        CHECK(done == CHIMERA_LOCK_TEST_WAITERS,
+              "every parked waiter acquired in turn (%d of %d)",
+              done, CHIMERA_LOCK_TEST_WAITERS);
+
+        for (i = 0; i < CHIMERA_LOCK_TEST_WAITERS; i++) {
+            kill(waiters[i], SIGKILL);
+            waitpid(waiters[i], NULL, WNOHANG);
+        }
+
+        close(fda);
+    }
 
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
 

@@ -125,6 +125,7 @@ struct chimera_server_config {
     int                                   smb_enabled;
     int                                   s3_enabled;
     int                                   fuse_enabled;
+    int                                   fuse_io_uring;
     int                                   nfs_data_server;
     uint64_t                              nfs_server_scope;
     int                                   external_portmap;
@@ -390,6 +391,9 @@ chimera_server_config_init(void)
     config->smb_enabled  = 0;
     config->s3_enabled   = 0;
     config->fuse_enabled = 0;
+
+    /* FUSE-over-io_uring whenever the kernel offers it. */
+    config->fuse_io_uring = 1;
 
     /* NFS service port (default 2049); data-server mode binds only the NFSv4
      * service so a pNFS data server can coexist with an MDS on one host. */
@@ -1173,6 +1177,20 @@ chimera_server_config_get_fuse_enabled(const struct chimera_server_config *confi
 {
     return config->fuse_enabled;
 } /* chimera_server_config_get_fuse_enabled */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_fuse_io_uring(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->fuse_io_uring = enabled;
+} /* chimera_server_config_set_fuse_io_uring */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_fuse_io_uring(const struct chimera_server_config *config)
+{
+    return config->fuse_io_uring;
+} /* chimera_server_config_get_fuse_io_uring */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_data_server(

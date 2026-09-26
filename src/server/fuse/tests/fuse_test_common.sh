@@ -29,6 +29,26 @@ fail() {
     exit 1
 }
 
+# FUSE_EXPECT_URING=1 makes a test about the io_uring transport: it skips
+# where the fuse module does not offer io_uring (enable_uring is off by
+# default), and fails if the daemon never actually served a request over it.
+fuse_test_require_uring() {
+    [ "${FUSE_EXPECT_URING:-0}" = "1" ] || return 0
+
+    if [ "$(cat /sys/module/fuse/parameters/enable_uring 2> /dev/null)" != "Y" ]; then
+        echo "SKIP: fuse module does not offer io_uring (fuse.enable_uring=0)"
+        exit 77
+    fi
+}
+
+# fuse_test_check_uring <daemon-log>
+fuse_test_check_uring() {
+    [ "${FUSE_EXPECT_URING:-0}" = "1" ] || return 0
+
+    grep -q "serving requests over io_uring" "$1" ||
+        fail "FUSE_EXPECT_URING=1 but no request was served over io_uring"
+}
+
 # fuse_test_start <chimera-binary> <backend-module> [backend-path] [mount-options]
 fuse_test_start() {
     local bin=$1

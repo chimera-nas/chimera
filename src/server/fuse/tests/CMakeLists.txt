@@ -32,8 +32,11 @@ else()
 endif()
 
 set(_fuse_wrapper ${CMAKE_SOURCE_DIR}/scripts/fuse_test_wrapper.sh)
+# CHIMERA_FUSE_URING_DEPTH: ring entries reserve ~1 MiB each per CPU queue, so
+# the tests keep the depth low -- which fuse_lock_test also relies on to park
+# more waiters on one queue than it has entries.
 set(_fuse_env
-    "FUSE_PROBE=$<TARGET_FILE:fuse_probe>;CHIMERA_REQUIRE_FUSE=${_fuse_require}")
+    "FUSE_PROBE=$<TARGET_FILE:fuse_probe>;CHIMERA_REQUIRE_FUSE=${_fuse_require};CHIMERA_FUSE_URING_DEPTH=2")
 
 # memfs only: the FUSE protocol path is backend-agnostic, and the linux
 # backend cannot serve a container tempdir (overlayfs rejects
@@ -51,16 +54,32 @@ foreach(backend memfs)
         TIMEOUT 120
         ENVIRONMENT "${_fuse_env}")
 
+    # Pinned to plain /dev/fuse reads so that path stays covered on hosts
+    # whose fuse module offers io_uring; posix_uring_* covers the ring.
     add_test(NAME chimera/fuse/posix_${backend}
              COMMAND ${_fuse_wrapper} bash
                      ${CMAKE_CURRENT_SOURCE_DIR}/fuse_posix_test.sh
                      $<TARGET_FILE:chimera> ${backend}
-                     $<TARGET_FILE:fuse_posix_test>)
+                     $<TARGET_FILE:fuse_posix_test>
+                     "uring_depth=0")
 
     set_tests_properties(chimera/fuse/posix_${backend} PROPERTIES
         SKIP_RETURN_CODE 77
         TIMEOUT 120
         ENVIRONMENT "${_fuse_env}")
+
+    # The same assertions carried over FUSE-over-io_uring.  Skips unless the
+    # fuse module was loaded with enable_uring=1.
+    add_test(NAME chimera/fuse/posix_uring_${backend}
+             COMMAND ${_fuse_wrapper} bash
+                     ${CMAKE_CURRENT_SOURCE_DIR}/fuse_posix_test.sh
+                     $<TARGET_FILE:chimera> ${backend}
+                     $<TARGET_FILE:fuse_posix_test>)
+
+    set_tests_properties(chimera/fuse/posix_uring_${backend} PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120
+        ENVIRONMENT "${_fuse_env};FUSE_EXPECT_URING=1")
 
     # The same POSIX assertions with the kernel's page cache taken out of the
     # path entirely (direct_io), so forced direct I/O cannot quietly change
@@ -94,6 +113,20 @@ foreach(tbin fuse_lock_test fuse_coherence_test fuse_sync_test)
         TIMEOUT 120
         ENVIRONMENT "${_fuse_env}")
 endforeach()
+
+# Blocking locks over io_uring: a parked SETLKW holds its ring entry until
+# the conflicting lock goes away, which is what the replacement entries in
+# fuse_uring.c exist for.
+add_test(NAME chimera/fuse/fuse_lock_test_uring
+         COMMAND ${_fuse_wrapper} bash
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fuse_multimount_test.sh
+                 $<TARGET_FILE:chimera>
+                 $<TARGET_FILE:fuse_lock_test>)
+
+set_tests_properties(chimera/fuse/fuse_lock_test_uring PROPERTIES
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120
+    ENVIRONMENT "${_fuse_env};FUSE_EXPECT_URING=1")
 
 get_property(_fuse_tests DIRECTORY PROPERTY TESTS)
 if(_fuse_tests)
