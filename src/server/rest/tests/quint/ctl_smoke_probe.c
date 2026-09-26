@@ -9,13 +9,13 @@
  *
  * What it pins, in order:
  *
- *   1. The unauthenticated surface answers: GET /version, GET /api/openapi.json.
+ *   1. The unauthenticated surface answers: GET /api/core/v1/version, GET /api/docs/v1/openapi.json.
  *   2. A method the route does not implement is 405, not 404, and an unknown
  *      path is 404.
  *   3. The full admin lifecycle over HTTP -- filesystem, mount, export, share,
  *      bucket, user -- each created, listed, fetched, and deleted, with the
  *      documented conflict/not-found statuses on the edges.
- *   4. GET /api/v1/config reconstructs exactly what those endpoints report.
+ *   4. GET /api/core/v1/config reconstructs exactly what those endpoints report.
  *   5. GET /metrics returns a Prometheus exposition carrying both registries
  *      (chimera_* and evpl_*), and a non-GET or wrong URI on that endpoint is
  *      rejected.
@@ -141,48 +141,48 @@ main(
 
     /* ---- 1. unauthenticated surface ----------------------------------- */
 
-    ctl_get(api, "/version", &res);
+    ctl_get(api, "/api/core/v1/version", &res);
     ck_status(&res, 200, "version/status");
     ck(res.body_len > 0 && strchr(res.body, '{') != NULL,
        "version/json-body");
 
-    ctl_get(api, "/api/openapi.json", &res);
+    ctl_get(api, "/api/docs/v1/openapi.json", &res);
     ck_status(&res, 200, "openapi/status");
 
     /* ---- 2. routing edges ---------------------------------------------- */
 
-    ctl_delete(api, "/version", &res);
+    ctl_delete(api, "/api/core/v1/version", &res);
     ck_status(&res, 405, "version/delete-is-405");
 
-    ctl_get(api, "/api/v1/nonesuch", &res);
+    ctl_get(api, "/api/core/v1/nonesuch", &res);
     ck_status(&res, 404, "unknown-path-is-404");
 
     /* The debug fsop endpoint is invisible unless configured on. */
-    ctl_post(api, "/api/v1/debug/fsop", "{}", &res);
+    ctl_post(api, "/api/debug/v1/fsop", "{}", &res);
     ck_status(&res, 404, "debug-fsop-hidden-by-default");
 
     /* ---- 3. admin lifecycle -------------------------------------------- */
 
-    ctl_post(api, "/api/v1/filesystems",
+    ctl_post(api, "/api/core/v1/filesystems",
              "{\"module\":\"memfs\",\"name\":\"fs0\"}", &res);
     ck_status(&res, 201, "fs/create");
 
-    ctl_post(api, "/api/v1/filesystems",
+    ctl_post(api, "/api/core/v1/filesystems",
              "{\"module\":\"memfs\",\"name\":\"fs0\"}", &res);
     ck_status(&res, 409, "fs/create-duplicate-is-409");
 
-    ctl_post(api, "/api/v1/filesystems",
+    ctl_post(api, "/api/core/v1/filesystems",
              "{\"module\":\"nosuchmodule\",\"name\":\"fs1\"}", &res);
     ck_status(&res, 404, "fs/create-unknown-module-is-404");
 
-    ctl_post(api, "/api/v1/filesystems", "{\"name\":\"fs1\"}", &res);
+    ctl_post(api, "/api/core/v1/filesystems", "{\"name\":\"fs1\"}", &res);
     ck_status(&res, 400, "fs/create-missing-module-is-400");
 
-    ctl_post(api, "/api/v1/mounts",
+    ctl_post(api, "/api/core/v1/mounts",
              "{\"name\":\"m0\",\"module\":\"memfs\",\"path\":\"fs0\"}", &res);
     ck_status(&res, 201, "mount/create");
 
-    ctl_post(api, "/api/v1/mounts",
+    ctl_post(api, "/api/core/v1/mounts",
              "{\"name\":\"m0\",\"module\":\"memfs\",\"path\":\"fs0\"}", &res);
     ck_status(&res, 409, "mount/create-duplicate-is-409");
 
@@ -191,55 +191,55 @@ main(
      * attempted, and would leave a caller unable to tell a typo from an
      * outage -- which is the difference between fixing the request and
      * retrying it. */
-    ctl_post(api, "/api/v1/mounts",
+    ctl_post(api, "/api/core/v1/mounts",
              "{\"name\":\"m9\",\"module\":\"memfs\",\"path\":\"nosuchfs\"}",
              &res);
     ck_status(&res, 404, "mount/create-unknown-fs-is-404");
 
-    ctl_post(api, "/api/v1/mounts",
+    ctl_post(api, "/api/core/v1/mounts",
              "{\"name\":\"m9\",\"module\":\"nosuchmodule\",\"path\":\"fs0\"}",
              &res);
     ck_status(&res, 404, "mount/create-unknown-module-is-404");
 
-    ctl_get(api, "/api/v1/mounts/m9", &res);
+    ctl_get(api, "/api/core/v1/mounts/m9", &res);
     ck_status(&res, 404, "mount/failed-create-registered-nothing");
 
-    ctl_get(api, "/api/v1/mounts", &res);
+    ctl_get(api, "/api/core/v1/mounts", &res);
     ck_status(&res, 200, "mount/list");
     ck(array_has_name(&res, "m0"), "mount/list-contains-m0");
 
-    ctl_get(api, "/api/v1/mounts/m0", &res);
+    ctl_get(api, "/api/core/v1/mounts/m0", &res);
     ck_status(&res, 200, "mount/get");
     ck(json_field_is(&res, "module", "memfs"), "mount/get-module");
 
     /* The internal "root" pseudo-mount must not be visible. */
-    ctl_get(api, "/api/v1/mounts/root", &res);
+    ctl_get(api, "/api/core/v1/mounts/root", &res);
     ck_status(&res, 404, "mount/root-pseudo-mount-hidden");
 
     /* A filesystem with a live mount cannot be removed. */
-    ctl_delete(api, "/api/v1/filesystems/memfs/fs0", &res);
+    ctl_delete(api, "/api/core/v1/filesystems/memfs/fs0", &res);
     ck_status(&res, 409, "fs/delete-while-mounted-is-409");
 
-    ctl_post(api, "/api/v1/exports",
+    ctl_post(api, "/api/core/v1/exports",
              "{\"name\":\"e0\",\"path\":\"/m0\",\"access\":\"rw\"}", &res);
     ck_status(&res, 201, "export/create");
 
-    ctl_get(api, "/api/v1/exports/e0", &res);
+    ctl_get(api, "/api/core/v1/exports/e0", &res);
     ck_status(&res, 200, "export/get");
     ck(json_field_is(&res, "access", "rw"), "export/get-access");
 
-    ctl_post(api, "/api/v1/shares",
+    ctl_post(api, "/api/core/v1/shares",
              "{\"name\":\"s0\",\"path\":\"/m0\"}", &res);
     ck_status(&res, 201, "share/create");
 
-    ctl_get(api, "/api/v1/shares", &res);
+    ctl_get(api, "/api/core/v1/shares", &res);
     ck(array_has_name(&res, "s0"), "share/list-contains-s0");
 
-    ctl_post(api, "/api/v1/buckets",
+    ctl_post(api, "/api/core/v1/buckets",
              "{\"name\":\"b0\",\"path\":\"/m0\"}", &res);
     ck_status(&res, 201, "bucket/create");
 
-    ctl_get(api, "/api/v1/buckets/b0", &res);
+    ctl_get(api, "/api/core/v1/buckets/b0", &res);
     ck_status(&res, 200, "bucket/get");
 
     /*
@@ -253,34 +253,34 @@ main(
      * misspelled name would permanently disable bucket administration.  The
      * create is the assertion; the 404 alone cannot see the leak.
      */
-    ctl_get(api, "/api/v1/buckets/nosuchbucket", &res);
+    ctl_get(api, "/api/core/v1/buckets/nosuchbucket", &res);
     ck_status(&res, 404, "bucket/get-missing-is-404");
 
-    ctl_post(api, "/api/v1/buckets",
+    ctl_post(api, "/api/core/v1/buckets",
              "{\"name\":\"b1\",\"path\":\"/m0\"}", &res);
     ck_status(&res, 201, "bucket/create-after-missing-get-does-not-deadlock");
 
-    ctl_delete(api, "/api/v1/buckets/b1", &res);
+    ctl_delete(api, "/api/core/v1/buckets/b1", &res);
     ck_status(&res, 204, "bucket/delete-after-missing-get-does-not-deadlock");
 
-    ctl_post(api, "/api/v1/users",
+    ctl_post(api, "/api/core/v1/users",
              "{\"username\":\"alice\",\"uid\":1000,\"gid\":1000,"
              "\"gids\":[1000,2000]}", &res);
     ck_status(&res, 201, "user/create");
 
-    ctl_get(api, "/api/v1/users/alice", &res);
+    ctl_get(api, "/api/core/v1/users/alice", &res);
     ck_status(&res, 200, "user/get");
 
-    ctl_get(api, "/api/v1/users/nobodyhere", &res);
+    ctl_get(api, "/api/core/v1/users/nobodyhere", &res);
     ck_status(&res, 404, "user/get-missing-is-404");
 
     /* A mount in use by a share, export or bucket is pinned. */
-    ctl_delete(api, "/api/v1/mounts/m0", &res);
+    ctl_delete(api, "/api/core/v1/mounts/m0", &res);
     ck_status(&res, 409, "mount/delete-while-in-use-is-409");
 
     /* ---- 4. config reconstruction --------------------------------------- */
 
-    ctl_get(api, "/api/v1/config", &res);
+    ctl_get(api, "/api/core/v1/config", &res);
     ck_status(&res, 200, "config/status");
     {
         json_t      *root;
@@ -300,27 +300,27 @@ main(
 
     /* ---- teardown, in dependency order ---------------------------------- */
 
-    ctl_delete(api, "/api/v1/buckets/b0", &res);
+    ctl_delete(api, "/api/core/v1/buckets/b0", &res);
     ck_status(&res, 204, "bucket/delete");
-    ctl_delete(api, "/api/v1/buckets/b0", &res);
+    ctl_delete(api, "/api/core/v1/buckets/b0", &res);
     ck_status(&res, 404, "bucket/delete-twice-is-404");
 
-    ctl_delete(api, "/api/v1/shares/s0", &res);
+    ctl_delete(api, "/api/core/v1/shares/s0", &res);
     ck_status(&res, 204, "share/delete");
 
-    ctl_delete(api, "/api/v1/exports/e0", &res);
+    ctl_delete(api, "/api/core/v1/exports/e0", &res);
     ck_status(&res, 204, "export/delete");
 
-    ctl_delete(api, "/api/v1/users/alice", &res);
+    ctl_delete(api, "/api/core/v1/users/alice", &res);
     ck_status(&res, 204, "user/delete");
 
-    ctl_delete(api, "/api/v1/mounts/m0", &res);
+    ctl_delete(api, "/api/core/v1/mounts/m0", &res);
     ck_status(&res, 204, "mount/delete");
 
-    ctl_delete(api, "/api/v1/filesystems/memfs/fs0", &res);
+    ctl_delete(api, "/api/core/v1/filesystems/memfs/fs0", &res);
     ck_status(&res, 204, "fs/delete");
 
-    ctl_get(api, "/api/v1/mounts/m0", &res);
+    ctl_get(api, "/api/core/v1/mounts/m0", &res);
     ck_status(&res, 404, "mount/gone-after-delete");
 
     /* ---- 5. the scrape endpoint ----------------------------------------- */

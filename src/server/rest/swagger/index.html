@@ -6,7 +6,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chimera NAS API Documentation</title>
-    <link rel="stylesheet" type="text/css" href="/api/docs/swagger-ui.min.css" />
+    <link rel="stylesheet" type="text/css" href="/api/docs/v1/swagger-ui.min.css" />
     <style>
         html { box-sizing: border-box; overflow-y: scroll; }
         *, *:before, *:after { box-sizing: inherit; }
@@ -15,12 +15,12 @@
 </head>
 <body>
     <div id="swagger-ui"></div>
-    <script src="/api/docs/swagger-ui-bundle.min.js"></script>
-    <script src="/api/docs/swagger-ui-standalone-preset.min.js"></script>
+    <script src="/api/docs/v1/swagger-ui-bundle.min.js"></script>
+    <script src="/api/docs/v1/swagger-ui-standalone-preset.min.js"></script>
     <script>
         window.onload = function() {
             window.ui = SwaggerUIBundle({
-                url: "/api/openapi.json",
+                url: "/api/docs/v1/openapi.json",
                 dom_id: '#swagger-ui',
                 deepLinking: true,
                 presets: [

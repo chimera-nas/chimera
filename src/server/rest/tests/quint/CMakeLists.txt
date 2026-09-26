@@ -74,6 +74,40 @@ set_tests_properties(chimera/server/rest/ctl/proto_probe PROPERTIES
     LABELS "quint;ctl_mbt;memfs"
     TIMEOUT 120)
 
+# Real external modules, compiled against only the public REST SDK.
+foreach(variant v2 badabi)
+    add_library(rest_example_${variant} MODULE ${CMAKE_SOURCE_DIR}/examples/rest_module/rest_example.c)
+    set_property(TARGET rest_example_${variant} PROPERTY INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/src/server/rest/sdk)
+    target_link_libraries(rest_example_${variant} PRIVATE pthread)
+endforeach()
+target_compile_definitions(rest_example_v2 PRIVATE EXAMPLE_API_VERSION=2)
+target_compile_definitions(rest_example_badabi PRIVATE EXAMPLE_ABI_VERSION=999)
+add_executable(ctl_modules_probe ctl_modules_probe.c)
+target_include_directories(ctl_modules_probe PRIVATE ${CMAKE_SOURCE_DIR}/src ${JANSSON_INCLUDE_DIRS})
+target_link_libraries(ctl_modules_probe chimera_server chimera_metrics ${JANSSON_LIBRARIES})
+target_compile_definitions(ctl_modules_probe PRIVATE
+    EXAMPLE_V1="$<TARGET_FILE:rest_example>"
+    EXAMPLE_V2="$<TARGET_FILE:rest_example_v2>"
+    EXAMPLE_BAD_ABI="$<TARGET_FILE:rest_example_badabi>")
+add_dependencies(ctl_modules_probe rest_example rest_example_v2 rest_example_badabi)
+foreach(mode modules empty core docs auth)
+    add_test(NAME chimera/server/rest/ctl/modules_${mode} COMMAND ctl_modules_probe ${mode})
+    set_tests_properties(chimera/server/rest/ctl/modules_${mode} PROPERTIES
+        LABELS "quint;ctl_mbt;memfs" TIMEOUT 60)
+endforeach()
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+foreach(case "badabi|incompatible ABI" "duplicate|Duplicate REST module/version"
+             "missing|Cannot load REST module" "badpublic|allow_public_routes")
+    string(REPLACE "|" ";" fields "${case}")
+    list(GET fields 0 mode)
+    list(GET fields 1 diagnostic)
+    add_test(NAME chimera/server/rest/ctl/modules_${mode}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../expect_module_failure.py
+            $<TARGET_FILE:ctl_modules_probe> ${mode} "${diagnostic}")
+    set_tests_properties(chimera/server/rest/ctl/modules_${mode} PROPERTIES
+        LABELS "quint;ctl_mbt;memfs" TIMEOUT 60)
+endforeach()
+
 # The corpus replayer.  Drives REST calls and NFS requests from one trace
 # against one in-process server, so an administrative change and the very next
 # protocol request are ordered the way the model says.

@@ -46,6 +46,7 @@ def main():
                     "threads": 2, "nfs_enabled": True, "nfs_port": nfs_port,
                     "data_server": True, "external_portmap": True,
                     "rest_http_port": http_port, "rest_auth_enabled": False,
+                    "rest_modules": [{"module": "core", "allow_public_routes": True}],
                     "metrics_port": 0, "state_dir": state.as_posix(),
                 },
                 "filesystems": {"fs0": {"module": "memfs"}},
@@ -124,7 +125,7 @@ def main():
                         raise RuntimeError(f"valid config exited: {proc.returncode}")
                     try:
                         with opener.open(
-                            f"http://127.0.0.1:{http_port}/api/v1/exports", timeout=2
+                            f"http://127.0.0.1:{http_port}/api/core/v1/exports", timeout=2
                         ) as response:
                             body = json.load(response)
                         break
@@ -138,7 +139,7 @@ def main():
                 assert exports["/a_auto"]["squash"] == "root", body
                 assert exports["/b_pinned"]["sec"] == ["krb5"], body
                 with opener.open(
-                    f"http://127.0.0.1:{http_port}/api/v1/config", timeout=5
+                    f"http://127.0.0.1:{http_port}/api/core/v1/config", timeout=5
                 ) as response:
                     config = json.load(response)
                 assert config["exports"]["/b_pinned"]["sec"] == ["krb5"], config

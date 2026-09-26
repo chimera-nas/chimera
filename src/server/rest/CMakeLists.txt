@@ -9,19 +9,48 @@ if(NOT WIN32)
     pkg_check_modules(JANSSON REQUIRED jansson)
 endif()
 
-add_library(chimera_rest ${CHIMERA_LIBRARY_TYPE}
-    rest.c
-    rest_users.c
-    rest_exports.c
-    rest_shares.c
-    rest_buckets.c
-    rest_mounts.c
-    rest_filesystems.c
-    rest_config.c
-    rest_swagger.c
-    rest_debug.c
-    rest_auth.c
-)
+add_library(chimera_rest SHARED rest.c rest_request.c rest_module.c rest_auth.c)
+target_compile_definitions(chimera_rest PRIVATE
+    CHIMERA_REST_MODULE_SUFFIX="${CMAKE_SHARED_MODULE_SUFFIX}")
+
+add_library(chimera_rest_core MODULE rest_core.c rest_users.c rest_exports.c
+    rest_shares.c rest_buckets.c rest_mounts.c rest_filesystems.c rest_config.c)
+add_library(chimera_rest_docs MODULE rest_swagger.c)
+foreach(module chimera_rest_core chimera_rest_docs)
+    set_target_properties(${module} PROPERTIES PREFIX "")
+    target_include_directories(${module} PRIVATE ${JANSSON_INCLUDE_DIRS})
+    target_link_libraries(${module} PRIVATE chimera_rest chimera_vfs evpl_http evpl
+        ${JANSSON_LIBRARIES})
+    if(APPLE)
+        target_link_options(${module} PRIVATE -undefined dynamic_lookup)
+    endif()
+    install(TARGETS ${module} LIBRARY DESTINATION lib)
+endforeach()
+
+if(NOT DISABLE_TESTS)
+    add_library(chimera_rest_debug MODULE rest_debug.c)
+    set_target_properties(chimera_rest_debug PROPERTIES PREFIX "")
+    target_include_directories(chimera_rest_debug PRIVATE ${JANSSON_INCLUDE_DIRS})
+    target_link_libraries(chimera_rest_debug PRIVATE chimera_rest chimera_vfs evpl
+        ${JANSSON_LIBRARIES})
+    if(APPLE)
+        target_link_options(chimera_rest_debug PRIVATE -undefined dynamic_lookup)
+    endif()
+endif()
+
+add_library(chimera_rest_sdk INTERFACE)
+set_target_properties(chimera_rest_sdk PROPERTIES EXPORT_NAME RestSDK)
+target_include_directories(chimera_rest_sdk INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/sdk>
+    $<INSTALL_INTERFACE:include/chimera/rest/sdk>)
+install(TARGETS chimera_rest_sdk EXPORT ChimeraRestSDK COMPONENT rest-sdk)
+install(EXPORT ChimeraRestSDK FILE ChimeraRestSDKConfig.cmake NAMESPACE Chimera::
+    DESTINATION lib/cmake/ChimeraRestSDK COMPONENT rest-sdk)
+install(DIRECTORY sdk/ DESTINATION include/chimera/rest/sdk COMPONENT rest-sdk
+    FILES_MATCHING PATTERN "*.h")
+install(FILES ${CMAKE_SOURCE_DIR}/LICENSES/LGPL-2.1-only.txt
+    DESTINATION share/licenses/chimera-rest-sdk COMPONENT rest-sdk)
+
 target_include_directories(chimera_rest PRIVATE ${JANSSON_INCLUDE_DIRS})
 # crypt(3) is a separate library only on Linux (libcrypt/libxcrypt); on Darwin
 # it lives in libSystem but supports only DES, so users.json password hashes
@@ -52,17 +81,18 @@ else()
 endif()
 
 target_link_libraries(chimera_rest chimera_vfs evpl_http evpl
-                      chimera_crypto ${CHIMERA_CRYPT_LIB})
+                      chimera_crypto ${CHIMERA_CRYPT_LIB} ${CHIMERA_DL_LIB} ${JANSSON_LIBRARIES})
 
 # Embed Swagger UI files at build time
 set(SWAGGER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/swagger)
 set(SWAGGER_EMBEDDED_C ${CMAKE_CURRENT_BINARY_DIR}/swagger_embedded.c)
+set(OPENAPI_EMBEDDED_C ${CMAKE_CURRENT_BINARY_DIR}/openapi_embedded.c)
 set(OPENAPI_JSON ${CMAKE_SOURCE_DIR}/docs/openapi.json)
 
 add_custom_command(
-    OUTPUT ${SWAGGER_EMBEDDED_C}
+    OUTPUT ${SWAGGER_EMBEDDED_C} ${OPENAPI_EMBEDDED_C}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/embed_files.py
-            ${SWAGGER_DIR} ${OPENAPI_JSON} ${SWAGGER_EMBEDDED_C}
+            ${SWAGGER_DIR} ${OPENAPI_JSON} ${SWAGGER_EMBEDDED_C} ${OPENAPI_EMBEDDED_C}
     DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/embed_files.py
         ${SWAGGER_DIR}/index.html
@@ -73,7 +103,8 @@ add_custom_command(
     COMMENT "Embedding Swagger UI files"
 )
 
-target_sources(chimera_rest PRIVATE ${SWAGGER_EMBEDDED_C})
+target_sources(chimera_rest_docs PRIVATE ${SWAGGER_EMBEDDED_C})
+target_sources(chimera_rest PRIVATE ${OPENAPI_EMBEDDED_C})
 
 if(WBCLIENT_FOUND)
     target_include_directories(chimera_rest PRIVATE ${WBCLIENT_INCLUDE_DIRS})
@@ -81,6 +112,10 @@ if(WBCLIENT_FOUND)
 endif()
 
 install(TARGETS chimera_rest DESTINATION lib)
+add_dependencies(chimera_server chimera_rest_core chimera_rest_docs)
+if(NOT DISABLE_TESTS)
+    add_dependencies(chimera_server chimera_rest_debug)
+endif()
 
 if(NOT DISABLE_TESTS)
     add_subdirectory(tests)

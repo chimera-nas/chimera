@@ -40,9 +40,9 @@ share_to_json_callback(
 
 void
 chimera_rest_handle_shares_list(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread)
 {
     struct share_list_ctx ctx;
 
@@ -56,10 +56,10 @@ chimera_rest_handle_shares_list(
 
 void
 chimera_rest_handle_shares_get(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *name)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *name)
 {
     const struct chimera_smb_share *share;
     json_t                         *obj;
@@ -82,11 +82,11 @@ chimera_rest_handle_shares_get(
 
 void
 chimera_rest_handle_shares_create(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *body,
-    int                         body_len)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *body,
+    int                          body_len)
 {
     json_t      *root;
     json_error_t error;
@@ -136,10 +136,10 @@ chimera_rest_handle_shares_create(
 
 void
 chimera_rest_handle_shares_delete(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *name)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *name)
 {
     int rc;
 
@@ -151,5 +151,5 @@ chimera_rest_handle_shares_delete(
         return;
     }
 
-    evpl_http_server_dispatch_default(request, 204);
+    chimera_rest_reply(request, 204, NULL, NULL, 0);
 } /* chimera_rest_handle_shares_delete */

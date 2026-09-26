@@ -37,6 +37,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
             "s3_enabled": False, "state_dir": root.as_posix(),
             "rest_http_port": http_port, "rest_https_port": https_port,
             "metrics_port": metrics_port, "rest_auth_enabled": False,
+            "rest_modules": [{"module": "core", "allow_public_routes": True}],
         },
     }
     config_path = root / "config.json"
@@ -57,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
                     raise RuntimeError(f"daemon exited during startup: {proc.returncode}")
                 try:
                     with opener.open(
-                        f"http://127.0.0.1:{http_port}/api/v1/exports", timeout=2
+                        f"http://127.0.0.1:{http_port}/api/core/v1/exports", timeout=2
                     ) as response:
                         assert response.status == 200
                         json.load(response)
@@ -77,7 +78,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
                 urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=tls)
             )
             with https.open(
-                f"https://127.0.0.1:{https_port}/api/v1/exports", timeout=5
+                f"https://127.0.0.1:{https_port}/api/core/v1/exports", timeout=5
             ) as response:
                 assert response.status == 200
                 json.load(response)

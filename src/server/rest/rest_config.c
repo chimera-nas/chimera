@@ -16,7 +16,7 @@
 #include "rest_internal.h"
 
 /*
- * GET /api/v1/config
+ * GET /api/core/v1/config
  *
  * Reconstructs a JSON document compatible with the chimera.json file format
  * from live runtime state.  The "users" section is intentionally omitted (it
@@ -62,7 +62,7 @@ config_export_callback(
     json_t *exports = data;
     json_t *obj;
 
-    /* Shared with the /api/v1/exports handlers; includes the sec restriction
+    /* Shared with the /api/core/v1/exports handlers; includes the sec restriction
      * so a captured config regenerates chimera.json faithfully (omitting it
      * would silently drop a security restriction on the next boot).  The
      * name is the entry's key rather than a field, matching chimera.json. */
@@ -110,9 +110,9 @@ config_bucket_callback(
 
 void
 chimera_rest_handle_config(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread)
 {
     struct chimera_server *server = thread->shared->server;
     json_t                *root;

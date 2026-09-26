@@ -15,7 +15,7 @@
 #   link   <src> <newlink>
 #   chmod  <octal-mode> <path>
 #
-# Each verb is translated into a POST to the chimera /api/v1/debug/fsop debug
+# Each verb is translated into a POST to the chimera /api/debug/v1/fsop debug
 # endpoint, which performs the real VFS operation. The VFS core recalls any
 # outstanding delegation on the affected file as a side effect, which is what
 # the tests verify.
@@ -47,7 +47,7 @@ case "$VERB" in
 esac
 
 HTTP=$(curl -sS -o /dev/null -w '%{http_code}' \
-       -X POST "$BASE/api/v1/debug/fsop" \
+       -X POST "$BASE/api/debug/v1/fsop" \
        -H 'Content-Type: application/json' \
        -d "$BODY") || {
     echo "pynfs_serverhelper: curl failed for $VERB" >&2

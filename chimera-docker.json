@@ -9,7 +9,11 @@
         "smb_enabled": true,
         "s3_enabled": true,
         "threads": 4,
-        "rest_http_port": 8080
+        "rest_http_port": 8080,
+        "rest_modules": [
+            {"module": "core", "allow_public_routes": true},
+            {"module": "docs", "allow_public_routes": true}
+        ]
     },
     "mounts": {
         "export": {

@@ -946,12 +946,38 @@ main(
         chimera_server_config_set_rest_http_port(server_config, rest_http_port);
     }
 
-    /* Test-only: enable the /api/v1/debug/fsop endpoint that performs
-     * server-side filesystem mutations (used to drive delegation recalls in
-     * the pynfs DELEG16-20 tests). Default off; never enable in production. */
-    json_t *rest_debug_fsops_value = json_object_get(server_params, "rest_debug_fsops");
-    if (json_is_true(rest_debug_fsops_value)) {
-        chimera_server_config_set_rest_debug_fsops(server_config, 1);
+    json_t *rest_modules = json_object_get(server_params, "rest_modules");
+    if (rest_modules) {
+        size_t  index;
+        json_t *entry;
+        if (!json_is_array(rest_modules)) {
+            fprintf(stderr, "server.rest_modules must be an array\n");
+            exit(EXIT_FAILURE);
+        }
+        json_array_foreach(rest_modules, index, entry)
+        {
+            const char *name         = json_string_value(json_object_get(entry, "module"));
+            json_t     *path_value   = json_object_get(entry, "module_path");
+            json_t     *public_value = json_object_get(entry, "allow_public_routes");
+            json_t     *options      = json_object_get(entry, "config");
+            char       *options_json;
+
+            if (!name || (path_value && !json_is_string(path_value)) ||
+                (public_value && !json_is_boolean(public_value)) ||
+                (options && !json_is_object(options))) {
+                fprintf(stderr, "Invalid REST module entry %zu\n", index);
+                exit(EXIT_FAILURE);
+            }
+            options_json = options ? json_dumps(options, JSON_COMPACT) : strdup("{}");
+            if (!options_json || chimera_server_config_add_rest_module(server_config,
+                                                                       name, json_string_value(path_value), options_json
+                                                                       ,
+                                                                       json_is_true(public_value))) {
+                fprintf(stderr, "Invalid or excessive REST module configuration\n");
+                exit(EXIT_FAILURE);
+            }
+            free(options_json);
+        }
     }
 
     /* REST API authentication is enabled by default; it can be turned off

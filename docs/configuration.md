@@ -130,11 +130,12 @@ the canonical place to set them.
 | `smb_acl_inherited_canonicalize` | bool | `true` | Canonicalize inherited ACLs on SMB. |
 | `smb_replay_pending_windows` | bool | `false` | Answer a replayed durable-v2 CREATE that collides with a still-deferred CREATE the way Windows servers do (`STATUS_ACCESS_DENIED`, and no replay detection while the original waits on a share conflict). The default answers `STATUS_FILE_NOT_AVAILABLE`, which clients retry until the original create completes. MS-SMB2 does not specify this race; the two profiles are mutually exclusive. |
 | `metrics_port` | int | `9000` | Prometheus metrics port (`/metrics`). Make it distinct when running multiple daemons per host. |
+| `rest_modules` | array | `[]` | Explicit module list, including core and docs; see [REST module SDK](rest-module-sdk.md). No modules load automatically. |
 | `rest_http_port` | int | - | HTTP port for the REST admin API. Set to enable it (examples use `8080`). |
 | `rest_https_port` | int | `0` | HTTPS port for the REST API (`0` = disabled). |
 | `rest_ssl_cert` | string | - | TLS certificate path. Auto-generated (self-signed) if HTTPS is enabled and this is unset. |
 | `rest_ssl_key` | string | - | TLS private-key path. Auto-generated alongside the cert if unset. |
-| `rest_auth_enabled` | bool | `true` | Require authentication (JWT Bearer token or HTTP Basic credentials) on all `/api/v1/*` endpoints. Set to `false` to disable auth entirely - only safe on a trusted/loopback-only management network. |
+| `rest_auth_enabled` | bool | `true` | Require authentication (JWT Bearer token or HTTP Basic credentials) on protected routes in every REST module. Set to `false` to disable auth entirely - only safe on a trusted/loopback-only management network. |
 | `soft_fail_bad_req` | bool | `false` | Return a soft error on a malformed REST request instead of dropping the connection. |
 
 See [Advanced and testing options](#advanced-and-testing-options) for a small set
@@ -438,7 +439,11 @@ an AllUsers READ or WRITE grant when the world bits are set.
         "smb_encryption": "enabled",
         "smb_persistent_handles": true,
         "metrics_port": 9000,
-        "rest_http_port": 8080
+        "rest_http_port": 8080,
+        "rest_modules": [
+            {"module": "core", "allow_public_routes": true},
+            {"module": "docs", "allow_public_routes": true}
+        ]
     },
     "mounts": {
         "data": { "module": "memfs", "path": "/" }
@@ -599,5 +604,4 @@ completeness; leave them at their defaults unless you understand the trade-off.
 
 | Section | Key | Type | Default | Description |
 |---|---|---|---|---|
-| `server` | `rest_debug_fsops` | bool | `false` | Enable `/api/v1/debug/fsop`, an unauthenticated endpoint that performs server-side filesystem mutations (used to drive delegation-recall tests). **Never enable on a production or network-reachable server.** |
 | `diskfs` `config` | `unsafe_async` | bool | `false` | Issue block writes without FUA/sync, trading crash-consistency for throughput. A power loss or crash can corrupt the filesystem. Intended for benchmarking only. |

@@ -102,7 +102,7 @@ generate_config() {
     # rather than carving out a per-endpoint exemption.
     if [ "$DELEG_ENABLE" = "true" ]; then
         rest_section="\"rest_http_port\": $REST_PORT,
-        \"rest_debug_fsops\": true,
+        \"rest_modules\": [{\"module\": \"debug\"}],
         \"rest_auth_enabled\": false,"
     fi
 

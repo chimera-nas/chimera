@@ -43,8 +43,8 @@ def embed_file(filepath, varname):
 
 
 def main():
-    if len(sys.argv) != 4:
-        print(f"Usage: {sys.argv[0]} <swagger_dir> <openapi_json> <output.c>",
+    if len(sys.argv) != 5:
+        print(f"Usage: {sys.argv[0]} <swagger_dir> <openapi_json> <assets.c> <openapi.c>",
               file=sys.stderr)
         sys.exit(1)
 
@@ -59,7 +59,6 @@ def main():
         (os.path.join(swagger_dir, 'swagger-ui-standalone-preset.min.js'),
          'swagger_ui_standalone_preset_min_js'),
         (os.path.join(swagger_dir, 'swagger-ui.min.css'), 'swagger_ui_min_css'),
-        (openapi_json, 'openapi_json'),
     ]
 
     output_lines = []
@@ -82,6 +81,9 @@ def main():
 
     with open(output_file, 'w') as f:
         f.write('\n'.join(output_lines))
+
+    with open(sys.argv[4], 'w') as f:
+        f.write(embed_file(openapi_json, 'openapi_json'))
 
     print(f"Generated {output_file}")
 

@@ -103,97 +103,98 @@ struct chimera_server_config_nfs_auth {
 };
 
 struct chimera_server_config {
-    int                                   nfs_rdma;
-    int                                   nfs_rdma_port;
-    int                                   nfs_tcp_rdma_port;
-    int                                   nfs_lockmgr_port;
-    int                                   nfs_nsm_port;
+    int                                      nfs_rdma;
+    int                                      nfs_rdma_port;
+    int                                      nfs_tcp_rdma_port;
+    int                                      nfs_lockmgr_port;
+    int                                      nfs_nsm_port;
     /* The MOUNT and portmap services.  Configurable for the same reason the
      * two above are: their well-known numbers are only a default, and two NFS
      * servers in one address space (a pNFS metadata server and an NFS proxy in
      * front of it, say) need distinct ones or the second one's listen fails. */
-    int                                   nfs_mount_port;
-    int                                   nfs_portmap_port;
-    int                                   nfs_port;
-    int                                   s3_port;
+    int                                      nfs_mount_port;
+    int                                      nfs_portmap_port;
+    int                                      nfs_port;
+    int                                      s3_port;
     /* Identity an S3 access key acts as when its configuration binds it to no
      * user.  Defaults to nobody/nogroup so an unbound key is unprivileged. */
-    uint32_t                              s3_anon_uid;
-    uint32_t                              s3_anon_gid;
-    int                                   smb_port;
-    int                                   nfs_enabled;
-    int                                   smb_enabled;
-    int                                   s3_enabled;
-    int                                   fuse_enabled;
-    int                                   nfs_data_server;
-    uint64_t                              nfs_server_scope;
-    int                                   external_portmap;
-    char                                  portmap_hostname[256];
-    int                                   soft_fail_bad_req;
-    uint64_t                              max_open_files;
-    int                                   core_threads;
-    int                                   sync_delegation;
-    int                                   sync_delegation_threads;
-    int                                   async_delegation;
-    int                                   async_delegation_threads;
-    int                                   cache_ttl;
-    int                                   attr_cache_enabled;
-    int                                   umount_timeout_ms;
-    int                                   name_cache_enabled;
-    int                                   rcu_reclaim_threads;
-    int                                   nfs4_session_slots;
-    int                                   nfs4_delegations;
-    int                                   nfs4_drc;
-    int                                   nfs3_drc;
-    int                                   nfs4_node_id;
-    uint32_t                              nfs4_lease_time_s;
-    uint32_t                              nfs4_grace_time_s;
-    uint32_t                              nfs4_courtesy_time_s;
-    int                                   num_modules;
-    int                                   metrics_port;
-    int                                   rest_http_port;
-    int                                   rest_https_port;
-    int                                   rest_debug_fsops;
-    int                                   rest_auth_enabled;
-    int                                   smb_num_dialects;
-    uint32_t                              smb_dialects[16];
-    int                                   smb_persistent_handles;
-    int                                   smb_directory_leases;
-    int                                   smb_named_streams;
-    int                                   smb_signing_required;
-    int                                   smb_encryption;
-    int                                   smb_compression;
-    int                                   smb_leases;
-    int                                   smb_oplocks;
-    int                                   smb_notify_disabled;
-    int                                   smb_acl_inherited_canonicalize;
-    int                                   smb_mode_from_sid;
-    int                                   smb_posix_rename;
-    int                                   smb_replay_pending_windows;
-    int                                   smb2_max_async_credits;
-    uint32_t                              smb_fs_physical_bytes_per_sector;
-    uint32_t                              smb_fs_sector_size_flags;
-    int                                   smb_num_nic_info;
-    uint32_t                              anonuid;
-    uint32_t                              anongid;
-    uint32_t                              nfs_max_exports;   /* concurrent-export count cap */
-    int                                   nfs_fh_sign;       /* sign wire file handles (default on) */
+    uint32_t                                 s3_anon_uid;
+    uint32_t                                 s3_anon_gid;
+    int                                      smb_port;
+    int                                      nfs_enabled;
+    int                                      smb_enabled;
+    int                                      s3_enabled;
+    int                                      fuse_enabled;
+    int                                      nfs_data_server;
+    uint64_t                                 nfs_server_scope;
+    int                                      external_portmap;
+    char                                     portmap_hostname[256];
+    int                                      soft_fail_bad_req;
+    uint64_t                                 max_open_files;
+    int                                      core_threads;
+    int                                      sync_delegation;
+    int                                      sync_delegation_threads;
+    int                                      async_delegation;
+    int                                      async_delegation_threads;
+    int                                      cache_ttl;
+    int                                      attr_cache_enabled;
+    int                                      umount_timeout_ms;
+    int                                      name_cache_enabled;
+    int                                      rcu_reclaim_threads;
+    int                                      nfs4_session_slots;
+    int                                      nfs4_delegations;
+    int                                      nfs4_drc;
+    int                                      nfs3_drc;
+    int                                      nfs4_node_id;
+    uint32_t                                 nfs4_lease_time_s;
+    uint32_t                                 nfs4_grace_time_s;
+    uint32_t                                 nfs4_courtesy_time_s;
+    int                                      num_modules;
+    int                                      metrics_port;
+    int                                      rest_http_port;
+    int                                      rest_https_port;
+    int                                      num_rest_modules;
+    struct chimera_server_rest_module_config rest_modules[CHIMERA_REST_MAX_MODULES];
+    int                                      rest_auth_enabled;
+    int                                      smb_num_dialects;
+    uint32_t                                 smb_dialects[16];
+    int                                      smb_persistent_handles;
+    int                                      smb_directory_leases;
+    int                                      smb_named_streams;
+    int                                      smb_signing_required;
+    int                                      smb_encryption;
+    int                                      smb_compression;
+    int                                      smb_leases;
+    int                                      smb_oplocks;
+    int                                      smb_notify_disabled;
+    int                                      smb_acl_inherited_canonicalize;
+    int                                      smb_mode_from_sid;
+    int                                      smb_posix_rename;
+    int                                      smb_replay_pending_windows;
+    int                                      smb2_max_async_credits;
+    uint32_t                                 smb_fs_physical_bytes_per_sector;
+    uint32_t                                 smb_fs_sector_size_flags;
+    int                                      smb_num_nic_info;
+    uint32_t                                 anonuid;
+    uint32_t                                 anongid;
+    uint32_t                                 nfs_max_exports; /* concurrent-export count cap */
+    int                                      nfs_fh_sign;    /* sign wire file handles (default on) */
     /* Optional 32-hex-char (128-bit) signing key.  Held with room to spare so
      * an over-long key is not truncated into a well-formed one: NFS init
      * validates the length and reports the mistake. */
-    char                                  nfs_fh_key[65];
-    enum chimera_tcp_flavor               tcp_flavor;
-    char                                  nfs_rdma_hostname[256];
-    char                                  kv_module[64];
-    char                                  state_dir[256];
-    char                                  rest_ssl_cert[256];
-    char                                  rest_ssl_key[256];
-    struct chimera_vfs_module_cfg         modules[CHIMERA_SERVER_MAX_MODULES];
-    struct chimera_server_config_smb_nic  smb_nic_info[16];
-    struct chimera_server_config_smb_auth smb_auth;
-    struct chimera_server_config_nfs_auth nfs_auth;
-    int                                   pnfs_enabled;
-    int                                   pnfs_num_ds;
+    char                                     nfs_fh_key[65];
+    enum chimera_tcp_flavor                  tcp_flavor;
+    char                                     nfs_rdma_hostname[256];
+    char                                     kv_module[64];
+    char                                     state_dir[256];
+    char                                     rest_ssl_cert[256];
+    char                                     rest_ssl_key[256];
+    struct chimera_vfs_module_cfg            modules[CHIMERA_SERVER_MAX_MODULES];
+    struct chimera_server_config_smb_nic     smb_nic_info[16];
+    struct chimera_server_config_smb_auth    smb_auth;
+    struct chimera_server_config_nfs_auth    nfs_auth;
+    int                                      pnfs_enabled;
+    int                                      pnfs_num_ds;
     struct chimera_server_config_pnfs_ds {
         char netid[8];
         char uaddr[64];
@@ -246,7 +247,6 @@ chimera_server_config_init(void)
     config->external_portmap         = 0;
     config->portmap_hostname[0]      = '\0';
     config->soft_fail_bad_req        = 0;
-    config->rest_debug_fsops         = 0;
     config->rest_auth_enabled        = 1;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
@@ -1419,19 +1419,47 @@ chimera_server_config_get_rest_http_port(const struct chimera_server_config *con
     return config->rest_http_port;
 } /* chimera_server_config_get_rest_http_port */
 
-SYMBOL_EXPORT void
-chimera_server_config_set_rest_debug_fsops(
-    struct chimera_server_config *config,
-    int                           enable)
-{
-    config->rest_debug_fsops = enable;
-} /* chimera_server_config_set_rest_debug_fsops */
-
 SYMBOL_EXPORT int
-chimera_server_config_get_rest_debug_fsops(const struct chimera_server_config *config)
+chimera_server_config_add_rest_module(
+    struct chimera_server_config *config,
+    const char                   *name,
+    const char                   *module_path,
+    const char                   *config_json,
+    int                           allow_public_routes)
 {
-    return config->rest_debug_fsops;
-} /* chimera_server_config_get_rest_debug_fsops */
+    struct chimera_server_rest_module_config *module;
+
+    if (!name || !name[0] || config->num_rest_modules == CHIMERA_REST_MAX_MODULES) {
+        return -1;
+    }
+    if (!config_json) {
+        config_json = "{}";
+    }
+    if (!module_path) {
+        module_path = "";
+    }
+    module = &config->rest_modules[config->num_rest_modules];
+    if (strlen(name) >= sizeof(module->name) ||
+        strlen(module_path) >= sizeof(module->module_path) ||
+        strlen(config_json) >= sizeof(module->config_json)) {
+        return -1;
+    }
+    strcpy(module->name, name);
+    strcpy(module->module_path, module_path);
+    strcpy(module->config_json, config_json);
+    module->allow_public_routes = !!allow_public_routes;
+    config->num_rest_modules++;
+    return 0;
+} /* chimera_server_config_add_rest_module */
+
+SYMBOL_EXPORT const struct chimera_server_rest_module_config *
+chimera_server_config_get_rest_modules(
+    const struct chimera_server_config *config,
+    int                                *count)
+{
+    *count = config->num_rest_modules;
+    return config->rest_modules;
+} /* chimera_server_config_get_rest_modules */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_rest_auth_enabled(
@@ -3026,6 +3054,8 @@ chimera_server_destroy(struct chimera_server *server)
 
     evpl_threadpool_destroy(server->pool);
 
+    chimera_rest_destroy(server->rest);
+
     /* Destroy protocols before VFS so they can release any open handles */
     for (i = 0; i < server->num_protocols; i++) {
         if (!server->protocol_private[i]) {
@@ -3035,8 +3065,6 @@ chimera_server_destroy(struct chimera_server *server)
     }
 
     chimera_vfs_destroy(server->vfs);
-
-    chimera_rest_destroy(server->rest);
 
     free((void *) server->config);
     free(server);

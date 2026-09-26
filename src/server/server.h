@@ -622,6 +622,27 @@ chimera_server_config_set_metrics_port(
     struct chimera_server_config *config,
     int                           port);
 
+/* REST modules are opt-in, including core and docs. A NULL path loads
+ * chimera_rest_<name> from the directory containing libchimera_rest. */
+#define CHIMERA_REST_MAX_MODULES 16
+struct chimera_server_rest_module_config {
+    char name[48];
+    char module_path[4096];
+    char config_json[8192];
+    int  allow_public_routes;
+};
+
+int chimera_server_config_add_rest_module(
+    struct chimera_server_config *config,
+    const char                   *name,
+    const char                   *module_path,
+    const char                   *config_json,
+    int                           allow_public_routes);
+const struct chimera_server_rest_module_config *
+chimera_server_config_get_rest_modules(
+    const struct chimera_server_config *config,
+    int                                *count);
+
 void
 chimera_server_config_set_rest_http_port(
     struct chimera_server_config *config,
@@ -638,15 +659,6 @@ chimera_server_config_set_rest_https_port(
 
 int
 chimera_server_config_get_rest_https_port(
-    const struct chimera_server_config *config);
-
-void
-chimera_server_config_set_rest_debug_fsops(
-    struct chimera_server_config *config,
-    int                           enable);
-
-int
-chimera_server_config_get_rest_debug_fsops(
     const struct chimera_server_config *config);
 
 void
