@@ -91,10 +91,11 @@ chimera_vfs_write_dispatch(
     uint64_t                          post_attr_mask,
     struct evpl_iovec                *iov,
     int                               niov,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_write_callback_t      callback,
     void                             *private_data)
 {
+
     struct chimera_vfs_request *request;
 
     /* Allocated against io_handle -- the DS backing file when this file is
@@ -133,13 +134,11 @@ chimera_vfs_write_dispatch(
      * claim for a leaseless actor, or break other holders' read caches for a
      * lease-holding client), then dispatch.  The caller's actor is copied
      * onto the request so the claim layer sees a stable address. */
-    if (io_owner) {
-        request->io_owner       = *io_owner;
-        request->io_owner_valid = 1;
-    }
+    chimera_vfs_io_view_copy(&request->io_view, &request->io_owner, view);
+    request->io_owner_valid = request->io_view.owner != NULL;
 
     chimera_vfs_io_claim_acquire(request,
-                                 io_owner ? &request->io_owner : NULL,
+                                 request->io_view.owner,
                                  chimera_vfs_dispatch);
 } /* chimera_vfs_write_dispatch */
 
@@ -156,7 +155,7 @@ struct chimera_vfs_write_resolve_ctx {
     uint64_t                        post_attr_mask;
     struct evpl_iovec              *iov;
     int                             niov;
-    bool                            has_io_owner;
+    struct chimera_vfs_io_view      view;
     struct chimera_claim_actor      io_owner;
     chimera_vfs_write_callback_t    callback;
     void                           *private_data;
@@ -185,7 +184,7 @@ chimera_vfs_write_resolve_complete(
                                ctx->offset, ctx->count, ctx->sync,
                                ctx->pre_attr_mask, ctx->post_attr_mask,
                                ctx->iov, ctx->niov,
-                               ctx->has_io_owner ? &ctx->io_owner : NULL,
+                               &ctx->view,
                                ctx->callback, ctx->private_data);
     chimera_vfs_gate_scratch_free(ctx->thread, ctx);
 } /* chimera_vfs_write_resolve_complete */
@@ -202,7 +201,7 @@ chimera_vfs_write_resolve(
     uint64_t                          post_attr_mask,
     struct evpl_iovec                *iov,
     int                               niov,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_write_callback_t      callback,
     void                             *private_data)
 {
@@ -212,7 +211,7 @@ chimera_vfs_write_resolve(
     if (!chimera_vfs_pnfs_io_possible(thread, handle)) {
         chimera_vfs_write_dispatch(thread, cred, handle, handle, 0,
                                    offset, count, sync, pre_attr_mask,
-                                   post_attr_mask, iov, niov, io_owner,
+                                   post_attr_mask, iov, niov, view,
                                    callback, private_data);
         return;
     }
@@ -229,12 +228,7 @@ chimera_vfs_write_resolve(
     ctx->post_attr_mask = post_attr_mask;
     ctx->iov            = iov;
     ctx->niov           = niov;
-    if (io_owner) {
-        ctx->has_io_owner = true;
-        ctx->io_owner     = *io_owner;
-    } else {
-        ctx->has_io_owner = false;
-    }
+    chimera_vfs_io_view_copy(&ctx->view, &ctx->io_owner, view);
     ctx->callback     = callback;
     ctx->private_data = private_data;
 
@@ -243,11 +237,10 @@ chimera_vfs_write_resolve(
 } /* chimera_vfs_write_resolve */
 
 /* Continuation for the first gated write on a handle (see read counterpart).
- * io_owner is copied by value (not by pointer) because the callback fires
- * after an async getattr has returned to the event loop -- the SMB caller's
- * stack frame that owned the original io_owner is gone by then.  Both the
- * has_io_owner flag and the copy let the dispatch tail re-emit a const-
- * pointer to a stable address. */
+* io_owner is copied by value (not by pointer) because the callback fires
+* after an async getattr has returned to the event loop -- the SMB caller's
+* stack frame that owned the original actor is gone by then. The view points
+* at the gate's own actor copy and borrows only the pinned exclusion list. */
 struct chimera_vfs_write_gate {
     struct chimera_vfs_thread      *thread;
     const struct chimera_vfs_cred  *cred;
@@ -259,8 +252,8 @@ struct chimera_vfs_write_gate {
     uint64_t                        post_attr_mask;
     struct evpl_iovec              *iov;
     int                             niov;
-    bool                            has_io_owner;
     struct chimera_claim_actor      io_owner;
+    struct chimera_vfs_io_view      view;
     chimera_vfs_write_callback_t    callback;
     void                           *private_data;
 };
@@ -327,7 +320,7 @@ chimera_vfs_write_gate_complete(
                               gate->offset, gate->count, gate->sync,
                               gate->pre_attr_mask, gate->post_attr_mask,
                               gate->iov, gate->niov,
-                              gate->has_io_owner ? &gate->io_owner : NULL,
+                              &gate->view,
                               gate->callback, gate->private_data);
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_write_gate_complete */
@@ -348,6 +341,30 @@ chimera_vfs_write_owned(
     chimera_vfs_write_callback_t      callback,
     void                             *private_data)
 {
+    struct chimera_vfs_io_view view = { .owner = io_owner };
+
+    chimera_vfs_write_view(thread, cred, handle, offset, count, sync,
+                           pre_attr_mask, post_attr_mask, iov, niov,
+                           &view, callback, private_data);
+} /* chimera_vfs_write_owned */
+
+SYMBOL_EXPORT void
+chimera_vfs_write_view(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          count,
+    uint32_t                          sync,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    const struct chimera_vfs_io_view *view,
+    chimera_vfs_write_callback_t      callback,
+    void                             *private_data)
+{
+
     struct chimera_vfs_write_gate *gate;
 
 
@@ -381,14 +398,8 @@ chimera_vfs_write_owned(
             gate->post_attr_mask = post_attr_mask;
             gate->iov            = iov;
             gate->niov           = niov;
-            if (io_owner) {
-                /* Deep copy: the caller's io_owner is a stack variable that
-                 * will be gone by the time the async getattr callback fires. */
-                gate->has_io_owner = true;
-                gate->io_owner     = *io_owner;
-            } else {
-                gate->has_io_owner = false;
-            }
+            chimera_vfs_io_view_copy(&gate->view, &gate->io_owner, view);
+
             gate->callback     = callback;
             gate->private_data = private_data;
 
@@ -401,8 +412,8 @@ chimera_vfs_write_owned(
 
     chimera_vfs_write_resolve(thread, cred, handle, offset, count, sync,
                               pre_attr_mask, post_attr_mask, iov, niov,
-                              io_owner, callback, private_data);
-} /* chimera_vfs_write_owned */
+                              view, callback, private_data);
+} /* chimera_vfs_write_view */
 
 SYMBOL_EXPORT void
 chimera_vfs_write(

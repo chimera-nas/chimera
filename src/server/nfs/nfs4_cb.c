@@ -15,43 +15,34 @@
 #include "nfs_internal.h"
 #include "nfs4_cb.h"
 
-#define NFS4_CB_MAX_HOLDERS 32   /* recall fan-out per file */
 
-/* Per-holder recall context: lets the completion find and drop the holder's
- * layout if the client declines (no LAYOUTRETURN coming).  The send itself
- * rides the client's shared callback channel (nfs4_callback.c). */
-struct nfs4_cb_recall_ctx {
+/* Every recall owns a separate queue node, layout reference and client pin.
+ * Concurrent recalls of one holder must never share intrusive queue linkage. */
+struct nfs4_cb_layout_recall_ctx {
     struct chimera_server_nfs_thread *thread;
-    struct nfs_client                *client;     /* the holder */
-    uint8_t                           fh[NFS4_FHSIZE];
-    uint16_t                          fhlen;
+    struct nfs_client                *client;
+    struct nfs_layout_state          *holder;
+    struct nfs4_cb_layout_recall_ctx *next;
 };
 
-/*
- * CB_LAYOUTRECALL completion.  NFS4_OK means the client will return the layout
- * via LAYOUTRETURN (which deregisters it and resumes the waiters).  Anything
- * else -- NOMATCHING, a callback error, or a transport failure -- means no
- * return is coming, so drop the stale layout now; its deregistration resumes
- * the waiters once the last holder for the file is gone.
- */
 static void
 nfs4_cb_recall_done(
     int   cb_status,
     void *arg)
 {
-    struct nfs4_cb_recall_ctx *ctx = arg;
+    struct nfs4_cb_layout_recall_ctx *ctx = arg;
 
     if (cb_status != NFS4_OK) {
-        struct nfs_layout_state *layout =
-            nfs_layout_state_find(ctx->client, ctx->fh, ctx->fhlen);
-
-        if (layout) {
-            nfs_layout_state_destroy(layout,
-                                     &ctx->thread->shared->nfs4_state_table,
-                                     ctx->thread->vfs_thread);
-        }
+        /* Revoke the original holder only. A layout returned and regranted
+        * while the callback was outstanding is a different reservation. */
+        nfs_layout_state_destroy(ctx->holder,
+                                 &ctx->thread->shared->nfs4_state_table,
+                                 ctx->thread->vfs_thread);
     }
-
+    nfs_layout_state_put(ctx->holder);
+    nfs_client_finish_compound(ctx->client,
+                               &ctx->thread->shared->nfs4_state_table,
+                               ctx->thread->vfs_thread);
     free(ctx);
 } /* nfs4_cb_recall_done */
 
@@ -101,39 +92,25 @@ nfs4_cb_drain_resume_queue(struct chimera_server_nfs_thread *thread)
     }
 } /* nfs4_cb_drain_resume_queue */
 
-/*
- * Recall `holder` from the client that holds it, over that client's shared
- * callback channel.  A client with no usable channel cannot be asked to return
- * the layout, so it is revoked locally (which deregisters it and lets the
- * recall make progress).  `holder` is pinned by the caller.
- */
-void
-nfs4_cb_recall_holder(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_layout_state          *holder)
+static void
+nfs4_cb_recall_send(struct nfs4_cb_layout_recall_ctx *ctx)
 {
-    struct nfs_client                *client   = holder->client;
-    struct nfs4_cb_client            *chan     = client->cb_path.cb_client;
+    struct chimera_server_nfs_thread *thread   = ctx->thread;
+    struct nfs_layout_state          *holder   = ctx->holder;
+    struct nfs4_cb_client            *chan     = ctx->client->cb_path.cb_client;
     struct chimera_server_nfs_thread *cb_owner =
         (chan && chan->session) ? chan->session->nfs4_session_backchannel_owner : NULL;
-    struct nfs4_cb_recall_ctx        *ctx;
     struct stateid4                   recall_stateid;
 
-    /* The CB_LAYOUTRECALL rides the session's backchannel conn, owned by one
-     * thread's evpl (evpl sends are not cross-thread safe).  When a conflicting
-     * op recalls from a different thread, bounce to that conn's owner -- mirrors
-     * the delegation CB_RECALL path (nfs4_cb_recall_enqueue): pin the layout
-     * with a ref, queue it, ring the owner's cb_doorbell.  The drain re-enters
-     * this function on the owner thread (where the test below is false) and
-     * sends inline.  Note: the bounce target is the *backchannel conn's* owner
-     * (tracked on the session, repointed by CREATE_SESSION/BIND_CONN), NOT
-     * chan->owner_thread, which is fixed at channel-open and drifts from the
-     * conn.  If there is no backchannel the send below fails -> revoke. */
+    if (atomic_load_explicit(&holder->destroyed, memory_order_acquire)) {
+        nfs4_cb_recall_done(NFS4_OK, ctx);
+        return;
+    }
     if (cb_owner && thread != cb_owner) {
-        nfs_layout_state_get(holder);
+        ctx->thread = cb_owner;
         evpl_mutex_lock(&cb_owner->cb_recall_lock);
-        holder->recall_qnext            = cb_owner->cb_layoutrecall_queue;
-        cb_owner->cb_layoutrecall_queue = holder;
+        ctx->next                       = cb_owner->cb_layoutrecall_queue;
+        cb_owner->cb_layoutrecall_queue = ctx;
         evpl_mutex_unlock(&cb_owner->cb_recall_lock);
         evpl_ring_doorbell(&cb_owner->cb_doorbell);
         return;
@@ -141,23 +118,61 @@ nfs4_cb_recall_holder(
 
     nfs4_stateid_encode(&recall_stateid, holder->seqid, NFS4_STATEID_TYPE_LAYOUT,
                         holder->shard, holder->slot_idx, holder->generation,
-                        (uint32_t) client->client_id);
-
-    ctx         = calloc(1, sizeof(*ctx));
-    ctx->thread = thread;
-    ctx->client = client;
-    memcpy(ctx->fh, holder->fh, holder->fh_len);
-    ctx->fhlen = holder->fh_len;
-
-    if (!nfs4_cb_layoutrecall(thread, client, holder->fh, holder->fh_len,
+                        thread->shared->nfs4_state_table.epoch);
+    if (!nfs4_cb_layoutrecall(thread, ctx->client, holder->fh, holder->fh_len,
                               holder->export_id, holder->layout_type,
                               &recall_stateid, nfs4_cb_recall_done, ctx)) {
         chimera_nfs_error("CB: holder has no callback channel; revoking layout");
-        free(ctx);
+        nfs4_cb_recall_done(-1, ctx);
+    }
+} /* nfs4_cb_recall_send */
+
+void
+nfs4_cb_recall_holder(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_layout_state          *holder)
+{
+    struct nfs_client                *client;
+    struct nfs4_cb_layout_recall_ctx *ctx;
+
+    /* A layout reference retains client memory. Pin callbacks even when client
+     * destruction is pending behind a compound which is waiting for recall. */
+    client = nfs_layout_state_reserve_client(holder);
+    if (!client) {
+        /* Teardown has already removed this holder (under the same lock). */
+        return;
+    }
+    ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
         nfs_layout_state_destroy(holder, &thread->shared->nfs4_state_table,
                                  thread->vfs_thread);
+        nfs_client_finish_compound(client, &thread->shared->nfs4_state_table,
+                                   thread->vfs_thread);
+        return;
     }
+    nfs_layout_state_get(holder);
+    ctx->thread = thread;
+    ctx->client = client;
+    ctx->holder = holder;
+    nfs4_cb_recall_send(ctx);
 } /* nfs4_cb_recall_holder */
+
+void
+nfs4_cb_drain_layoutrecall_queue(struct chimera_server_nfs_thread *thread)
+{
+    struct nfs4_cb_layout_recall_ctx *q;
+
+    evpl_mutex_lock(&thread->cb_recall_lock);
+    q                             = thread->cb_layoutrecall_queue;
+    thread->cb_layoutrecall_queue = NULL;
+    evpl_mutex_unlock(&thread->cb_recall_lock);
+    while (q) {
+        struct nfs4_cb_layout_recall_ctx *ctx = q;
+        q         = ctx->next;
+        ctx->next = NULL;
+        nfs4_cb_recall_send(ctx);
+    }
+} /* nfs4_cb_drain_layoutrecall_queue */
 
 void
 chimera_nfs4_cb_recall_and_wait(
@@ -170,7 +185,7 @@ chimera_nfs4_cb_recall_and_wait(
 {
     struct nfs_layout_recall_waiter *waiter;
     struct nfs4_cb_resume_ctx       *rctx;
-    struct nfs_layout_state         *holders[NFS4_CB_MAX_HOLDERS];
+    struct nfs_layout_state        **holders;
     int                              n, i;
 
     /* The waiter's resume fires on whichever thread processes the final
@@ -187,7 +202,7 @@ chimera_nfs4_cb_recall_and_wait(
 
     n = nfs_layout_table_recall_prepare(&thread->shared->nfs4_layout_table,
                                         fh, (uint16_t) fhlen, waiter,
-                                        holders, NFS4_CB_MAX_HOLDERS);
+                                        &holders);
 
     if (n == 0) {
         /* No layouts held for this file: nothing to recall, proceed now (we are
@@ -206,4 +221,5 @@ chimera_nfs4_cb_recall_and_wait(
         nfs4_cb_recall_holder(thread, holders[i]);
         nfs_layout_state_put(holders[i]);
     }
+    free(holders);
 } /* chimera_nfs4_cb_recall_and_wait */

@@ -100,6 +100,8 @@ chimera_nfs4_mkdir_callback(
         }
     }
 
+    chimera_nfs4_unmarshall_cinfo(&create_res->opcreate.resok4.cinfo,
+                                  &request->mkdir_at.r_dir_pre_attr, &request->mkdir_at.r_dir_post_attr);
     /* The parent's post-mutation snapshot (op 7, after the PUTFH that put the
      * current filehandle back on the parent). */
     chimera_nfs4_unmarshall_dir_attr(res, 7, &request->mkdir_at.r_dir_post_attr);

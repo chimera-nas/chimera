@@ -26,7 +26,7 @@ chimera_attrs_to_statvfs(
 } /* chimera_attrs_to_statvfs */
 
 /*
- * statfs is filesystem-wide: resolve the path through an OPEN_PATH op (which
+ * statfs is filesystem-wide: resolve the path through chimera_vfs_open (which
  * picks the path-op vs FH-relative strategy internally, so it works on
  * path-only mounts that return no re-openable child fh from lookup), then read
  * the statfs attributes from the resulting handle.
@@ -53,8 +53,7 @@ chimera_statfs_sequence_complete(
         chimera_attrs_to_statvfs((struct chimera_vfs_attrs *) &op->attr, &st);
     }
 
-    /* The sequence owns the handle its OPEN produced and releases it in the
-     * free below; nothing here releases anything. */
+    /* The compound owns and releases the handle used for this request. */
     if (heap_allocated) {
         chimera_client_request_free(thread, request);
     }
@@ -90,6 +89,6 @@ chimera_dispatch_statfs(
                                            (uint32_t) open_idx);
     }
 
-    chimera_vfs_compound_submit(compound, chimera_statfs_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(compound, chimera_statfs_sequence_complete,
+                                     request);
 } /* chimera_dispatch_statfs */

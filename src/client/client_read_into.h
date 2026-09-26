@@ -1,58 +1,66 @@
 // SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
-//
 // SPDX-License-Identifier: LGPL-2.1-only
-
 #pragma once
-
 #include "client_internal.h"
-
-static void
-chimera_read_into_complete(
-    enum chimera_vfs_error         error_code,
-    uint32_t                       count,
-    uint32_t                       eof,
-    struct chimera_client_request *request)
-{
-    struct chimera_client_thread *client_thread = request->thread;
-    chimera_read_into_callback_t  callback      = request->read_into.callback;
-    void                         *callback_arg  = request->read_into.private_data;
-
-    /* The data has already landed in the caller's destination buffers.  The
-     * caller owns and releases those buffers, so nothing is released here. */
-    request->read_into.result_count = count;
-    request->read_into.result_eof   = eof;
-
-    chimera_client_request_free(client_thread, request);
-
-    callback(client_thread, error_code, count, eof, callback_arg);
-} /* chimera_read_into_complete */
 
 static void
 chimera_read_into_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    const struct chimera_vfs_compound_op *op;
-    enum chimera_vfs_error                status;
+    struct chimera_client_request        *request  = private_data;
+    struct chimera_client_thread         *thread   = request->thread;
+    chimera_read_into_callback_t          callback = request->read_into.callback;
+    void                                 *arg      = request->read_into.private_data;
+    enum chimera_vfs_error                status   = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *op       = chimera_vfs_compound_op(compound,
+                                                                             chimera_vfs_compound_num_ops(compound) - 1)
+    ;
     uint32_t                              count = 0, eof = 0;
 
-    status = chimera_vfs_compound_status(compound);
-
     if (status == CHIMERA_VFS_OK) {
-        op = chimera_vfs_compound_op(compound,
-                                     chimera_vfs_compound_num_ops(compound) - 1);
-        count = op->read_len;
-        eof   = op->eof_read;
+        size_t capacity = 0;
+        for (int i = 0; i < request->read_into.dest_niov; i++) {
+            capacity += request->read_into.dest_iov[i].length;
+        }
+        if (op->read_len > capacity) {
+            status = CHIMERA_VFS_EIO;
+        } else {
+            int    src = 0, dst = 0;
+            size_t soff = 0, doff = 0, remaining = op->read_len;
+            /* The destination is borrowed until completion, but is written
+             * only after acceptance. Rejected attempts cannot expose bytes. */
+            while (remaining) {
+                size_t n     = op->iov[src].length - soff;
+                size_t avail = request->read_into.dest_iov[dst].length - doff;
+                if (n > avail) {
+                    n = avail;
+                }
+                if (n > remaining) {
+                    n = remaining;
+                }
+                if (n) {
+                    memcpy((char *) request->read_into.dest_iov[dst].data + doff,
+                           (char *) op->iov[src].data + soff, n);
+                }
+                remaining -= n; soff += n; doff += n;
+                if (soff == op->iov[src].length) {
+                    src++; soff = 0;
+                }
+                if (doff == request->read_into.dest_iov[dst].length) {
+                    dst++; doff = 0;
+                }
+            }
+            count = op->read_len;
+            eof   = op->eof_read;
+        }
     }
-
-    /* A READ with dest_iov leaves the compound owning nothing of the data:
-     * the op's iov IS the caller's dest_iov, handed back, and take_iov would
-     * answer NULL / 0.  So the free releases no data, and the caller's
-     * buffers are untouched by it. */
+    request->read_into.result_count = count;
+    request->read_into.result_eof   = eof;
     chimera_vfs_compound_free(compound);
-
-    chimera_read_into_complete(status, count, eof, private_data);
-} /* chimera_read_into_sequence_complete */
+    chimera_client_request_free(thread, request);
+    callback(thread, status, count, eof, arg);
+} // chimera_read_into_sequence_complete
 
 static inline void
 chimera_dispatch_read_into(
@@ -61,26 +69,7 @@ chimera_dispatch_read_into(
 {
     request->compound = chimera_vfs_compound_alloc(thread->vfs_thread,
                                                    chimera_client_req_cred(request));
-
-    /* The PUTHANDLE says what the handle was really opened with -- see
-     * open_flags on the request -- and the handle stays on the op too, for
-     * the reason given in chimera_dispatch_read.  dest_iov turns the READ
-     * into chimera_vfs_read_into: the scratch array is the request's, the
-     * destination the caller's, both borrowed for the run. */
-    chimera_vfs_compound_add_puthandle(request->compound,
-                                       request->read_into.handle,
-                                       request->read_into.open_flags);
-    chimera_vfs_compound_add_read(request->compound,
-                                  request->read_into.handle,
-                                  request->read_into.offset,
-                                  request->read_into.length,
-                                  request->read_into.iov,
-                                  CHIMERA_CLIENT_IOV_MAX,
-                                  0,
-                                  NULL,
-                                  request->read_into.dest_iov,
-                                  request->read_into.dest_niov);
-
-    chimera_vfs_compound_submit(request->compound,
-                                chimera_read_into_sequence_complete, request);
-} /* chimera_dispatch_read_into */
+    chimera_vfs_compound_add_read(request->compound, request->read_into.handle, request->read_into.offset, request->
+                                  read_into.length, request->read_into.iov, CHIMERA_CLIENT_IOV_MAX, 0, NULL, NULL, 0);
+    chimera_frontend_compound_submit(request->compound, chimera_read_into_sequence_complete, request);
+} // chimera_dispatch_read_into

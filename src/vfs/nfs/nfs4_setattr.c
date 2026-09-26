@@ -10,6 +10,7 @@ struct chimera_nfs4_setattr_ctx {
     struct chimera_nfs_client_server *server;
     uint32_t                          attr_mask[2];
     uint8_t                           attr_vals[128];
+    uint32_t                          pre_index, set_index, post_index;
 };
 
 static void
@@ -20,8 +21,9 @@ chimera_nfs4_setattr_callback(
     int                          status,
     void                        *private_data)
 {
-    struct chimera_vfs_request *request = private_data;
-    struct nfs_resop4          *setattr_res;
+    struct chimera_vfs_request      *request = private_data;
+    struct chimera_nfs4_setattr_ctx *ctx     = request->plugin_data;
+    struct nfs_resop4               *setattr_res;
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -29,6 +31,13 @@ chimera_nfs4_setattr_callback(
         return;
     }
 
+    if (ctx->pre_index && res->num_resarray > ctx->pre_index &&
+        res->resarray[ctx->pre_index].resop == OP_GETATTR &&
+        res->resarray[ctx->pre_index].opgetattr.status == NFS4_OK) {
+        chimera_nfs4_unmarshall_fattr(
+            &res->resarray[ctx->pre_index].opgetattr.resok4.obj_attributes,
+            &request->setattr.r_pre_attr);
+    }
     if (res->status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(res->status);
         request->complete(request);
@@ -50,18 +59,30 @@ chimera_nfs4_setattr_callback(
     }
 
     /* Check SETATTR result */
-    if (res->num_resarray < 3) {
+    if (ctx->set_index && res->num_resarray <= ctx->set_index) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
-    setattr_res = &res->resarray[2];
-    if (setattr_res->opsetattr.status != NFS4_OK) {
+    setattr_res = &res->resarray[ctx->set_index];
+    if (ctx->set_index && setattr_res->opsetattr.status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(setattr_res->opsetattr.status);
         request->complete(request);
         return;
     }
 
+    if (ctx->post_index) {
+        if (res->num_resarray <= ctx->post_index ||
+            res->resarray[ctx->post_index].resop != OP_GETATTR ||
+            res->resarray[ctx->post_index].opgetattr.status != NFS4_OK) {
+            request->status = CHIMERA_VFS_EIO;
+            request->complete(request);
+            return;
+        }
+        chimera_nfs4_unmarshall_fattr(
+            &res->resarray[ctx->post_index].opgetattr.resok4.obj_attributes,
+            &request->setattr.r_post_attr);
+    }
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs4_setattr_callback */
@@ -80,7 +101,8 @@ chimera_vfs_nfs4_setattr(
     struct chimera_nfs4_setattr_ctx         *ctx;
     struct chimera_vfs_attrs                *set_attr;
     struct COMPOUND4args                     args;
-    struct nfs_argop4                        argarray[3];
+    struct nfs_argop4                        argarray[5];
+    uint32_t                                 stat_mask[2], set_index;
     struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
     int                                      fhlen;
@@ -108,8 +130,9 @@ chimera_vfs_nfs4_setattr(
         return;
     }
 
-    ctx->thread = thread;
-    ctx->server = server;
+    ctx->thread    = thread;
+    ctx->server    = server;
+    ctx->pre_index = ctx->set_index = ctx->post_index = 0;
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
@@ -230,12 +253,13 @@ chimera_vfs_nfs4_setattr(
      * a dead store. */
     (void) attr_ptr;
 
-    /* Build compound: SEQUENCE + PUTFH + SETATTR */
+    /* Keep requested pre/post attributes in the same remote compound. */
     memset(&args, 0, sizeof(args));
     args.tag.len      = 0;
     args.minorversion = 1;
     args.argarray     = argarray;
-    args.num_argarray = 3;
+    args.num_argarray = 2;
+    chimera_nfs4_attr_request_stat(stat_mask);
 
     /* Op 0: SEQUENCE */
     argarray[0].argop = OP_SEQUENCE;
@@ -245,8 +269,14 @@ chimera_vfs_nfs4_setattr(
     argarray[1].opputfh.object.data = fh;
     argarray[1].opputfh.object.len  = fhlen;
 
-    /* Op 2: SETATTR */
-    argarray[2].argop = OP_SETATTR;
+    if (request->setattr.r_pre_attr.va_req_mask) {
+        ctx->pre_index                                      = args.num_argarray++;
+        argarray[ctx->pre_index].argop                      = OP_GETATTR;
+        argarray[ctx->pre_index].opgetattr.attr_request     = stat_mask;
+        argarray[ctx->pre_index].opgetattr.num_attr_request = 2;
+    }
+    set_index                 = args.num_argarray;
+    argarray[set_index].argop = OP_SETATTR;
 
     /* The open's stateid when this handle carries one, else the anonymous
      * stateid.  A size-changing SETATTR through an open descriptor is
@@ -259,29 +289,40 @@ chimera_vfs_nfs4_setattr(
             (struct chimera_nfs4_open_state *)
             request->setattr.handle->vfs_private;
 
-        if (open_state) {
-            argarray[2].opsetattr.stateid = open_state->stateid;
+        if (open_state && (!(set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ||
+                           (open_state->access & OPEN4_SHARE_ACCESS_WRITE))) {
+            argarray[set_index].opsetattr.stateid = open_state->stateid;
+            /* Another handle can coalesce this session's OPEN identity and
+            * advance its version. Session I/O uses its current version. */
+            argarray[set_index].opsetattr.stateid.seqid = 0;
         } else {
-            memset(&argarray[2].opsetattr.stateid, 0,
-                   sizeof(argarray[2].opsetattr.stateid));
+            /* OPEN UNCHECKED may truncate while requesting only read access.
+             * VFS already checked write permission; authorize that mutation
+             * by the credentials, not the read-only upstream OPEN. */
+            memset(&argarray[set_index].opsetattr.stateid, 0,
+                   sizeof(argarray[set_index].opsetattr.stateid));
         }
     }
 
     /* Set attribute mask - use 2 words if we have any bit in word 1, else 1 word */
     if (ctx->attr_mask[1]) {
-        argarray[2].opsetattr.obj_attributes.num_attrmask = 2;
+        argarray[set_index].opsetattr.obj_attributes.num_attrmask = 2;
     } else if (ctx->attr_mask[0]) {
-        argarray[2].opsetattr.obj_attributes.num_attrmask = 1;
-    } else {
-        /* No attributes to set - just return OK */
-        request->status = CHIMERA_VFS_OK;
-        request->complete(request);
-        return;
+        argarray[set_index].opsetattr.obj_attributes.num_attrmask = 1;
     }
 
-    argarray[2].opsetattr.obj_attributes.attrmask       = ctx->attr_mask;
-    argarray[2].opsetattr.obj_attributes.attr_vals.data = ctx->attr_vals;
-    argarray[2].opsetattr.obj_attributes.attr_vals.len  = attr_len;
+    argarray[set_index].opsetattr.obj_attributes.attrmask       = ctx->attr_mask;
+    argarray[set_index].opsetattr.obj_attributes.attr_vals.data = ctx->attr_vals;
+    argarray[set_index].opsetattr.obj_attributes.attr_vals.len  = attr_len;
+    if (ctx->attr_mask[0] || ctx->attr_mask[1]) {
+        ctx->set_index = args.num_argarray++;
+    }
+    if (request->setattr.r_post_attr.va_req_mask) {
+        ctx->post_index                                      = args.num_argarray++;
+        argarray[ctx->post_index].argop                      = OP_GETATTR;
+        argarray[ctx->post_index].opgetattr.attr_request     = stat_mask;
+        argarray[ctx->post_index].opgetattr.num_attr_request = 2;
+    }
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,

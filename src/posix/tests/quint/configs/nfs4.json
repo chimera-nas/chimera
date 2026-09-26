@@ -6,11 +6,11 @@
 // longer removes a directory.
 {
   "extends": "./posix_base.json",
-  "description": "chimera's POSIX surface reached over NFSv4.1: SEEK_HOLE/SEEK_DATA via the NFS4.2 SEEK operation, no copy or clone offload.",
+  "description": "chimera's POSIX surface reached over NFSv4.1: SEEK_HOLE/SEEK_DATA via the NFS4.2 SEEK operation, buffered COPY, no clone offload.",
   "traceStem": "posixNfs4",
 
   "features": {
-    "copyRange": "unsupported",
+    "copyRange": "supported",
     "cloneRange": "unsupported",
     "seekHole": "supported"
   },

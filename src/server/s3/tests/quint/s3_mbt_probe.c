@@ -361,10 +361,22 @@ main(
 
     /* ---- delete ---------------------------------------------------------- */
 
-    /* Status here is the model's business (DeleteObject/DeleteBucket are in
-     * the modeled surface, deviations and all); this drains the bucket to set
-     * up the phantom-CommonPrefix check below, which is not. */
-    simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/c");
+    /* DeleteObject is idempotent and returns no payload for either case. */
+    r = simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/c");
+    CHECK(r->status == 204, "DeleteObject: got %d want 204", r->status);
+    CHECK(r->body_len == 0, "DeleteObject returned a body");
+    r = simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/c");
+    CHECK(r->status == 204, "DeleteObject missing key: got %d want 204", r->status);
+    CHECK(r->body_len == 0, "DeleteObject missing key returned a body");
+
+    /* Non-empty buckets report the S3 BucketNotEmpty conflict. */
+    r = simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0");
+    CHECK(r->status == 409,
+          "non-empty DeleteBucket: expected 409, got %d", r->status);
+    CHECK(body_has(r, "<Code>BucketNotEmpty</Code>"),
+          "non-empty DeleteBucket: body lacks BucketNotEmpty");
+
+    /* drain the bucket, then it deletes cleanly */
     simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/a");
     simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/b");
     simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/d/a");

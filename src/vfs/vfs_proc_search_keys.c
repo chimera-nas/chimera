@@ -118,7 +118,20 @@ chimera_vfs_search_keys_at(
     struct chimera_vfs_kv_route route;
     uint8_t                    *scratch;
 
+    if ((start_key_len && !start_key) || (end_key_len && !end_key) || !callback ||
+        fhlen < 0 || fhlen > CHIMERA_VFS_FH_SIZE || (fhlen && !fh)) {
+        complete(CHIMERA_VFS_EINVAL, private_data);
+        return;
+    }
     chimera_vfs_kv_route_fh(thread, fh, fhlen, &route);
+    uint64_t                    scratch_bytes = (uint64_t) start_key_len + end_key_len;
+    if (route.fallback) {
+        scratch_bytes += ((sizeof(struct chimera_vfs_kv_ns_search_ctx) + 7) & ~(size_t) 7) + 2;
+    }
+    if (scratch_bytes > CHIMERA_VFS_PLUGIN_DATA_SIZE) {
+        complete(CHIMERA_VFS_ERANGE, private_data);
+        return;
+    }
 
     if (route.fallback) {
         request = chimera_vfs_request_alloc_common(thread, NULL, route.module,
@@ -174,7 +187,7 @@ chimera_vfs_search_keys_at(
             request->search_keys.end_key_len = 1;
             /* ns+1 is a strict namespace boundary: exclude it so a key that
              * happens to equal the single boundary byte never leaks out. */
-            request->search_keys.flags = CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE;
+            request->search_keys.flags = flags | CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE;
         }
 
         request->search_keys.callback = chimera_vfs_kv_ns_search_cb;

@@ -22,7 +22,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <pthread.h>
+#include "common/thread.h"
 #undef NDEBUG
 #include <assert.h>
 
@@ -98,6 +98,30 @@ compound_cb(
     ctx->cb_thread = pthread_self();
     ctx->done      = 1;
 } /* compound_cb */
+
+struct dest_finish_test {
+    struct evpl_iovec *dest;
+    int                finishes;
+};
+
+static void
+dest_finish(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct dest_finish_test *test = private_data;
+
+    assert(chimera_vfs_compound_execution_status(compound) == CHIMERA_VFS_OK);
+    /* Both attempts must leave the application's destination untouched until
+     * finish accepts the staged data. */
+    const char              *data = evpl_iovec_data(test->dest);
+    for (int i = 0; i < 4096; i++) {
+        assert(data[i] == 'x');
+    }
+    chimera_vfs_compound_finish_result(compound,
+                                       ++test->finishes == 1 ? CHIMERA_VFS_EAGAIN : CHIMERA_VFS_OK);
+} /* dest_finish */
+
 
 /* ---- fixture builders ----
  * The tree these tests run against is built the way everything else reaches
@@ -842,16 +866,9 @@ main(
     a_fh_len = ctx.fh_len;
     mkdir_under(&ctx, &cred, a_fh, a_fh_len, "b");
 
-    /* ---- the death test's child ----
-     * A gate that skips an op another op addresses by use_handle has written a
-     * sequence that does not hold together, and the executor aborts rather
-     * than hand that op a NULL handle.  An abort cannot be observed in the
-     * process it happens in, so the parent re-runs this binary with the flag
-     * below and checks how the child died -- see the gate-edit section.  A
-     * fresh process rather than a fork: the abort path runs inside a process
-     * whose other threads are the VFS's own, and a forked copy of those is not
-     * something to abort inside. */
-    if (argc > 1 && strcmp(argv[1], "--die-skip-handle-from") == 0) {
+    /* Check the rejected dependency in a fresh process so the gate fixture
+     * cannot affect the other sequences in this test. */
+    if (argc > 1 && strcmp(argv[1], "--reject-skip-handle-from") == 0) {
         struct edit_gate_ctx g;
         int                  i_open;
 
@@ -874,11 +891,12 @@ main(
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
 
-        /* Not reached: the executor aborts on the op that addresses the
-         * skipped OPEN's handle.  _exit, not return: the parent's only signal
-         * is that the child did NOT end cleanly, and a leak check on a process
-         * that was supposed to abort mid-sequence would end it uncleanly for
-         * the wrong reason. */
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_op(cp, 2)->status == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_op(cp, i_open)->status == CHIMERA_VFS_UNSET);
+        assert(chimera_vfs_compound_op(cp, i_open)->out_handle == NULL);
+        chimera_vfs_compound_free(cp);
         _exit(0);
     }
 
@@ -2865,7 +2883,7 @@ main(
                                               CHIMERA_VFS_OPEN_INFERRED |
                                               CHIMERA_VFS_OPEN_PATH |
                                               CHIMERA_VFS_OPEN_DIRECTORY, 0);
-        i_cl = chimera_vfs_compound_add_close(cp, 0, NULL);
+        i_cl = chimera_vfs_compound_add_close_doc(cp, 0, NULL);
         i_gh = chimera_vfs_compound_add_gethandle(cp);
 
         ctx.callbacks = 0;
@@ -2882,7 +2900,7 @@ main(
         /* CLOSE with nothing open. */
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, root_fh, (int) root_fh_len);
-        i_cl          = chimera_vfs_compound_add_close(cp, 0, NULL);
+        i_cl          = chimera_vfs_compound_add_close_doc(cp, 0, NULL);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -2965,7 +2983,7 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, h, CHIMERA_VFS_OPEN_READ_ONLY);
-        i_cl          = chimera_vfs_compound_add_close(cp, 0, NULL);
+        i_cl          = chimera_vfs_compound_add_close_doc(cp, 0, NULL);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -5292,11 +5310,19 @@ main(
                                              &dest, 1);
         assert(i_rd >= 0);
 
+        struct dest_finish_test finish = { .dest = &dest };
+        chimera_vfs_compound_set_finish_handler(cp, dest_finish, &finish);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
+        assert(ctx.callbacks == 1 && finish.finishes == 1);
+        assert(chimera_vfs_compound_finish_status(cp) == CHIMERA_VFS_EAGAIN);
+        ctx.callbacks = 0;
+        assert(chimera_vfs_compound_retry(cp));
+        wait_done(&ctx);
 
         assert(ctx.callbacks == 1);
+        assert(finish.finishes == 2);
         assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
         op = chimera_vfs_compound_op(cp, i_rd);
         assert(op->status == CHIMERA_VFS_OK);
@@ -5394,9 +5420,9 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, ft_fh, (int) ft_fh_len);
-        i_find = chimera_vfs_compound_add_find(cp, CHIMERA_VFS_ATTR_MASK_STAT,
-                                               find_filter, find_append,
-                                               find_reset, &f);
+        i_find = chimera_vfs_compound_add_find_stream(cp, CHIMERA_VFS_ATTR_MASK_STAT,
+                                                      find_filter, find_append,
+                                                      find_reset, &f);
         i_ga = chimera_vfs_compound_add_getattr(cp, CHIMERA_VFS_ATTR_MASK_STAT);
         assert(i_find >= 0 && i_ga >= 0);
 
@@ -5437,8 +5463,8 @@ main(
          * the count is the tree's and not twice the tree's. */
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, ft_fh, (int) ft_fh_len);
-        chimera_vfs_compound_add_find(cp, CHIMERA_VFS_ATTR_MASK_STAT,
-                                      find_filter, find_append, find_reset, &f);
+        chimera_vfs_compound_add_find_stream(cp, CHIMERA_VFS_ATTR_MASK_STAT,
+                                             find_filter, find_append, find_reset, &f);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -5452,9 +5478,9 @@ main(
         f.stop_at = 2;
         cp        = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, ft_fh, (int) ft_fh_len);
-        i_find = chimera_vfs_compound_add_find(cp, CHIMERA_VFS_ATTR_MASK_STAT,
-                                               find_filter, find_append,
-                                               find_reset, &f);
+        i_find = chimera_vfs_compound_add_find_stream(cp, CHIMERA_VFS_ATTR_MASK_STAT,
+                                                      find_filter, find_append,
+                                                      find_reset, &f);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -5472,9 +5498,9 @@ main(
         f.stop_at = 0;
         cp        = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, f1_fh, (int) f1_fh_len);
-        i_find = chimera_vfs_compound_add_find(cp, CHIMERA_VFS_ATTR_MASK_STAT,
-                                               find_filter, find_append,
-                                               find_reset, &f);
+        i_find = chimera_vfs_compound_add_find_stream(cp, CHIMERA_VFS_ATTR_MASK_STAT,
+                                                      find_filter, find_append,
+                                                      find_reset, &f);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -5487,12 +5513,12 @@ main(
 
         /* A walk missing any of its callbacks does not build. */
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
-        assert(chimera_vfs_compound_add_find(cp, 0, NULL, find_append,
-                                             find_reset, &f) == -1);
-        assert(chimera_vfs_compound_add_find(cp, 0, find_filter, NULL,
-                                             find_reset, &f) == -1);
-        assert(chimera_vfs_compound_add_find(cp, 0, find_filter, find_append,
-                                             NULL, &f) == -1);
+        assert(chimera_vfs_compound_add_find_stream(cp, 0, NULL, find_append,
+                                                    find_reset, &f) == -1);
+        assert(chimera_vfs_compound_add_find_stream(cp, 0, find_filter, NULL,
+                                                    find_reset, &f) == -1);
+        assert(chimera_vfs_compound_add_find_stream(cp, 0, find_filter, find_append,
+                                                    NULL, &f) == -1);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -7049,23 +7075,17 @@ main(
 
         chimera_vfs_release(ctx.vfs_thread, oh);
 
-        /* A skipped op that another op addresses by use_handle is a sequence
-         * that does not hold together, and the executor says so rather than
-         * acting on a NULL handle.  It aborts, so it is checked in a child
-         * process -- see the flag at the top of main. */
+        /* A skipped handle producer is rejected with EINVAL before a
+         * dependent operation can dispatch with a NULL handle. */
         {
             char cmd[4096];
             int  rc;
 
             snprintf(cmd, sizeof(cmd),
-                     "exec '%s' --die-skip-handle-from >/dev/null 2>&1",
+                     "exec '%s' --reject-skip-handle-from >/dev/null 2>&1",
                      argv[0]);
             rc = system(cmd);
-            /* However the abort ends the child -- SIGABRT under a sanitizer,
-             * possibly another fatal signal through the crash handler -- what
-             * must not happen is the child returning 0, which would mean the
-             * executor ran the op. */
-            assert(rc != 0);
+            assert(rc == 0);
         }
     }
     TEST_PASS("a gate rewrites and skips the ops ahead of it, is refused the "
@@ -7103,7 +7123,7 @@ main(
         assert(chimera_vfs_compound_op(cp, i_ga1)->status == CHIMERA_VFS_OK);
         assert(chimera_vfs_compound_op(cp, i_ga2)->status == CHIMERA_VFS_UNSET);
         assert(chimera_vfs_compound_op(cp, i_ga3)->status == CHIMERA_VFS_OK);
-        assert(chimera_vfs_compound_num_completed(cp) == 4);
+        assert(chimera_vfs_compound_num_completed(cp) == 3);
 
         /* Submitted again WITHOUT rebuilding: submit clears the gate's skip
          * and not this one, so the second run is the same run. */
@@ -7231,7 +7251,7 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_READ_ONLY);
-        i_cl = chimera_vfs_compound_add_close(
+        i_cl = chimera_vfs_compound_add_close_doc(
             cp, CHIMERA_VFS_COMPOUND_CLOSE_DOC, NULL);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -7287,7 +7307,7 @@ main(
                                            CHIMERA_VFS_OPEN_INFERRED |
                                            CHIMERA_VFS_OPEN_PATH |
                                            CHIMERA_VFS_OPEN_DIRECTORY);
-        i_cl = chimera_vfs_compound_add_close(
+        i_cl = chimera_vfs_compound_add_close_doc(
             cp, CHIMERA_VFS_COMPOUND_CLOSE_DOC, NULL);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -7348,7 +7368,7 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_READ_ONLY);
-        i_cl = chimera_vfs_compound_add_close(
+        i_cl = chimera_vfs_compound_add_close_doc(
             cp, CHIMERA_VFS_COMPOUND_CLOSE_DOC, NULL);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -7399,7 +7419,7 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, oh, CHIMERA_VFS_OPEN_READ_ONLY);
-        i_cl          = chimera_vfs_compound_add_close(cp, 0, NULL);
+        i_cl          = chimera_vfs_compound_add_close_doc(cp, 0, NULL);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -7455,7 +7475,6 @@ main(
         memcpy(e_fh, op->attr.va_fh, op->attr.va_fh_len);
         e_fh_len = op->attr.va_fh_len;
         chimera_vfs_compound_free(cp);
-        e_fh_len = ctx.fh_len;
 
         /* Created read-only, opened for write: open_at grants a freshly
          * created file the access it was opened with, and stamps it. */

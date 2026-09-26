@@ -45,7 +45,7 @@ chimera_posix_fcntl_dupfd(
 
     chimera_dup_handle(worker->client_thread, handle);
 
-    newfd = chimera_posix_fd_alloc_at_least(posix, handle, minfd);
+    newfd = chimera_posix_fd_alloc_description(posix, handle, minfd, entry->ofd);
 
     if (newfd < 0) {
         chimera_posix_close_on_worker(worker, handle);
@@ -53,9 +53,6 @@ chimera_posix_fcntl_dupfd(
         errno = EMFILE;
         return -1;
     }
-
-    /* Like dup(): the duplicate SHARES the open file description. */
-    chimera_posix_ofd_adopt(posix, &posix->fds[newfd], entry);
 
     chimera_posix_fd_release(entry, 0);
 
@@ -114,19 +111,15 @@ chimera_posix_fcntl(
     int cmd,
     ...)
 {
-    struct chimera_posix_client    *posix  = chimera_posix_get_global();
-    struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
-    struct chimera_posix_fd_entry  *entry;
-    struct flock                   *fl;
-    struct chimera_vfs_open_handle *handle;
-    struct chimera_posix_ofd_lock  *node = NULL;
-    uint32_t                        lock_type;
-    int32_t                         whence;
-    uint64_t                        offset;
-    uint64_t                        length;
-    uint64_t                        core_length = 0;
-    bool                            local_arbiter;
-    va_list                         args;
+    struct chimera_posix_client   *posix  = chimera_posix_get_global();
+    struct chimera_posix_worker   *worker = chimera_posix_choose_worker(posix);
+    struct chimera_posix_fd_entry *entry;
+    struct flock                  *fl;
+    uint32_t                       lock_type;
+    int32_t                        whence;
+    uint64_t                       offset;
+    uint64_t                       length;
+    va_list                        args;
 
     switch (cmd) {
         case F_DUPFD: {
@@ -159,6 +152,10 @@ chimera_posix_fcntl(
             return -1;
     } /* switch */
 
+    if (!fl) {
+        errno = EFAULT;
+        return -1;
+    }
     switch (fl->l_type) {
         case F_RDLCK:
             lock_type = CHIMERA_VFS_LOCK_READ;
@@ -167,6 +164,10 @@ chimera_posix_fcntl(
             lock_type = CHIMERA_VFS_LOCK_WRITE;
             break;
         case F_UNLCK:
+            if (cmd == F_GETLK) {
+                errno = EINVAL;
+                return -1;
+            }
             lock_type = CHIMERA_VFS_LOCK_UNLOCK;
             break;
         default:
@@ -206,8 +207,16 @@ chimera_posix_fcntl(
             break;
         }
         case SEEK_CUR: {
-            int64_t abs_offset = (int64_t) entry->ofd->offset + (int64_t) fl->l_start;
+            int64_t  abs_offset;
+            uint64_t base = entry->ofd->offset;
 
+            if (base > INT64_MAX ||
+                __builtin_add_overflow((int64_t) base,
+                                       (int64_t) fl->l_start, &abs_offset)) {
+                chimera_posix_fd_release(entry, 0);
+                errno = EOVERFLOW;
+                return -1;
+            }
             if (abs_offset < 0) {
                 chimera_posix_fd_release(entry, 0);
                 errno = EINVAL;
@@ -245,179 +254,27 @@ chimera_posix_fcntl(
     if (whence == SEEK_END) {
         length = (uint64_t) (int64_t) fl->l_len;
     } else if (fl->l_len < 0) {
-        int64_t signed_offset = (int64_t) offset + (int64_t) fl->l_len;
-
-        if (signed_offset < 0) {
+        /* Unsigned magnitude avoids negating INT64_MIN. */
+        uint64_t backwards = (uint64_t) (-(fl->l_len + 1)) + 1;
+        if (backwards > offset) {
             chimera_posix_fd_release(entry, 0);
             errno = EINVAL;
             return -1;
         }
-        offset = (uint64_t) signed_offset;
-        length = (uint64_t) (-(int64_t) fl->l_len);
+        offset -= backwards;
+        length  = backwards;
     } else {
-        length = (uint64_t) fl->l_len;   /* 0 = lock to EOF (POSIX) */
-    }
-
-    /*
-     * POSIX (fcntl, System Interfaces): F_SETLK/F_SETLKW are EBADF when the
-     * lock type is not permitted by the descriptor's access mode -- a shared
-     * lock needs a descriptor open for reading, an exclusive lock one open
-     * for writing.  F_GETLK only asks a question, and F_UNLCK only gives
-     * something back, so neither is constrained; the kernel draws the line
-     * in the same place.
-     */
-    if ((cmd == F_SETLK || cmd == F_SETLKW) &&
-        lock_type != CHIMERA_VFS_LOCK_UNLOCK) {
-        unsigned int acc = entry->ofd->oflags & O_ACCMODE;
-        int          ok  = (lock_type == CHIMERA_VFS_LOCK_READ)
-            ? (acc == O_RDONLY || acc == O_RDWR)
-            : (acc == O_WRONLY || acc == O_RDWR);
-
-        if (!ok) {
+        length = (uint64_t) fl->l_len; /* POSIX zero = through EOF. */
+        if (length && length - 1 > (uint64_t) INT64_MAX - offset) {
             chimera_posix_fd_release(entry, 0);
-            errno = EBADF;
+            errno = EOVERFLOW;
             return -1;
         }
     }
 
-    /*
-     * Every resolved-range command is one VFS sequence -- PUTHANDLE of this
-     * descriptor's open file, then a CLAIM or CLAIM_TEST against it.  The
-     * client's embedded VFS core arbitrates this process's share of the
-     * cluster (protocol claims and other posix threads), and beneath it a
-     * CHIMERA_VFS_CAP_CLAIM_RANGE backend confirms the range so cross-PROCESS
-     * conflicts keep working (each process has its own core instance; the
-     * backend is the shared arbiter).
-     *
-     * SEEK_END ranges stay backend-only: the backend resolves the offset
-     * relative to EOF atomically (the TOCTOU note above), so the local core
-     * cannot know the absolute range.
-     * CLAIMTODO: SEEK_END locks therefore bypass local arbitration
-     * entirely; resolving EOF locally would reintroduce the TOCTOU race.
-     */
-    handle        = entry->handle;
-    local_arbiter = (whence != SEEK_END);
-
-    if (local_arbiter) {
-        /* POSIX l_len 0 = to-EOF sentinel; the core spells to-EOF as
-         * UINT64_MAX (its 0 is a genuine zero-byte range). */
-        core_length = (length == 0) ? UINT64_MAX : length;
-    }
-
-    if (local_arbiter && cmd == F_GETLK) {
-        struct chimera_vfs_claim_conflict conf;
-        int                               found;
-
-        /* One CLAIM_TEST answers both halves: the local core first, and --
-         * when that comes back clear and something arbitrates ranges -- the
-         * backend, so holders outside this process are seen too. */
-        found = chimera_posix_lock_claim_getlk(
-            posix, handle, chimera_posix_fd_open_flags(entry),
-            lock_type == CHIMERA_VFS_LOCK_WRITE, offset, core_length, &conf);
-
-        if (found < 0) {
-            int saved = errno;
-
-            chimera_posix_fd_release(entry, 0);
-            errno = saved;
-            return -1;
-        }
-
-        if (found) {
-            /* WRITE_LT iff the holder's used mode carries a write-flavored
-             * bit -- a write delegation reports WRITE_LT though it holds no
-             * LW, and a backend holder is reported as LR or LR|LW. */
-            fl->l_type = (conf.used & (CHIMERA_CLAIM_W |
-                                       CHIMERA_CLAIM_CW |
-                                       CHIMERA_CLAIM_LW))
-                ? F_WRLCK : F_RDLCK;
-            fl->l_whence = SEEK_SET;
-            fl->l_start  = (chimera_off_t) conf.offset;
-            fl->l_len    = (conf.length == UINT64_MAX)
-                ? 0 : (chimera_off_t) conf.length;
-            fl->l_pid = (pid_t) conf.owner.owner_lo;
-        } else {
-            fl->l_type = F_UNLCK;
-        }
-
-        chimera_posix_fd_release(entry, 0);
-        return 0;
-    }
-
-    if (!local_arbiter) {
-        /* A SEEK_END range: the core cannot know the absolute range, and
-         * resolving EOF here would reintroduce the fstat TOCTOU the whence
-         * passthrough exists to avoid.  The claim wire carries whence, so
-         * this is answerable by a range-arbitrating backend and only by it. */
-        int rc = chimera_posix_lock_claim_seek_end(posix, entry->ofd, handle,
-                                                   cmd, fl, lock_type,
-                                                   whence, offset, length);
-
-        chimera_posix_fd_release(entry, 0);
-        return rc;
-    }
-
-    if (local_arbiter && cmd != F_GETLK &&
-        lock_type == CHIMERA_VFS_LOCK_UNLOCK) {
-        /* Carve the owner's local coverage of the range (REPLACE geometry)
-         * and wait for the backend to drop what it held, so the range is
-         * free to every other process by the time this call returns. */
-        chimera_posix_lock_claim_unlock(posix, entry->ofd, handle,
-                                        offset, core_length);
-    }
-
-    if (local_arbiter && cmd != F_GETLK &&
-        lock_type != CHIMERA_VFS_LOCK_UNLOCK) {
-        node = chimera_posix_ofd_lock_alloc(posix, handle,
-                                            lock_type == CHIMERA_VFS_LOCK_WRITE,
-                                            offset, core_length);
-
-        if (!node) {
-            chimera_posix_fd_release(entry, 0);
-            errno = ENOMEM;
-            return -1;
-        }
-
-        /* One sequence: the descriptor's own handle, then the CLAIM.
-         * F_SETLKW waits on a breaking holder and on a hard lock conflict;
-         * F_SETLK waits for neither, and a BREAKING answer (recalls kicked,
-         * claim not inserted) is the same EAGAIN a DENIED is.  Both
-         * arbitrate locally first and, on a CAP_LEASE backend, confirm the
-         * granted range with it before returning -- so a lock this process
-         * is told it holds is one the backend has agreed to.  A backend
-         * refusal arrives as DENIED with the optimistic local insert
-         * already rolled back. */
-        if (chimera_posix_lock_claim_acquire(posix, handle,
-                                             chimera_posix_fd_open_flags(entry),
-                                             node,
-                                             /* wait */ cmd == F_SETLKW) < 0) {
-            /* The refusal's errno is the answer; the teardown below it is
-             * free to have one of its own. */
-            int saved = errno;
-
-            chimera_posix_ofd_lock_free(posix, node);
-            chimera_posix_fd_release(entry, 0);
-            errno = saved;
-            return -1;
-        }
-
-        chimera_posix_ofd_lock_track(posix, entry->ofd, node);
-
-        /* POSIX: the new lock REPLACES the owner's coverage of the bytes it
-         * spans, so a WRLCK->RDLCK downgrade really downgrades.  Same-owner
-         * claims are self-exempt at the OWNER circle, so leaving the older
-         * fragments in place looked harmless -- it is not: a stale WRITE
-         * fragment under a downgraded range still denies another owner's
-         * READ lock, and under F_SETLKW that waits forever. */
-        chimera_posix_ofd_lock_replace(posix, entry->ofd, handle, node,
-                                       offset, core_length);
-    }
-
+    int rc = chimera_posix_lock_compound(posix, entry, cmd, fl, lock_type,
+                                         whence, offset,
+                                         whence == SEEK_END || length ? length : UINT64_MAX);
     chimera_posix_fd_release(entry, 0);
-
-    if (cmd == F_GETLK) {
-        fl->l_type = F_UNLCK;
-    }
-
-    return 0;
+    return rc;
 } /* chimera_posix_fcntl */

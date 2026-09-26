@@ -31,7 +31,7 @@ chimera_posix_mkdirat_exec(
     /* A real dirfd resolves relative to the descriptor; AT_FDCWD and an
      * absolute path take the path-based mkdir from the export root. */
     if (request->mkdir.parent_handle) {
-        chimera_dispatch_mkdir_at(thread, request);
+        chimera_dispatch_mkdir_at(thread, request->mkdir.parent_handle, request);
     } else {
         chimera_dispatch_mkdir(thread, request);
     }

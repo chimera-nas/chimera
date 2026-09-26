@@ -6,29 +6,37 @@
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
 
+#include "nfs3_compound.h"
+
 static void
 chimera_nfs3_read_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  count,
-    uint32_t                  eof,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct READ3res                   res;
-    int                               rc;
+    struct nfs3_compound                 *ctx = private_data;
 
-    res.status = chimera_vfs_error_to_nfsstat3(error_code);
+    if (nfs3_compound_retry(ctx)) {
+        return;
+    }
+    struct nfs_request                   *req  = ctx->req;
+    const struct chimera_vfs_compound_op *op   = nfs3_compound_result(ctx);
+    const struct chimera_vfs_attrs       *attr = &op->attr;
+    uint32_t                              count = op->read_len, eof = op->eof_read;
+    struct evpl_iovec                    *iov  = op->iov;
+    int                                   niov = op->niov;
+
+    struct chimera_server_nfs_thread     *thread = req->thread;
+    struct chimera_server_nfs_shared     *shared = thread->shared;
+    struct evpl                          *evpl   = thread->evpl;
+    struct READ3res                       res;
+    int                                   rc;
+
+    res.status = nfs3_compound_status(ctx);
 
     if (res.status == NFS3_OK) {
         res.resok.count       = count;
@@ -42,50 +50,16 @@ chimera_nfs3_read_complete(
         chimera_nfs3_set_post_op_attr(&res.resfail.file_attributes, attr);
     }
 
+    if (res.status == NFS3_OK) {
+        chimera_vfs_compound_take_iov(compound, ctx->result, &res.resok.data.iov, &res.resok.data.niov);
+    }
     rc = shared->nfs_v3.send_reply_NFSPROC3_READ(evpl, NULL, &res, req->encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
-    /* The open belonged to the sequence and went with it. */
 
+    nfs3_compound_free(ctx);
     nfs_request_free(thread, req);
 } /* chimera_nfs3_read_complete */
-
-/*
- * PUTFH, OPEN, READ.  The data iovecs are TAKEN from the sequence: they are the
- * reply's payload and have to outlive the sequence that produced them.
- */
-static void
-chimera_nfs3_read_sequence_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct nfs_request                   *req = private_data;
-    const struct chimera_vfs_compound_op *op;
-    struct chimera_vfs_attrs              attr;
-    struct evpl_iovec                    *iov = NULL;
-    enum chimera_vfs_error                status;
-    uint32_t                              idx, count = 0, eof = 0;
-    int                                   niov = 0;
-
-    status = chimera_vfs_compound_status(compound);
-
-    memset(&attr, 0, sizeof(attr));
-
-    idx = chimera_vfs_compound_num_ops(compound) - 1;
-    op  = chimera_vfs_compound_op(compound, idx);
-
-    attr = op->attr;
-
-    if (status == CHIMERA_VFS_OK) {
-        count = op->read_len;
-        eof   = op->eof_read;
-        chimera_vfs_compound_take_iov(compound, idx, &iov, &niov);
-    }
-
-    chimera_vfs_compound_free(compound);
-
-    chimera_nfs3_read_complete(status, count, eof, iov, niov, &attr, req);
-} /* chimera_nfs3_read_sequence_complete */
 
 void
 chimera_nfs3_read(
@@ -99,8 +73,6 @@ chimera_nfs3_read(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
-    struct chimera_vfs_compound      *compound;
-    struct evpl_iovec                *iov;
     struct READ3res                   res;
     int                               rc;
 
@@ -131,19 +103,12 @@ chimera_nfs3_read(
         args->count = CHIMERA_NFS3_MAX_XFER;
     }
 
-    iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
-    chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
-
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
-    chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_INFERRED, 0);
-    chimera_vfs_compound_add_read(compound, NULL,
-                                  args->offset, args->count,
-                                  iov, 256,
-                                  CHIMERA_NFS3_ATTR_MASK, NULL, NULL, 0);
-
-    chimera_vfs_compound_submit(compound,
-                                chimera_nfs3_read_sequence_complete, req);
+    struct nfs3_compound        *ctx      = nfs3_compound_alloc(req, CHIMERA_VFS_OPEN_INFERRED);
+    struct chimera_vfs_compound *compound = ctx->compound;
+    struct evpl_iovec           *iov      = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
+    chimera_nfs_abort_if(!iov, "NFS3 READ descriptor allocation failed");
+    ctx->result = chimera_vfs_compound_add_read(compound, NULL, args->offset, args->count, iov, 256, 0, NULL, NULL, 0);
+    chimera_vfs_compound_set_result_masks(compound, ctx->result, CHIMERA_NFS3_ATTR_MASK, CHIMERA_NFS3_ATTR_WCC_MASK,
+                                          CHIMERA_NFS3_ATTR_MASK);
+    chimera_vfs_compound_submit(compound, chimera_nfs3_read_complete, ctx);
 } /* chimera_nfs3_read */

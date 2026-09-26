@@ -649,7 +649,7 @@ main(
         ops[0]                        = op_putfh(&p.fh);
         ops[1]                        = op_delegreturn(&a_f2_deleg);
         p                             = pc_compound(&a, ops, 2, 1);
-        expect("A DELEGRETURN succeeds", p.st[2] == NFS4_OK, "delegreturn");
+        expect("A DELEGRETURN succeeds", p.status == NFS4_OK && p.nres == 3, "delegreturn");
     }
     for (i = 0; i < 200; i++) {
         p = do_open(&b, &root, "b-oo1", "f2", 1, 0);
@@ -710,8 +710,8 @@ main(
     }
     snprintf(buf, sizeof(buf), "REMOVE st=%u recall=%d",
              p.st[2], recall_seen(&a, &a_f4_deleg));
-    expect("B REMOVE vs A write deleg: completes AND recalls",
-           p.st[2] == NFS4_OK && recall_seen(&a, &a_f4_deleg), buf);
+    expect("B REMOVE recalls the delegation and returns DELAY before unlink",
+           p.st[2] == NFS4ERR_DELAY && recall_seen(&a, &a_f4_deleg), buf);
 
     p          = do_open(&a, &root, "a-oo1", "f6", 3, 1);
     a_f6_deleg = p.deleg_sid;
@@ -764,6 +764,10 @@ main(
         rops[0]                       = op_putfh(&p.fh);
         rops[1]                       = op_delegreturn(&a_f4_deleg);
         pc_compound(&a, rops, 2, 1);
+        rops[0] = op_putfh(&root);
+        rops[1] = op_remove("f4");
+        p       = pc_compound(&b, rops, 2, 1);
+        expect("B REMOVE succeeds after delegation return", p.st[2] == NFS4_OK, "retry");
 
         lops[1].oplookup.objname.data = "f6";
         p                             = pc_compound(&a, lops, 3, 1);
@@ -780,6 +784,18 @@ main(
     {
         struct nfs_argop4 ops[2];
         struct stateid4   f8_deleg = p.deleg_sid;
+        struct mbt_fh     f8_fh;
+        struct nfs_argop4 lops[3];
+
+        memset(lops, 0, sizeof(lops));
+        lops[0]                       = op_putfh(&root);
+        lops[1].argop                 = OP_LOOKUP;
+        lops[1].oplookup.objname.data = "f8";
+        lops[1].oplookup.objname.len  = 2;
+        lops[2].argop                 = OP_GETFH;
+        p                             = pc_compound(&g4c, lops, 3, 1);
+        expect("resolve f8 for delegation return", p.status == NFS4_OK && p.fh.has, "lookup/getfh");
+        f8_fh = p.fh;
 
         ops[0] = op_putfh(&root);
         ops[1] = op_remove("f8");
@@ -789,32 +805,16 @@ main(
         }
         snprintf(buf, sizeof(buf), "self REMOVE st=%u self-recall=%d",
                  p.st[2], recall_seen(&g4c, &f8_deleg));
-        /* D4-13 was the DELAY, not the recall.  The removal completes now:
-         * the VFS drives the recall inside the unlink and the client is
-         * answered once the name is gone, so a client no longer has to retry
-         * a removal of its own file.  The self-recall is still observed --
-         * the delegation's holder identity and the remover's are different
-         * owners to the claim core -- and is what the RFC intent (no
-         * self-conflict) would still remove. */
-        expect("A REMOVE of its own write-delegated file: completes AND "
-               "self-recalls (D4-13 residue: the recall, not the DELAY)",
-               p.st[2] == NFS4_OK && recall_seen(&g4c, &f8_deleg), buf);
-        {
-            struct nfs_argop4 rops[2];
-
-            /* The name is gone, so there is no filehandle to put but the
-             * root's, and what the server makes of a DELEGRETURN for a
-             * removed file is recorded rather than pinned: the RFC does not
-             * say, the recall already broke the delegation, and the client
-             * has nothing left to hold.  Recorded so a CHANGE here is
-             * visible. */
-            rops[0] = op_putfh(&root);
-            rops[1] = op_delegreturn(&f8_deleg);
-            p       = pc_compound(&g4c, rops, 2, 1);
-            snprintf(buf, sizeof(buf), "delegreturn st=%u", p.st[2]);
-            expect("A's DELEGRETURN for the file it removed (observed)",
-                   1, buf);
-        }
+        expect("A REMOVE recalls its delegation and returns DELAY before unlink",
+               p.st[2] == NFS4ERR_DELAY && recall_seen(&g4c, &f8_deleg), buf);
+        struct nfs_argop4 rops[2];
+        rops[0] = op_putfh(&f8_fh);
+        rops[1] = op_delegreturn(&f8_deleg);
+        p       = pc_compound(&g4c, rops, 2, 1);
+        expect("A returns its delegation before retrying REMOVE", p.status == NFS4_OK && p.nres == 3, "delegreturn");
+        p = pc_compound(&g4c, ops, 2, 1);
+        snprintf(buf, sizeof(buf), "retry st=%u compound=%u nres=%d", p.st[2], p.status, p.nres);
+        expect("A REMOVE succeeds after delegation return", p.status == NFS4_OK && p.nres == 3, buf);
     }
 
     printf("C4 anonymous-stateid I/O vs A's write delegation:\n");
@@ -972,7 +972,7 @@ main(
                 rops[1] = op_delegreturn(&f9_deleg);
                 rp      = pc_compound(&mc, rops, 2, 1);
                 expect("holder returns f9's delegation mid-write",
-                       rp.st[2] == NFS4_OK, "delegreturn");
+                       rp.status == NFS4_OK && rp.nres == 3, "delegreturn");
                 for (i = 0; i < 500 && !env->res.done; i++) {
                     evpl_continue(env->evpl);
                 }
@@ -1041,7 +1041,7 @@ main(
                 rops[1]                        = op_delegreturn(&f10_deleg);
                 rp                             = pc_compound(&mc, rops, 2, 1);
                 expect("holder returns f10's delegation mid-setattr",
-                       rp.st[2] == NFS4_OK, "delegreturn");
+                       rp.status == NFS4_OK && rp.nres == 3, "delegreturn");
                 for (i = 0; i < 500 && !env->res.done; i++) {
                     evpl_continue(env->evpl);
                 }

@@ -5,25 +5,53 @@
 #include "nfs3_procs.h"
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
+#include "nfs3_compound.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
+/*
+ * PUTFH, OPEN, GETATTR.  The open the handler used to make by hand belongs to
+ * the sequence now, and goes with it -- nothing here releases a handle.
+ */
 static void
-chimera_nfs3_fsstat_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_nfs3_fsstat_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct FSSTAT3res                 res;
-    uint64_t                          mask;
-    int                               rc;
+    struct nfs3_compound                 *ctx = private_data;
 
-    res.status = chimera_vfs_error_to_nfsstat3(error_code);
+    if (nfs3_compound_retry(ctx)) {
+        return;
+    }
+    struct nfs_request                   *req = ctx->req;
+    const struct chimera_vfs_compound_op *op;
+    struct chimera_vfs_attrs              result_attr;
+    const struct chimera_vfs_attrs       *attr;
+    struct chimera_server_nfs_thread     *thread = req->thread;
+    struct chimera_server_nfs_shared     *shared = thread->shared;
+    struct evpl                          *evpl   = thread->evpl;
+    struct FSSTAT3res                     res;
+    uint64_t                              mask;
+    int                                   rc;
+    enum chimera_vfs_error                status;
+
+    status = chimera_vfs_compound_status(compound);
+
+    memset(&result_attr, 0, sizeof(result_attr));
+
+    /* Taken out before the free: a freed sequence is recycled and reset. */
+    if (status == CHIMERA_VFS_OK) {
+        op = chimera_vfs_compound_op(compound,
+                                     chimera_vfs_compound_num_ops(compound) - 1);
+        result_attr = op->attr;
+    }
+
+    nfs3_compound_free(ctx);
+
+    attr = status == CHIMERA_VFS_OK ? &result_attr : NULL;
+
+    res.status = chimera_vfs_error_to_nfsstat3(status);
 
     if (res.status == NFS3_OK) {
         chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
@@ -52,39 +80,6 @@ chimera_nfs3_fsstat_complete(
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 
     nfs_request_free(thread, req);
-} /* chimera_nfs3_fsstat_complete */
-
-
-/*
- * PUTFH, OPEN, GETATTR.  The open the handler used to make by hand belongs to
- * the sequence now, and goes with it -- nothing here releases a handle.
- */
-static void
-chimera_nfs3_fsstat_sequence_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct nfs_request                   *req = private_data;
-    const struct chimera_vfs_compound_op *op;
-    struct chimera_vfs_attrs              attr;
-    enum chimera_vfs_error                status;
-
-    status = chimera_vfs_compound_status(compound);
-
-    memset(&attr, 0, sizeof(attr));
-
-    /* Taken out before the free: a freed sequence is recycled and reset. */
-    if (status == CHIMERA_VFS_OK) {
-        op = chimera_vfs_compound_op(compound,
-                                     chimera_vfs_compound_num_ops(compound) - 1);
-        attr = op->attr;
-    }
-
-    chimera_vfs_compound_free(compound);
-
-    chimera_nfs3_fsstat_complete(status,
-                                 status == CHIMERA_VFS_OK ? &attr : NULL,
-                                 req);
 } /* chimera_nfs3_fsstat_sequence_complete */
 
 
@@ -124,6 +119,10 @@ chimera_nfs3_fsstat(
     }
 
     compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
+    struct nfs3_compound *ctx = calloc(1, sizeof(*ctx));
+    chimera_nfs_abort_if(!ctx, "NFS3 compound context allocation failed");
+    ctx->req      = req;
+    ctx->compound = compound;
 
     chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
     chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_INFERRED |
@@ -131,5 +130,5 @@ chimera_nfs3_fsstat(
     chimera_vfs_compound_add_getattr(compound, CHIMERA_NFS3_FSSTAT_MASK);
 
     chimera_vfs_compound_submit(compound,
-                                chimera_nfs3_fsstat_sequence_complete, req);
+                                chimera_nfs3_fsstat_sequence_complete, ctx);
 } /* chimera_nfs3_fsstat */

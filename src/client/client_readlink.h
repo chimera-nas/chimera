@@ -40,8 +40,7 @@ chimera_readlink_sequence_complete(
         }
     }
 
-    /* The sequence owns the handle its OPEN produced and releases it in the
-     * free below; nothing here releases anything. */
+    /* The compound owns and releases the handle used for this request. */
     if (heap_allocated) {
         chimera_client_request_free(thread, request);
     }
@@ -80,6 +79,6 @@ chimera_dispatch_readlink(
                                            (uint32_t) open_idx);
     }
 
-    chimera_vfs_compound_submit(compound, chimera_readlink_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(compound, chimera_readlink_sequence_complete,
+                                     request);
 } /* chimera_dispatch_readlink */

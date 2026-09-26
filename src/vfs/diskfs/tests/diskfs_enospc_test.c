@@ -8,6 +8,7 @@
  * fill; checking only the latter missed an unenforced internal reserve. */
 #include <inttypes.h>
 #include "diskfs_test_harness.h"
+#include "vfs/vfs_internal_procs.h"
 
 #define SMALL (256ULL * 1024)
 #define BLOCK 4096ULL

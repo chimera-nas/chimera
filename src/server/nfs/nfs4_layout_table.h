@@ -10,6 +10,7 @@
 #include <uthash.h>
 
 #include "nfs4_xdr.h"   /* NFS4_FHSIZE */
+#include "common/macros.h"
 
 /*
  * Server-wide index of outstanding pNFS layouts, keyed by file handle and
@@ -20,7 +21,7 @@
  * than the client issuing the conflict -- which the per-client layout table
  * cannot do.
  *
- * Each file with >=1 outstanding layout has one entry; the entry lists the
+ * Each file with outstanding layouts or admission holds has one entry; it lists the
  * per-client nfs_layout_state holders (linked via nfs_layout_state.global_next)
  * and any conflicting operations deferred until every holder has returned.
  * The deferral barrier is simply "the holder list became empty": each holder's
@@ -46,6 +47,8 @@ struct nfs_layout_entry {
     uint16_t                         fh_len;
     struct nfs_layout_state         *holders;   /* list via ls->global_next */
     struct nfs_layout_recall_waiter *waiters;   /* ops awaiting all returns  */
+    uint32_t                         barriers; /* request lifetime admission exclusion */
+    uint32_t                         grants;   /* short final-publication sections */
     UT_hash_handle                   hh;
 };
 
@@ -77,27 +80,59 @@ void nfs_layout_table_deregister(
 
 /*
  * Begin a recall for fh: if any layouts are held, append `waiter` to the file's
- * deferred-op list and snapshot the current holders into out_holders (each
+ * deferred-op list and allocate a snapshot of ALL current holders in out_holders (each
  * pinned with a layout ref the caller must release with nfs_layout_state_put).
  * Returns the number of holders snapshotted, or 0 if none are held (in which
  * case `waiter` is NOT enqueued and the caller should resume immediately).
+ * Caller releases every snapshot reference and frees the pointer array.
  */
-int nfs_layout_table_recall_prepare(
+SYMBOL_EXPORT int nfs_layout_table_recall_prepare(
     struct nfs_layout_table         *table,
     const uint8_t                   *fh,
     uint16_t                         fh_len,
     struct nfs_layout_recall_waiter *waiter,
-    struct nfs_layout_state        **out_holders,
-    int                              max_holders);
+    struct nfs_layout_state       ***out_holders);
+
+/* A successful acquire excludes new final LAYOUTGET publication until its
+ * matching release, including after the last recalled holder returns. It may
+ * fail while a grant already owns its short publication section. No wait,
+ * callbacks, lease renewal or layout mutation. Retain across compound retry. */
+SYMBOL_EXPORT bool nfs_layout_table_barrier_acquire(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len);
+SYMBOL_EXPORT void nfs_layout_table_barrier_release(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len);
+
+/* LAYOUTGET final publication only: begin/end bracket synchronous create or
+ * widening. Never retain a grant section across backend or callback I/O. */
+SYMBOL_EXPORT bool nfs_layout_table_grant_begin(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len);
+SYMBOL_EXPORT void nfs_layout_table_grant_end(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len);
 
 /*
- * True while a recall started by nfs_layout_table_recall_prepare is still
- * outstanding for fh (i.e. the file has deferred operations waiting for every
- * holder to return).  LAYOUTGET consults this so it does not hand out a layout
+ * True while a recall is outstanding or a request retains an admission barrier.
+ * LAYOUTGET consults this so it does not hand out a layout
  * the in-progress recall has already snapshotted past
  * (RFC 8881 §12.5.5.2 / §18.43.3: NFS4ERR_RECALLCONFLICT).
  */
 bool nfs_layout_table_recall_active(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len);
+
+/* Pure snapshot matching the existing recall barrier, which waits for all
+ * holders (including read layouts). No references, callbacks, or waiters are
+ * created. A caller needing exclusion against later LAYOUTGET must separately
+ * hold an admission barrier; this observation alone is not such a barrier. */
+SYMBOL_EXPORT bool nfs_layout_table_has_holders(
     struct nfs_layout_table *table,
     const uint8_t           *fh,
     uint16_t                 fh_len);

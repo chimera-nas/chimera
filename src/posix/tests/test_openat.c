@@ -6,7 +6,7 @@
 #include "posix_test_common.h"
 
 #ifndef AT_FDCWD
-#define AT_FDCWD     -100
+#define AT_FDCWD -100
 #endif /* ifndef AT_FDCWD */
 
 /* A cached write-only open must not satisfy a later reader (or an O_RDWR
@@ -245,7 +245,7 @@ static void
 test_real_dirfd(struct posix_test_env *env)
 {
     chimera_posix_stat_t st;
-    int         dfd, fd, rc;
+    int                  dfd, fd, rc;
 
     rc = chimera_posix_mkdir("/test/openat_dir", 0755);
     if (rc != 0) {

@@ -31,6 +31,7 @@
 #include "../client/client_internal.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_lock.h"
 #include "posix.h"
 
 // Directory stream for opendir/readdir/closedir
@@ -68,49 +69,9 @@ struct chimera_posix_completion {
  * concurrent I/O through two duplicates of one description is not
  * additionally serialized here. */
 struct chimera_posix_ofd {
-    uint64_t                        offset;
-    unsigned int                    oflags; // Raw open(2) flags (for O_ACCMODE checks)
-    int                             refcnt;
-    /* Byte-range lock claims this description holds in the local claim core
-     * (heap chimera_posix_ofd_lock nodes, claim embedded first).  Guarded by
-     * the client's fd_lock, like the description refcount.  Released when the
-     * last duplicate of the description closes. */
-    struct chimera_posix_ofd_lock  *locks;
-    /* Backend range records this description holds that the local core does
-     * NOT track: a SEEK_END lock, whose absolute range only the backend
-     * resolved.  The old lock wire took these on the file's own descriptor,
-     * so closing the file dropped them; the claim wire records them against
-     * a descriptor of the backend's own, so they have to be released
-     * explicitly.  Released by token at last close, same as `locks`. */
-    struct chimera_posix_ofd_token *backend_tokens;
-};
-
-/* A backend range record held without a local claim (see backend_tokens). */
-struct chimera_posix_ofd_token {
-    uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
-    uint8_t                         fh_len;
-    uint64_t                        fh_hash;
-    uint64_t                        token;
-    struct chimera_posix_ofd_token *next;
-};
-
-/* One byte-range lock claim held by an open file description in the local
- * claim core.  The embedded claim MUST be the first member: the core hands
- * back released fragments (chimera_vfs_claim_range_replace) as bare claim
- * pointers, and the posix layer recovers the node by cast.  Each node holds
- * its own chimera_vfs_state_get reference on `file` so the anchor outlives
- * the claim. */
-struct chimera_posix_ofd_lock {
-    struct chimera_vfs_claim           claim;
-    /* The CLAIM op's ticket.  It lives here for the same reason the claim
-     * does: the sequence BORROWS both and the claim core may keep the ticket
-     * queued after the acquire call has returned, so neither may be stack
-     * storage of a submission that is already over. */
-    struct chimera_vfs_pending_acquire ticket;
-    struct chimera_vfs_file_state     *file;
-    struct chimera_posix_ofd          *ofd; /* owning description; NULL until tracked */
-    struct chimera_posix_ofd_lock     *prev;
-    struct chimera_posix_ofd_lock     *next;
+    uint64_t     offset;
+    unsigned int oflags;                    // Raw open(2) flags (for O_ACCMODE checks)
+    int          refcnt;
 };
 
 struct CHIMERA_ALIGNED(64) chimera_posix_fd_entry {
@@ -120,6 +81,7 @@ struct CHIMERA_ALIGNED(64) chimera_posix_fd_entry {
     struct chimera_posix_fd_entry  *next;
     struct chimera_posix_ofd       *ofd;
     unsigned int                    flags;
+    uint64_t                        generation;
     int                             refcnt;
     int                             io_waiters;
     int                             pending_close;
@@ -143,23 +105,19 @@ struct CHIMERA_ALIGNED(64) chimera_posix_worker {
 };
 
 struct CHIMERA_ALIGNED(64) chimera_posix_client {
-    struct chimera_client         *client;
-    struct evpl_threadpool        *pool;
-    struct chimera_posix_worker   *workers;
-    int                            nworkers;
-    atomic_uint                    next_worker;
-    evpl_mutex_t                   fd_lock;
-    struct chimera_posix_fd_entry *fds;
-    struct chimera_posix_fd_entry *free_list;
-    int                            max_fds;
-    atomic_int                     init_cursor;
-    int                            owns_config;
-    /* Number of byte-range lock claims this client currently tracks, across
-     * every open file description.  Maintained under fd_lock alongside the
-     * per-description lists.  close() consults it to skip the POSIX
-     * whole-file lock release entirely on the overwhelmingly common path
-     * where the process holds no locks at all. */
-    atomic_int                     n_range_locks;
+    struct chimera_client          *client;
+    struct evpl_threadpool         *pool;
+    struct chimera_posix_worker    *workers;
+    int                             nworkers;
+    atomic_uint                     next_worker;
+    evpl_mutex_t                    fd_lock;
+    evpl_mutex_t                    dup_lock;
+    struct chimera_posix_fd_entry  *fds;
+    struct chimera_posix_fd_entry  *free_list;
+    int                             max_fds;
+    atomic_int                      init_cursor;
+    int                             owns_config;
+    struct chimera_vfs_lock_domain *lock_domain;
 };
 
 extern struct chimera_posix_client *chimera_posix_global;
@@ -227,159 +185,27 @@ chimera_posix_lock_owner_init(struct chimera_claim_owner *owner)
     owner->owner_hi   = 0;
 } // chimera_posix_lock_owner_init
 
-/* Allocate a lock node with an initialized range claim and its own
- * file-state anchor reference.  offset/length are in core geometry
- * (length UINT64_MAX = to-EOF).  Returns NULL on allocation failure. */
-struct chimera_posix_ofd_lock *
-chimera_posix_ofd_lock_alloc(
-    struct chimera_posix_client    *posix,
-    struct chimera_vfs_open_handle *handle,
-    bool                            exclusive,
-    uint64_t                        offset,
-    uint64_t                        length);
-
-/* Free an UNTRACKED node whose claim is not (or no longer) inserted. */
-void chimera_posix_ofd_lock_free(
+/* Blocking frontend boundary; range and backend-token state belong to the
+ * shared domain, keyed by semantic process owner and file, never by OFD. */
+int chimera_posix_lock_compound(
     struct chimera_posix_client   *posix,
-    struct chimera_posix_ofd_lock *node);
-
-/* Link a granted node onto the description's lock list. */
-void chimera_posix_ofd_lock_track(
-    struct chimera_posix_client   *posix,
-    struct chimera_posix_ofd      *ofd,
-    struct chimera_posix_ofd_lock *node);
-
-/* Unlink a tracked node, release its claim from the core, and free it
- * (backend projection denied after a local grant). */
-void chimera_posix_ofd_lock_untrack_release(
-    struct chimera_posix_client   *posix,
-    struct chimera_posix_ofd_lock *node);
-
-/* F_UNLCK: carve `owner`'s local coverage of [offset, offset+length) out of
- * the claim core (REPLACE geometry, new_mask 0).  The owner is a parameter
- * rather than something this function derives: the unlock path runs it on a
- * worker thread, and the identity belongs to the application thread that
- * called fcntl(). */
-void chimera_posix_ofd_lock_carve(
-    struct chimera_posix_client      *posix,
-    struct chimera_posix_ofd         *ofd,
-    struct chimera_vfs_open_handle   *handle,
-    const struct chimera_claim_owner *owner,
-    const struct chimera_vfs_claim   *except,
-    uint64_t                          offset,
-    uint64_t                          length);
-
-/* POSIX re-lock: a new lock REPLACES the owner's coverage of the range it
- * covers, including a WRLCK->RDLCK downgrade.  Called with `node` already
- * granted and tracked, it carves away the owner's older overlapping claims
- * and leaves `node` standing.  Doing it in this order rather than
- * carve-then-insert is what makes a refused upgrade leave the old lock
- * intact, and leaves no window in which the range is unheld. */
-void chimera_posix_ofd_lock_replace(
+    struct chimera_posix_fd_entry *entry,
+    int                            cmd,
+    struct flock                  *fl,
+    uint32_t                       type,
+    int32_t                        whence,
+    uint64_t                       offset,
+    uint64_t                       length);
+/* Retire before waiting for fd users, so a blocked SETLKW can be cancelled. */
+void chimera_posix_locks_retire_file(
     struct chimera_posix_client    *posix,
-    struct chimera_posix_ofd       *ofd,
-    struct chimera_vfs_open_handle *handle,
-    struct chimera_posix_ofd_lock  *node,
-    uint64_t                        offset,
-    uint64_t                        length);
-
-/* Take `node`'s claim as a VFS sequence -- PUTHANDLE of the descriptor's own
- * open file, lent with the flags it was opened with, then a CLAIM against it.
- * `wait` is the F_SETLKW contract (queue on a breaking holder and on another
- * owner's incompatible lock); without it the run is a TRY.  The application
- * thread blocks on the sequence's completion.
- *
- * 0 when the claim was granted and inserted; -1 with errno set otherwise --
- * EAGAIN for a refusal, and the status's own errno for a sequence that could
- * not ask the question at all. */
-int
-chimera_posix_lock_claim_acquire(
-    struct chimera_posix_client    *posix,
-    struct chimera_vfs_open_handle *handle,
-    unsigned int                    open_flags,
-    struct chimera_posix_ofd_lock  *node,
-    bool                            wait);
-
-/* Record a backend range token this description holds without a local
- * claim (a SEEK_END grant), so last close can release it. */
-void
-chimera_posix_ofd_track_token(
-    struct chimera_posix_client    *posix,
-    struct chimera_posix_ofd       *ofd,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        token);
-
-/* F_UNLCK: carve the local coverage and wait for any backend releases it
-* produced to complete, so the range really is free when this returns. */
-void
-chimera_posix_lock_claim_unlock(
-    struct chimera_posix_client    *posix,
-    struct chimera_posix_ofd       *ofd,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        offset,
-    uint64_t                        length);
-
-/* SEEK_END unlock: release the backend record by geometry, since this node
- * never learned the absolute range. */
-int
-chimera_posix_lock_claim_unlock_ranged(
-    struct chimera_posix_client    *posix,
-    struct chimera_vfs_open_handle *handle,
-    int32_t                         whence,
-    uint64_t                        offset,
-    uint64_t                        length);
-
-/* F_GETLK: ask whether the range WOULD be granted, as one sequence --
- * PUTHANDLE of the descriptor's open file, then a CLAIM_TEST carrying
- * CHIMERA_VFS_COMPOUND_CLAIM_TEST_BACKEND.  That one op is both halves of
- * the question: the local core answers first, and when it is clear the
- * executor projects the probe to a range-arbitrating backend so holders
- * outside this process are seen too (with no such backend registered the
- * local answer stands and nothing is dispatched).
- *
- * 1 when a holder was reported, filling *conflict; 0 when the range is free;
- * -1 with errno set when the sequence could not ask. */
-int
-chimera_posix_lock_claim_getlk(
-    struct chimera_posix_client       *posix,
-    struct chimera_vfs_open_handle    *handle,
-    unsigned int                       open_flags,
-    bool                               exclusive,
-    uint64_t                           offset,
-    uint64_t                           length,
-    struct chimera_vfs_claim_conflict *conflict);
-
-/* SEEK_END ranges: the offset is resolved by the backend, atomically with
- * the operation, so the local core cannot arbitrate them at all and the
- * whole fcntl is answered by the backend.  Returns the fcntl return value
- * and sets errno on failure. */
-int
-chimera_posix_lock_claim_seek_end(
-    struct chimera_posix_client    *posix,
-    struct chimera_posix_ofd       *ofd,
-    struct chimera_vfs_open_handle *handle,
-    int                             cmd,
-    struct flock                   *fl,
-    uint32_t                        lock_type,
-    int32_t                         whence,
-    uint64_t                        offset,
-    uint64_t                        length);
-
-/* Release every lock claim the description still holds.  Caller holds
- * fd_lock. */
-void chimera_posix_ofd_locks_release(
-    struct chimera_posix_client *posix,
-    struct chimera_posix_ofd    *ofd);
-
-/* POSIX close(): drop every byte-range lock this PROCESS holds on the file
- * `handle` refers to -- including locks taken through other descriptions of
- * the same file, which is what makes it POSIX record-lock semantics rather
- * than OFD-lock semantics.  A no-op when the client tracks no locks.  Caller
- * must NOT hold fd_lock. */
-void chimera_posix_locks_release_file(
-    struct chimera_posix_client    *posix,
-    struct chimera_posix_ofd       *ofd,
     struct chimera_vfs_open_handle *handle);
+/* Returns errno after mandatory backend release completion. */
+int chimera_posix_locks_release_file(
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle);
+void chimera_posix_locks_shutdown(
+    struct chimera_posix_client *posix);
 
 /* Drop an fd entry's reference on its open file description, freeing the
  * description when the last duplicate goes.  Caller holds fd_lock. */
@@ -387,33 +213,10 @@ static FORCE_INLINE void
 chimera_posix_ofd_release_locked(struct chimera_posix_fd_entry *entry)
 {
     if (entry->ofd && --entry->ofd->refcnt == 0) {
-        /* Last posix close of the description: release whatever lock claims
-        * it still tracks.  POSIX's own rule -- any close of any descriptor
-        * for the file drops all of the process's locks on it -- is applied
-        * earlier, by chimera_posix_locks_release_file() in
-        * chimera_posix_close(); this is the backstop for a description torn
-        * down by another path, and for its backend-only SEEK_END tokens. */
-        chimera_posix_ofd_locks_release(chimera_posix_get_global(), entry->ofd);
         free(entry->ofd);
     }
     entry->ofd = NULL;
 } // chimera_posix_ofd_release_locked
-
-/* Point `entry` at `src`'s open file description (dup/dup2/F_DUPFD: the
- * duplicate SHARES the description), releasing whatever description the
- * entry held. */
-static FORCE_INLINE void
-chimera_posix_ofd_adopt(
-    struct chimera_posix_client   *posix,
-    struct chimera_posix_fd_entry *entry,
-    struct chimera_posix_fd_entry *src)
-{
-    evpl_mutex_lock(&posix->fd_lock);
-    chimera_posix_ofd_release_locked(entry);
-    entry->ofd = src->ofd;
-    entry->ofd->refcnt++;
-    evpl_mutex_unlock(&posix->fd_lock);
-} // chimera_posix_ofd_adopt
 
 /* chimera_vfs_error values are a protocol enum whose numbers happen to follow
  * the Linux errno layout; the host's errno numbering differs on other
@@ -424,6 +227,7 @@ chimera_posix_errno_from_status(enum chimera_vfs_error status)
 {
     switch (status) {
         case CHIMERA_VFS_OK:           return 0;
+        case CHIMERA_VFS_EINTR:       return EINTR;
         case CHIMERA_VFS_EPERM:        return EPERM;
         case CHIMERA_VFS_ENOENT:       return ENOENT;
         case CHIMERA_VFS_EIO:          return EIO;
@@ -667,12 +471,7 @@ chimera_posix_to_chimera_flags(int flags)
     return out;
 } // chimera_posix_to_chimera_flags
 
-/* The CHIMERA_VFS_OPEN_* word a descriptor's handle was opened with, for a
- * request that lends the handle to a sequence: PUTHANDLE promises the
- * executor what the caller opened it with, and this is the only place that
- * knows.  The open file description keeps the open(2) flags for every
- * duplicate of it (F_SETFL touches only the status bits), so the answer is
- * the same through dup(2) and fdopen(3). */
+/* Preserve the descriptor's actual capabilities when lending it. */
 static FORCE_INLINE unsigned int
 chimera_posix_fd_open_flags(const struct chimera_posix_fd_entry *entry)
 {
@@ -724,10 +523,11 @@ chimera_posix_check_path(const char *path)
  * index; it holds at most max_fds entries and allocation is not a hot
  * path in this compatibility layer. */
 static FORCE_INLINE int
-chimera_posix_fd_alloc_at_least(
+chimera_posix_fd_alloc_description(
     struct chimera_posix_client    *posix,
     struct chimera_vfs_open_handle *handle,
-    int                             minfd)
+    int                             minfd,
+    struct chimera_posix_ofd       *shared)
 {
     struct chimera_posix_fd_entry  *entry;
     struct chimera_posix_fd_entry **pp, **best_pp = NULL;
@@ -752,36 +552,57 @@ chimera_posix_fd_alloc_at_least(
     entry       = *best_pp;
     *best_pp    = entry->next;
     entry->next = NULL;
-
+    evpl_mutex_lock(&entry->lock);
+    entry->flags = CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING;
+    if (shared) {
+        shared->refcnt++;
+    }
+    evpl_mutex_unlock(&entry->lock);
     evpl_mutex_unlock(&posix->fd_lock);
 
     fd = (int) (entry - posix->fds);
 
     /* A fresh open gets a fresh open file description (not shared with
      * anyone yet, so no lock needed for the refcount). */
-    entry->ofd = calloc(1, sizeof(*entry->ofd));
+    entry->ofd = shared ? shared : calloc(1, sizeof(*entry->ofd));
 
     if (!entry->ofd) {
         evpl_mutex_lock(&posix->fd_lock);
+        evpl_mutex_lock(&entry->lock);
+        entry->flags     = CHIMERA_POSIX_FD_CLOSED;
         entry->next      = posix->free_list;
         posix->free_list = entry;
+        evpl_cond_broadcast(&entry->cond);
+        evpl_mutex_unlock(&entry->lock);
         evpl_mutex_unlock(&posix->fd_lock);
         return -1;
     }
 
-    entry->ofd->refcnt = 1;
-
+    if (!shared) {
+        entry->ofd->refcnt = 1;
+    }
+    evpl_mutex_lock(&entry->lock);
+    entry->generation++;
     entry->handle        = handle;
     entry->flags         = 0;
     entry->refcnt        = 0;
-    entry->io_waiters    = 0;
     entry->pending_close = 0;
-    entry->close_waiters = 0;
     entry->eof_flag      = 0;
     entry->error_flag    = 0;
     entry->ungetc_char   = -1;
+    evpl_cond_broadcast(&entry->cond);
+    evpl_mutex_unlock(&entry->lock);
 
     return fd;
+} // chimera_posix_fd_alloc_description
+
+static FORCE_INLINE int
+chimera_posix_fd_alloc_at_least(
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle,
+    int                             minfd)
+{
+    return chimera_posix_fd_alloc_description(posix, handle, minfd, NULL);
 } // chimera_posix_fd_alloc_at_least
 
 static FORCE_INLINE int
@@ -805,15 +626,22 @@ chimera_posix_fd_free(
 
     entry = &posix->fds[fd];
 
-    entry->handle      = NULL;
-    entry->eof_flag    = 0;
-    entry->error_flag  = 0;
-    entry->ungetc_char = -1;
-
+    /* Publish CLOSED, drop the description, and recycle the slot together.
+     * Otherwise dup2 can install a new description between those steps. */
     evpl_mutex_lock(&posix->fd_lock);
+    evpl_mutex_lock(&entry->lock);
+    entry->handle = NULL;
+    entry->flags  = CHIMERA_POSIX_FD_CLOSED;
+    entry->refcnt--;
+    entry->pending_close = 0;
+    entry->eof_flag      = 0;
+    entry->error_flag    = 0;
+    entry->ungetc_char   = -1;
     chimera_posix_ofd_release_locked(entry);
     entry->next      = posix->free_list;
     posix->free_list = entry;
+    evpl_cond_broadcast(&entry->cond);
+    evpl_mutex_unlock(&entry->lock);
     evpl_mutex_unlock(&posix->fd_lock);
 } // chimera_posix_fd_free
 
@@ -835,23 +663,27 @@ chimera_posix_fd_acquire(
     evpl_mutex_lock(&entry->lock);
 
     // If CLOSED, return error
-    if (entry->flags & CHIMERA_POSIX_FD_CLOSED) {
+    if ((entry->flags & CHIMERA_POSIX_FD_CLOSED) ||
+        ((entry->flags & CHIMERA_POSIX_FD_CLOSING) && !(flags_to_set & CHIMERA_POSIX_FD_CLOSING))) {
         evpl_mutex_unlock(&entry->lock);
         errno = EBADF;
         return NULL;
     }
 
+    uint64_t generation = entry->generation;
+
     // If caller wants IO_ACTIVE flag (read/write operations)
     if (flags_to_set & CHIMERA_POSIX_FD_IO_ACTIVE) {
         // Wait for existing IO to complete
-        while (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE) {
+        while (entry->generation == generation && (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE)) {
             entry->io_waiters++;
             evpl_cond_wait(&entry->cond, &entry->lock);
             entry->io_waiters--;
         }
 
         // Check if fd was closed or is closing
-        if (entry->flags & (CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING)) {
+        if (entry->generation != generation ||
+            (entry->flags & (CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING))) {
             evpl_mutex_unlock(&entry->lock);
             errno = EBADF;
             return NULL;
@@ -865,7 +697,7 @@ chimera_posix_fd_acquire(
         // If CLOSING is already set by another thread, wait for it to complete
         if (entry->flags & CHIMERA_POSIX_FD_CLOSING) {
             entry->close_waiters++;
-            while (!(entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
+            while (entry->generation == generation && !(entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
                 evpl_cond_wait(&entry->cond, &entry->lock);
             }
             entry->close_waiters--;
@@ -877,6 +709,9 @@ chimera_posix_fd_acquire(
         // Set CLOSING and pending_close
         entry->flags        |= CHIMERA_POSIX_FD_CLOSING;
         entry->pending_close = 1;
+        evpl_mutex_unlock(&entry->lock);
+        chimera_posix_locks_retire_file(posix, entry->handle);
+        evpl_mutex_lock(&entry->lock);
 
         // Wait for existing operations to complete
         while (entry->refcnt > 0) {
@@ -901,16 +736,6 @@ chimera_posix_fd_release(
     if (flags_to_clear & CHIMERA_POSIX_FD_IO_ACTIVE) {
         entry->flags &= ~CHIMERA_POSIX_FD_IO_ACTIVE;
         if (entry->io_waiters > 0) {
-            evpl_cond_signal(&entry->cond);
-        }
-    }
-
-    // If completing a close operation
-    if (flags_to_clear & CHIMERA_POSIX_FD_CLOSING) {
-        entry->flags        &= ~CHIMERA_POSIX_FD_CLOSING;
-        entry->flags        |= CHIMERA_POSIX_FD_CLOSED;
-        entry->pending_close = 0;
-        if (entry->close_waiters > 0) {
             evpl_cond_broadcast(&entry->cond);
         }
     }
@@ -919,7 +744,7 @@ chimera_posix_fd_release(
 
     // Signal if refcnt is zero and a close is pending
     if (entry->refcnt == 0 && entry->pending_close) {
-        evpl_cond_signal(&entry->cond);
+        evpl_cond_broadcast(&entry->cond);
     }
 
     evpl_mutex_unlock(&entry->lock);
@@ -963,21 +788,24 @@ chimera_posix_fd_lseek(
     evpl_mutex_lock(&entry->lock);
 
     // If CLOSED, return error
-    if (entry->flags & CHIMERA_POSIX_FD_CLOSED) {
+    if (entry->flags & (CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING)) {
         evpl_mutex_unlock(&entry->lock);
         errno = EBADF;
         return -1;
     }
 
+    uint64_t generation = entry->generation;
+
     // Wait for any IO to complete
-    while (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE) {
+    while (entry->generation == generation && (entry->flags & CHIMERA_POSIX_FD_IO_ACTIVE)) {
         entry->io_waiters++;
         evpl_cond_wait(&entry->cond, &entry->lock);
         entry->io_waiters--;
     }
 
-    // Check again if fd was closed while waiting
-    if (entry->flags & (CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING)) {
+    // Check again if fd was closed or reused while waiting
+    if (entry->generation != generation ||
+        (entry->flags & (CHIMERA_POSIX_FD_CLOSED | CHIMERA_POSIX_FD_CLOSING))) {
         evpl_mutex_unlock(&entry->lock);
         errno = EBADF;
         return -1;

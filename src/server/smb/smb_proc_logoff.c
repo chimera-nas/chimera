@@ -24,7 +24,14 @@ chimera_smb_logoff(struct chimera_smb_request *request)
         return;
     }
 
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    /* Retain signing/encryption state through reply generation and wire
+     * cleanup. The connection table's handle is released below; request now
+     * points at its independently pinned snapshot. */
+    request->session_handle = session_handle;
+    if (!chimera_smb_logoff_pin_wire(request, session_handle)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
+        return;
+    }
 
     /* MS-SMB2 3.3.5.6: for an SMB 3.x session the server MUST remove the session
      * from every Channel.Connection.SessionTable in Session.ChannelList and from
@@ -38,6 +45,11 @@ chimera_smb_logoff(struct chimera_smb_request *request)
      * equivalent to the plain release below. */
     if (conn->dialect >= SMB2_DIALECT_3_0) {
         chimera_smb_session_mark_deleted(thread->shared, session_handle->session);
+        /* A sibling channel retains the session after this channel releases
+         * it. Detach all admitted watches now, and let each owner loop deliver
+         * cleanup. Admission timers observe DELETED and clean themselves up. */
+        chimera_smb_session_flush_notifies(session_handle->session);
+
     }
 
     /* LOGOFF closes the session's non-durable opens but DISASSOCIATES
@@ -53,9 +65,10 @@ chimera_smb_logoff(struct chimera_smb_request *request)
 
     chimera_smb_session_handle_free(thread, session_handle);
 
-    request->session_handle = NULL;
+    /* Completion may advance the compound and free this request. */
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
-} /* chimera_smb_tree_disconnect */
+} /* chimera_smb_logoff */
 
 int
 chimera_smb_parse_logoff(

@@ -7,7 +7,8 @@
 #include "nfs4_status.h"
 #include "nfs4_named_attr.h"
 #include "server/server.h"
-#include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
+#include "vfs/vfs_release.h"
 
 /*
  * Marshal one directory entry into the reply and append it to `cursor`,
@@ -33,10 +34,23 @@ chimera_nfs4_readdir_entry_fill(
     int                             namelen,
     const struct chimera_vfs_attrs *attrs)
 {
-    uint32_t       dbuf_cur;
-    uint32_t       dbuf_before = req->encoding->dbuf->used;
-    struct entry4 *entry;
-    int            rc;
+    uint32_t                 dbuf_cur;
+    uint32_t                 dbuf_before = req->encoding->dbuf->used;
+    struct entry4           *entry;
+    int                      rc;
+    struct chimera_vfs_attrs projected = *attrs;
+
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_FH) && args->num_attr_request &&
+        (args->attr_request[0] & (1U << FATTR4_CHANGE))) {
+        struct nfs4_change_observation *observation;
+        cursor->change_status = nfs4_change_project(req->thread->shared->nfs4_state_table.change_table,
+                                                    attrs->va_fh, attrs->va_fh_len, &projected, &req->
+                                                    change_observations, &observation);
+        if (cursor->change_status != NFS4_OK) {
+            return -1;
+        }
+        attrs = &projected;
+    }
 
     entry = xdr_dbuf_alloc_space(sizeof(*entry), req->encoding->dbuf);
     if (!entry) {
@@ -120,10 +134,6 @@ chimera_nfs4_readdir_entry_fill(
     return 0;
 } /* chimera_nfs4_readdir_entry_fill */
 
-/*
- * Marshal one synthesized entry, for the named-attribute directory whose
- * entries are built here rather than enumerated by a backend.
- */
 static int
 chimera_nfs4_readdir_callback(
     uint64_t                        inum,
@@ -143,161 +153,29 @@ chimera_nfs4_readdir_callback(
                                            cookie, name, namelen, attrs);
 } /* chimera_nfs4_readdir_callback */
 
-/*
- * PUTFH, OPEN_CURRENT(dir), READDIR -- the STREAMING shape, because the entries
- * are marshalled into the reply as the backend produces them, which is where a
- * per-entry ACL can be encoded at all: the attributes an append is handed are
- * the backend's own and live only for the call.
- *
- * `reset` runs before every execution of the op, so it has to take back
- * everything `append` did.  Rewinding the reply buffer to a mark, rather than
- * merely stopping at it, is safe because during the run the entry fill is the
- * only thing that allocates from that buffer: every other result of this
- * one-op run is marshalled afterwards.
- */
-#define NFS4_READDIR_OP_READDIR 2
-
-struct nfs4_readdir_ctx {
-    struct nfs_request *req;
-    uint32_t            mark;
-    uint8_t             have_mark;
-};
-
-static void
-chimera_nfs4_readdir_reset(
-    struct chimera_vfs_compound *compound,
-    uint32_t                     index,
-    void                        *private_data)
-{
-    struct nfs4_readdir_ctx        *ctx    = private_data;
-    struct nfs_request             *req    = ctx->req;
-    struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
-
-    if (ctx->have_mark) {
-        req->encoding->dbuf->used = ctx->mark;
-    } else {
-        ctx->mark      = req->encoding->dbuf->used;
-        ctx->have_mark = 1;
-    }
-
-    /* Fixed READDIR4resok overhead counted against maxcount: cookieverf (8)
-     * + the dirlist4 "entry present" and "eof" booleans (4 each). */
-    cursor->count   = 16;
-    cursor->entries = NULL;
-    cursor->last    = NULL;
-} /* chimera_nfs4_readdir_reset */
-
-static int
-chimera_nfs4_readdir_append(
-    struct chimera_vfs_compound    *compound,
-    uint32_t                        index,
-    uint64_t                        inum,
-    uint64_t                        cookie,
-    const char                     *name,
-    int                             namelen,
-    const struct chimera_vfs_attrs *attrs,
-    void                           *private_data)
-{
-    struct nfs4_readdir_ctx              *ctx  = private_data;
-    struct nfs_request                   *req  = ctx->req;
-    struct READDIR4args                  *args = &req->args_compound->argarray[req->index].opreaddir;
-    const struct chimera_vfs_compound_op *vop;
-
-    (void) inum;
-
-    /* The directory being listed, as the op recorded it: req->fh still names
-     * it here, but the op's own record is what the sequence path reads and
-     * what survives an op that moved the cursor. */
-    vop = chimera_vfs_compound_op(compound, index);
-
-    return chimera_nfs4_readdir_entry_fill(req, args, &req->readdir4_cursor,
-                                           vop->fh, (int) vop->fh_len,
-                                           cookie, name, namelen, attrs);
-} /* chimera_nfs4_readdir_append */
-
 static void
 chimera_nfs4_readdir_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        cookie,
+    uint64_t                        verifier,
+    uint32_t                        eof,
+    struct chimera_vfs_attrs       *dir_attr,
+    void                           *private_data)
 {
-    struct nfs4_readdir_ctx              *ctx    = private_data;
-    struct nfs_request                   *req    = ctx->req;
-    struct READDIR4res                   *res    = &req->res_compound.resarray[req->index].opreaddir;
-    struct nfs_nfs4_readdir_cursor       *cursor = &req->readdir4_cursor;
-    const struct chimera_vfs_compound_op *vop;
-    enum chimera_vfs_error                error_code;
-    nfsstat4                              status;
-    uint64_t                              cv;
+    struct nfs_request             *req    = private_data;
+    struct READDIR4res             *res    = &req->res_compound.resarray[req->index].opreaddir;
+    nfsstat4                        status = chimera_nfs4_errno_to_nfsstat4(error_code);
+    struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
+    uint64_t                        cv;
 
-    error_code = chimera_vfs_compound_status(compound);
-
-    /* LISTXATTRS and READDIR both turn a too-small buffer into TOOSMALL. */
-    status = (error_code == CHIMERA_VFS_ERANGE) ?
-        NFS4ERR_TOOSMALL : chimera_nfs4_errno_to_nfsstat4(error_code);
-
-    vop = chimera_vfs_compound_op(compound, NFS4_READDIR_OP_READDIR);
+    if (status == NFS4_OK && cursor->change_status != NFS4_OK) {
+        status = cursor->change_status;
+    }
 
     /* RFC 7530 §16.24.4: if not even one entry fit in maxcount and we are
      * not at end-of-directory, the buffer is too small. Returning an empty,
      * non-eof page would stall a paging client. */
-    if (status == NFS4_OK && !vop->eof && cursor->entries == NULL) {
-        status = NFS4ERR_TOOSMALL;
-    }
-
-    res->status = status;
-
-    if (status != NFS4_OK) {
-        chimera_vfs_compound_free(compound);
-        chimera_nfs4_compound_complete(req, status);
-        return;
-    }
-
-    cv = vop->r_verifier ? vop->r_verifier : vop->r_cookie;
-    memcpy(res->resok4.cookieverf, &cv, sizeof(res->resok4.cookieverf));
-
-    res->resok4.reply.eof     = vop->eof;
-    res->resok4.reply.entries = cursor->entries;
-
-    chimera_vfs_compound_free(compound);
-
-    chimera_nfs4_compound_complete(req, status);
-} /* chimera_nfs4_readdir_complete */
-
-/* ---- Named-attribute directory READDIR ----------------------------------
- *
- * The synthetic attr directory has no backend directory to enumerate; its
- * entries are the base file's named streams.  Stat the base once (the entries
- * inherit its owner/timestamps), list the streams (with their file handles),
- * and synthesize one entry per named stream.  memfs returns the full stream
- * list in one shot, so a single pass with index-based cookies covers
- * continuation.
- *
- * All of it is one run: PUTFH the base, PATH-open it, GETATTR, LIST_STREAMS.
- * The page the last op stages belongs to the compound, so the synthesis reads
- * it before the sequence is freed -- as does the stat, whose ACL (when one was
- * asked for) the op owns for exactly that long.
- */
-#define NFS4_ATTRDIR_READDIR_OP_GETATTR 2
-#define NFS4_ATTRDIR_READDIR_OP_LIST    3
-
-/* The stream page the LIST_STREAMS op stages.  Sized as the per-op buffer was,
- * and the same bound the client's maxcount is judged against afterwards. */
-#define NFS4_ATTRDIR_READDIR_PAGE       (64 * 1024)
-
-static void
-chimera_nfs4_readdir_attrdir_finish(
-    struct nfs_request *req,
-    nfsstat4            status,
-    uint64_t            cookie,
-    uint32_t            eof)
-{
-    struct READDIR4res             *res =
-        &req->res_compound.resarray[req->index].opreaddir;
-    struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
-    uint64_t                        cv;
-
-    /* RFC 7530 §16.24.4: if not even one entry fit in maxcount and we are not
-     * at end-of-directory, the buffer is too small. */
     if (status == NFS4_OK && !eof && cursor->entries == NULL) {
         status = NFS4ERR_TOOSMALL;
     }
@@ -305,49 +183,93 @@ chimera_nfs4_readdir_attrdir_finish(
     res->status = status;
 
     if (status != NFS4_OK) {
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
         chimera_nfs4_compound_complete(req, status);
         return;
     }
 
-    cv = cookie;
+    cv = verifier ? verifier : cookie;
     memcpy(res->resok4.cookieverf, &cv, sizeof(res->resok4.cookieverf));
 
     res->resok4.reply.eof     = eof;
     res->resok4.reply.entries = cursor->entries;
 
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+
     chimera_nfs4_compound_complete(req, status);
-} /* chimera_nfs4_readdir_attrdir_finish */
+} /* chimera_nfs4_readdir_complete */
 
 static void
-chimera_nfs4_readdir_attrdir_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
+chimera_nfs4_readdir_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
 {
-    struct nfs_request                   *req = private_data;
-    const struct chimera_vfs_compound_op *gop, *lop;
-    const uint8_t                        *records;
-    uint32_t                              records_len, in = 0, index = 0;
-    uint32_t                              r_eof;
-    uint64_t                              cookie;
-    enum chimera_vfs_error                error_code;
+    struct nfs_request               *req    = private_data;
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct READDIR4args              *args   = &req->args_compound->argarray[req->index].opreaddir;
+    struct READDIR4res               *res    = &req->res_compound.resarray[req->index].opreaddir;
+    uint64_t                          attrmask;
 
-    error_code = chimera_vfs_compound_status(compound);
+    req->handle = handle;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_compound_free(compound);
-        chimera_nfs4_readdir_attrdir_finish(
-            req, chimera_nfs4_errno_to_nfsstat4(error_code), 0, 0);
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
         return;
     }
+    attrmask = chimera_nfs4_attr2mask(args->attr_request,
+                                      args->num_attr_request) | CHIMERA_VFS_ATTR_FH;
+    uint64_t cookieverf;
+    memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
+    chimera_vfs_readdir(thread->vfs_thread, &req->cred,
+                        handle,
+                        attrmask,
+                        0,
+                        args->cookie,
+                        cookieverf,
+                        0,
+                        NULL, 0, /* no search-pattern filter */
+                        chimera_nfs4_readdir_callback,
+                        chimera_nfs4_readdir_complete,
+                        req);
+} /* chimera_nfs4_readdir_open_callback */
 
-    gop = chimera_vfs_compound_op(compound,
-                                  NFS4_ATTRDIR_READDIR_OP_GETATTR);
-    lop = chimera_vfs_compound_op(compound,
-                                  NFS4_ATTRDIR_READDIR_OP_LIST);
-    records     = lop->buffer;
-    records_len = lop->buffer_len;
-    r_eof       = lop->eof;
-    cookie      = lop->r_cookie;
+/* ---- Named-attribute directory READDIR ----------------------------------
+ *
+ * The synthetic attr directory has no backend directory to enumerate; its
+ * entries are the base file's named streams.  We stat the base once (the entries
+ * inherit its owner/timestamps), list the streams (with their file handles), and
+ * synthesize one entry per named stream.  memfs returns the full stream list in
+ * one shot, so a single pass with index-based cookies covers continuation. */
+
+struct nfs4_attrdir_readdir_ctx {
+    struct nfs_request      *req;
+    struct chimera_vfs_attrs base_attr;
+    uint8_t                  records[64 * 1024];
+};
+
+static void
+chimera_nfs4_readdir_attrdir_list_callback(
+    enum chimera_vfs_error error_code,
+    const void            *records,
+    uint32_t               records_len,
+    uint32_t               count,
+    uint32_t               eof,
+    uint64_t               cookie,
+    void                  *private_data)
+{
+    struct nfs4_attrdir_readdir_ctx *ctx   = private_data;
+    struct nfs_request              *req   = ctx->req;
+    uint32_t                         in    = 0;
+    uint32_t                         index = 0;
+    uint32_t                         r_eof = eof;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs4_readdir_complete(error_code, req->handle, 0, 0, 0, NULL, req);
+        free(ctx);
+        return;
+    }
 
     while (in < records_len) {
         struct chimera_vfs_stream_entry entry;
@@ -356,14 +278,14 @@ chimera_nfs4_readdir_attrdir_complete(
         struct chimera_vfs_attrs        attr;
         uint32_t                        reclen;
 
-        memcpy(&entry, records + in, sizeof(entry));
+        memcpy(&entry, (const uint8_t *) records + in, sizeof(entry));
         name = (const char *) records + in + sizeof(entry);
-        fh   = records + in + sizeof(entry) + entry.name_len;
+        fh   = (const uint8_t *) records + in + sizeof(entry) + entry.name_len;
 
         reclen = (sizeof(entry) + entry.name_len + entry.fh_len + 7) & ~7u;
 
-        /* Skip the unnamed default fork ("::$DATA") -- it is the file's own
-         * data, not a named attribute. */
+        /* Skip the unnamed default fork ("::$DATA") -- it is the file's own data,
+         * not a named attribute. */
         if (entry.name_len == 0) {
             in += reclen;
             continue;
@@ -377,7 +299,7 @@ chimera_nfs4_readdir_attrdir_complete(
             continue;
         }
 
-        attr               = gop->attr;
+        attr               = ctx->base_attr;
         attr.va_size       = entry.size;
         attr.va_space_used = entry.alloc;
         attr.va_set_mask  |= CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_SPACE_USED;
@@ -387,8 +309,7 @@ chimera_nfs4_readdir_attrdir_complete(
             attr.va_fh_len    = entry.fh_len;
             attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
             /* Give each named attribute a distinct, stable fileid derived from
-             * its handle (the base inode's ino would collide across
-             * streams). */
+             * its handle (the base inode's ino would collide across streams). */
             attr.va_ino       = chimera_vfs_hash(fh, entry.fh_len);
             attr.va_set_mask |= CHIMERA_VFS_ATTR_INUM;
         }
@@ -403,44 +324,92 @@ chimera_nfs4_readdir_attrdir_complete(
         in += reclen;
     }
 
-    chimera_vfs_compound_free(compound);
+    chimera_nfs4_readdir_complete(CHIMERA_VFS_OK, req->handle, index, 0, r_eof,
+                                  NULL, req);
+    free(ctx);
+} /* chimera_nfs4_readdir_attrdir_list_callback */
 
-    chimera_nfs4_readdir_attrdir_finish(req, NFS4_OK, index, r_eof);
-} /* chimera_nfs4_readdir_attrdir_complete */
+static void
+chimera_nfs4_readdir_attrdir_getattr_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs4_attrdir_readdir_ctx *ctx = private_data;
+    struct nfs_request              *req = ctx->req;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs4_readdir_complete(error_code, req->handle, 0, 0, 0, NULL, req);
+        free(ctx);
+        return;
+    }
+
+    ctx->base_attr = *attr;
+
+    chimera_vfs_list_streams(req->thread->vfs_thread, &req->cred,
+                             req->handle,
+                             0,
+                             ctx->records,
+                             sizeof(ctx->records),
+                             1, /* want per-stream file handles */
+                             chimera_nfs4_readdir_attrdir_list_callback,
+                             ctx);
+} /* chimera_nfs4_readdir_attrdir_getattr_callback */
+
+static void
+chimera_nfs4_readdir_attrdir_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs4_attrdir_readdir_ctx *ctx  = private_data;
+    struct nfs_request              *req  = ctx->req;
+    struct READDIR4args             *args = &req->args_compound->argarray[req->index].opreaddir;
+    struct READDIR4res              *res  = &req->res_compound.resarray[req->index].opreaddir;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* Nothing was opened, so there is no handle to release.  Complete the
+         * op directly, as chimera_nfs4_readdir_open_callback does on the same
+         * failure: chimera_nfs4_readdir_complete releases req->handle
+         * unconditionally and would dereference the NULL. */
+        req->handle = NULL;
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        free(ctx);
+        return;
+    }
+
+    req->handle = handle;
+
+    /* Stat the base file once; every named attribute inherits its
+     * owner/group/timestamps (size/fh/fileid are overridden per stream). */
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+                        handle,
+                        chimera_nfs4_attr2mask(args->attr_request,
+                                               args->num_attr_request),
+                        chimera_nfs4_readdir_attrdir_getattr_callback,
+                        ctx);
+} /* chimera_nfs4_readdir_attrdir_open_callback */
 
 static void
 chimera_nfs4_readdir_attrdir(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req)
 {
-    struct READDIR4args         *args =
-        &req->args_compound->argarray[req->index].opreaddir;
-    struct chimera_vfs_compound *compound;
-    const uint8_t               *base;
-    int                          base_len;
+    struct nfs4_attrdir_readdir_ctx *ctx;
+    const uint8_t                   *base;
+    int                              base_len;
 
-    req->handle = NULL;
+    ctx      = calloc(1, sizeof(*ctx));
+    ctx->req = req;
 
     chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
 
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putfh(compound, base, base_len);
-    chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_INFERRED |
-                                          CHIMERA_VFS_OPEN_PATH, 0);
-    /* Stat the base once; every named attribute inherits its
-     * owner/group/timestamps (size/fh/fileid are overridden per stream). */
-    chimera_vfs_compound_add_getattr(compound,
-                                     chimera_nfs4_attr2mask(
-                                         args->attr_request,
-                                         args->num_attr_request));
-    chimera_vfs_compound_add_list_streams(compound, 0,
-                                          NFS4_ATTRDIR_READDIR_PAGE,
-                                          1 /* want per-stream file handles */);
-
-    chimera_vfs_compound_submit(compound, chimera_nfs4_readdir_attrdir_complete,
-                                req);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        base, base_len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                        chimera_nfs4_readdir_attrdir_open_callback,
+                        ctx);
 } /* chimera_nfs4_readdir_attrdir */
 
 void
@@ -453,7 +422,6 @@ chimera_nfs4_readdir(
     struct READDIR4args            *args = &argop->opreaddir;
     struct READDIR4res             *res  = &req->res_compound.resarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor *cursor;
-    struct chimera_vfs_compound    *compound;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -501,9 +469,10 @@ chimera_nfs4_readdir(
      * + the dirlist4 "entry present" and "eof" booleans (4 each). Keeping
      * this tight ensures a small maxcount on a continuation still admits at
      * least one entry rather than returning an empty, non-eof page. */
-    cursor->count   = 16;
-    cursor->entries = NULL;
-    cursor->last    = NULL;
+    cursor->count         = 16;
+    cursor->entries       = NULL;
+    cursor->last          = NULL;
+    cursor->change_status = NFS4_OK;
 
     res->resok4.reply.entries = NULL;
 
@@ -514,39 +483,11 @@ chimera_nfs4_readdir(
         return;
     }
 
-    struct nfs4_readdir_ctx *ctx =
-        xdr_dbuf_alloc_space(sizeof(*ctx), req->encoding->dbuf);
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs4_readdir_open_callback,
+                        req);
 
-    chimera_nfs_abort_if(ctx == NULL, "Failed to allocate space");
-
-    ctx->req       = req;
-    ctx->mark      = 0;
-    ctx->have_mark = 0;
-
-    uint64_t cookieverf;
-
-    memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
-
-    req->handle = NULL;
-
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
-    chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_INFERRED |
-                                          CHIMERA_VFS_OPEN_PATH |
-                                          CHIMERA_VFS_OPEN_DIRECTORY, 0);
-    chimera_vfs_compound_add_readdir_stream(compound,
-                                            args->cookie,
-                                            cookieverf,
-                                            chimera_nfs4_attr2mask(
-                                                args->attr_request,
-                                                args->num_attr_request),
-                                            0,
-                                            0, NULL, 0,
-                                            chimera_nfs4_readdir_reset,
-                                            chimera_nfs4_readdir_append,
-                                            ctx);
-
-    chimera_vfs_compound_submit(compound, chimera_nfs4_readdir_complete, ctx);
 } /* chimera_nfs4_readdir */

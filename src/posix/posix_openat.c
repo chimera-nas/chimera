@@ -35,7 +35,7 @@ chimera_posix_openat_exec(
     /* A real dirfd resolves relative to the descriptor; AT_FDCWD and an
      * absolute path take the path-based open from the export root. */
     if (request->open.parent_handle) {
-        chimera_dispatch_open_at(thread, request);
+        chimera_dispatch_open_at(thread, request->open.parent_handle, request);
     } else {
         chimera_dispatch_open(thread, request);
     }

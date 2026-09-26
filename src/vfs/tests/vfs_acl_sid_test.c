@@ -43,6 +43,7 @@
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_compound.h"
+#include "vfs/vfs_internal_procs.h"
 /* The pool lifecycle -- mkfs, mount, umount, rmfs -- is not a sequence and
  * is not expressible as one.  It comes from the core's per-op header, which
  * is where those four still live. */

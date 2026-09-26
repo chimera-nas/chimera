@@ -19,6 +19,7 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/vfs_compound.h"
+#include "common/compound_retry.h"
 #include "vfs/vfs_release.h"
 #include "common/logging.h"
 
@@ -318,6 +319,8 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
             int                             name_offset;
             unsigned int                    flags; /* CHIMERA_VFS_REMOVE_* */
             char                            path[CHIMERA_VFS_PATH_MAX];
+            int                             child_fh_len;
+            uint8_t                         child_fh[CHIMERA_VFS_FH_SIZE];
         } remove;
 
         struct {
@@ -391,6 +394,8 @@ struct CHIMERA_ALIGNED(64) chimera_client_request {
             int                             path_len;
             struct chimera_vfs_attrs        set_attr;
             char                            path[CHIMERA_VFS_PATH_MAX];
+            int                             parent_len;
+            int                             name_offset;
         } setattr;
 
         struct {

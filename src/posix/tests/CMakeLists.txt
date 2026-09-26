@@ -179,6 +179,39 @@ if(CHIMERA_LIMITS_TESTING)
     add_posix_test(lock_project_memfs test_lock_project memfs)
     add_posix_test(lock_seek_end_memfs test_lock_seek_end memfs)
     add_posix_test(lock_posix_semantics_memfs test_lock_posix_semantics memfs)
+    if(CHIMERA_LINUX)
+        add_posix_test(lock_seek_end_linux test_lock_seek_end linux)
+        add_posix_test(lock_posix_semantics_linux test_lock_posix_semantics linux)
+    endif()
+    if(CHIMERA_VFS_IO_URING)
+        add_posix_test(lock_seek_end_io_uring test_lock_seek_end io_uring)
+        add_posix_test(lock_posix_semantics_io_uring test_lock_posix_semantics io_uring)
+    endif()
+endif()
+
+# Deterministic executor barrier for close versus parked SETLKW and fd reuse.
+if(CHIMERA_LINUX)
+    add_posix_testprog(test_lock_close_pending)
+    add_library(posix_compound_lock_fixture SHARED compound_lock_fixture.c)
+    target_include_directories(posix_compound_lock_fixture PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(posix_compound_lock_fixture chimera_vfs ${CMAKE_DL_LIBS})
+    if(CHIMERA_LIMITS_TESTING)
+        foreach(backend memfs linux)
+            add_test(NAME chimera/posix/lock_close_pending_${backend}
+                COMMAND ${LIMITS_WRAPPER} bash ${CMAKE_CURRENT_SOURCE_DIR}/compound_lock_fixture.sh
+                    $<TARGET_FILE:posix_test_lock_close_pending>
+                    $<TARGET_FILE:posix_compound_lock_fixture> -b ${backend})
+            set_tests_properties(chimera/posix/lock_close_pending_${backend} PROPERTIES TIMEOUT 90)
+        endforeach()
+        if(CAIRN_ENABLED)
+            add_test(NAME chimera/posix/lock_compound_retry_cairn
+                COMMAND ${LIMITS_WRAPPER} bash ${CMAKE_CURRENT_SOURCE_DIR}/compound_lock_fixture.sh
+                    $<TARGET_FILE:posix_test_lock_close_pending>
+                    $<TARGET_FILE:posix_compound_lock_fixture> -b cairn)
+            set_tests_properties(chimera/posix/lock_compound_retry_cairn PROPERTIES
+                ENVIRONMENT "CHIMERA_TEST_LOCAL_LOCK_RETRY=1" TIMEOUT 90)
+        endif()
+    endif()
 endif()
 
 # diskfs-only cache-eviction / cold-remount stress (not part of the

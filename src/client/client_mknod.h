@@ -8,44 +8,21 @@
 #include "client_dispatch.h"
 
 static void
-chimera_mknod_vfs_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+chimera_mknod_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_client_request *request      = private_data;
     struct chimera_client_thread  *thread       = request->thread;
     chimera_mknod_callback_t       callback     = request->mknod.callback;
     void                          *callback_arg = request->mknod.private_data;
+    enum chimera_vfs_error         status       = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
 
     chimera_client_request_free(thread, request);
 
-    callback(thread, error_code, callback_arg);
-} /* chimera_mknod_vfs_complete */
-
-static void
-chimera_mknod_sequence_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    const struct chimera_vfs_compound_op *op;
-    struct chimera_vfs_attrs              attr;
-    enum chimera_vfs_error                status;
-
-    status = chimera_vfs_compound_status(compound);
-
-    memset(&attr, 0, sizeof(attr));
-
-    if (status == CHIMERA_VFS_OK) {
-        op = chimera_vfs_compound_op(compound,
-                                     chimera_vfs_compound_num_ops(compound) - 1);
-        attr = op->attr;
-    }
-
-    /* Taken out before the free: a freed sequence is recycled and reset. */
-    chimera_vfs_compound_free(compound);
-
-    chimera_mknod_vfs_complete(status, &attr, private_data);
+    callback(thread, status, callback_arg);
 } /* chimera_mknod_sequence_complete */
 
 static inline void
@@ -69,6 +46,6 @@ chimera_dispatch_mknod(
                                          NULL, 0,
                                          &request->mknod.set_attr, 0, 0);
 
-    chimera_vfs_compound_submit(compound, chimera_mknod_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(compound, chimera_mknod_sequence_complete,
+                                     request);
 } /* chimera_dispatch_mknod */

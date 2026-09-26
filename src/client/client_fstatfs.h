@@ -8,51 +8,31 @@
 #include "client_statfs.h"
 
 static void
-chimera_fstatfs_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_client_request *request       = private_data;
-    struct chimera_client_thread  *client_thread = request->thread;
-    chimera_fstatfs_callback_t     callback      = request->fstatfs.callback;
-    void                          *callback_arg  = request->fstatfs.private_data;
-    struct chimera_statvfs         st;
-
-    chimera_client_request_free(client_thread, request);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        callback(client_thread, error_code, NULL, callback_arg);
-        return;
-    }
-
-    chimera_attrs_to_statvfs(attr, &st);
-
-    callback(client_thread, CHIMERA_VFS_OK, &st, callback_arg);
-} /* chimera_fstatfs_getattr_complete */
-
-static void
 chimera_fstatfs_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
+    struct chimera_client_request        *request = private_data;
+    struct chimera_client_thread         *thread  = request->thread;
     const struct chimera_vfs_compound_op *op;
-    struct chimera_vfs_attrs              attr;
+    chimera_fstatfs_callback_t            callback     = request->fstatfs.callback;
+    void                                 *callback_arg = request->fstatfs.private_data;
+    struct chimera_statvfs                st;
     enum chimera_vfs_error                status;
 
     status = chimera_vfs_compound_status(compound);
 
-    memset(&attr, 0, sizeof(attr));
-
     if (status == CHIMERA_VFS_OK) {
         op = chimera_vfs_compound_op(compound,
                                      chimera_vfs_compound_num_ops(compound) - 1);
-        attr = op->attr;
+        chimera_attrs_to_statvfs(&op->attr, &st);
     }
 
     chimera_vfs_compound_free(compound);
+    chimera_client_request_free(thread, request);
 
-    chimera_fstatfs_getattr_complete(status, &attr, private_data);
+    callback(thread, status, status == CHIMERA_VFS_OK ? &st : NULL,
+             callback_arg);
 } /* chimera_fstatfs_sequence_complete */
 
 static inline void
@@ -70,6 +50,6 @@ chimera_dispatch_fstatfs(
     chimera_vfs_compound_add_getattr(request->compound,
                                      CHIMERA_VFS_ATTR_MASK_STATFS);
 
-    chimera_vfs_compound_submit(request->compound,
-                                chimera_fstatfs_sequence_complete, request);
+    chimera_frontend_compound_submit(request->compound,
+                                     chimera_fstatfs_sequence_complete, request);
 } /* chimera_dispatch_fstatfs */

@@ -201,6 +201,28 @@ nfs4_find_conflicting_write_deleg(
     uint16_t                          fh_len,
     uint64_t                          querying_client_id);
 
+/* As above, also pin the holder's unified client before callback dispatch.
+ * No VFS file lock is held while acquiring the client-table/client locks.
+ * Release *holder_client with nfs_client_finish_compound after callbacks and
+ * compound journals have finished. Both returned objects are caller-owned. */
+struct nfs_delegation *
+nfs4_find_conflicting_write_deleg_pinned(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *fh,
+    uint16_t                          fh_len,
+    uint64_t                          querying_client_id,
+    struct nfs_client               **holder_client);
+
+/* Pure revalidation: 0 means no conflicting holder, 1 the expected holder,
+ * -1 a different holder. No delegation reference is taken or released, so
+ * this check cannot trigger deferred delegation/claim teardown. */
+int nfs4_write_delegation_matches(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *fh,
+    uint16_t                          fh_len,
+    uint64_t                          querying_client_id,
+    const struct nfs_delegation      *expected);
+
 
 /* pNFS layout recall (CB_LAYOUTRECALL, RFC 8881 §20.3).  Sends
  * CB_COMPOUND{[CB_SEQUENCE,] CB_LAYOUTRECALL(LAYOUTRECALL4_FILE, fh,

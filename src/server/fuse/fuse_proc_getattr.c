@@ -55,38 +55,6 @@ chimera_fuse_attr_out_reply(
 
 /* --- GETATTR --- */
 
-static void
-chimera_fuse_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req   = private_data;
-    struct chimera_fuse_mount   *mount = req->channel->mount;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    /* The kernel re-fetches attributes exactly when its cache went stale
-     * (or was invalidated), which makes this the natural rearm point for a
-     * broken grant -- and for stat-only files, the point coverage begins. */
-    if (req->fh_len) {
-        if (S_ISREG(attr->va_mode)) {
-            chimera_fuse_grant_ensure(req->thread, mount, req->nodeid,
-                                      req->fh, req->fh_len,
-                                      chimera_fuse_fh_hash(req->fh,
-                                                           req->fh_len));
-        } else if (S_ISDIR(attr->va_mode)) {
-            chimera_fuse_watch_dir(req->thread, mount, req->nodeid,
-                                   req->fh, req->fh_len);
-        }
-    }
-
-    chimera_fuse_attr_out_reply(req, attr);
-} /* chimera_fuse_getattr_complete */
-
 /*
  * One sequence, however the kernel named the object.
  *
@@ -102,13 +70,33 @@ chimera_fuse_getattr_sequence_complete(
 {
     struct chimera_fuse_request          *req = private_data;
     const struct chimera_vfs_compound_op *op;
+    struct chimera_fuse_mount            *mount  = req->channel->mount;
+    enum chimera_vfs_error                status = chimera_vfs_compound_status(compound);
 
     op = chimera_vfs_compound_op(compound,
                                  chimera_vfs_compound_num_ops(compound) - 1);
 
-    chimera_fuse_getattr_complete(chimera_vfs_compound_status(compound),
-                                  (struct chimera_vfs_attrs *) &op->attr,
-                                  req);
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
+        return;
+    }
+
+    /* The kernel re-fetches attributes exactly when its cache went stale
+     * (or was invalidated), which makes this the natural rearm point for a
+     * broken grant -- and for stat-only files, the point coverage begins. */
+    if (req->fh_len) {
+        if (S_ISREG(op->attr.va_mode)) {
+            chimera_fuse_grant_ensure(req->thread, mount, req->nodeid,
+                                      req->fh, req->fh_len,
+                                      chimera_fuse_fh_hash(req->fh,
+                                                           req->fh_len));
+        } else if (S_ISDIR(op->attr.va_mode)) {
+            chimera_fuse_watch_dir(req->thread, mount, req->nodeid,
+                                   req->fh, req->fh_len);
+        }
+    }
+
+    chimera_fuse_attr_out_reply(req, &op->attr);
 } /* chimera_fuse_getattr_sequence_complete */
 
 void
@@ -180,38 +168,23 @@ chimera_fuse_op_getattr(
 /* --- SETATTR --- */
 
 static void
-chimera_fuse_setattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    chimera_fuse_attr_out_reply(req, post_attr);
-} /* chimera_fuse_setattr_complete */
-
-static void
 chimera_fuse_setattr_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
     struct chimera_fuse_request          *req = private_data;
     const struct chimera_vfs_compound_op *op;
+    enum chimera_vfs_error                status = chimera_vfs_compound_status(compound);
 
     op = chimera_vfs_compound_op(compound,
                                  chimera_vfs_compound_num_ops(compound) - 1);
 
-    chimera_fuse_setattr_complete(chimera_vfs_compound_status(compound),
-                                  NULL, NULL,
-                                  (struct chimera_vfs_attrs *) &op->attr,
-                                  req);
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
+        return;
+    }
+
+    chimera_fuse_attr_out_reply(req, &op->attr);
 } /* chimera_fuse_setattr_sequence_complete */
 
 void
@@ -283,23 +256,6 @@ chimera_fuse_op_setattr(
 
 /* --- READLINK --- */
 
-static void
-chimera_fuse_readlink_complete(
-    enum chimera_vfs_error    error_code,
-    int                       targetlen,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    chimera_fuse_reply(req, 0, chimera_fuse_reply_space(req), targetlen);
-} /* chimera_fuse_readlink_complete */
-
 /*
  * The sequence owns the target it read, so it is copied into the reply rather
  * than read into it -- one copy of a path, in exchange for the request no
@@ -318,7 +274,7 @@ chimera_fuse_readlink_sequence_complete(
     status = chimera_vfs_compound_status(compound);
 
     if (status != CHIMERA_VFS_OK) {
-        chimera_fuse_readlink_complete(status, 0, NULL, req);
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
         return;
     }
 
@@ -328,7 +284,7 @@ chimera_fuse_readlink_sequence_complete(
 
     memcpy(chimera_fuse_reply_space(req), op->target, len);
 
-    chimera_fuse_readlink_complete(CHIMERA_VFS_OK, (int) len, NULL, req);
+    chimera_fuse_reply(req, 0, chimera_fuse_reply_space(req), len);
 } /* chimera_fuse_readlink_sequence_complete */
 
 void
@@ -361,39 +317,28 @@ chimera_fuse_op_readlink(
 /* --- STATFS --- */
 
 static void
-chimera_fuse_statfs_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_fuse_request *req = private_data;
-    struct fuse_statfs_out       out;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
-        return;
-    }
-
-    memset(&out, 0, sizeof(out));
-
-    chimera_fuse_statfs_from_vfs(&out.st, attr);
-
-    chimera_fuse_reply(req, 0, &out, sizeof(out));
-} /* chimera_fuse_statfs_complete */
-
-static void
 chimera_fuse_statfs_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
     struct chimera_fuse_request          *req = private_data;
     const struct chimera_vfs_compound_op *op;
+    struct fuse_statfs_out                out;
+    enum chimera_vfs_error                status = chimera_vfs_compound_status(compound);
 
     op = chimera_vfs_compound_op(compound,
                                  chimera_vfs_compound_num_ops(compound) - 1);
 
-    chimera_fuse_statfs_complete(chimera_vfs_compound_status(compound),
-                                 (struct chimera_vfs_attrs *) &op->attr, req);
+    if (status != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(status), NULL, 0);
+        return;
+    }
+
+    memset(&out, 0, sizeof(out));
+
+    chimera_fuse_statfs_from_vfs(&out.st, &op->attr);
+
+    chimera_fuse_reply(req, 0, &out, sizeof(out));
 } /* chimera_fuse_statfs_sequence_complete */
 
 void

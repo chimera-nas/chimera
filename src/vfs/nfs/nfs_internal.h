@@ -395,6 +395,8 @@ struct chimera_nfs4_client_devcache {
 
 struct chimera_nfs3_range {
     uint64_t                   token;
+    /* Typed locks use one owner anchor; NLM owns the interval map. */
+    uint8_t                    geometry_only;
     uint8_t                    fh[CHIMERA_VFS_FH_SIZE];
     int                        fh_len;
     uint64_t                   offset;
@@ -661,6 +663,10 @@ chimera_nfs4_status_to_errno(nfsstat4 status)
             return CHIMERA_VFS_EISDIR;
         case NFS4ERR_INVAL:
             return CHIMERA_VFS_EINVAL;
+        case NFS4ERR_DELAY:
+            return CHIMERA_VFS_EAGAIN;
+        case NFS4ERR_SYMLINK:
+            return CHIMERA_VFS_ESYMLINK;
         case NFS4ERR_FBIG:
             return CHIMERA_VFS_EFBIG;
         case NFS4ERR_NOSPC:
@@ -786,6 +792,20 @@ chimera_nfs4_attr_request_stat(uint32_t *attr_request)
         (1 << (FATTR4_TIME_ACCESS - 32)) | (1 << (FATTR4_TIME_METADATA - 32)) |
         (1 << (FATTR4_TIME_MODIFY - 32));
 } /* chimera_nfs4_attr_request_stat */
+
+/* Preserve the upstream namespace operation's change values. A later GETATTR
+ * cannot reconstruct its before value and zero is not a valid substitute. */
+static inline void
+chimera_nfs4_unmarshall_cinfo(
+    const struct change_info4 *cinfo,
+    struct chimera_vfs_attrs  *before,
+    struct chimera_vfs_attrs  *after)
+{
+    before->va_change    = cinfo->before;
+    before->va_set_mask |= CHIMERA_VFS_ATTR_CHANGE;
+    after->va_change     = cinfo->after;
+    after->va_set_mask  |= CHIMERA_VFS_ATTR_CHANGE;
+} // chimera_nfs4_unmarshall_cinfo
 
 static inline void
 chimera_nfs4_unmarshall_fattr(

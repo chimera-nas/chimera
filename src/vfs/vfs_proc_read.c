@@ -206,10 +206,11 @@ chimera_vfs_read_dispatch(
     struct evpl_iovec                *dest_iov,
     int                               dest_niov,
     uint64_t                          attr_mask,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_read_callback_t       callback,
     void                             *private_data)
 {
+
     struct chimera_vfs_request *request;
 
     /* The request is allocated against io_handle -- the DS backing file for a
@@ -282,13 +283,11 @@ chimera_vfs_read_dispatch(
      * claim for a leaseless actor, recalling another holder's conflicting
      * write cache), then dispatch.  The caller's actor is copied onto the
      * request so the claim layer sees a stable address. */
-    if (io_owner) {
-        request->io_owner       = *io_owner;
-        request->io_owner_valid = 1;
-    }
+    chimera_vfs_io_view_copy(&request->io_view, &request->io_owner, view);
+    request->io_owner_valid = request->io_view.owner != NULL;
 
     chimera_vfs_io_claim_acquire(request,
-                                 io_owner ? &request->io_owner : NULL,
+                                 request->io_view.owner,
                                  chimera_vfs_dispatch);
 } /* chimera_vfs_read_dispatch */
 
@@ -306,7 +305,7 @@ struct chimera_vfs_read_resolve_ctx {
     struct evpl_iovec              *dest_iov;
     int                             dest_niov;
     uint64_t                        attr_mask;
-    bool                            has_io_owner;
+    struct chimera_vfs_io_view      view;
     struct chimera_claim_actor      io_owner;
     chimera_vfs_read_callback_t     callback;
     void                           *private_data;
@@ -334,7 +333,7 @@ chimera_vfs_read_resolve_complete(
                               io_handle, redirected,
                               ctx->offset, ctx->count, ctx->iov, ctx->niov,
                               ctx->dest_iov, ctx->dest_niov, ctx->attr_mask,
-                              ctx->has_io_owner ? &ctx->io_owner : NULL,
+                              &ctx->view,
                               ctx->callback, ctx->private_data);
     chimera_vfs_gate_scratch_free(ctx->thread, ctx);
 } /* chimera_vfs_read_resolve_complete */
@@ -357,7 +356,7 @@ chimera_vfs_read_resolve(
     struct evpl_iovec                *dest_iov,
     int                               dest_niov,
     uint64_t                          attr_mask,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_read_callback_t       callback,
     void                             *private_data)
 {
@@ -366,7 +365,7 @@ chimera_vfs_read_resolve(
     if (!chimera_vfs_pnfs_io_possible(thread, handle)) {
         chimera_vfs_read_dispatch(thread, cred, handle, handle, 0,
                                   offset, count, iov, niov, dest_iov, dest_niov,
-                                  attr_mask, io_owner, callback, private_data);
+                                  attr_mask, view, callback, private_data);
         return;
     }
 
@@ -382,12 +381,7 @@ chimera_vfs_read_resolve(
     ctx->dest_iov  = dest_iov;
     ctx->dest_niov = dest_niov;
     ctx->attr_mask = attr_mask;
-    if (io_owner) {
-        ctx->has_io_owner = true;
-        ctx->io_owner     = *io_owner;
-    } else {
-        ctx->has_io_owner = false;
-    }
+    chimera_vfs_io_view_copy(&ctx->view, &ctx->io_owner, view);
     ctx->callback     = callback;
     ctx->private_data = private_data;
 
@@ -410,8 +404,8 @@ struct chimera_vfs_read_gate {
     uint64_t                        attr_mask;
     /* io_owner is copied by value (not by pointer): the gate's async getattr
      * callback fires after the caller's stack frame is gone. */
-    bool                            has_io_owner;
     struct chimera_claim_actor      io_owner;
+    struct chimera_vfs_io_view      view;
     chimera_vfs_read_callback_t     callback;
     void                           *private_data;
 };
@@ -486,7 +480,7 @@ chimera_vfs_read_gate_complete(
                              gate->offset, gate->count, gate->iov, gate->niov,
                              gate->dest_iov, gate->dest_niov,
                              gate->attr_mask,
-                             gate->has_io_owner ? &gate->io_owner : NULL,
+                             &gate->view,
                              gate->callback,
                              gate->private_data);
     chimera_vfs_gate_scratch_free(gate->thread, gate);
@@ -507,10 +501,11 @@ chimera_vfs_read_submit(
     struct evpl_iovec                *dest_iov,
     int                               dest_niov,
     uint64_t                          attr_mask,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_read_callback_t       callback,
     void                             *private_data)
 {
+
     struct chimera_vfs_read_gate *gate;
 
     /* gate_needed_dac, not gate_needed: a DELEGATES_DAC passthrough backend
@@ -548,13 +543,8 @@ chimera_vfs_read_submit(
             gate->dest_iov  = dest_iov;
             gate->dest_niov = dest_niov;
             gate->attr_mask = attr_mask;
-            if (io_owner) {
-                /* Deep copy: see read_gate struct comment. */
-                gate->has_io_owner = true;
-                gate->io_owner     = *io_owner;
-            } else {
-                gate->has_io_owner = false;
-            }
+            chimera_vfs_io_view_copy(&gate->view, &gate->io_owner, view);
+
             gate->callback     = callback;
             gate->private_data = private_data;
 
@@ -566,9 +556,27 @@ chimera_vfs_read_submit(
     }
 
     chimera_vfs_read_resolve(thread, cred, handle, offset, count, iov, niov,
-                             dest_iov, dest_niov, attr_mask, io_owner, callback,
+                             dest_iov, dest_niov, attr_mask, view, callback,
                              private_data);
 } /* chimera_vfs_read_submit */
+
+SYMBOL_EXPORT void
+chimera_vfs_read_view(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          count,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    uint64_t                          attr_mask,
+    const struct chimera_vfs_io_view *view,
+    chimera_vfs_read_callback_t       callback,
+    void                             *private_data)
+{
+    chimera_vfs_read_submit(thread, cred, handle, offset, count, iov, niov,
+                            NULL, 0, attr_mask, view, callback, private_data);
+} /* chimera_vfs_read_view */
 
 SYMBOL_EXPORT void
 chimera_vfs_read_owned(
@@ -584,8 +592,10 @@ chimera_vfs_read_owned(
     chimera_vfs_read_callback_t       callback,
     void                             *private_data)
 {
+    struct chimera_vfs_io_view view = { .owner = io_owner };
+
     chimera_vfs_read_submit(thread, cred, handle, offset, count, iov, niov,
-                            NULL, 0, attr_mask, io_owner, callback, private_data);
+                            NULL, 0, attr_mask, &view, callback, private_data);
 } /* chimera_vfs_read_owned */
 
 SYMBOL_EXPORT void

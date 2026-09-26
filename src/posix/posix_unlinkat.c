@@ -35,7 +35,7 @@ chimera_posix_unlinkat_exec(
     /* A real dirfd resolves relative to the descriptor; AT_FDCWD and an
      * absolute path take the path-based remove from the export root. */
     if (request->remove.parent_handle) {
-        chimera_dispatch_remove_at(thread, request);
+        chimera_dispatch_remove_at(thread, request->remove.parent_handle, request);
     } else {
         chimera_dispatch_remove(thread, request);
     }
