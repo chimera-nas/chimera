@@ -43,6 +43,35 @@ jobs:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
+      # The ARM64 image keeps the workspace on C:, a network-attached OS disk
+      # where each FlushFileBuffers costs 3-5 ms, against 0.25 ms on the x64
+      # image's local D:.  diskfs and cairn flush on nearly every operation,
+      # which made their tests 5-25x slower on ARM64 than on x64.  That image
+      # also carries an unformatted local NVMe disk, as fast as x64's D:.
+      # Format it and move every test scratch location onto it: the rooted
+      # /tmp and /build/test the tests use resolve against the current drive,
+      # the build tree holds per-test session directories, and TEMP covers the
+      # rest.  The same directories are reachable as <drive>:\tmp and
+      # <drive>:\build on either volume, so a test resolves them to the same
+      # place whichever drive its working directory is on.  A runner with no
+      # raw disk -- the x64 image -- skips this.
+      - name: Put test scratch space on the local NVMe disk
+        shell: pwsh
+        run: |
+          $raw = Get-Disk | Where-Object PartitionStyle -eq 'RAW' | Sort-Object Size -Descending | Select-Object -First 1
+          if (-not $raw) { 'No raw local disk; scratch stays on the workspace drive.'; exit 0 }
+          $volume = Initialize-Disk -Number $raw.Number -PartitionStyle GPT -PassThru |
+            New-Partition -UseMaximumSize -AssignDriveLetter |
+            Format-Volume -FileSystem NTFS -NewFileSystemLabel scratch -Confirm:$false -Force
+          $scratch = "$($volume.DriveLetter):"
+          $workspace = (Get-Location).Drive.Name + ':'
+          New-Item -ItemType Directory -Force "$scratch/tmp", "$scratch/build", "$scratch/workspace-build", "$scratch/temp" | Out-Null
+          New-Item -ItemType Junction -Path "$workspace/tmp" -Target "$scratch/tmp" | Out-Null
+          New-Item -ItemType Junction -Path "$workspace/build" -Target "$scratch/build" | Out-Null
+          New-Item -ItemType Junction -Path "$pwd/build" -Target "$scratch/workspace-build" | Out-Null
+          "TEMP=$scratch\temp" >> $env:GITHUB_ENV
+          "TMP=$scratch\temp" >> $env:GITHUB_ENV
+          "Test scratch space is on $scratch ($($raw.FriendlyName))"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
