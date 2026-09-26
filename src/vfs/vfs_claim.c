@@ -1792,12 +1792,13 @@ chimera_vfs_claim_grant_release_locked(struct chimera_vfs_claim_grant *grant)
     return true;
 } /* chimera_vfs_claim_grant_release_locked */
 
-SYMBOL_EXPORT void
-chimera_vfs_claim_release_open(
+static void
+chimera_vfs_claim_release_common(
     struct chimera_vfs_state       *state,
     struct chimera_vfs_file_state  *file,
     struct chimera_vfs_claim       *claim,
-    struct chimera_vfs_claim_grant *grant)
+    struct chimera_vfs_claim_grant *grant,
+    bool                            pump)
 {
     uint64_t token;
     bool     last = false;
@@ -1825,9 +1826,21 @@ chimera_vfs_claim_release_open(
     if (last) {
         free(grant);
     }
-    chimera_vfs_claim_pump_pending(state, file);
-    chimera_vfs_claim_pump_io(state, file);
+    if (pump) {
+        chimera_vfs_claim_pump_pending(state, file);
+        chimera_vfs_claim_pump_io(state, file);
+    }
     chimera_vfs_claim_backend_reeval(state, file);
+} /* chimera_vfs_claim_release_common */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_release_open(
+    struct chimera_vfs_state       *state,
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_claim       *claim,
+    struct chimera_vfs_claim_grant *grant)
+{
+    chimera_vfs_claim_release_common(state, file, claim, grant, true);
 } /* chimera_vfs_claim_release_open */
 
 SYMBOL_EXPORT void
@@ -1836,8 +1849,17 @@ chimera_vfs_claim_release(
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_claim      *claim)
 {
-    chimera_vfs_claim_release_open(state, file, claim, NULL);
+    chimera_vfs_claim_release_common(state, file, claim, NULL, true);
 } /* chimera_vfs_claim_release */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_release_nopump(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim)
+{
+    chimera_vfs_claim_release_common(state, file, claim, NULL, false);
+} /* chimera_vfs_claim_release_nopump */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_shrink(

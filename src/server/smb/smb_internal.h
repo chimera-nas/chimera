@@ -1779,6 +1779,11 @@ chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
 
+void
+chimera_smb_open_file_drain_locks_nopump(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file);
+
 /* Forward decls (defined in smb_proc_lock.c; also in smb_procs.h, which this
  * header cannot include) so the inline tree-teardown path can abort and complete
  * a blocking byte-range LOCK parked on an open being torn down. */
@@ -2154,6 +2159,15 @@ chimera_smb_open_file_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file)
 {
+    /* The share claims are embedded in the open and a linked claim is
+     * reachable from its file state's claim lists, which other threads walk:
+     * freeing one still linked is a use-after-free that only surfaces when
+     * a walker happens to run (unlink clears claim->file). */
+    chimera_smb_abort_if(open_file->share_lease.file ||
+                         open_file->base_share_lease.file ||
+                         open_file->lock_entries,
+                         "open file freed with claims still linked");
+
     /* Release any undrained ncacn_np pipe response and reset the stash so a
      * reused open_file (the free list does not zero) starts clean. */
     if (open_file->rpc_resp) {

@@ -398,6 +398,16 @@ chimera_vfs_claim_release(
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_claim      *claim);
 
+/* Release without waking waiters -- the claim counterpart of
+ * chimera_vfs_claim_grant_release(pump=false), for teardown where a woken
+ * waiter would complete against a connection that is already gone.  The
+ * claim is still unlinked, so the embedding struct may be freed after. */
+void
+chimera_vfs_claim_release_nopump(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim);
+
 /* Release an open's ACCESS claim and its reference to a cache grant under
  * the same file lock, then pump waiters. The optional grant must belong to
  * file; the caller must detach its protocol member before calling. A shared

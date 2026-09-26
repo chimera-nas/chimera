@@ -2161,8 +2161,13 @@ chimera_smb_create_truncate_cb(
     if (error_code != CHIMERA_VFS_OK) {
         /* The open was granted but the replacement it exists to perform did
          * not happen, so the create fails -- and, as above, leaves the file
-         * alone.  Tear the half-built open down exactly as a denied share park
-         * does: it is not hashed yet, so nothing can have found it. */
+         * alone.  Tear the half-built open down as a denied share park does
+         * (it is not hashed yet, so nothing can have found it), except that
+         * this one HOLDS its share claim: the grant linked it into the file
+         * state before share_lease_inserted is set in finish_share_grant.
+         * Unlink it before the open is freed, or the claim list keeps a
+         * pointer into the freed open (and the reservation never lifts). */
+        chimera_vfs_claim_release(vfs_state, file_state, &open_file->share_lease);
         chimera_vfs_state_put(vfs_state, file_state);
         if (open_file->handle) {
             chimera_vfs_release(vfs_thread, open_file->handle);

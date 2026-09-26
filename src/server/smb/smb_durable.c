@@ -792,27 +792,23 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
  * Cold entries (open_file == NULL) only hold bookkeeping, freed by
  * chimera_smb_durable_table_destroy.
  *
- * The open's share reservation / byte-range locks are deliberately NOT drained
- * via chimera_smb_open_file_drain_locks: that releases the lease with a pump,
- * and pumping a pending acquire queued behind it (e.g. a blocking lock whose
- * connection already dropped) runs a completion callback that allocates a reply
- * iovec on this teardown thread for a dead connection, tripping the cross-thread
- * iovec guard.  At shutdown those waiters have no live connection to answer, so
- * dropping them is correct.  The embedded share/range leases are reclaimed
- * wholesale when chimera_vfs_state_destroy frees the per-file state (it never
- * walks the lease lists).
+ * The open's claims are drained WITHOUT pumping waiters
+ * (chimera_smb_open_file_drain_locks_nopump): pumping a pending acquire queued
+ * behind them (e.g. a blocking lock whose connection already dropped) runs a
+ * completion callback that allocates a reply iovec on this teardown thread for
+ * a dead connection, tripping the cross-thread iovec guard.  At shutdown those
+ * waiters have no live connection to answer, so leaving them is correct.
  *
- * The cache grant (oplock / SMB2 lease), however, is a standalone heap object
- * the SMB layer owns -- vfs_state_destroy frees the per-file state but never the
- * grant -- so a parked handle's grant must be released here explicitly or it
- * leaks.  Release it with pump=false to free the grant memory (and unlink its
- * lease) without waking a waiter on a dead connection. */
+ * The claims must still be UNLINKED before the open is freed: the share and
+ * range claims are embedded in the open (and its lock entries), and the VFS
+ * close thread's shutdown pass walks every file's claim lists
+ * (chimera_vfs_claim_backend_service) after the SMB threads are gone.  The
+ * cache grant is a standalone heap object vfs_state_destroy never frees, so it
+ * is released here as well. */
 SYMBOL_EXPORT void
 chimera_smb_durable_drain_all(struct chimera_server_smb_thread *thread)
 {
-    struct chimera_server_smb_shared *shared    = thread->shared;
-    struct chimera_vfs_state         *vfs_state =
-        thread->vfs_thread->vfs->vfs_state;
+    struct chimera_server_smb_shared *shared = thread->shared;
     struct chimera_smb_durable_entry *entry, *tmp;
     struct chimera_smb_durable_entry *reap = NULL;
 
@@ -835,22 +831,10 @@ chimera_smb_durable_drain_all(struct chimera_server_smb_thread *thread)
         entry = reap;
         reap  = reap->reap_next;
 
+        chimera_smb_open_file_drain_locks_nopump(thread, open_file);
         if (open_file->handle) {
             chimera_vfs_release(thread->vfs_thread, open_file->handle);
             open_file->handle = NULL;
-        }
-        /* Release the standalone cache grant (vfs_state_destroy won't); no
-         * pump -- there is no live connection left to answer a woken waiter. */
-        if (open_file->grant) {
-            chimera_smb_grant_remove_member(open_file->grant, open_file);
-            chimera_vfs_claim_grant_release(vfs_state, open_file->grant,
-                                            false /*pump*/);
-            open_file->grant                  = NULL;
-            open_file->caching_lease_inserted = false;
-        }
-        if (open_file->caching_file_state) {
-            chimera_vfs_state_put(vfs_state, open_file->caching_file_state);
-            open_file->caching_file_state = NULL;
         }
         chimera_smb_open_file_free(thread, open_file);
 
