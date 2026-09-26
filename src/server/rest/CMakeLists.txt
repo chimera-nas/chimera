@@ -26,7 +26,10 @@ function(configure_rest_module module)
     target_include_directories(${module} PRIVATE ${JANSSON_INCLUDE_DIRS})
     target_link_libraries(${module} PRIVATE jansson)
     if(CHIMERA_LINUX)
-        target_link_options(${module} PRIVATE -Wl,-z,defs)
+        # Clang's ASan runtime is supplied by the executable, so its Debug
+        # modules intentionally contain unresolved sanitizer imports.
+        target_link_options(${module} PRIVATE
+            "$<$<NOT:$<AND:$<C_COMPILER_ID:Clang>,$<CONFIG:Debug>>>:-Wl,-z,defs>")
     endif()
 endfunction()
 foreach(module chimera_rest_core chimera_rest_docs)
