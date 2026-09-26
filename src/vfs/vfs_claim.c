@@ -1590,6 +1590,49 @@ chimera_vfs_pending_dequeue_locked(
     ticket->queued = false;
 } /* chimera_vfs_pending_dequeue_locked */
 
+/* Recheck admission and publish the waiter under the same file lock. A
+ * break acknowledgment or release can run while try_acquire is unlocked;
+ * parking from its stale result would miss the pump that already ran. */
+static enum chimera_vfs_claim_result
+chimera_vfs_claim_acquire_or_queue(
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_pending_acquire *ticket,
+    struct chimera_vfs_claim_conflict  *conflict,
+    bool                               *queued)
+{
+    enum chimera_vfs_claim_result result, current;
+    struct chimera_vfs_claim     *holder;
+    bool park;
+
+    *queued = false;
+    for (;;) {
+        result = chimera_vfs_claim_try_acquire(state, file, ticket->claim, conflict);
+        if (!((result == CHIMERA_CLAIM_BREAKING && ticket->wait) ||
+              (result == CHIMERA_CLAIM_DENIED && ticket->wait_hard))) {
+            return result;
+        }
+
+        evpl_mutex_lock(&file->lock);
+        current = chimera_vfs_claim_admit_locked(file, ticket->claim, &holder);
+        /* A new idle/expired holder needs try_acquire to initiate its break
+         * or reclaim it. Only an outstanding break can supply a future wake. */
+        park = (current == CHIMERA_CLAIM_BREAKING && ticket->wait &&
+                holder->break_state == CHIMERA_CLAIM_BREAK_BREAKING &&
+                !chimera_vfs_claim_deadline_passed(holder)) ||
+            (current == CHIMERA_CLAIM_DENIED && ticket->wait_hard &&
+             !chimera_vfs_claim_holder_reclaimable(holder, ticket->claim));
+        if (park) {
+            chimera_vfs_pending_enqueue_locked(file, ticket);
+            *queued = true;
+        }
+        evpl_mutex_unlock(&file->lock);
+        if (park) {
+            return current;
+        }
+    }
+} /* chimera_vfs_claim_acquire_or_queue */
+
 void
 chimera_vfs_claim_pump_pending(
     struct chimera_vfs_state      *state,
@@ -1598,6 +1641,7 @@ chimera_vfs_claim_pump_pending(
     struct chimera_vfs_pending_acquire *head, *t, *next;
     enum chimera_vfs_claim_result       result;
     struct chimera_vfs_claim_conflict   conflict;
+    bool                                queued;
 
     evpl_mutex_lock(&file->lock);
     head               = file->pending_head;
@@ -1613,21 +1657,8 @@ chimera_vfs_claim_pump_pending(
         t->prev = NULL;
         t->next = NULL;
 
-        result = chimera_vfs_claim_try_acquire(state, file, t->claim, &conflict);
-
-        if (result == CHIMERA_CLAIM_BREAKING) {
-            evpl_mutex_lock(&file->lock);
-            chimera_vfs_pending_enqueue_locked(file, t);
-            evpl_mutex_unlock(&file->lock);
-            continue;
-        }
-
-        /* A waiting lock ticket still hard-DENIED stays parked (SMB2
-         * blocking lock / NLM block: never bounce DENIED to a waiter). */
-        if (result == CHIMERA_CLAIM_DENIED && t->wait_hard) {
-            evpl_mutex_lock(&file->lock);
-            chimera_vfs_pending_enqueue_locked(file, t);
-            evpl_mutex_unlock(&file->lock);
+        result = chimera_vfs_claim_acquire_or_queue(state, file, t, &conflict, &queued);
+        if (queued) {
             continue;
         }
 
@@ -1675,6 +1706,7 @@ chimera_vfs_claim_acquire(
 {
     enum chimera_vfs_claim_result     result;
     struct chimera_vfs_claim_conflict conflict;
+    bool                              queued;
 
     ticket->claim        = claim;
     ticket->cb           = cb;
@@ -1686,13 +1718,9 @@ chimera_vfs_claim_acquire(
     ticket->prev         = NULL;
     ticket->next         = NULL;
 
-    result = chimera_vfs_claim_try_acquire(state, file, claim, &conflict);
+    result = chimera_vfs_claim_acquire_or_queue(state, file, ticket, &conflict, &queued);
 
-    if ((result == CHIMERA_CLAIM_BREAKING && wait) ||
-        (result == CHIMERA_CLAIM_DENIED && wait_hard)) {
-        evpl_mutex_lock(&file->lock);
-        chimera_vfs_pending_enqueue_locked(file, ticket);
-        evpl_mutex_unlock(&file->lock);
+    if (queued) {
         /* Fired after the enqueue but before return, so the deferred
          * result callback can never overtake it (NLM4_BLOCKED). */
         if (blocked_cb) {

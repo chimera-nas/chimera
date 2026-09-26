@@ -1711,6 +1711,125 @@ test_fuse_grant_sync_semantics(void)
     chimera_vfs_state_destroy(state);
 } /* test_fuse_grant_sync_semantics */
 
+/* A break can settle before acquire has put its ticket on the pending list.
+ * A synchronous acknowledgment forces that interleaving without sleeps. */
+static void
+immediate_ack_cb(
+    struct chimera_vfs_claim *claim,
+    uint8_t                   mode,
+    void                     *priv)
+{
+    int *breaks = priv;
+
+    ++*breaks;
+    /* Legacy oplocks have no RH wire level: retaining read means LEVEL_II. */
+    chimera_vfs_claim_ack(claim, mode & CHIMERA_CLAIM_CR);
+} /* immediate_ack_cb */
+
+static void
+test_ack_before_enqueue(void)
+{
+    struct chimera_vfs_state          *state = chimera_vfs_state_init();
+    struct chimera_vfs_file_state     *file  = get_file(state, 90);
+    struct chimera_claim_owner         owner;
+    struct chimera_vfs_claim           holder, cache, opener;
+    struct chimera_vfs_claim_grant    *grant;
+    struct chimera_vfs_pending_acquire ticket;
+    struct acquire_recorder            rec    = { 0 };
+    int                                breaks = 0;
+
+    fprintf(stderr, "\ntest_ack_before_enqueue\n");
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 1, 1);
+    chimera_vfs_claim_init_smb_open(&holder, CHIMERA_CLAIM_R,
+                                    CHIMERA_CLAIM_R, &owner);
+    assert(chimera_vfs_claim_try_acquire(state, file, &holder, NULL) ==
+           CHIMERA_CLAIM_GRANTED);
+    chimera_vfs_claim_init_oplock(&cache,
+                                  CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW | CHIMERA_CLAIM_H,
+                                  &owner);
+    cache.break_cb   = immediate_ack_cb;
+    cache.cb_private = &breaks;
+    assert(chimera_vfs_claim_grant_acquire(state, file, &cache, 0, 0,
+                                           CHIMERA_CLAIM_GRANT_EXACT, NULL, NULL, &grant, NULL) ==
+           CHIMERA_CLAIM_GRANTED);
+    holder.own_cache = grant;
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 2, 2);
+    chimera_vfs_claim_init_smb_open(&opener, CHIMERA_CLAIM_R, 0, &owner);
+    chimera_vfs_claim_acquire(NULL, state, file, &opener, &ticket, true, false,
+                              recording_acquire_cb, NULL, &rec);
+    CHECK(breaks == 1, "batch holder acknowledged one break before enqueue");
+    CHECK(rec.fired == 1 && rec.last_result == CHIMERA_CLAIM_DENIED,
+          "settled break completes share-conflicting open exactly once");
+    CHECK(!ticket.queued, "acknowledged break leaves no stranded ticket");
+    if (ticket.queued) {
+        chimera_vfs_claim_cancel(state, &ticket);
+    }
+    chimera_vfs_claim_release_open(state, file, &holder, grant);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_ack_before_enqueue */
+
+static void
+immediate_return_cb(
+    struct chimera_vfs_claim *claim,
+    uint8_t                   mode,
+    void                     *priv)
+{
+    int                           *breaks = priv;
+    struct chimera_vfs_file_state *file   = claim->file;
+
+    (void) mode;
+    ++*breaks;
+    chimera_vfs_claim_release(file->state, file, claim);
+} /* immediate_return_cb */
+
+/* While a ticket waits on A, B obtains a compatible read cache. Releasing A
+ * makes the pump break B; B acknowledges inside that probe, before requeue. */
+static void
+test_ack_before_requeue(void)
+{
+    struct chimera_vfs_state          *state = chimera_vfs_state_init();
+    struct chimera_vfs_file_state     *file  = get_file(state, 91);
+    struct chimera_claim_owner         owner;
+    struct chimera_vfs_claim           a, b, writer;
+    struct chimera_vfs_pending_acquire ticket;
+    struct acquire_recorder            rec         = { 0 };
+    struct break_recorder              first_break = { 0 };
+    int                                breaks      = 0;
+
+    fprintf(stderr, "\ntest_ack_before_requeue\n");
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 1, 1);
+    chimera_vfs_claim_init_delegation(&a, false, &owner);
+    a.break_cb   = recording_break_cb;
+    a.cb_private = &first_break;
+    assert(chimera_vfs_claim_try_acquire(state, file, &a, NULL) == CHIMERA_CLAIM_GRANTED);
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 2, 2);
+    chimera_vfs_claim_init_smb_open(&writer, CHIMERA_CLAIM_W, 0, &owner);
+    chimera_vfs_claim_acquire(NULL, state, file, &writer, &ticket, true, false,
+                              recording_acquire_cb, NULL, &rec);
+    assert(ticket.queued && !rec.fired && first_break.fired == 1);
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 3, 3);
+    chimera_vfs_claim_init_delegation(&b, false, &owner);
+    b.break_cb   = immediate_return_cb;
+    b.cb_private = &breaks;
+    assert(chimera_vfs_claim_try_acquire(state, file, &b, NULL) == CHIMERA_CLAIM_GRANTED);
+    chimera_vfs_claim_release(state, file, &a);
+    CHECK(breaks == 1, "pump broke the newly arrived read cache");
+    CHECK(rec.fired == 1 && rec.last_result == CHIMERA_CLAIM_GRANTED,
+          "ack during pump grants the waiting writer exactly once");
+    CHECK(!ticket.queued, "pump leaves no stale waiter after acknowledgment");
+    if (ticket.queued) {
+        chimera_vfs_claim_cancel(state, &ticket);
+    }
+    if (writer.file) {
+        chimera_vfs_claim_release(state, file, &writer);
+    }
+    chimera_vfs_claim_release(state, file, &b);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_ack_before_requeue */
+
 /* Main ---------------------------------------------------------------- */
 int
 main(
@@ -1723,6 +1842,8 @@ main(
     ChimeraLogLevel = CHIMERA_LOG_INFO;
     chimera_vfs_clock_init();
 
+    test_ack_before_enqueue();
+    test_ack_before_requeue();
     test_init_destroy();
     test_file_state_lookup();
     test_range_vs_range();
