@@ -411,6 +411,7 @@ python3 "$(dirname "${BASH_SOURCE[0]}")/run_guest.py" -- \
     -no-reboot \
     -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet mitigations=off tsc=reliable panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh" \
     2>/dev/null | tee "$LOG_FILE"
+GUEST_STATUS=${PIPESTATUS[0]}
 
 for pid in "$MDS_PID" "$DS_PID"; do
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -421,5 +422,4 @@ for pid in "$MDS_PID" "$DS_PID"; do
     fi
 done
 
-EXIT_CODE=$(grep -oP 'CHIMERA_KVM_EXIT_CODE=\K[0-9]+' "$LOG_FILE" | tail -1)
-exit ${EXIT_CODE:-1}
+exit "$GUEST_STATUS"
