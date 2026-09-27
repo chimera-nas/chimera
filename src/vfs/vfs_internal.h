@@ -5,7 +5,6 @@
 #pragma once
 
 #include <stdlib.h>
-#include <stddef.h>
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
@@ -555,9 +554,10 @@ chimera_vfs_complete(struct chimera_vfs_request *request)
     chimera_vfs_dump_reply(request);
 } /* chimera_vfs_complete */
 
-struct chimera_vfs_request_memory {
+/* Keep the payload aligned to malloc's 16-byte alignment on supported
+ * 64-bit platforms, including MSVC C where max_align_t is unavailable. */
+struct CHIMERA_ALIGNED(16) chimera_vfs_request_memory {
     struct chimera_vfs_request_memory *next;
-    max_align_t                        data[];
 };
 
 static inline void

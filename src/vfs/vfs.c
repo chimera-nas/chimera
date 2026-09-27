@@ -1713,5 +1713,5 @@ chimera_vfs_request_alloc_memory(
     }
     memory->next    = request->memory;
     request->memory = memory;
-    return memory->data;
+    return memory + 1;
 } /* chimera_vfs_request_alloc_memory */
