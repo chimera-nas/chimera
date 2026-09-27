@@ -24,24 +24,27 @@ jobs:
           mkdir -p ctest-results
           docker run --rm --privileged \
             -e EVPL_IO_URING_ENTRIES=1024 -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
-            -e KVM_NFSTEST_RUNTEST=recall18 -e KVM_PCAP_FILE=/build/delegation.pcap \
+            -e KVM_PCAP_FILE=/build/delegation.pcap \
             -v "$GITHUB_WORKSPACE/oras:/usr/local/bin/oras:ro" \
             -v "$GITHUB_WORKSPACE:/workspace" -v "$RUNNER_TEMP/build:/build" \
             -w /workspace ghcr.io/chimera-nas/chimera-dev:b407c56cd448ed56820ead48fb5a906df13a1678-amd64 \
             bash -euc '
               cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug -DKVM_TESTING=ON -DKVM_FETCH_IMAGES=OFF -S /workspace -B /build/Debug
               ninja -C /build/Debug -j4 chimera kvm_ubuntu2604_image
+              python3 /workspace/kvm/delegation_repro.py
               rc=0
-              ctest --test-dir /build/Debug -C extended -V --repeat until-fail:30 \
-                -R "^chimera/kvm/ubuntu2604/nfstest/nfstest_delegation_memfs_nfs4.1$" \
+              ctest --test-dir /build/delegation-repro -V -j4 --repeat until-fail:3 \
                 --output-junit /workspace/ctest-results/delegation.xml || rc=$?
-              # Export operation ordering only, never packet payloads or the capture.
-              if [ -f /build/delegation.pcap ]; then
-                tshark -r /build/delegation.pcap -Y nfs -T fields \
+              # Export operation ordering only, never packet payloads or captures.
+              for capture in /build/delegation-*.pcap; do
+                [ -f "$capture" ] || continue
+                name=$(basename "$capture" .pcap)
+                tshark -r "$capture" -Y nfs -T fields \
                   -e frame.number -e ip.src -e rpc.xid -e rpc.msgtyp \
-                  -e nfs.opcode -e nfs.nfsstat4 > /workspace/ctest-results/operations.tsv
-                rm /build/delegation.pcap
-              fi
+                  -e nfs.opcode -e nfs.cb.operation -e nfs.nfsstat4 \
+                  > "/workspace/ctest-results/operations-${name}.tsv"
+                rm "$capture"
+              done
               exit "$rc"
             ' 2>&1 | tee ctest-results/delegation.log
       - uses: actions/upload-artifact@v6
@@ -51,4 +54,4 @@ jobs:
           path: |
             ctest-results/delegation.log
             ctest-results/delegation.xml
-            ctest-results/operations.tsv
+            ctest-results/operations-*.tsv
