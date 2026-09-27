@@ -39,7 +39,7 @@ jobs:
               for capture in /build/delegation-*.pcap; do
                 [ -f "$capture" ] || continue
                 name=$(basename "$capture" .pcap)
-                tshark -r "$capture" -Y nfs -T fields \
+                tshark -r "$capture" -Y "nfs || nfs.cb" -T fields \
                   -e frame.number -e ip.src -e rpc.xid -e rpc.msgtyp \
                   -e nfs.opcode -e nfs.cb.operation -e nfs.nfsstat4 \
                   > "/workspace/ctest-results/operations-${name}.tsv"
