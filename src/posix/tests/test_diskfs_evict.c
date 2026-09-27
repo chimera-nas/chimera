@@ -207,8 +207,9 @@ main(
                                     posix_test_diskfs_device_type(env.backend),
                                     diskfs_cfg, sizeof(diskfs_cfg));
 
-        root      = json_object();
-        config    = json_object();
+        root   = json_object();
+        config = json_object();
+        posix_test_configure_client(config);
         vfs       = json_object();
         vfs_entry = json_object();
         json_object_set_new(vfs_entry, "path", json_string("/build/test/diskfs"));

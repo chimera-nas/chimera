@@ -396,7 +396,8 @@ grep -q "backing root resolved" "$MDS_LOG" || {
 NFS_MOUNT_OPTS="vers=${NFS_VERSION},tcp"
 TEST_CMD="mount -t nfs -o ${NFS_MOUNT_OPTS} ${MDS_IP}:/share /mnt && ${TEST_CMD_ARG}"
 
-ip netns exec "${NETNS_NAME}" timeout --foreground --kill-after=10s "${KVM_QEMU_DEADLINE}" "$QEMU_BIN" \
+python3 "$(dirname "${BASH_SOURCE[0]}")/run_guest.py" -- \
+    ip netns exec "${NETNS_NAME}" timeout --foreground --kill-after=10s "${KVM_QEMU_DEADLINE}" "$QEMU_BIN" \
     -enable-kvm -smp 4 -m 1G -cpu host \
     -kernel "$VMLINUZ" \
     $QEMU_INITRD \
