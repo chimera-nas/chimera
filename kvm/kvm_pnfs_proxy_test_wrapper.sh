@@ -341,7 +341,8 @@ echo "=== proxy negotiated pNFS-MDS + established back channel ==="
 NFS_MOUNT_OPTS="vers=4.1,tcp"
 TEST_CMD="mount -t nfs -o ${NFS_MOUNT_OPTS} ${PROXY_IP}:/pshare /mnt && ${TEST_CMD_ARG}"
 
-ip netns exec "${FE_NS}" timeout --foreground --kill-after=10s "${KVM_QEMU_DEADLINE}" "$QEMU_BIN" \
+python3 "$(dirname "${BASH_SOURCE[0]}")/run_guest.py" -- \
+    ip netns exec "${FE_NS}" timeout --foreground --kill-after=10s "${KVM_QEMU_DEADLINE}" "$QEMU_BIN" \
     -enable-kvm -smp 4 -m 1G -cpu host \
     -kernel "$VMLINUZ" \
     $QEMU_INITRD \

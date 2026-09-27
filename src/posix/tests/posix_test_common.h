@@ -373,6 +373,16 @@ posix_test_session_root(void)
 #endif // ifdef _WIN32
 } // posix_test_session_root
 
+/* Use the same pool sizes on initial mount and cold remount. Diskfs's statfs
+ * reserve depends on the worker count, so changing it invalidates a saved
+ * free-space baseline even when every deleted extent has been reclaimed. */
+static inline void
+posix_test_configure_client(json_t *config)
+{
+    json_object_set_new(config, "core_threads", json_integer(4));
+    json_object_set_new(config, "sync_delegation_threads", json_integer(4));
+} /* posix_test_configure_client */
+
 /* Emit the external-module client config into a posix.json "config" object:
  * the config.vfs.<backend> entry (module .so path + config text, both plain
  * strings per the client contract) and reduced thread pools (external modules
@@ -1009,8 +1019,7 @@ posix_test_init(
         /* The production client defaults to 16 core and 64 delegation
          * threads. Four of each is sufficient for the POSIX fixtures; apply
          * this before backend-specific overrides, including external modules. */
-        json_object_set_new(posix_json_config, "core_threads", json_integer(4));
-        json_object_set_new(posix_json_config, "sync_delegation_threads", json_integer(4));
+        posix_test_configure_client(posix_json_config);
 
         if (!is_nfs) {
             if (posix_test_is_ext_module(backend)) {

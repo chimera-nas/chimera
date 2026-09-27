@@ -801,6 +801,16 @@ endfunction()
 # so builds without the pynfs checkout (most non-devcontainer images) skip it.
 option(CHIMERA_ENABLE_PYNFS_TESTS "Register PyNFS test suite ctests" ON)
 find_package(Python3 COMPONENTS Interpreter QUIET)
+if(NOT DISABLE_TESTS AND CHIMERA_LINUX AND Python3_FOUND)
+    # Validate the guest lifecycle even on hosts without /dev/kvm. A completed
+    # workload must not become a timeout merely because guest poweroff hangs.
+    set(_guest_saved_tier "${CHIMERA_TEST_TIER}")
+    set(CHIMERA_TEST_TIER quick)
+    add_test(NAME chimera/kvm/guest_completion
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/kvm/run_guest_test.py)
+    set_tests_properties(chimera/kvm/guest_completion PROPERTIES TIMEOUT 20)
+    set(CHIMERA_TEST_TIER "${_guest_saved_tier}")
+endif()
 if(NOT DISABLE_TESTS
     AND CHIMERA_ENABLE_PYNFS_TESTS
     AND Python3_FOUND
