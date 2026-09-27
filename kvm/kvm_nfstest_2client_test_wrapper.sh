@@ -360,14 +360,15 @@ NFSTEST_CMD="PYTHONPATH=/opt/nfstest /opt/nfstest/test/${NFSTEST_PROGRAM} \
 # Wait (in-guest) for B's sshd to accept, then run the suite.
 # KVM_DIAG_CMD overrides the nfstest invocation with an arbitrary diagnostic
 # command run on guest A after B's sshd is up (manual harness debugging).
-PROBE=$(base64 -w0 "$(dirname "$0")/delegation_probe.py")
-RUN_CMD="echo ${PROBE} | python3 -c 'import sys,base64;exec(base64.b64decode(sys.stdin.read()))'; ${NFSTEST_CMD}"
+PROBE=$(python3 -c 'import sys,zlib,base64;print(base64.b64encode(zlib.compress(open(sys.argv[1], "rb").read())).decode())' "$(dirname "$0")/delegation_probe.py")
+RUN_CMD="echo ${PROBE} | python3 -c 'import sys,base64,zlib;exec(zlib.decompress(base64.b64decode(sys.stdin.read())))'; ${NFSTEST_CMD}"
 # Fail fast and loudly if the second client is unusable, rather than letting
 # nfstest emit hundreds of cryptic create_rexec tracebacks (an image without an
 # ssh client, or an unreachable/never-booted B, otherwise wastes the full 120s
 # wait and then fails inside the suite).  No double-quotes here: the kernel
 # cmdline parser truncates test_cmd at the first one.
-TEST_CMD="${SSHFIX}; mkdir -p /mnt/t; command -v ssh >/dev/null 2>&1 || { echo CHIMERA_KVM_FATAL: ssh client missing on guest image, cannot run 2-client test; exit 1; }; ok=0; for i in \$(seq 1 120); do ssh -o ConnectTimeout=2 10.0.0.3 true 2>/dev/null && { ok=1; break; }; sleep 1; done; [ \$ok = 1 ] || { echo CHIMERA_KVM_FATAL: second client 10.0.0.3 unreachable after 120s; exit 1; }; ${RUN_CMD}"
+TEST_CMD="${SSHFIX}; mkdir -p /mnt/t; until ssh -o ConnectTimeout=2 10.0.0.3 true 2>/dev/null; do sleep 1; done; ${RUN_CMD}"
+[ ${#TEST_CMD} -lt 1800 ] || { echo Diagnostic_command_too_long; exit 1; }
 
 # Guest A RAM: nfstest brackets each subtest with a fresh in-guest tcpdump and
 # does not reap the previous one before the next starts, so the live tcpdumps
