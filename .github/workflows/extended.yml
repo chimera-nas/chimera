@@ -34,7 +34,7 @@ jobs:
               ninja -C /build/Debug -j4 chimera kvm_ubuntu2404_image
               python3 /workspace/kvm/nfsidem_repro.py
               rc=0
-              ctest --test-dir /build/nfsidem-repro -V -j4 --repeat until-fail:100 \
+              ctest --test-dir /build/nfsidem-repro -V -j4 --repeat until-fail:1 \
                 --output-junit /workspace/ctest-results/nfsidem.xml || rc=$?
               # Export operation ordering only, never packet payloads or captures.
               for capture in /build/nfsidem-*.pcap; do

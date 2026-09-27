@@ -3316,6 +3316,12 @@ memfs_remove_at(
     }
 
     if (S_ISDIR(inode->mode) && !rb_tree_empty(&inode->dir.dirents)) {
+        struct memfs_dirent *remaining;
+
+        rb_tree_first(&inode->dir.dirents, remaining);
+        chimera_memfs_info("NFSIDEM_NOTEMPTY directory=%.*s child=%.*s",
+                           request->remove_at.namelen, request->remove_at.name,
+                           remaining->name_len, remaining->name);
         evpl_mutex_unlock(&parent_inode->lock);
         evpl_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_ENOTEMPTY;
