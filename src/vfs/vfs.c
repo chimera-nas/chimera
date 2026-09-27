@@ -1696,3 +1696,22 @@ chimera_vfs_request_invalidate_attrs(
     chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                   chimera_vfs_hash(fh, fh_len), fh, fh_len, &invalid);
 } /* chimera_vfs_request_invalidate_attrs */
+
+SYMBOL_EXPORT void *
+chimera_vfs_request_alloc_memory(
+    struct chimera_vfs_request *request,
+    size_t                      size)
+{
+    struct chimera_vfs_request_memory *memory;
+
+    if (size > SIZE_MAX - sizeof(*memory)) {
+        return NULL;
+    }
+    memory = malloc(sizeof(*memory) + size);
+    if (!memory) {
+        return NULL;
+    }
+    memory->next    = request->memory;
+    request->memory = memory;
+    return memory->data;
+} /* chimera_vfs_request_alloc_memory */
