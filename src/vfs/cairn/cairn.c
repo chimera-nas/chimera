@@ -1055,11 +1055,6 @@ cairn_load_acl(
 } /* cairn_load_acl */
 
 /*
- * Populate attr->va_acl when CHIMERA_VFS_ATTR_ACL is requested: the stored ACL
- * if present, else one synthesised from the inode mode.  Uses a per-thread
- * scratch buffer valid for the duration of the (synchronous) completion.
- */
-/*
  * Native owner / group SID record (CAIRN_KEY_SID): the SID companions to the
  * inode's uid / gid, in the pair record format shared with diskfs
  * (chimera_sid_pair_encode / chimera_sid_pair_decode, vfs_sid.h).  The record
@@ -1155,7 +1150,7 @@ cairn_load_sids(
 
 /*
  * Populate attr->va_owner_sid / va_group_sid when requested and stored, from
- * per-thread scratch valid for the duration of the (synchronous) completion.
+ * per-thread scratch valid only until the next mapping on this thread.
  */
 static inline void
 cairn_map_sids(
@@ -1185,6 +1180,11 @@ cairn_map_sids(
     }
 } /* cairn_map_sids */
 
+/*
+ * Return the stored ACL or synthesize one from the inode mode. The returned
+ * scratch is valid only until the next mapping on this thread; request
+ * results must use cairn_map_request_acl to preserve it through completion.
+ */
 static inline void
 cairn_map_acl(
     struct cairn_thread      *thread,

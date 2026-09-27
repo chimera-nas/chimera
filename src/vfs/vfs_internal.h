@@ -581,11 +581,11 @@ chimera_vfs_request_free(
                          "clang static analysis thinks this can happen");
 #endif /* ifdef __clang_analyzer__ */
 
-    chimera_vfs_request_free_memory(request);
-
     DL_DELETE2(thread->active_requests, request, active_prev, active_next);
 
     thread->num_active_requests--;
+
+    chimera_vfs_request_free_memory(request);
 
     LL_PREPEND(thread->free_requests, request);
 } /* chimera_vfs_request_free */
