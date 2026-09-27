@@ -1209,6 +1209,39 @@ cairn_map_acl(
     attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
 } /* cairn_map_acl */
 
+/* Completion can be deferred until a transaction commits, then queued back
+* from a blocking worker to the protocol thread. Thread-local ACL/SID scratch
+* is already reusable during either wait. Preserve request result attributes
+* immediately; readdir's per-entry callback consumes its scratch inline. */
+static inline void
+cairn_map_request_acl(
+    struct cairn_thread        *thread,
+    struct chimera_vfs_request *request,
+    struct chimera_vfs_attrs   *attr,
+    const struct cairn_inode   *inode)
+{
+    cairn_map_acl(thread, attr, inode);
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attr->va_acl) {
+        size_t              size = chimera_acl_size(attr->va_acl->num_aces);
+        struct chimera_acl *acl  = chimera_vfs_request_alloc_memory(request, size);
+        chimera_cairn_abort_if(!acl, "Unable to preserve reply ACL");
+        memcpy(acl, attr->va_acl, size);
+        attr->va_acl = acl;
+    }
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) && attr->va_owner_sid) {
+        struct chimera_sid *sid = chimera_vfs_request_alloc_memory(request, sizeof(*sid));
+        chimera_cairn_abort_if(!sid, "Unable to preserve reply owner SID");
+        *sid               = *attr->va_owner_sid;
+        attr->va_owner_sid = sid;
+    }
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) && attr->va_group_sid) {
+        struct chimera_sid *sid = chimera_vfs_request_alloc_memory(request, sizeof(*sid));
+        chimera_cairn_abort_if(!sid, "Unable to preserve reply group SID");
+        *sid               = *attr->va_group_sid;
+        attr->va_group_sid = sid;
+    }
+} /* cairn_map_request_acl */
+
 /*
  * Seed a freshly-created child's ACL, mirroring memfs_inherit_acl():
  *   1. An explicit ACL supplied at create is stored as-is.
@@ -2318,7 +2351,7 @@ cairn_getattr(
 
     cairn_map_attrs(fs, &request->getattr.r_attr, inode);
     cairn_map_ea_size(thread, inode, &request->getattr.r_attr);
-    cairn_map_acl(thread, &request->getattr.r_attr, inode);
+    cairn_map_request_acl(thread, request, &request->getattr.r_attr, inode);
     cairn_map_pnfs(thread, &request->getattr.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
@@ -3128,7 +3161,7 @@ cairn_lookup_at(
     if (namelen == 1 && name[0] == '.') {
         cairn_map_attrs(fs, &request->lookup_at.r_dir_attr, inode);
         cairn_map_attrs(fs, &request->lookup_at.r_attr, inode);
-        cairn_map_acl(thread, &request->lookup_at.r_attr, inode);
+        cairn_map_request_acl(thread, request, &request->lookup_at.r_attr, inode);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_OK;
         request->complete(request);
@@ -3150,7 +3183,7 @@ cairn_lookup_at(
 
         child = child_ih.inode;
         cairn_map_attrs(fs, &request->lookup_at.r_attr, child);
-        cairn_map_acl(thread, &request->lookup_at.r_attr, child);
+        cairn_map_request_acl(thread, request, &request->lookup_at.r_attr, child);
         cairn_inode_handle_release(&ih);
         cairn_inode_handle_release(&child_ih);
         request->status = CHIMERA_VFS_OK;
@@ -3188,7 +3221,7 @@ cairn_lookup_at(
     child = child_ih.inode;
 
     cairn_map_attrs(fs, &request->lookup_at.r_attr, child);
-    cairn_map_acl(thread, &request->lookup_at.r_attr, child);
+    cairn_map_request_acl(thread, request, &request->lookup_at.r_attr, child);
 
     cairn_inode_handle_release(&ih);
     cairn_dirent_handle_release(&dh);
@@ -3309,7 +3342,7 @@ cairn_mkdir_at(
                       request->cred->flavor == CHIMERA_VFS_AUTH_ATTR);
 
     cairn_map_attrs(fs, &request->mkdir_at.r_attr, &inode);
-    cairn_map_acl(thread, &request->mkdir_at.r_attr, &inode);
+    cairn_map_request_acl(thread, request, &request->mkdir_at.r_attr, &inode);
 
     dirent_value.inum     = inode.inum;
     dirent_value.name_len = request->mkdir_at.name_len;
@@ -4174,7 +4207,7 @@ cairn_open_at(
 
     cairn_map_attrs(fs, &request->open_at.r_dir_post_attr, parent_inode);
     cairn_map_attrs(fs, &request->open_at.r_attr, inode);
-    cairn_map_acl(thread, &request->open_at.r_attr, inode);
+    cairn_map_request_acl(thread, request, &request->open_at.r_attr, inode);
     cairn_map_pnfs(thread, &request->open_at.r_attr, inode);
 
     cairn_put_inode(thread, parent_inode);

@@ -70,6 +70,12 @@ if(CAIRN_ENABLED)
             COMMAND vfs_cairn_conflict_${variant}_test)
         set_tests_properties(chimera/vfs/cairn_conflict_${variant} PROPERTIES TIMEOUT 30)
     endforeach()
+    add_executable(vfs_cairn_reply_attrs_test vfs_cairn_reply_attrs_test.c)
+    target_link_libraries(vfs_cairn_reply_attrs_test chimera_vfs evpl jansson rocksdb)
+    target_compile_definitions(vfs_cairn_reply_attrs_test PRIVATE
+        $<TARGET_PROPERTY:chimera_vfs_cairn,COMPILE_DEFINITIONS>)
+    add_test(NAME chimera/vfs/cairn_reply_attrs COMMAND vfs_cairn_reply_attrs_test)
+    set_tests_properties(chimera/vfs/cairn_reply_attrs PROPERTIES TIMEOUT 30)
     set(CHIMERA_TEST_TIER "${_cairn_saved_tier}")
 endif()
 

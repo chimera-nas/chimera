@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdlib.h>
+#include <stddef.h>
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
@@ -554,6 +555,21 @@ chimera_vfs_complete(struct chimera_vfs_request *request)
     chimera_vfs_dump_reply(request);
 } /* chimera_vfs_complete */
 
+struct chimera_vfs_request_memory {
+    struct chimera_vfs_request_memory *next;
+    max_align_t                        data[];
+};
+
+static inline void
+chimera_vfs_request_free_memory(struct chimera_vfs_request *request)
+{
+    while (request->memory) {
+        struct chimera_vfs_request_memory *memory = request->memory;
+        request->memory = memory->next;
+        free(memory);
+    }
+} // chimera_vfs_request_free_memory
+
 static inline void
 chimera_vfs_request_free(
     struct chimera_vfs_thread  *thread,
@@ -564,6 +580,8 @@ chimera_vfs_request_free(
     chimera_vfs_abort_if(request->active_prev != request && request->active_next == NULL,
                          "clang static analysis thinks this can happen");
 #endif /* ifdef __clang_analyzer__ */
+
+    chimera_vfs_request_free_memory(request);
 
     DL_DELETE2(thread->active_requests, request, active_prev, active_next);
 
