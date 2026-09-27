@@ -160,3 +160,10 @@ See `examples/vfs_module/vfs_example.c` for the skeleton.  In short:
    with `"module": "<name>"` and `"module_path": "/path/to/vfs_<name>.so"`.
    The loader dlopens the object, resolves `vfs_<name>`, and validates
    `sdk_version`.
+
+Pointer-valued result attributes must remain valid until the consumer callback
+finishes. For deferred replies or blocking modules, `request->complete()` can
+queue that callback on another thread. Use `chimera_vfs_request_alloc_memory()`
+for result data that would otherwise refer to reusable scratch; the core frees
+these allocations when it recycles the request. Check its return value for
+allocation failure, and do not free the returned storage yourself.
