@@ -360,7 +360,8 @@ NFSTEST_CMD="PYTHONPATH=/opt/nfstest /opt/nfstest/test/${NFSTEST_PROGRAM} \
 # Wait (in-guest) for B's sshd to accept, then run the suite.
 # KVM_DIAG_CMD overrides the nfstest invocation with an arbitrary diagnostic
 # command run on guest A after B's sshd is up (manual harness debugging).
-RUN_CMD="${KVM_DIAG_CMD:-${NFSTEST_CMD}}"
+PROBE=$(base64 -w0 "$(dirname "$0")/delegation_probe.py")
+RUN_CMD="echo ${PROBE} | python3 -c 'import sys,base64;exec(base64.b64decode(sys.stdin.read()))'; ${NFSTEST_CMD}"
 # Fail fast and loudly if the second client is unusable, rather than letting
 # nfstest emit hundreds of cryptic create_rexec tracebacks (an image without an
 # ssh client, or an unreachable/never-booted B, otherwise wastes the full 120s

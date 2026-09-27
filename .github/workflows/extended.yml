@@ -21,6 +21,7 @@ jobs:
           arch: amd64
       - name: Diagnose repeated Ubuntu 26.04 delegation recall
         run: |
+          set -o pipefail
           mkdir -p ctest-results
           docker run --rm --privileged \
             -e EVPL_IO_URING_ENTRIES=1024 -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
