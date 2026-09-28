@@ -43,11 +43,11 @@ main(void)
     CHECK(getopt(9, args, "vdc:") == 'v');
     CHECK(getopt(9, args, "vdc:") == 'd');
     CHECK(getopt(9, args, "vdc:") == 'c');
-    CHECK(!strcmp(optarg, "config.json"));
+    CHECK(optarg && !strcmp(optarg, "config.json"));
     CHECK(getopt_long(9, args, "", options, &index) == 't');
-    CHECK(index == 0 && !strcmp(optarg, "x"));
+    CHECK(index == 0 && optarg && !strcmp(optarg, "x"));
     CHECK(getopt_long(9, args, "", options, NULL) == 'b');
-    CHECK(!strcmp(optarg, "64"));
+    CHECK(optarg && !strcmp(optarg, "64"));
     CHECK(getopt_long(9, args, "", options, NULL) == 0 && flag == 7);
     CHECK(getopt_long(9, args, "", options, NULL) == -1 && optind == 8);
     {
