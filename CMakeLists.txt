@@ -217,8 +217,10 @@ if(CCACHE_PROGRAM)
     set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
     # ccache cannot cache /Zi, which writes one PDB shared by every object in
     # a target.  Embed the debug information in each object (/Z7) instead; the
-    # linker still produces the PDB.
-    if(MSVC)
+    # linker still produces the PDB.  A build that wants debug information
+    # in every configuration (CI's Release cells, so a hung or crashed daemon
+    # can be symbolized) sets the variable itself.
+    if(MSVC AND NOT DEFINED CMAKE_MSVC_DEBUG_INFORMATION_FORMAT)
         set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
             "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
     endif()

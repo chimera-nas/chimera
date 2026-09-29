@@ -214,7 +214,13 @@ jobs:
         shell: pwsh
         run: |
           $triplet = '${{ matrix.arch }}'.ToLower() + '-windows'
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config }} -DCMAKE_C_COMPILER=cl "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON
+          # Debug information in every configuration, so a daemon that hangs
+          # or crashes in a Release cell -- or in the smb-client job, which
+          # runs the Release build -- can be symbolized.  /Z7 keeps it
+          # cacheable; /DEBUG turns the linker's /OPT:REF and /OPT:ICF off by
+          # default, so they are restored to keep Release code unchanged.
+          $releaseLink = '/DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF'
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config }} -DCMAKE_C_COMPILER=cl "-DCMAKE_TOOLCHAIN_FILE=$pwd/_vcpkg/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_TARGET_TRIPLET=$triplet" "-DVCPKG_HOST_TRIPLET=$triplet" "-DFLEX_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_flex.exe" "-DBISON_EXECUTABLE=$env:RUNNER_TEMP/winflexbison/win_bison.exe" "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching" -DOTEL_SQLITE=ON -DREQUIRE_CTL_MBT=ON -DREQUIRE_DISKFS_MBT=ON -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=$releaseLink" "-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=$releaseLink"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       # The installed libraries live in build/vcpkg_installed. Drop temporary
       # package extraction/probe trees before diskfs tests need scratch space.
@@ -253,7 +259,7 @@ jobs:
         run: |
           $bundle = "$env:RUNNER_TEMP/smb-client-bundle"
           New-Item -ItemType Directory -Force $bundle | Out-Null
-          Copy-Item build/bin/chimera.exe, build/bin/*.dll $bundle
+          Copy-Item build/bin/chimera.exe, build/bin/chimera.pdb, build/bin/*.dll $bundle
           Copy-Item src/server/smb/tests/windows_client/windows_smb_client_test.py $bundle
       - name: Upload the SMB client test bundle
         if: matrix.config == 'Release'
