@@ -7,9 +7,9 @@ permalink: /api-reference
 
 # REST API Reference
 
-Chimera exposes a REST API for server administration: managing builtin users, VFS
-mounts, NFS exports, SMB shares, and S3 buckets. This page documents every endpoint
-and its arguments.
+Chimera exposes a REST API for server administration: managing builtin users,
+named filesystems, VFS mounts, NFS exports, SMB shares, and S3 buckets. This page
+documents every endpoint and its arguments.
 
 The same API is also available interactively:
 
@@ -477,12 +477,81 @@ curl -X DELETE http://localhost:8080/api/v1/buckets/export
 
 ---
 
+## Named filesystems
+
+The `memfs`, `diskfs` and `cairn` modules each hold any number of named
+filesystems, and a [VFS mount](#vfs-mounts) of one of those modules selects a
+filesystem by name. These endpoints create and delete them at runtime. The
+`filesystems` section of the configuration creates them at startup. There is no
+list endpoint.
+
+### Create filesystem
+
+```
+POST /api/v1/filesystems
+```
+
+**Request body**
+
+| Field     | Type   | Required | Description                                                  |
+|-----------|--------|----------|--------------------------------------------------------------|
+| `module`  | string | yes      | Module to create the filesystem in (`memfs`, `diskfs`, `cairn`) |
+| `name`    | string | yes      | Filesystem name; non-empty, no `/`                           |
+| `options` | string | no       | Comma-separated `key[=value]` creation options               |
+
+**Response `201`**
+
+```json
+{ "message": "Filesystem created" }
+```
+
+**Errors:** `400` (invalid JSON, missing `module`/`name`, `options` not a
+string or malformed, an invalid name, or a module that does not hold named
+filesystems, such as `nfs`), `404` (no such module), `409` (the module
+already holds a filesystem with that name), `500` (creation failed).
+
+```bash
+curl -X POST http://localhost:8080/api/v1/filesystems \
+  -H "Content-Type: application/json" \
+  -d '{"module":"memfs","name":"fs1"}'
+```
+
+### Delete filesystem
+
+```
+DELETE /api/v1/filesystems/{module}/{name}
+```
+
+| Path parameter | Type   | Description                         |
+|----------------|--------|-------------------------------------|
+| `module`       | string | Module that holds the filesystem    |
+| `name`         | string | Name of the filesystem              |
+
+Deleting a filesystem destroys its contents.
+
+**Response `204`** - no body.
+
+**Errors:** `400` (the path is not `<module>/<name>`, or the module does not
+hold named filesystems), `404` (no such module, or no such filesystem in
+it), `409` (the filesystem still has mounts; delete them first), `500`
+(removal failed).
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/filesystems/memfs/fs1
+```
+
+The `chimera_admin` Python client exposes these as `create_filesystem()` and
+`delete_filesystem()`; the `chimera-admin` CLI has no filesystem command yet.
+
+---
+
 ## VFS Mounts
 
 VFS mounts map a mount name to a backing path served by a VFS module (for example
 `linux` or `memfs`). For `memfs`, `diskfs` and `cairn` the path starts with the
 name of a filesystem the module already holds: one declared under `filesystems`
-in the configuration, or one created with `POST /api/v1/filesystems`. A mount
+in the configuration, or one created with
+[`POST /api/v1/filesystems`](#create-filesystem). A mount
 may carry an optional comma-separated `key[=value]` options string; when
 present it is echoed back on reads.
 
@@ -583,7 +652,7 @@ The same operations are available from the `chimera-admin` CLI, where the create
 command accepts the options string via the `--options` flag:
 
 ```bash
-chimera-admin mount create share --module memfs --path / --options ro,foo=bar
+chimera-admin mount create share --module memfs --path fs0 --options ro,foo=bar
 ```
 
 ---
