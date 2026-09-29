@@ -39,7 +39,8 @@ The latest chimera build is published by CI to ghcr.io. The image ships with a
 default config that exports two filesystems:
 
 * `/export` — `linux` backend, bound to the container path `/export`. Mount a
-  host directory there to serve files from disk.
+  host directory there to serve files from disk; without one, Docker gives
+  `/export` an anonymous volume.
 * `/memfs` — `memfs` backend, an in-memory filesystem useful for smoke tests
   and benchmarking.
 
@@ -119,10 +120,13 @@ A minimal example that exports a single in-memory filesystem over NFS at
         "rdma_hostname": "0.0.0.0",
         "rdma_port": 20049
     },
+    "filesystems": {
+        "memfs": { "module": "memfs" }
+    },
     "mounts": {
         "memfs": {
             "module": "memfs",
-            "path": "/"
+            "path": "memfs"
         }
     },
     "exports": {
@@ -158,8 +162,11 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
         ],
         "vfs": {
             "diskfs": {
-                "path": "/usr/local/lib/chimera_vfs_diskfs.so",
-                "config": "/usr/local/etc/diskfs.json"
+                "config": {
+                    "devices": [
+                        { "type": "io_uring", "path": "/dev/nvme0n1" }
+                    ]
+                }
             }
         }
     },
@@ -174,10 +181,14 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
             "path": "/memfs"
         }
     },
+    "filesystems": {
+        "memfs": { "module": "memfs" },
+        "diskfs": { "module": "diskfs" }
+    },
     "mounts": {
         "memfs": {
             "module": "memfs",
-            "path": "/"
+            "path": "memfs"
         },
         "linux": {
             "module": "io_uring",
@@ -185,7 +196,7 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
         },
         "diskfs": {
             "module": "diskfs",
-            "path": "/"
+            "path": "diskfs"
         }
     },
     "shares": {
@@ -201,6 +212,11 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
     }
 }
 ```
+
+diskfs is built in, so its `server.vfs` entry carries only its `config`. A new
+device must be formatted first: add `"initialize": true` to that `config` for
+the first start only, since it erases the device on every start that has it.
+See [docs/configuration.md](docs/configuration.md) for every key.
 
 # Questions or feedback?
 
