@@ -480,8 +480,11 @@ curl -X DELETE http://localhost:8080/api/v1/buckets/export
 ## VFS Mounts
 
 VFS mounts map a mount name to a backing path served by a VFS module (for example
-`linux` or `memfs`). A mount may carry an optional comma-separated `key[=value]`
-options string; when present it is echoed back on reads.
+`linux` or `memfs`). For `memfs`, `diskfs` and `cairn` the path starts with the
+name of a filesystem the module already holds: one declared under `filesystems`
+in the configuration, or one created with `POST /api/v1/filesystems`. A mount
+may carry an optional comma-separated `key[=value]` options string; when
+present it is echoed back on reads.
 
 ### List mounts
 
@@ -493,7 +496,7 @@ GET /api/v1/mounts
 
 ```json
 [
-  { "name": "share", "module": "memfs", "path": "/", "options": "ro" }
+  { "name": "share", "module": "memfs", "path": "fs0", "options": "ro" }
 ]
 ```
 
@@ -555,7 +558,7 @@ failed).
 ```bash
 curl -X POST http://localhost:8080/api/v1/mounts \
   -H "Content-Type: application/json" \
-  -d '{"name":"share","module":"memfs","path":"/","options":"ro,foo=bar"}'
+  -d '{"name":"share","module":"memfs","path":"fs0","options":"ro,foo=bar"}'
 ```
 
 ### Delete mount

@@ -31,6 +31,7 @@ reads the file:
 |---|---|---|---|
 | `common` | object | server + client | Shared transport, memory, and delegation settings. |
 | `server` | object | server | Daemon-wide settings (threads, protocols, ports, REST, pNFS...). |
+| `filesystems` | object | server | Named filesystems to create inside memfs, diskfs or cairn before mounting. |
 | `mounts` | object | server | VFS backends to instantiate, keyed by name. |
 | `exports` | object | server | NFS exports. |
 | `shares` | object | server | SMB shares. |
@@ -42,13 +43,15 @@ reads the file:
 | `config` | object | client | Client-library settings (the client's analogue of `server`). |
 
 A typical server config wires a **mount** (a VFS backend) and then publishes it
-through one or more of `exports`, `shares`, and `buckets`:
+through one or more of `exports`, `shares`, and `buckets`. A memfs, diskfs or
+cairn mount names a filesystem declared under `filesystems`:
 
 ```json
 {
     "common": { "tcp_flavor": "plain" },
-    "server": { "threads": 16 },
-    "mounts":  { "data": { "module": "memfs", "path": "/" } },
+    "server": { "threads": 16, "nfs_enabled": true, "smb_enabled": true, "s3_enabled": true },
+    "filesystems": { "data": { "module": "memfs" } },
+    "mounts":  { "data": { "module": "memfs", "path": "data" } },
     "exports": { "/nfs":  { "path": "/data" } },
     "shares":  { "smb":   { "path": "/data" } },
     "buckets": { "s3":    { "path": "/data" } }
@@ -208,15 +211,41 @@ is registered here, keyed by module name, before it can be used in `mounts`:
 | `path` | string | Filesystem path to the module's `.so`. |
 | `config` | object | Module-specific options passed to the module at init (see [VFS module options](#vfs-module-options)). |
 
+### `filesystems`
+
+An object keyed by filesystem name. The `memfs`, `diskfs` and `cairn` modules
+each hold any number of named filesystems, and a mount of one of those modules
+selects a filesystem by name. Each entry is created before any mount is
+processed. An entry that already exists, such as a persistent `diskfs` or
+`cairn` filesystem after a restart, is kept as it is, so the section can stay
+in the config permanently.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `module` | string | required | Module that holds the filesystem (`memfs`, `diskfs` or `cairn`). |
+| `options` | string | - | Module-specific creation options. |
+
+```json
+"filesystems": { "fs0": { "module": "memfs" } },
+"mounts":      { "data": { "module": "memfs", "path": "fs0" } }
+```
+
+A filesystem name is scoped to its module. A `memfs` filesystem and a `diskfs`
+filesystem with the same name are distinct, but a JSON object cannot repeat a
+key, so give them different names here.
+
 ### `mounts`
 
 An object keyed by mount name. Each mount instantiates a VFS backend that
-becomes visible in the Chimera namespace at `/<name>`.
+becomes visible in the Chimera namespace at `/<name>`. A mount that fails stops
+the daemon at startup. It does not come up with exports, shares or buckets over
+a missing root.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `module` | string | required | VFS module name (`memfs`, `linux`, `diskfs`, `cairn`, `io_uring`, `nfs`, ...). |
-| `path` | string | required | Backend-specific root. For passthrough modules this is a host path; for `nfs` it's the upstream export; for in-memory modules it's typically `/`. |
+| `path` | string | required | Backend-specific root. For passthrough modules (`linux`, `io_uring`) this is a host path; for `nfs` it's the upstream export; for `memfs`, `diskfs` and `cairn` it's the name of a filesystem declared under [`filesystems`](#filesystems), optionally followed by a path inside it (`fs0/projects`). The path must already exist unless `create` is set. |
+| `create` | bool or object | `false` | Create `path`, and any missing parents, before mounting. `true` uses mode `0755`; `{ "mode": "0750" }` sets the mode as an octal string. The directories are owned by the server identity. A path that cannot be created stops startup. |
 | `options` | string | - | Module-specific mount options (e.g. `"vers=4.1,rdma,port=20049"` for the `nfs` module). |
 
 ### `exports` (NFS)
@@ -265,7 +294,8 @@ mountpoint directory, which must exist.
 
 ```json
 "server":      { "fuse_enabled": true },
-"mounts":      { "data": { "module": "memfs", "path": "/" } },
+"filesystems": { "data": { "module": "memfs" } },
+"mounts":      { "data": { "module": "memfs", "path": "data" } },
 "fuse_mounts": { "/mnt/chimera": { "path": "/data", "options": "allow_other" } }
 ```
 
@@ -450,14 +480,20 @@ an AllUsers READ or WRITE grant when the world bits are set.
     },
     "server": {
         "threads": 16,
+        "nfs_enabled": true,
+        "smb_enabled": true,
+        "s3_enabled": true,
         "nfs4_delegations": true,
         "smb_encryption": "enabled",
         "smb_persistent_handles": true,
         "metrics_port": 9000,
         "rest_http_port": 8080
     },
+    "filesystems": {
+        "data": { "module": "memfs" }
+    },
     "mounts": {
-        "data": { "module": "memfs", "path": "/" }
+        "data": { "module": "memfs", "path": "data" }
     },
     "exports": {
         "/nfs": {

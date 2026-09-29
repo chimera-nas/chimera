@@ -13,7 +13,7 @@ filesystems out of the box:
 
 | Mount    | Backend | Description                                        |
 |----------|---------|----------------------------------------------------|
-| `/export`| `linux` | A bind-mount target inside the container. Mount any host directory here to serve files from disk. |
+| `/export`| `linux` | A volume inside the container. Mount a host directory here to serve files from disk; without one, Docker creates an anonymous volume. |
 | `/memfs` | `memfs` | An in-memory filesystem. Useful for smoke tests and benchmarking; contents do not persist across restarts. |
 
 Each is published as an NFS export, an SMB share, and an S3 bucket
@@ -92,6 +92,7 @@ with RDMA enabled:
 ```json
 {
     "server": {
+        "nfs_enabled": true,
         "threads": 32,
         "sync_delegation_threads": 32,
         "async_delegation": false,
@@ -104,10 +105,13 @@ with RDMA enabled:
         "rdma_hostname": "0.0.0.0",
         "rdma_port": 20049
     },
+    "filesystems": {
+        "memfs": { "module": "memfs" }
+    },
     "mounts": {
         "memfs": {
             "module": "memfs",
-            "path": "/"
+            "path": "memfs"
         }
     },
     "exports": {
