@@ -925,7 +925,8 @@ nfs_open_owner_put(
     struct nfs_open_owner *owner);
 
 /* Find an existing open_state on `owner` whose FH matches.  Returns NULL if
- * none.  Does NOT acquire a ref. */
+ * none.  The returned state holds a reference which the caller must drop with
+ * nfs_state_table_release(..., NFS4_SLOT_TYPE_OPEN, ...). */
 SYMBOL_EXPORT struct nfs_open_state *
 nfs_open_owner_find_state(
     struct nfs_open_owner *owner,
