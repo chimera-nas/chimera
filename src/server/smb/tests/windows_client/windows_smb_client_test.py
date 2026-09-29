@@ -624,7 +624,7 @@ def write_junit(path, results, os_label):
     ElementTree.ElementTree(suites).write(path, encoding="utf-8", xml_declaration=True)
 
 
-def run_all(chimera, backends):
+def run_all(chimera, backends, daemon_debug=False, daemon_log=None):
     """Serve every backend from one daemon, map each share, run the checks.
 
     One daemon rather than one per backend: the client keeps its session to a
@@ -644,7 +644,8 @@ def run_all(chimera, backends):
     drives = []
     results = []
     with (scratch / "daemon.log").open("w+b") as log:
-        proc = subprocess.Popen([chimera, "-c", str(config_path)], stdout=log, stderr=log,
+        command = [chimera, "-c", str(config_path)] + (["-d"] if daemon_debug else [])
+        proc = subprocess.Popen(command, stdout=log, stderr=log,
                                 env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
         try:
             wait_until_ready(proc, scratch / "daemon.log")
@@ -690,6 +691,8 @@ def run_all(chimera, backends):
                 tail = log.read().decode("utf-8", errors="replace").splitlines()[-300:]
                 print("---- daemon log (last 300 lines) ----")
                 print("\n".join(tail), flush=True)
+    if daemon_log:
+        shutil.copyfile(scratch / "daemon.log", daemon_log)
     shutil.rmtree(scratch, ignore_errors=True)
     return results
 
@@ -700,6 +703,9 @@ def main():
     parser.add_argument("backends", nargs="+", choices=["memfs", "diskfs", "cairn"])
     parser.add_argument("--junit", help="write JUnit XML here")
     parser.add_argument("--duration", help="write the wall-clock seconds here")
+    parser.add_argument("--daemon-log", help="keep the daemon's full log here")
+    parser.add_argument("--daemon-debug", action="store_true",
+                        help="run the daemon with debug logging (dumps every SMB request)")
     args = parser.parse_args()
 
     if os.name != "nt":
@@ -715,7 +721,8 @@ def main():
     print(f"client: {os_label}", flush=True)
 
     start = time.monotonic()
-    results = run_all(args.chimera, list(dict.fromkeys(args.backends)))
+    results = run_all(args.chimera, list(dict.fromkeys(args.backends)),
+                      args.daemon_debug, args.daemon_log)
     if args.junit:
         write_junit(args.junit, results, os_label)
     if args.duration:

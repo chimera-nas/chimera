@@ -406,7 +406,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force ctest-results | Out-Null
-          python bundle/windows_smb_client_test.py bundle/chimera.exe memfs diskfs cairn --junit ctest-results/results.xml --duration ctest-results/duration_seconds
+          python bundle/windows_smb_client_test.py bundle/chimera.exe memfs diskfs cairn --junit ctest-results/results.xml --duration ctest-results/duration_seconds --daemon-log ctest-results/daemon.log
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v6
