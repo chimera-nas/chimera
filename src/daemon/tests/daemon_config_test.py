@@ -39,7 +39,7 @@ def main():
         env.update(TEMP=scratch, TMP=scratch)
         config_path = root / "config.json"
 
-        def write_config(exports, extra_server=None, mounts=None):
+        def write_config(exports, extra_server=None, sections=None):
             config = {
                 "common": {"huge_pages": False, "sync_delegation_threads": 2},
                 "server": {
@@ -49,10 +49,12 @@ def main():
                     "metrics_port": 0, "state_dir": state.as_posix(),
                 },
                 "filesystems": {"fs0": {"module": "memfs"}},
-                "mounts": mounts or {"data": {"module": "memfs", "path": "fs0"}},
+                "mounts": {"data": {"module": "memfs", "path": "fs0"}},
                 "exports": exports,
             }
             config["server"].update(extra_server or {})
+            # Whole top-level sections (filesystems, mounts) replaced by a case.
+            config.update(sections or {})
             config_path.write_text(json.dumps(config), encoding="utf-8")
 
         def remove_certificates(pid):
@@ -78,9 +80,9 @@ def main():
             ("missing path", {}),
             ("negative anonuid", {"path": "/data", "anonuid": -1}),
         ]
-        # Each case: name, exports, server overrides, replaced mounts, and the
-        # error line the rejection must log (None for the export cases, which
-        # only check the exit status).
+        # Each case: name, exports, server overrides, replaced top-level
+        # sections, and the error line the rejection must log (None for the
+        # export cases, which only check the exit status).
         cases = [(name, {"/e": export}, {}, None, None) for name, export in bad_exports]
         cases.extend([
             ("duplicate export_id", {
@@ -93,19 +95,35 @@ def main():
             # it fails; serving /e over the missing root must not be the
             # fallback.
             ("failed mount", {"/e": {"path": "/data"}}, {},
-             {"data": {"module": "memfs", "path": "fs_missing"}},
+             {"mounts": {"data": {"module": "memfs", "path": "fs_missing"}}},
              "Failed to mount memfs://fs_missing to /data"),
             # Rejected before the mount is attempted, which would otherwise
             # dereference the missing string.
             ("mount without module", {"/e": {"path": "/data"}}, {},
-             {"data": {"path": "fs0"}},
+             {"mounts": {"data": {"path": "fs0"}}},
              "Mount data missing module"),
             ("mount without path", {"/e": {"path": "/data"}}, {},
-             {"data": {"module": "memfs"}},
+             {"mounts": {"data": {"module": "memfs"}}},
              "Mount data missing path"),
+            # A filesystem that cannot be created is fatal, and the exit must
+            # be a clean 1: plain exit() here runs libevpl's atexit cleanup
+            # under live service threads and aborts (134).
+            ("mkfs unknown module", {"/e": {"path": "/data"}}, {},
+             {"filesystems": {"fs0": {"module": "memfs"}, "bad": {"module": "memf"}}},
+             "Failed to create filesystem bad in module memf"),
+            # nfs is registered on every platform and holds no named
+            # filesystems (linux, the obvious choice, exists only on Linux).
+            ("mkfs unsupported by module", {"/e": {"path": "/data"}}, {},
+             {"filesystems": {"fs0": {"module": "memfs"}, "bad": {"module": "nfs"}}},
+             "Failed to create filesystem bad in module nfs"),
+            # Malformed even though no mount names it, so it is not caught
+            # later as a failed mount.
+            ("filesystem without module", {"/e": {"path": "/data"}}, {},
+             {"filesystems": {"fs0": {"module": "memfs"}, "orphan": {}}},
+             "Filesystem orphan missing module"),
         ])
-        for name, exports, extra, mounts, expect in cases:
-            write_config(exports, extra, mounts)
+        for name, exports, extra, sections, expect in cases:
+            write_config(exports, extra, sections)
             with subprocess.Popen(
                 [daemon, "-c", str(config_path)], stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, env=env, creationflags=flags,
