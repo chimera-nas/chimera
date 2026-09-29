@@ -6928,12 +6928,20 @@ chimera_smb_parse_create(
      * a prior CREATE; clear it explicitly so the backend's create-time ACL
      * precedence check (which keys off the va_acl pointer, since
      * <backend>_apply_attrs strips the va_set_mask ACL bit before
-     * <backend>_inherit_acl runs) doesn't fire on a stale pointer. */
-    request->create.set_attr.va_req_mask = 0;
-    request->create.set_attr.va_set_mask = 0;
-    request->create.set_attr.va_acl      = NULL;
-    request->create.ctx_present_mask     = 0;
-    request->create.ea_buf_len           = 0;
+     * <backend>_inherit_acl runs) doesn't fire on a stale pointer.
+     *
+     * va_dos_attributes is cleared for the same reason: the create path ORs
+     * FILE_ATTRIBUTE_ARCHIVE into it, and it is only assigned when the client's
+     * FileAttributes carry a settable bit.  A plain create (FILE_ATTRIBUTE_NORMAL)
+     * therefore stamped the new file with whatever the slot last held -- a new
+     * file came out READONLY (0x21) after an earlier request on the same slot
+     * carried 0x21, and every later write open of it was refused. */
+    request->create.set_attr.va_req_mask       = 0;
+    request->create.set_attr.va_set_mask       = 0;
+    request->create.set_attr.va_acl            = NULL;
+    request->create.set_attr.va_dos_attributes = 0;
+    request->create.ctx_present_mask           = 0;
+    request->create.ea_buf_len                 = 0;
 
     /* The request slot is pooled, so the AppInstanceId/AppInstanceVersion
      * fields survive from a prior CREATE on this same slot.  Each create

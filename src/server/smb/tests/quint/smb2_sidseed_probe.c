@@ -517,7 +517,8 @@ probe_sd_context_owner_wins(struct smb2_conn *c)
 
     smb2c_send(c, smb2c_build_create_full(c, "sdowned.bin", MBT_FILE_CREATE,
                                           FILE_ALL_ACCESS_MASK, MBT_FILE_SHARE_RWD,
-                                          MBT_FILE_NON_DIRECTORY_FILE, NULL,
+                                          MBT_FILE_NON_DIRECTORY_FILE,
+                                          MBT_FILE_ATTRIBUTE_NORMAL, NULL,
                                           &ctx, 1));
     smb2c_wait(c);
     smb2c_parse_create(c, &co);

@@ -1381,6 +1381,67 @@ probe_query_directory(struct smb2_conn *c)
 
 /* ---- refusals ----------------------------------------------------------- */
 
+/* FileAttributes of a file just created with FileAttributes = NORMAL. */
+static uint32_t
+created_file_attributes(
+    struct smb2_conn *c,
+    const char       *name,
+    uint32_t          file_attributes,
+    uint32_t         *st)
+{
+    struct smb2_create_out co;
+    uint8_t                basic[64];
+    uint32_t               len = 0, attrs = 0;
+
+    *st = smb2_create_attrs(c, name, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                            MBT_FILE_SHARE_RWD, file_attributes, &co);
+    if (*st != ST_SUCCESS) {
+        return 0;
+    }
+    if (smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, co.file_id, 0,
+                        basic, sizeof(basic), &len) == ST_SUCCESS && len >= 36) {
+        /* FILE_BASIC_INFORMATION: 4 timestamps (32) then FileAttributes(4). */
+        attrs = g32(basic, 32);
+    }
+    smb2_close(c, co.file_id);
+    return attrs;
+} /* created_file_attributes */
+
+/* A CREATE's DOS attributes come from its own FileAttributes and nothing
+ * else.  The request slot is pooled, and the create path ORs ARCHIVE into the
+ * slot's set_attr; when the field was not reset, a plain create reused the
+ * previous CREATE's READONLY bit, so a new file came out read-only and every
+ * later write open of it was refused (found with the Windows client).
+ * Alternate the two kinds of create so each normal one follows a READONLY one
+ * on whatever slot the server hands out. */
+static void
+probe_create_attributes_not_inherited(struct smb2_conn *c)
+{
+    char     name[32];
+    uint32_t st, attrs;
+    int      leaked = 0, ro_seen = 0;
+
+    for (int i = 0; i < 8; i++) {
+        snprintf(name, sizeof(name), "attr-ro-%d.bin", i);
+        attrs = created_file_attributes(c, name, MBT_FILE_ATTRIBUTE_READONLY, &st);
+        if (st == ST_SUCCESS && (attrs & MBT_FILE_ATTRIBUTE_READONLY)) {
+            ro_seen++;
+        }
+
+        snprintf(name, sizeof(name), "attr-plain-%d.bin", i);
+        attrs = created_file_attributes(c, name, MBT_FILE_ATTRIBUTE_NORMAL, &st);
+        CHECK(st == ST_SUCCESS, "CREATE %s (FileAttributes NORMAL) -> 0x%08x", name, st);
+        if (attrs & MBT_FILE_ATTRIBUTE_READONLY) {
+            leaked++;
+        }
+    }
+
+    CHECK(ro_seen == 8, "a CREATE with FileAttributes READONLY makes a read-only file "
+          "(%d of 8)", ro_seen);
+    CHECK(leaked == 0, "a CREATE with FileAttributes NORMAL never inherits READONLY "
+          "from an earlier CREATE (%d of 8 did)", leaked);
+} /* probe_create_attributes_not_inherited */
+
 static void
 probe_refusals(struct smb2_conn *c)
 {
@@ -1491,6 +1552,7 @@ main(
     probe_security_sids(c);
     probe_query_directory(c);
     probe_refusals(c);
+    probe_create_attributes_not_inherited(c);
 
     smb2_env_stop(&env);
 
