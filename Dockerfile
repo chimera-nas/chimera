@@ -116,6 +116,11 @@ COPY /suppressions.txt /suppressions.txt
 
 RUN mkdir -p /export
 
+# The linux module needs file handles, which the image's overlayfs root
+# does not support; a volume keeps /export off it when no host directory
+# is bound there.
+VOLUME /export
+
 ENV LSAN_OPTIONS=suppressions=/suppressions.txt
 
 # Just to check it will at least execute at build time
