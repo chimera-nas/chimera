@@ -485,6 +485,90 @@ test_reclaim_complete_not_granted_to_new_clients(void)
     printf("ok: reclaim_complete_not_granted_to_new_clients\n");
 } /* test_reclaim_complete_not_granted_to_new_clients */
 
+/* ------------------------------------------------------------------ *
+*  Hydrated client: retiring it leaves the by-owner table            *
+* ------------------------------------------------------------------ */
+
+/*
+ * A client record rebuilt out of the KV store is hashed by owner as well as by
+ * id, and every path that retires a record decides from
+ * nfs4_client_in_owner_table whether to unhash it by owner.  A hydrated
+ * record that is not flagged is freed while still hashed by owner, and the
+ * next record added for that owner links itself in through the freed memory:
+ * the write lands in whatever the allocator has handed out there since.
+ *
+ * The retirement exercised is the one a returning client takes when it
+ * reboots: EXCHANGE_ID with a new verifier registers a superseding record
+ * (RFC 8881 section 18.35.4 case 5), and CREATE_SESSION confirms it, retiring
+ * the hydrated one.
+ */
+static void
+test_hydrated_client_leaves_owner_table(void)
+{
+    struct nfs4_client_table       table;
+    struct nfs4_drc_session_record srec;
+    struct nfs4_client_principal   princ;
+    struct nfs4_exchange_id_result eid;
+    struct nfs4_client            *c;
+    struct nfs_client             *destroy_unified;
+    uint8_t                        sessionid[NFS4_SESSIONID_SIZE];
+    static const uint8_t           owner[] = "co_owner_hydrated_reboot";
+    uint64_t                       hydrated_id;
+
+    nfs4_client_table_init(&table,1);
+
+    /* --- a returning client, hydrated from its persisted session --- */
+    hydrated_id = nfs4_make_clientid(1,7);
+    memset(sessionid,0x5A,NFS4_SESSIONID_SIZE);
+
+    memset(&srec,0,sizeof(srec));
+    srec.clientid              = hydrated_id;
+    srec.verifier              = 0x1111ULL;
+    srec.princ_flavor          = 1;
+    srec.replay_max_slots      = 8;
+    srec.replay_maxresp_cached = 4096;
+    srec.owner_len             = sizeof(owner) - 1;
+    memcpy(srec.owner,owner,srec.owner_len);
+
+    nfs4_drc_reconstruct_session(&table,sessionid,&srec,0x9999ULL);
+
+    HASH_FIND(nfs4_client_hh_by_owner,table.nfs4_ct_clients_by_owner,
+              owner,sizeof(owner) - 1,c);
+    CHECK(c != NULL);
+    CHECK(c->nfs4_client_id == hydrated_id);
+
+    /* --- the client reboots: a superseding registration... --- */
+    memset(&princ,0,sizeof(princ));
+    princ.flavor = srec.princ_flavor;
+
+    nfs4_client_exchange_id(&table,owner,(int) sizeof(owner) - 1,0x2222ULL,
+                            &princ,false,1,&eid);
+    CHECK(eid.status == NFS4_OK);
+    CHECK(eid.clientid != hydrated_id);
+    CHECK(!eid.confirmed);
+
+    /* ...which CREATE_SESSION confirms, retiring the hydrated record. */
+    CHECK(nfs4_client_confirm(&table,eid.clientid,&destroy_unified));
+    CHECK(destroy_unified != NULL);
+    nfs_client_destroy(destroy_unified,NULL,NULL,true);
+
+    /* The decisive check: the superseding record is the only one left, in
+     * both tables. */
+    CHECK(HASH_CNT(nfs4_client_hh_by_id,table.nfs4_ct_clients_by_id) == 1);
+    CHECK(HASH_CNT(nfs4_client_hh_by_owner,
+                   table.nfs4_ct_clients_by_owner) == 1);
+
+    HASH_FIND(nfs4_client_hh_by_owner,table.nfs4_ct_clients_by_owner,
+              owner,sizeof(owner) - 1,c);
+    CHECK(c != NULL);
+    CHECK(c->nfs4_client_id == eid.clientid);
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    printf("ok: hydrated_client_leaves_owner_table\n");
+} /* test_hydrated_client_leaves_owner_table */
+
 /*
  * nfs_recovery_kickoff() forces the grace window open before its async KV
  * reads have populated to_reclaim, so pending_reclaim is legitimately 0 while
@@ -1281,6 +1365,7 @@ main(void)
     test_cross_reboot_replay();
     test_cross_reboot_reclaim_complete();
     test_reclaim_complete_not_granted_to_new_clients();
+    test_hydrated_client_leaves_owner_table();
     test_grace_survives_sweep_during_load();
     test_grace_survives_reclaim_complete_during_load();
 
