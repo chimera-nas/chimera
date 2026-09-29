@@ -1992,6 +1992,25 @@ chimera_smb_create_release_parent(struct chimera_smb_request *request)
     }
 } /* chimera_smb_create_release_parent */
 
+/* True when the connection this CREATE arrived on has gone away while its VFS
+ * open was in flight -- the same test chimera_smb_compound_reply uses to drop a
+ * reply.  An in-flight CREATE holds no tree reference, so the disconnect has
+ * already torn the session's trees down and swept their opens; hashing a new
+ * open into that tree would leave its VFS handle referenced forever (and the
+ * tree may already be back in the free pool).  The client never saw a reply,
+ * so abandoning the open is indistinguishable from the CREATE not having run.
+ * Seen at shutdown with the Windows client: a background attribute query to a
+ * cairn share, whose opens complete on a delegation thread, landed after the
+ * connection closed and the leaked handle hung chimera_vfs_destroy. */
+static inline bool
+chimera_smb_create_conn_gone(struct chimera_smb_request *request)
+{
+    struct chimera_smb_compound *compound = request->compound;
+
+    return compound->conn->generation != compound->conn_generation ||
+           compound->conn->disconnecting;
+} /* chimera_smb_create_conn_gone */
+
 static inline void
 chimera_smb_create_finish_share_grant(
     struct chimera_smb_open_file  *open_file,
@@ -3044,6 +3063,13 @@ chimera_smb_create_open_at_callback(
         }
         chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
+        return;
+    }
+
+    if (unlikely(chimera_smb_create_conn_gone(request))) {
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_CONNECTION_DISCONNECTED);
         return;
     }
 
@@ -4327,6 +4353,12 @@ chimera_smb_create_open_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
+        return;
+    }
+
+    if (unlikely(chimera_smb_create_conn_gone(request))) {
+        chimera_smb_create_release_handle(vfs_thread, oh);
+        chimera_smb_complete_request(request, SMB2_STATUS_CONNECTION_DISCONNECTED);
         return;
     }
 
