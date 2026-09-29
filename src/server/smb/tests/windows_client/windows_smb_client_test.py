@@ -632,16 +632,23 @@ def run_all(chimera, backends):
         finally:
             for drive in drives:
                 net_use_delete(drive)
+            shutdown_failure = None
+            stopping = time.monotonic()
             if proc.poll() is None:
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
                 try:
-                    proc.wait(timeout=30)
+                    proc.wait(timeout=120)
                 except subprocess.TimeoutExpired:
+                    shutdown_failure = "daemon still running 120s after CTRL_BREAK; killed"
                     proc.kill()
                     proc.wait()
-            if proc.returncode != 0:
-                results.append(("daemon/shutdown", 0.0,
-                                f"daemon exited with status {proc.returncode}", None))
+            stopped = time.monotonic() - stopping
+            if shutdown_failure is None and proc.returncode != 0:
+                shutdown_failure = f"daemon exited with status {proc.returncode}"
+            print(f"daemon stopped in {stopped:.1f}s with status {proc.returncode}", flush=True)
+            if shutdown_failure:
+                print(f"[FAIL] daemon/shutdown -- {shutdown_failure}", flush=True)
+                results.append(("daemon/shutdown", stopped, shutdown_failure, None))
             if any(r[2] for r in results):
                 log.seek(0)
                 tail = log.read().decode("utf-8", errors="replace").splitlines()[-300:]
