@@ -21,6 +21,7 @@
 #include "common/logging.h"
 #include "common/macros.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_identity.h"
 #include "vfs/vfs_user_cache.h"
 
 #define smb_ntlm_debug(...) chimera_debug("smb_ntlm", __FILE__, __LINE__, __VA_ARGS__)
@@ -436,21 +437,25 @@ append_av_pair(
 
 void
 smb_ntlm_resolve_server_identity(
+    struct chimera_vfs                   *vfs,
     const struct chimera_smb_auth_config *auth_config,
     struct smb_ntlm_server_identity      *id)
 {
-    char   hostname[256];
-    size_t i;
-    int    winbind_name   = 0;
-    int    winbind_domain = 0;
+    char                                    hostname[256];
+    size_t                                  i;
+    int                                     winbind_name   = 0;
+    int                                     winbind_domain = 0;
+    struct chimera_vfs_identity_domain_info join;
 
     memset(id, 0, sizeof(*id));
 
-    /* Winbind knows the exact identity the host is joined with. */
-    if (auth_config && auth_config->winbind_enabled) {
-        if (smb_wbclient_netbios_identity(id->netbios_name, sizeof(id->netbios_name),
-                                          id->netbios_domain, sizeof(id->netbios_domain),
-                                          NULL, 0) != 0) {
+    /* Winbind knows the exact identity the host is joined with; it reports it
+     * through the identity engine's domain_info op. */
+    if (auth_config && auth_config->winbind_enabled && vfs) {
+        if (chimera_vfs_identity_domain_info(vfs, &join) == CHIMERA_VFS_IDENTITY_OK) {
+            snprintf(id->netbios_name, sizeof(id->netbios_name), "%s", join.netbios_name);
+            snprintf(id->netbios_domain, sizeof(id->netbios_domain), "%s", join.netbios_domain);
+        } else {
             smb_ntlm_error(
                 "NTLM: winbind join identity unavailable; advertising fallback "
                 "CHALLENGE target names, pass-through logons may fail against "
@@ -564,7 +569,7 @@ generate_challenge(
     } else {
         /* No identity resolved at server init (no auth config); resolve
          * without winbind so the request path never blocks on winbindd. */
-        smb_ntlm_resolve_server_identity(NULL, &local_identity);
+        smb_ntlm_resolve_server_identity(NULL, NULL, &local_identity);
         identity = &local_identity;
     }
 

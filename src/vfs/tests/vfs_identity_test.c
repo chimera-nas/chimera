@@ -4,7 +4,7 @@
 
 /*
  * Identity resolver: a cache hit resolves synchronously (inline); a miss is
- * resolved off the event loop by a worker (default NSS handler) and delivered
+ * resolved off the event loop by a worker (default NSS module) and delivered
  * back on the caller's evpl thread via the doorbell, populating the cache so a
  * subsequent lookup is synchronous; an unresolvable key completes with NULL.
  */
@@ -62,21 +62,33 @@ resolve_cb(
 } /* resolve_cb */
 
 /*
- * Stands in for the winbind handler: registered AFTER the built-in NSS one and,
- * unlike NSS, able to supply a real SID for a numeric key.  `private_data`
- * points at the one gid it claims to know, which the test picks to be a gid NSS
+ * Stands in for the winbind module: registered AFTER the built-in NSS one and,
+ * unlike NSS, able to supply a real SID for a numeric key.  Its configuration
+ * names the one gid it claims to know, which the test picks to be a gid NSS
  * can ALSO resolve -- that overlap is the whole point, since first-wins would
  * hand the answer to NSS and lose the SID.
  */
 #define TEST_WB_GID_SID "S-1-5-21-777-888-999-513"
 
-static int
-sid_bearing_handler(
+static uint32_t sid_bearing_target;
+
+static void *
+sid_bearing_init(
+    const char                *cfgdata,
+    struct prometheus_metrics *metrics)
+{
+    (void) metrics;
+    assert(sscanf(cfgdata, "%u", &sid_bearing_target) == 1);
+    return &sid_bearing_target;
+} /* sid_bearing_init */
+
+static enum chimera_vfs_identity_status
+sid_bearing_lookup(
+    void                               *private_data,
     enum chimera_vfs_identity_key       key,
     uint32_t                            id,
     const char                         *name,
-    struct chimera_vfs_identity_result *out,
-    void                               *private_data)
+    struct chimera_vfs_identity_result *out)
 {
     uint32_t target = *(const uint32_t *) private_data;
 
@@ -88,22 +100,48 @@ sid_bearing_handler(
         snprintf(out->group.groupname, sizeof(out->group.groupname), "wbgroup");
         out->group.groupname_len = (int) strlen(out->group.groupname);
         snprintf(out->group.sid, sizeof(out->group.sid), TEST_WB_GID_SID);
-        return 0;
+        return CHIMERA_VFS_IDENTITY_OK;
     }
 
-    return -1;
-} /* sid_bearing_handler */
+    return CHIMERA_VFS_IDENTITY_NOT_MINE;
+} /* sid_bearing_lookup */
+
+static struct chimera_vfs_identity_module sid_bearing_module = {
+    .sdk_version  = CHIMERA_VFS_IDENTITY_SDK_VERSION,
+    .name         = "sidbearing",
+    .capabilities = CHIMERA_VFS_IDENTITY_CAP_LOOKUP,
+    .init         = sid_bearing_init,
+    .lookup       = sid_bearing_lookup,
+};
+
+/* A module without CAP_LOOKUP must be skipped by the walk, never called. */
+static enum chimera_vfs_identity_status
+no_lookup_domain_info(
+    void                                    *private_data,
+    struct chimera_vfs_identity_domain_info *out)
+{
+    (void) private_data;
+    snprintf(out->netbios_domain, sizeof(out->netbios_domain), "TESTDOM");
+    return CHIMERA_VFS_IDENTITY_OK;
+} /* no_lookup_domain_info */
+
+static struct chimera_vfs_identity_module domain_only_module = {
+    .sdk_version  = CHIMERA_VFS_IDENTITY_SDK_VERSION,
+    .name         = "domainonly",
+    .capabilities = CHIMERA_VFS_IDENTITY_CAP_DOMAIN_INFO,
+    .domain_info  = no_lookup_domain_info,
+};
 
 #ifdef _WIN32
 /* Windows has no NSS provider. Supply deterministic worker results so the
  * same async completion, caching, and SID-precedence checks still run. */
-static int
-fixture_identity_handler(
+static enum chimera_vfs_identity_status
+fixture_identity_lookup(
+    void                               *private_data,
     enum chimera_vfs_identity_key       key,
     uint32_t                            id,
     const char                         *name,
-    struct chimera_vfs_identity_result *out,
-    void                               *private_data)
+    struct chimera_vfs_identity_result *out)
 {
     (void) private_data;
     if (key == CHIMERA_VFS_IDENTITY_BY_NAME && !strcmp(name, "root")) {
@@ -111,17 +149,24 @@ fixture_identity_handler(
         out->user.gid = 0;
         snprintf(out->user.username, sizeof(out->user.username), "root");
         out->user.username_len = 4;
-        return 0;
+        return CHIMERA_VFS_IDENTITY_OK;
     }
     if (key == CHIMERA_VFS_IDENTITY_BY_GID && id <= 1) {
         out->is_group  = 1;
         out->group.gid = id;
         snprintf(out->group.groupname, sizeof(out->group.groupname), "group%u", id);
         out->group.groupname_len = (int) strlen(out->group.groupname);
-        return 0;
+        return CHIMERA_VFS_IDENTITY_OK;
     }
-    return -1;
-} /* fixture_identity_handler */
+    return CHIMERA_VFS_IDENTITY_NOT_MINE;
+} /* fixture_identity_lookup */
+
+static struct chimera_vfs_identity_module fixture_module = {
+    .sdk_version  = CHIMERA_VFS_IDENTITY_SDK_VERSION,
+    .name         = "fixture",
+    .capabilities = CHIMERA_VFS_IDENTITY_CAP_LOOKUP,
+    .lookup       = fixture_identity_lookup,
+};
 #endif /* ifdef _WIN32 */
 
 int
@@ -168,8 +213,13 @@ main(
     assert(thread != NULL);
 
 #ifdef _WIN32
-    chimera_vfs_identity_register_handler(vfs, fixture_identity_handler, NULL);
+    chimera_vfs_identity_register_module(vfs, &fixture_module, "");
 #endif /* ifdef _WIN32 */
+
+    /* A module that only knows domain membership sits in the walk without
+     * being asked to resolve anything. */
+    chimera_vfs_identity_register_module(vfs, &domain_only_module, "");
+    assert(chimera_vfs_identity_has_capability(vfs, CHIMERA_VFS_IDENTITY_CAP_DOMAIN_INFO));
 
     /* --- 1. cache hit resolves inline (synchronously) --- */
     chimera_vfs_add_user(vfs, "alice", NULL, NULL,
@@ -285,7 +335,12 @@ main(
     assert(getgrgid(wb_gid) != NULL);
 #endif /* ifdef _WIN32 */
 
-    chimera_vfs_identity_register_handler(vfs, sid_bearing_handler, &wb_gid);
+    {
+        char wb_cfg[16];
+
+        snprintf(wb_cfg, sizeof(wb_cfg), "%u", wb_gid);
+        chimera_vfs_identity_register_module(vfs, &sid_bearing_module, wb_cfg);
+    }
 
     memset(&p, 0, sizeof(p));
     chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_GID, wb_gid,
@@ -330,6 +385,16 @@ main(
     }
     assert(p.found == 0);
     TEST_PASS("unresolvable gid completes with no group");
+
+    /* --- 6. domain membership comes from the first module that has it --- */
+    {
+        struct chimera_vfs_identity_domain_info join;
+
+        assert(chimera_vfs_identity_domain_info(vfs, &join) == CHIMERA_VFS_IDENTITY_OK);
+        assert(strcmp(join.netbios_domain, "TESTDOM") == 0);
+        assert(join.netbios_name[0] == '\0');
+        TEST_PASS("domain_info answered by the module that has the capability");
+    }
 
     chimera_vfs_thread_destroy(thread);
     chimera_vfs_destroy(vfs);

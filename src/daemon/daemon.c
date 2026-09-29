@@ -1082,6 +1082,42 @@ main(
         }
     }
 
+    /* "identity": identity modules (src/identity) behind the built-in NSS
+     * one, in object order -- which is walk order.  Each value is an object
+     * with an optional "path" (a shared object to dlopen for an out-of-tree
+     * module) and an optional "config" object handed to the module's init. */
+    json_t *identity_modules = json_object_get(server_params, "identity");
+    if (json_is_object(identity_modules)) {
+        const char *module_name;
+        json_t     *module_cfg;
+        json_object_foreach(identity_modules, module_name, module_cfg)
+        {
+            const char *mod_path   = NULL;
+            json_t     *config_obj = NULL;
+            char       *config_str = NULL;
+
+            if (json_is_object(module_cfg)) {
+                mod_path   = json_string_value(json_object_get(module_cfg, "path"));
+                config_obj = json_object_get(module_cfg, "config");
+            } else if (!json_is_null(module_cfg)) {
+                chimera_server_error("Identity module config for module %s is not an object, skipping",
+                                     module_name);
+                continue;
+            }
+
+            if (json_is_object(config_obj)) {
+                config_str = json_dumps(config_obj, JSON_COMPACT);
+            } else if (config_obj) {
+                chimera_server_error("Identity module config for module %s is not an object, skipping",
+                                     module_name);
+            }
+
+            chimera_server_config_add_identity_module(server_config, module_name, mod_path,
+                                                      config_str ? config_str : "");
+            free(config_str);
+        }
+    }
+
     json_t *s3_anon = json_object_get(config, "s3_anon");
     if (s3_anon && json_is_object(s3_anon)) {
         json_t *anon_uid = json_object_get(s3_anon, "uid");

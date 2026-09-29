@@ -130,14 +130,20 @@ test.
    - `cairn`: Custom persistent filesystem
    - `io_uring`: io_uring-based async filesystem
 
-2. **Protocol Servers** (`src/server/`):
+2. **Identity Modules** (`src/identity/`): backends for the VFS identity
+   engine (`src/vfs/vfs_identity.c`), built against
+   `src/vfs/sdk/vfs_identity_module.h`
+   - `nss`: the host's nsswitch (always present, walked first)
+   - `winbind`: winbindd via libwbclient (real AD SIDs, domain join identity)
+
+3. **Protocol Servers** (`src/server/`):
    - `nfs`: NFSv3 and NFSv4 implementation
    - `smb`: SMB2 protocol server
    - `s3`: S3-compatible object storage
 
-3. **Client Library** (`src/client/`): Application client interface
-4. **POSIX Layer** (`src/posix/`): POSIX compatibility layer
-5. **Metrics** (`src/metrics/`): Prometheus metrics support
+4. **Client Library** (`src/client/`): Application client interface
+5. **POSIX Layer** (`src/posix/`): POSIX compatibility layer
+6. **Metrics** (`src/metrics/`): Prometheus metrics support
 
 ### Key Design Patterns
 
@@ -192,6 +198,7 @@ protocol is enabled.
 
 ### Adding New Features
 - VFS modules go in `src/vfs/<module_name>/`
+- Identity modules go in `src/identity/<module_name>/`
 - Protocol features go in `src/server/<protocol>/`
 - Add tests in corresponding `tests/` directories
 - Update CMakeLists.txt for new components

@@ -66,12 +66,15 @@ struct smb_ntlm_server_identity {
     char dns_name[256];
 };
 
-// Resolve the identity advertised in CHALLENGE messages, preferring the
-// winbind join identity when auth_config enables winbind.  The winbind lookup
-// is a blocking winbindd round trip, so call this once at server startup and
-// cache the result; it must not run on the per-connection request path.
+// Resolve the identity advertised in CHALLENGE messages, preferring the join
+// identity an identity module (winbind) reports when auth_config enables
+// winbind.  That lookup is a blocking winbindd round trip, so call this once
+// at server startup and cache the result; it must not run on the
+// per-connection request path.  vfs may be NULL (no identity engine: the
+// fallback names are used).
 void
 smb_ntlm_resolve_server_identity(
+    struct chimera_vfs                   *vfs,
     const struct chimera_smb_auth_config *auth_config,
     struct smb_ntlm_server_identity      *id);
 

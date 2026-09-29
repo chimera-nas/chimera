@@ -7,8 +7,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "vfs/vfs_identity.h"
-
 struct chimera_vfs_user;
 
 #define SMB_WBCLIENT_MAX_GROUPS  32
@@ -89,32 +87,6 @@ int smb_wbclient_map_principal(
 // Returns: 1 if available, 0 if not
 int smb_wbclient_available(
     void);
-
-// Fetch the NetBIOS identity winbind is joined with (name of the machine
-// account, short domain and DNS domain).  Domain controllers validate the
-// NTLMv2 target info a pass-through logon carries against the machine account
-// on the netlogon channel, so the CHALLENGE must advertise these names.
-// Any output may be NULL when not wanted; empty string when unknown.
-// Returns: 0 on success, -1 on failure (output buffers left unmodified)
-int smb_wbclient_netbios_identity(
-    char  *netbios_name,
-    size_t netbios_name_len,
-    char  *netbios_domain,
-    size_t netbios_domain_len,
-    char  *dns_domain,
-    size_t dns_domain_len);
-
-// Identity-resolver miss handler backed by winbind.  Resolves BY_UID / BY_NAME
-// to a full user record (uid/gid/groups/name/real SID), BY_GID to a group
-// record (gid/name/real SID), and BY_SID to whichever of the two the SID names.
-// Registered with the VFS identity authority at SMB server init when winbind is
-// enabled.  Matches the chimera_vfs_identity_handler signature.
-int smb_wbclient_identity_handler(
-    enum chimera_vfs_identity_key       key,
-    uint32_t                            id,
-    const char                         *name,
-    struct chimera_vfs_identity_result *out,
-    void                               *private_data);
 
 // Authenticate a user via winbind using plaintext password
 // Returns: 0 on success, -1 on failure

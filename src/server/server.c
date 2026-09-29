@@ -46,6 +46,7 @@
 #include "fuse/fuse.h"
 #endif /* ifdef __linux__ */
 #include "vfs/vfs.h"
+#include "vfs/vfs_identity.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"
@@ -59,9 +60,10 @@
 #include "smb_common/smb2.h"
 #include "rest/rest.h"
 
-#define CHIMERA_SERVER_MAX_MODULES   64
+#define CHIMERA_SERVER_MAX_MODULES          64
+#define CHIMERA_SERVER_MAX_IDENTITY_MODULES 16
 
-#define CHIMERA_SERVER_MAX_PROTOCOLS 4
+#define CHIMERA_SERVER_MAX_PROTOCOLS        4
 
 struct chimera_server_config_smb_auth {
     int  winbind_enabled;
@@ -190,6 +192,10 @@ struct chimera_server_config {
     char                                  rest_ssl_cert[256];
     char                                  rest_ssl_key[256];
     struct chimera_vfs_module_cfg         modules[CHIMERA_SERVER_MAX_MODULES];
+    /* Identity modules (src/identity), in walk order; see
+     * chimera_server_config_add_identity_module. */
+    struct chimera_vfs_module_cfg         identity_modules[CHIMERA_SERVER_MAX_IDENTITY_MODULES];
+    int                                   num_identity_modules;
     struct chimera_server_config_smb_nic  smb_nic_info[16];
     struct chimera_server_config_smb_auth smb_auth;
     struct chimera_server_config_nfs_auth nfs_auth;
@@ -1414,6 +1420,44 @@ chimera_server_config_add_module(
         module_cfg->module_path[0] = '\0';
     }
 } /* chimera_server_config_add_module */
+
+SYMBOL_EXPORT void
+chimera_server_config_add_identity_module(
+    struct chimera_server_config *config,
+    const char                   *module_name,
+    const char                   *module_path,
+    const char                   *config_data)
+{
+    struct chimera_vfs_module_cfg *module_cfg = NULL;
+    int                            i;
+
+    /* One instance per backend: configuring a module twice overrides the
+     * first entry (keeping its position in the walk) rather than registering
+     * it again. */
+    for (i = 0; i < config->num_identity_modules; i++) {
+        if (strcmp(config->identity_modules[i].module_name, module_name) == 0) {
+            module_cfg = &config->identity_modules[i];
+            break;
+        }
+    }
+
+    if (!module_cfg) {
+        if (config->num_identity_modules >= CHIMERA_SERVER_MAX_IDENTITY_MODULES) {
+            chimera_server_error("Too many identity modules configured; ignoring %s", module_name);
+            return;
+        }
+        module_cfg = &config->identity_modules[config->num_identity_modules++];
+    }
+
+    snprintf(module_cfg->module_name, sizeof(module_cfg->module_name), "%s", module_name);
+    snprintf(module_cfg->config_data, sizeof(module_cfg->config_data), "%s",
+             config_data ? config_data : "");
+    if (module_path) {
+        snprintf(module_cfg->module_path, sizeof(module_cfg->module_path), "%s", module_path);
+    } else {
+        module_cfg->module_path[0] = '\0';
+    }
+} /* chimera_server_config_add_identity_module */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_metrics_port(
@@ -2917,6 +2961,42 @@ chimera_server_init(
                                    config->name_cache_enabled,
                                    config->rcu_reclaim_threads,
                                    metrics);
+
+    /* smb_auth.winbind_enabled predates the identity block and is kept as an
+     * alias for it: a deployment that set it gets the winbind module behind
+     * NSS exactly as before, unless the identity block already placed it. */
+    {
+        struct chimera_vfs_module_cfg identity_cfgs[CHIMERA_SERVER_MAX_IDENTITY_MODULES + 1];
+        int                           num_identity_cfgs = config->num_identity_modules;
+        int                           have_winbind      = 0;
+        int                           i;
+
+        memcpy(identity_cfgs, config->identity_modules,
+               num_identity_cfgs * sizeof(identity_cfgs[0]));
+
+        for (i = 0; i < num_identity_cfgs; i++) {
+            if (strcmp(identity_cfgs[i].module_name, "winbind") == 0) {
+                have_winbind = 1;
+                break;
+            }
+        }
+        if (config->smb_auth.winbind_enabled && !have_winbind) {
+#ifdef HAVE_WBCLIENT
+            memset(&identity_cfgs[num_identity_cfgs], 0, sizeof(identity_cfgs[0]));
+            snprintf(identity_cfgs[num_identity_cfgs].module_name,
+                     sizeof(identity_cfgs[num_identity_cfgs].module_name), "winbind");
+            num_identity_cfgs++;
+#else  /* ifdef HAVE_WBCLIENT */
+            /* The alias degrades the way the old stubbed winbind did -- no
+             * module, logons that need one are refused -- where an explicit
+             * identity-block entry for a module this build lacks is fatal. */
+            chimera_server_error("smb_auth.winbind_enabled is set but this build has no "
+                                 "libwbclient; the winbind identity module is unavailable");
+#endif /* ifdef HAVE_WBCLIENT */
+        }
+
+        chimera_vfs_identity_load_modules(server->vfs, identity_cfgs, num_identity_cfgs);
+    }
 
     /* Propagate the common TCP flavor so VFS client modules (e.g. nfs)
      * open outbound connections with the same transport. */

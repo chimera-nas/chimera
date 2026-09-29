@@ -67,3 +67,8 @@
 #include "vfs_acl_serialize.h"
 #include "vfs_access.h"
 #include "vfs_xattr_name.h"
+
+/* Identity modules: the backends behind the identity engine (name / uid /
+ * gid / SID resolution and domain membership).  A separate contract from the
+ * VFS module one, versioned by CHIMERA_VFS_IDENTITY_SDK_VERSION. */
+#include "vfs_identity_module.h"

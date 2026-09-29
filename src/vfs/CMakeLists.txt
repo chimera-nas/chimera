@@ -129,6 +129,17 @@ if (CAIRN_ENABLED)
     target_link_libraries(chimera_vfs chimera_vfs_cairn)
 endif()
 
+# Identity modules (src/identity): the engine references the in-tree ones
+# directly (vfs_identity.c) so they are always retained; an out-of-tree module
+# is dlopen'ed from its configured module_path instead.
+if (NOT WIN32)
+    target_link_libraries(chimera_vfs chimera_identity_nss)
+endif()
+
+if (WBCLIENT_FOUND)
+    target_link_libraries(chimera_vfs chimera_identity_winbind)
+endif()
+
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)
 endif()
