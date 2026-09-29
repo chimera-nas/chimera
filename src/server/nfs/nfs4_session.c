@@ -203,6 +203,7 @@ nfs4_client_register(
 
         HASH_ADD(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
                  nfs4_client_owner, client->nfs4_client_owner_len, client);
+        client->nfs4_client_in_owner_table = 1;
         HASH_ADD(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
                  nfs4_client_id, sizeof(client->nfs4_client_id), client);
 
