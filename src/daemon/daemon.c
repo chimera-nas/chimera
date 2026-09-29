@@ -1177,8 +1177,8 @@ main(
             int         fs_rc;
 
             if (!fs_module) {
-                chimera_server_error("Filesystem %s missing module, skipping", fsname);
-                continue;
+                chimera_server_error("Filesystem %s missing module", fsname);
+                startup_validation_fail();
             }
 
             chimera_server_info("Creating filesystem %s in module %s...", fsname, fs_module);
@@ -1190,7 +1190,7 @@ main(
             } else if (fs_rc != 0) {
                 chimera_server_error("Failed to create filesystem %s in module %s",
                                      fsname, fs_module);
-                exit(1);
+                startup_validation_fail();
             }
         }
     }
