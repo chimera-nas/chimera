@@ -506,6 +506,9 @@ chimera_nfs4_open_install_state(
         if ((existing->share_access & args->share_deny) ||
             (args->share_access & existing->share_deny)) {
             status = NFS4ERR_SHARE_DENIED;
+            nfs_state_table_release(&req->thread->shared->nfs4_state_table,
+                                    existing, NFS4_SLOT_TYPE_OPEN,
+                                    req->thread->vfs_thread);
             goto err_release_handle;
         }
         nfs_open_state_coalesce(existing,
@@ -533,6 +536,9 @@ chimera_nfs4_open_install_state(
          * (owner, fh) stays in force.  Broadening share bits on
          * coalesce is not re-checked cross-protocol in this pass —
          * upstream's intra-client check is likewise coalesce-exempt. */
+        nfs_state_table_release(&req->thread->shared->nfs4_state_table,
+                                existing, NFS4_SLOT_TYPE_OPEN,
+                                req->thread->vfs_thread);
     } else {
         struct nfs_open_state *new_state;
 

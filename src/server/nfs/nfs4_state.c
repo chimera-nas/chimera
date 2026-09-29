@@ -986,6 +986,11 @@ nfs_open_owner_find_state(
 
     evpl_mutex_lock(&owner->lock);
     HASH_FIND(hh, owner->states_by_fh, fh, fh_len, state);
+    if (state) {
+        /* Destruction removes the state under this same lock.  Pin it before
+         * unlocking so CLOSE or client expiry cannot free the lookup result. */
+        atomic_fetch_add_explicit(&state->refcount, 1, memory_order_acq_rel);
+    }
     evpl_mutex_unlock(&owner->lock);
     return state;
 } /* nfs_open_owner_find_state */
