@@ -147,6 +147,10 @@ struct chimera_vfs_close_thread {
      * flight at that moment without waiting for global quiescence. */
     uint64_t                   closes_issued;
     uint64_t                   closes_completed;
+    /* When the shutdown drain began, and whether a stalled drain has already
+     * logged what it is waiting on (see chimera_vfs_close_thread_wake_shutdown). */
+    uint64_t                   shutdown_started;
+    int                        shutdown_stall_logged;
     struct evpl_doorbell       doorbell;
     struct evpl_timer          timer;
     evpl_mutex_t               lock;

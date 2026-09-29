@@ -3151,6 +3151,9 @@ chimera_smb_create_open_at_callback(
 
             if (request->create.desired_access &
                 (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA)) {
+                chimera_smb_debug("CREATE access denied: write open of a "
+                                  "FILE_ATTRIBUTE_READONLY file (dos attributes %x)",
+                                  (unsigned) attr->va_dos_attributes);
                 chimera_vfs_release(vfs_thread, oh);
                 chimera_vfs_release(vfs_thread, request->create.parent_handle);
                 chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);

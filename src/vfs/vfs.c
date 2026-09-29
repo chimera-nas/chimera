@@ -225,6 +225,35 @@ static uint64_t
 chimera_vfs_close_sweep_min_age_ns(
     void);
 
+/* Log every handle a cache still holds a reference to.  Shutdown cannot finish
+ * until each is released, so a drain that stalls names its culprits instead of
+ * hanging silently. */
+static void
+chimera_vfs_close_thread_log_held(
+    struct vfs_open_cache *cache,
+    const char            *which)
+{
+    struct chimera_vfs_open_handle *handle;
+    char                            fh[2 * CHIMERA_VFS_FH_SIZE + 1];
+
+    for (unsigned int i = 0; i < cache->num_shards; i++) {
+        struct vfs_open_cache_shard *shard = &cache->shards[i];
+
+        evpl_mutex_lock(&shard->lock);
+        for (handle = shard->handles; handle; handle = handle->bucket_next) {
+            for (int b = 0; b < handle->fh_len; b++) {
+                snprintf(fh + 2 * b, 3, "%02x", handle->fh[b]);
+            }
+            fh[2 * handle->fh_len] = '\0';
+            chimera_vfs_error("shutdown: %s cache still holds %s handle %s "
+                              "(opencnt %u, access_mode %u, flags %x)",
+                              which, handle->vfs_module->name, fh, handle->opencnt,
+                              handle->access_mode, handle->flags);
+        }
+        evpl_mutex_unlock(&shard->lock);
+    }
+} /* chimera_vfs_close_thread_log_held */
+
 static void
 chimera_vfs_close_thread_wake_shutdown(
     struct evpl          *evpl,
@@ -254,6 +283,20 @@ chimera_vfs_close_thread_wake_shutdown(
 
     if (!shutdown) {
         return;
+    }
+
+    if (close_thread->shutdown_started == 0) {
+        close_thread->shutdown_started = chimera_vfs_now_ticks();
+    } else if (!close_thread->shutdown_stall_logged &&
+               (count || close_thread->num_pending) &&
+               chimera_vfs_ticks_to_ns(chimera_vfs_now_ticks() -
+                                       close_thread->shutdown_started) > 5000000000ULL) {
+        close_thread->shutdown_stall_logged = 1;
+        chimera_vfs_error("shutdown: close drain stalled for 5s with %" PRIu64
+                          " handles still referenced and %d closes in flight",
+                          count, close_thread->num_pending);
+        chimera_vfs_close_thread_log_held(close_thread->vfs->vfs_open_path_cache, "path");
+        chimera_vfs_close_thread_log_held(close_thread->vfs->vfs_open_file_cache, "file");
     }
 
     if (count == 0 && close_thread->num_pending == 0) {
