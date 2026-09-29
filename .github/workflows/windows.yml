@@ -295,6 +295,24 @@ jobs:
             Get-ChildItem $entries -Directory | Where-Object LastWriteTime -lt $runStart | Remove-Item -Recurse -Force
           }
           exit 0
+      # The daemon and its DLLs, for the smb-client job below: it runs the
+      # real Windows SMB client against this build on runners that cannot
+      # build it themselves.
+      - name: Bundle the daemon for the SMB client test
+        if: matrix.config == 'Release'
+        shell: pwsh
+        run: |
+          $bundle = "$env:RUNNER_TEMP/smb-client-bundle"
+          New-Item -ItemType Directory -Force $bundle | Out-Null
+          Copy-Item build/bin/chimera.exe, build/bin/*.dll $bundle
+          Copy-Item src/server/smb/tests/windows_client/windows_smb_client_test.py $bundle
+      - name: Upload the SMB client test bundle
+        if: matrix.config == 'Release'
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-smb-client-bundle-${{ matrix.arch }}
+          path: ${{ runner.temp }}/smb-client-bundle
+          retention-days: 1
       - name: Test
         shell: pwsh
         env:
@@ -341,3 +359,53 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config" -Force -ErrorAction SilentlyContinue
+
+  # The real Windows SMB client against a native chimera daemon on the same
+  # machine, one daemon per backend.  Port 445 belongs to the kernel's own SMB
+  # server, so the drive is mapped with `net use /TCPPORT`, which the client
+  # has from Windows 11 24H2 and Windows Server 2025; Server 2022, the image
+  # the x64 build cells use, has no such option.  So this job takes the
+  # Release daemon those cells built and runs it on Server 2025 (x64) and
+  # Windows 11 (ARM64).  See
+  # src/server/smb/tests/windows_client/windows_smb_client_test.py.
+  smb-client:
+    name: SMB client ${{ matrix.os }} ${{ matrix.arch }}
+    needs: test
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.full_matrix && '[{"runner":"windows-2025","os":"Server 2025","label":"server2025","arch":"x64"},{"runner":"windows-11-vs2026-arm","os":"Windows 11","label":"windows11","arch":"ARM64"}]' || '[{"runner":"windows-2025","os":"Server 2025","label":"server2025","arch":"x64"}]') }}
+    steps:
+      # As in the test job: the ARM64 image's C: is slow to flush, and diskfs
+      # and cairn flush on nearly every operation.
+      - name: Put scratch space on the local NVMe disk
+        shell: pwsh
+        run: |
+          $raw = Get-Disk | Where-Object PartitionStyle -eq 'RAW' | Sort-Object Size -Descending | Select-Object -First 1
+          if (-not $raw) { 'No raw local disk; scratch stays on the default drive.'; exit 0 }
+          $volume = Initialize-Disk -Number $raw.Number -PartitionStyle GPT -PassThru |
+            New-Partition -UseMaximumSize -AssignDriveLetter |
+            Format-Volume -FileSystem NTFS -NewFileSystemLabel scratch -Confirm:$false -Force
+          $temp = "$($volume.DriveLetter):\temp"
+          New-Item -ItemType Directory -Force $temp | Out-Null
+          "TEMP=$temp" >> $env:GITHUB_ENV
+          "TMP=$temp" >> $env:GITHUB_ENV
+      - uses: actions/download-artifact@v6
+        with:
+          name: windows-smb-client-bundle-${{ matrix.arch }}
+          path: bundle
+      - name: Run the Windows SMB client against memfs, diskfs and cairn
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ctest-results | Out-Null
+          python bundle/windows_smb_client_test.py bundle/chimera.exe memfs diskfs cairn --junit ctest-results/results.xml --duration ctest-results/duration_seconds
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ctest-junit-windows-smbclient-${{ matrix.label }}-${{ matrix.arch }}
+          path: ctest-results/
+          if-no-files-found: warn
+          retention-days: 30
