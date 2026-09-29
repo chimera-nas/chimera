@@ -33,8 +33,10 @@ target_include_directories(diskfs_mbt_replay PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..       # diskfs_test_harness.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../..    # diskfs_test.h
     ${JANSSON_INCLUDE_DIRS})
+# Embeds diskfs for the diskfs_test.h SDK; see ../CMakeLists.txt.
 target_link_libraries(diskfs_mbt_replay
-    chimera_vfs chimera_vfs_diskfs chimera_vfs_memkv evpl ${JANSSON_LIBRARIES})
+    chimera_vfs chimera_vfs_diskfs_objs evpl ${JANSSON_LIBRARIES})
+set_target_properties(diskfs_mbt_replay PROPERTIES ENABLE_EXPORTS ON)
 
 # ---------------------------------------------------------------------------
 # Trace corpus (generated at build time by quint; see rest/tests/quint for the

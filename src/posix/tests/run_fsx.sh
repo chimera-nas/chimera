@@ -122,7 +122,6 @@ generate_config() {
             mount_path="fs0"
             modules_section="\"modules\": {
         \"diskfs\": {
-            \"path\": \"/build/test/diskfs\",
             \"config\": {\"initialize\":true,\"devices\":[$DEVICES_JSON],\"unsafe_async\":true,\"intent_log_size\":67108864}
         }
     },"
@@ -132,7 +131,6 @@ generate_config() {
             mount_path="fs0"
             modules_section="\"modules\": {
         \"cairn\": {
-            \"path\": \"/build/test/cairn\",
             \"config\": {\"initialize\":true,\"path\":\"$SESSION_DIR\"}
         }
     },"

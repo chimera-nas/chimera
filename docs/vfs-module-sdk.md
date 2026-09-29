@@ -114,8 +114,7 @@ module in `struct chimera_vfs_module`.  See `vfs_fh_magic.h`.
   `vfs_log.h`), `vfs_fsid.h` (Linux-passthrough `st_dev` mapping),
   `server/smb/smb2.h` (for speaking SMB to a third party, not to
   chimera), and `../linux/` (io_uring is the linux backend with a
-  different I/O engine).  The `root` and `nfs`
-  modules are exempt: root is VFS-core plumbing and the NFS client
+  different I/O engine).  The `nfs` module is exempt: the NFS client
   backend is still entangled with the open cache.
 
 ## Versioning
@@ -156,10 +155,13 @@ See `examples/vfs_module/vfs_example.c` for the skeleton.  In short:
    `request->opcode`, use the per-op payload union, set
    `request->status`, and call `request->complete(request)` exactly once
    (synchronously or later from an async completion).
-4. Build as a shared object; reference the share in the chimera config
-   with `"module": "<name>"` and `"module_path": "/path/to/vfs_<name>.so"`.
-   The loader dlopens the object, resolves `vfs_<name>`, and validates
-   `sdk_version`.
+4. Build as a shared object and either install it in the VFS module
+   directory as `libchimera_vfs_<name>.so` (the directory holding
+   `libchimera_vfs`, or `$CHIMERA_VFS_MODULE_DIR`) or give its path
+   explicitly as `"module_path": "/path/to/vfs_<name>.so"` (`"path"` under
+   `server.vfs` in the daemon config).  The loader dlopens the object,
+   resolves `vfs_<name>`, and validates `sdk_version` -- the same path
+   every in-tree backend takes, since none is linked into chimera.
 
 Pointer-valued result attributes must remain valid until the consumer callback
 finishes. For deferred replies or blocking modules, `request->complete()` can

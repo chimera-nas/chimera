@@ -5,9 +5,11 @@
 # Model-based / quint-tier tests: the quick tier a plain `ctest` runs.
 set(CHIMERA_TEST_TIER quick)
 
-# White-box diskfs tests.  They link the diskfs module (for the diskfs_test.h
-# SDK exported from it) plus memkv (the pool KV backend the mount needs) and
-# drive diskfs directly through the VFS on a pread-backed device file.
+# White-box diskfs tests.  They embed diskfs (for the diskfs_test.h SDK
+# compiled into it) and drive it directly through the VFS on a pread-backed
+# device file; the memkv pool KV backend the mount needs is loaded at runtime.
+# ENABLE_EXPORTS lets chimera_vfs_init find the embedded vfs_diskfs, so the
+# VFS and the SDK share one copy of diskfs rather than also loading the module.
 #
 # The include of the parent directory is for diskfs_test.h (which lives with the
 # module because it needs the private internal structures).
@@ -20,7 +22,8 @@ target_include_directories(diskfs_smoke_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(diskfs_smoke_test
-    chimera_vfs chimera_vfs_diskfs chimera_vfs_memkv evpl)
+    chimera_vfs chimera_vfs_diskfs_objs evpl)
+set_target_properties(diskfs_smoke_test PROPERTIES ENABLE_EXPORTS ON)
 add_test(NAME chimera/vfs/diskfs/smoke_test COMMAND diskfs_smoke_test)
 set_tests_properties(chimera/vfs/diskfs/smoke_test PROPERTIES
     LABELS "quint;diskfs_mbt"
@@ -34,7 +37,8 @@ target_include_directories(diskfs_enospc_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(diskfs_enospc_test
-    chimera_vfs chimera_vfs_diskfs chimera_vfs_memkv evpl)
+    chimera_vfs chimera_vfs_diskfs_objs evpl)
+set_target_properties(diskfs_enospc_test PROPERTIES ENABLE_EXPORTS ON)
 add_test(NAME chimera/vfs/diskfs/enospc_test COMMAND diskfs_enospc_test)
 set_tests_properties(chimera/vfs/diskfs/enospc_test PROPERTIES
     LABELS "quint;diskfs_mbt"

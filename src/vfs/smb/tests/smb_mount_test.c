@@ -95,8 +95,8 @@ main(
      * own to keep it off the host's port. */
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_smb_enabled(config, 1);
-    /* Register the SMB2 client VFS module (statically linked into chimera_vfs;
-     * empty path => resolve the vfs_smb symbol, do not dlopen). */
+    /* Register the SMB2 client VFS module (empty path => the VFS loads it by
+     * name from its module directory). */
     chimera_server_config_add_module(config, "smb", NULL, "");
 
     server = chimera_server_init(config, metrics);

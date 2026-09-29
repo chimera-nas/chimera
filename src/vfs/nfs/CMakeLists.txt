@@ -4,7 +4,7 @@
 
 include_directories(${NFS_COMMON_INCLUDE_DIR})
 
-add_library(chimera_vfs_nfs ${CHIMERA_LIBRARY_TYPE}
+add_library(chimera_vfs_nfs ${CHIMERA_VFS_MODULE_TYPE}
     nfs.c
     nfs3.c
     nfs4.c
@@ -58,7 +58,7 @@ add_library(chimera_vfs_nfs ${CHIMERA_LIBRARY_TYPE}
 
 target_link_libraries(chimera_vfs_nfs chimera_nfs_common evpl evpl_rpc2)
 
-install(TARGETS chimera_vfs_nfs DESTINATION lib)
+chimera_vfs_module(chimera_vfs_nfs)
 
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)

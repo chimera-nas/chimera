@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_vfs_smb ${CHIMERA_LIBRARY_TYPE}
+add_library(chimera_vfs_smb ${CHIMERA_VFS_MODULE_TYPE}
     smb.c
     smb_mount.c
     smb_umount.c
@@ -14,7 +14,7 @@ add_library(chimera_vfs_smb ${CHIMERA_LIBRARY_TYPE}
 
 target_link_libraries(chimera_vfs_smb chimera_smb_common chimera_common evpl chimera_crypto)
 
-install(TARGETS chimera_vfs_smb DESTINATION lib)
+chimera_vfs_module(chimera_vfs_smb)
 
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)

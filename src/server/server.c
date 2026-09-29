@@ -503,8 +503,8 @@ chimera_server_config_init(void)
 
     /* The passthrough backends below are Linux-only (see src/vfs/CMakeLists.txt)
      * and are not built elsewhere, so do not ask the VFS to load them there --
-     * a missing module symbol is fatal at init.  Indices follow num_modules so
-     * the list stays contiguous whichever ones are present. */
+     * a module that cannot be loaded is fatal at init.  Indices follow
+     * num_modules so the list stays contiguous whichever ones are present. */
 #ifdef __linux__
     strncpy(config->modules[config->num_modules].module_name, "linux",
             sizeof(config->modules[config->num_modules].module_name));
@@ -1391,7 +1391,7 @@ chimera_server_config_add_module(
     int                            i;
 
     /* A module name maps to a single backend (one fh_magic), so configuring a
-     * built-in module (e.g. memfs with ds_mode/block_size) must override its
+     * default module (e.g. memfs with ds_mode/block_size) must override its
      * default entry rather than register a duplicate -- a double registration
      * leaks the first instance's private state. */
     for (i = 0; i < config->num_modules; i++) {
@@ -1410,7 +1410,7 @@ chimera_server_config_add_module(
     if (module_path) {
         snprintf(module_cfg->module_path, sizeof(module_cfg->module_path), "%s", module_path);
     } else {
-        /* We don't specify a path for preloaded modules like diskfs */
+        /* No path: the VFS loads the module by name from its module directory */
         module_cfg->module_path[0] = '\0';
     }
 } /* chimera_server_config_add_module */

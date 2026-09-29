@@ -11,6 +11,8 @@ add_compile_definitions(_LGPL_SOURCE)
 
 add_library(chimera_server ${CHIMERA_LIBRARY_TYPE} server.c)
 target_link_libraries(chimera_server chimera_nfs chimera_s3 chimera_smb chimera_rest chimera_vfs chimera_common evpl ${CHIMERA_UNWIND_LIB} ${CHIMERA_OTEL_LIBS})
+# The VFS backends are loaded at runtime, not linked (src/vfs/CMakeLists.txt).
+add_dependencies(chimera_server chimera_vfs_modules)
 
 install(TARGETS chimera_server DESTINATION lib)
 

@@ -212,7 +212,9 @@ elb_chimera_load_config(const char *config_path)
             module_path = json_object_get(module, "module_path");
             config_obj  = json_object_get(module, "config");
 
-            if (!module_name || !module_path) {
+            /* module_path is optional: without one the VFS loads the module
+             * by name from its module directory. */
+            if (!module_name) {
                 fprintf(stderr, "elbencho-chimera: invalid module config\n");
                 json_decref(config);
                 return -EINVAL;
@@ -225,7 +227,7 @@ elb_chimera_load_config(const char *config_path)
 
             chimera_client_config_add_module(client_config,
                                              json_string_value(module_name),
-                                             json_string_value(module_path),
+                                             module_path ? json_string_value(module_path) : "",
                                              config_str ? config_str : "");
             free(config_str);
         }

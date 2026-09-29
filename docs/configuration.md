@@ -189,18 +189,27 @@ Each entry of `data_servers`:
 | `backing_path` | string | required | Chimera VFS path (an `nfs`-module mount) the MDS uses to create backing files on the DS. |
 | `version` | int/string | `3` | NFS version clients use to reach the DS: `3`, `4`, `"4.0"`, or `"4.1"`. |
 
-#### `server.vfs` - loading external VFS plugins
+#### `server.vfs` - loading VFS modules
 
-Built-in modules (`memfs`, `linux`, `diskfs`, `io_uring`, ...) need no
-registration. A VFS module shipped as a separate shared object (e.g. `cairn`)
-is registered here, keyed by module name, before it can be used in `mounts`:
+Every VFS backend is a plugin that chimera loads at runtime; none is linked
+into the server.  A module is loaded by name from the module directory, which
+is the directory `libchimera_vfs` itself was loaded from (the backends are
+built and installed beside it as `libchimera_vfs_<name>.so`), or
+`$CHIMERA_VFS_MODULE_DIR` when that is set.
+
+The server loads `nfs`, `memfs`, and on Linux `linux` and `io_uring` by
+default.  Any other module (e.g. `diskfs`, `cairn`, `smb`, or an out-of-tree
+module) is registered here, keyed by module name, before it can be used in
+`mounts`:
 
 ```json
 "server": {
     "vfs": {
         "cairn": {
-            "path": "/usr/lib/chimera/libvfs_cairn.so",
             "config": { "path": "/var/lib/chimera/cairn" }
+        },
+        "vendorfs": {
+            "path": "/opt/vendor/lib/vfs_vendorfs.so"
         }
     }
 }
@@ -208,7 +217,7 @@ is registered here, keyed by module name, before it can be used in `mounts`:
 
 | Key | Type | Description |
 |---|---|---|
-| `path` | string | Filesystem path to the module's `.so`. |
+| `path` | string | Optional path to the module's `.so`, for a module outside the module directory. |
 | `config` | object | Module-specific options passed to the module at init (see [VFS module options](#vfs-module-options)). |
 
 ### `filesystems`

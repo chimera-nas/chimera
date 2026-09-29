@@ -16,7 +16,7 @@ check_symbol_exists(rocksdb_transaction_get_pinned_for_update "rocksdb/c.h" HAVE
 check_symbol_exists(rocksdb_flush_wal "rocksdb/c.h" HAVE_ROCKSDB_FLUSH_WAL_DECL)
 check_function_exists(rocksdb_flush_wal HAVE_ROCKSDB_FLUSH_WAL_SYM)
 
-add_library(chimera_vfs_cairn ${CHIMERA_LIBRARY_TYPE}
+add_library(chimera_vfs_cairn ${CHIMERA_VFS_MODULE_TYPE}
     cairn.c
 )
 
@@ -41,4 +41,4 @@ target_compile_definitions(chimera_vfs_cairn PRIVATE
     XXH_VECTOR=${CHIMERA_XXH_VECTOR}
 )
 
-install(TARGETS chimera_vfs_cairn DESTINATION lib)
+chimera_vfs_module(chimera_vfs_cairn)

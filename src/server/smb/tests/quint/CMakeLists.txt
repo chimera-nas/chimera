@@ -40,11 +40,14 @@ set_tests_properties(chimera/server/smb/mbt/smoke_probe_memfs PROPERTIES
     TIMEOUT 60)
 
 # Hold a backend rename across TREE_DISCONNECT to exercise a completion after
-# the requesting tree has released its share.
+# the requesting tree has released its share.  The probe embeds memfs to hook
+# its dispatch; ENABLE_EXPORTS lets the server's VFS find that hooked vfs_memfs
+# instead of loading the memfs module.
 add_executable(smb2_rename_disconnect_probe smb2_rename_disconnect_probe.c)
 target_include_directories(smb2_rename_disconnect_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(smb2_rename_disconnect_probe chimera_server chimera_metrics
-    chimera_vfs_memfs evpl)
+    chimera_vfs_memfs_objs evpl)
+set_target_properties(smb2_rename_disconnect_probe PROPERTIES ENABLE_EXPORTS ON)
 
 add_test(NAME chimera/server/smb/mbt/rename_disconnect_probe_memfs
     COMMAND $<TARGET_FILE:smb2_rename_disconnect_probe>)

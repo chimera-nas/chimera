@@ -60,8 +60,8 @@ chimera_client_config_init(void)
 
     /* The passthrough backends below are Linux-only (see src/vfs/CMakeLists.txt)
      * and are not built elsewhere, so do not ask the VFS to load them there --
-     * a missing module symbol is fatal at init.  Indices follow num_modules so
-     * the list stays contiguous whichever ones are present. */
+     * a module that cannot be loaded is fatal at init.  Indices follow
+     * num_modules so the list stays contiguous whichever ones are present. */
 #ifdef __linux__
     strncpy(config->modules[config->num_modules].module_name, "linux",
             sizeof(config->modules[config->num_modules].module_name));
