@@ -167,3 +167,35 @@ queue that callback on another thread. Use `chimera_vfs_request_alloc_memory()`
 for result data that would otherwise refer to reusable scratch; the core frees
 these allocations when it recycles the request. Check its return value for
 allocation failure, and do not free the returned storage yourself.
+
+## Identity modules
+
+The SDK carries a second, independent contract: `vfs_identity_module.h`
+defines `struct chimera_vfs_identity_module`, the backend behind the identity
+engine (`src/vfs/vfs_identity.c`) that resolves names, uids, gids and SIDs
+into identity records and reports the names the host is domain-joined with.
+The engine keeps the user cache in front of the modules and walks them in
+configuration order on a cache miss, off the event loop on its worker threads;
+a module answers only for itself, blocking as it must, and never calls back
+into the engine.
+
+A module declares a capability mask and implements the matching ops:
+
+| Capability | Op | Meaning |
+|---|---|---|
+| `CHIMERA_VFS_IDENTITY_CAP_LOOKUP` | `lookup` | Resolve a `BY_UID` / `BY_GID` / `BY_NAME` / `BY_SID` key into a user or group record. |
+| `CHIMERA_VFS_IDENTITY_CAP_DOMAIN_INFO` | `domain_info` | Report the NetBIOS and DNS names the host is joined with. |
+
+An op returns `CHIMERA_VFS_IDENTITY_OK`, `NOT_MINE` (the key is unknown here;
+the engine moves on) or `UNAVAILABLE` (the backend is down; routed like
+`NOT_MINE`, reported differently).  For a numeric key the engine treats a
+SID-less answer as provisional and keeps walking, so a SID-bearing module
+behind NSS can name the same identity properly.
+
+The in-tree modules live under `src/identity/`: `nss` (always present, walked
+first) and `winbind` (built when libwbclient is found).  An out-of-tree module
+exports `struct chimera_vfs_identity_module identity_<name>` with
+`.sdk_version = CHIMERA_VFS_IDENTITY_SDK_VERSION` and is named, with its
+shared-object path, under `server.identity` in the configuration.  The
+contract is versioned separately from the VFS one by
+`CHIMERA_VFS_IDENTITY_SDK_VERSION`.

@@ -80,7 +80,7 @@ The chimera side of both procedures is the `server.smb_auth` object:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `winbind_enabled` | bool | `false` | Authenticate through winbindd, and register winbind as a SID/uid resolver for SMB security descriptors. |
+| `winbind_enabled` | bool | `false` | Authenticate through winbindd, and register the `winbind` identity module as a SID/uid resolver for SMB security descriptors (an alias for a `winbind` entry in [`server.identity`](configuration#serveridentity---identity-modules)). |
 | `winbind_domain` | string | - | Fallback NetBIOS domain advertised in the NTLM CHALLENGE if winbindd cannot be queried for the join identity at startup. |
 | `kerberos_enabled` | bool | `false` | Accept Kerberos through SPNEGO. |
 | `kerberos_keytab` | string | - | Keytab used to accept Kerberos contexts. If unset, the MIT default (or `KRB5_KTNAME`) applies. |
@@ -96,7 +96,9 @@ reference for how these sit in the wider config file.
 dependency, detected with `pkg-config`, so cmake reports either
 `libwbclient found - Winbind integration enabled` or
 `libwbclient not found - Winbind integration disabled`. In the second case the
-resulting binary accepts `winbind_enabled: true` but does nothing with it.
+resulting binary has no `winbind` identity module: `winbind_enabled: true`
+logs an error at startup and pass-through logons are refused, and a
+`server.identity` entry naming `winbind` is fatal.
 Install `libwbclient-dev` (Debian/Ubuntu) or `libwbclient-devel` (RHEL/Rocky)
 and reconfigure. The prebuilt container images already include it.
 

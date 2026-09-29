@@ -628,6 +628,17 @@ chimera_server_config_add_module(
     const char                   *module_path,
     const char                   *config_data);
 
+/* Add an identity module (src/identity) to the engine's walk, in call order
+ * behind the built-in NSS module.  module_path names a shared object to
+ * dlopen for an out-of-tree module, NULL for one linked into chimera;
+ * config_data is the module's configuration JSON ("" or NULL for none). */
+void
+chimera_server_config_add_identity_module(
+    struct chimera_server_config *config,
+    const char                   *module_name,
+    const char                   *module_path,
+    const char                   *config_data);
+
 void
 chimera_server_config_set_metrics_port(
     struct chimera_server_config *config,

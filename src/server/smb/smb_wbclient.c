@@ -4,14 +4,11 @@
 
 #include "smb_wbclient.h"
 #include "smb_internal.h"
-#include "vfs/vfs_user_cache.h"
 
 #ifdef HAVE_WBCLIENT
 
 #include <wbclient.h>
 #include <string.h>
-#include <pwd.h>
-#include <grp.h>
 
 SYMBOL_EXPORT int
 smb_wbclient_available(void)
@@ -45,33 +42,6 @@ wbc_copy_string(
     }
     dst[len] = '\0';
 } // wbc_copy_string
-
-int
-smb_wbclient_netbios_identity(
-    char  *netbios_name,
-    size_t netbios_name_len,
-    char  *netbios_domain,
-    size_t netbios_domain_len,
-    char  *dns_domain,
-    size_t dns_domain_len)
-{
-    wbcErr                      wbc_err;
-    struct wbcInterfaceDetails *details = NULL;
-
-    wbc_err = wbcInterfaceDetails(&details);
-    if (wbc_err != WBC_ERR_SUCCESS || !details) {
-        chimera_smb_error("wbcInterfaceDetails failed: %s",
-                          wbcErrorString(wbc_err));
-        return -1;
-    }
-
-    wbc_copy_string(netbios_name, netbios_name_len, details->netbios_name);
-    wbc_copy_string(netbios_domain, netbios_domain_len, details->netbios_domain);
-    wbc_copy_string(dns_domain, dns_domain_len, details->dns_domain);
-
-    wbcFreeMemory(details);
-    return 0;
-} // smb_wbclient_netbios_identity
 
 // Convert wbcDomainSid to string format
 static int
@@ -353,207 +323,6 @@ smb_wbclient_map_principal(
     return 0;
 } // smb_wbclient_map_principal
 
-/* Fill a chimera_vfs_user (uid/gid/groups/name + real SID) from a resolved user
- * SID.  Returns 0 on success, -1 if the SID does not map to a Unix user. */
-static int
-wbc_fill_user(
-    const struct wbcDomainSid *user_sid,
-    const char                *sidstr,
-    struct chimera_vfs_user   *out)
-{
-    wbcErr               wbc_err;
-    uint32_t             unix_uid;
-    struct passwd       *pwd         = NULL;
-    struct wbcDomainSid *groups_sids = NULL;
-    uint32_t             num_groups  = 0;
-    uint32_t             i;
-
-    wbc_err = wbcSidToUid(user_sid, &unix_uid);
-    if (wbc_err != WBC_ERR_SUCCESS) {
-        return -1;
-    }
-
-    out->uid = unix_uid;
-    if (sidstr) {
-        wbc_copy_string(out->sid, sizeof(out->sid), sidstr);
-    }
-
-    /* Primary gid + name from the winbind passwd entry. */
-    wbc_err = wbcGetpwuid(unix_uid, &pwd);
-    if (wbc_err == WBC_ERR_SUCCESS && pwd) {
-        out->gid = pwd->pw_gid;
-        wbc_copy_string(out->username, sizeof(out->username), pwd->pw_name);
-        out->username_len = (int) strlen(out->username);
-        wbcFreeMemory(pwd);
-    } else {
-        out->gid = unix_uid;
-    }
-
-    /* Supplementary groups. */
-    out->ngids = 0;
-    wbc_err    = wbcLookupUserSids(user_sid, 0, &num_groups, &groups_sids);
-    if (wbc_err == WBC_ERR_SUCCESS && num_groups > 0) {
-        for (i = 0; i < num_groups && out->ngids < CHIMERA_VFS_CRED_MAX_GIDS; i++) {
-            uint32_t group_gid;
-            if (wbcSidToGid(&groups_sids[i], &group_gid) == WBC_ERR_SUCCESS) {
-                out->gids[out->ngids++] = group_gid;
-            }
-        }
-        wbcFreeMemory(groups_sids);
-    }
-
-    return 0;
-} // wbc_fill_user
-
-/* Fill a chimera_vfs_group (gid/name + real SID) from a resolved group SID.
- * Returns 0 on success, -1 if the SID does not map to a Unix group. */
-static int
-wbc_fill_group(
-    const struct wbcDomainSid *group_sid,
-    const char                *sidstr,
-    struct chimera_vfs_group  *out)
-{
-    wbcErr        wbc_err;
-    uint32_t      unix_gid;
-    struct group *grp = NULL;
-
-    wbc_err = wbcSidToGid(group_sid, &unix_gid);
-    if (wbc_err != WBC_ERR_SUCCESS) {
-        return -1;
-    }
-
-    out->gid = unix_gid;
-    if (sidstr) {
-        wbc_copy_string(out->sid, sizeof(out->sid), sidstr);
-    }
-
-    /* Name from the winbind group entry (best effort -- the gid<->SID mapping
-     * is what callers need). */
-    wbc_err = wbcGetgrgid(unix_gid, &grp);
-    if (wbc_err == WBC_ERR_SUCCESS && grp) {
-        wbc_copy_string(out->groupname, sizeof(out->groupname), grp->gr_name);
-        out->groupname_len = (int) strlen(out->groupname);
-        wbcFreeMemory(grp);
-    }
-
-    return 0;
-} // wbc_fill_group
-
-/* Non-zero if `type` names a group rather than a user. */
-static int
-wbc_sid_type_is_group(enum wbcSidType type)
-{
-    return type == WBC_SID_NAME_DOM_GRP ||
-           type == WBC_SID_NAME_ALIAS ||
-           type == WBC_SID_NAME_WKN_GRP;
-} // wbc_sid_type_is_group
-
-int
-smb_wbclient_identity_handler(
-    enum chimera_vfs_identity_key       key,
-    uint32_t                            id,
-    const char                         *name,
-    struct chimera_vfs_identity_result *out,
-    void                               *private_data)
-{
-    wbcErr              wbc_err;
-    struct wbcDomainSid sid;
-    enum wbcSidType     sid_type;
-    char                sidbuf[SMB_WBCLIENT_SID_MAX_LEN];
-    char               *lookup_domain = NULL, *lookup_name = NULL;
-    int                 rc;
-
-    (void) private_data;
-
-    switch (key) {
-        case CHIMERA_VFS_IDENTITY_BY_UID:
-            wbc_err = wbcUidToSid(id, &sid);
-            if (wbc_err != WBC_ERR_SUCCESS) {
-                return -1;
-            }
-            if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
-                return -1;
-            }
-            return wbc_fill_user(&sid, sidbuf, &out->user);
-
-        case CHIMERA_VFS_IDENTITY_BY_GID:
-            wbc_err = wbcGidToSid(id, &sid);
-            if (wbc_err != WBC_ERR_SUCCESS) {
-                return -1;
-            }
-            if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
-                return -1;
-            }
-            out->is_group = 1;
-            return wbc_fill_group(&sid, sidbuf, &out->group);
-
-        case CHIMERA_VFS_IDENTITY_BY_SID:
-            if (!name) {
-                return -1;
-            }
-            wbc_err = wbcStringToSid(name, &sid);
-            if (wbc_err != WBC_ERR_SUCCESS) {
-                return -1;
-            }
-            /* A SID is ambiguous.  Ask winbind what it names before choosing
-             * the fill: a group SID put through the user-shaped fill fails at
-             * wbcSidToUid, which is why domain-group ACEs used to be dropped. */
-            wbc_err = wbcLookupSid(&sid, &lookup_domain, &lookup_name,
-                                   &sid_type);
-            if (wbc_err != WBC_ERR_SUCCESS) {
-                /* Unknown to the DC: fall back to the historical user fill. */
-                return wbc_fill_user(&sid, name, &out->user);
-            }
-            if (lookup_domain) {
-                wbcFreeMemory(lookup_domain);
-            }
-            if (lookup_name) {
-                wbcFreeMemory(lookup_name);
-            }
-            if (wbc_sid_type_is_group(sid_type)) {
-                out->is_group = 1;
-                return wbc_fill_group(&sid, name, &out->group);
-            }
-            return wbc_fill_user(&sid, name, &out->user);
-
-        case CHIMERA_VFS_IDENTITY_BY_NAME:
-            if (!name) {
-                return -1;
-            }
-            wbc_err = wbcLookupName("", name, &sid, &sid_type);
-            if (wbc_err != WBC_ERR_SUCCESS) {
-                return -1;
-            }
-            if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
-                sidbuf[0] = '\0';
-            }
-            if (wbc_sid_type_is_group(sid_type)) {
-                out->is_group = 1;
-                rc            = wbc_fill_group(&sid, sidbuf[0] ? sidbuf : NULL,
-                                               &out->group);
-                if (rc == 0 && !out->group.groupname[0]) {
-                    wbc_copy_string(out->group.groupname,
-                                    sizeof(out->group.groupname), name);
-                    out->group.groupname_len = (int) strlen(out->group.groupname);
-                }
-                return rc;
-            }
-            if (sid_type != WBC_SID_NAME_USER) {
-                return -1;
-            }
-            rc = wbc_fill_user(&sid, sidbuf[0] ? sidbuf : NULL, &out->user);
-            if (rc == 0 && !out->user.username[0]) {
-                wbc_copy_string(out->user.username,
-                                sizeof(out->user.username), name);
-                out->user.username_len = (int) strlen(out->user.username);
-            }
-            return rc;
-
-        default:
-            return -1;
-    } // switch
-} // smb_wbclient_identity_handler
-
 int
 smb_wbclient_auth_password(
     const char *username,
@@ -656,25 +425,6 @@ smb_wbclient_available(void)
 } // smb_wbclient_available
 
 int
-smb_wbclient_netbios_identity(
-    char  *netbios_name,
-    size_t netbios_name_len,
-    char  *netbios_domain,
-    size_t netbios_domain_len,
-    char  *dns_domain,
-    size_t dns_domain_len)
-{
-    (void) netbios_name;
-    (void) netbios_name_len;
-    (void) netbios_domain;
-    (void) netbios_domain_len;
-    (void) dns_domain;
-    (void) dns_domain_len;
-
-    return -1;
-} // smb_wbclient_netbios_identity
-
-int
 smb_wbclient_auth_ntlm(
     const char    *username,
     const char    *domain,
@@ -731,23 +481,6 @@ smb_wbclient_map_principal(
 
     return -1;
 } // smb_wbclient_map_principal
-
-int
-smb_wbclient_identity_handler(
-    enum chimera_vfs_identity_key       key,
-    uint32_t                            id,
-    const char                         *name,
-    struct chimera_vfs_identity_result *out,
-    void                               *private_data)
-{
-    (void) key;
-    (void) id;
-    (void) name;
-    (void) out;
-    (void) private_data;
-
-    return -1;
-} // smb_wbclient_identity_handler
 
 int
 smb_wbclient_auth_password(

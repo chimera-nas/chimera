@@ -217,14 +217,11 @@ chimera_smb_server_init(
     }
 
     if (shared->config.auth.winbind_enabled) {
+        /* The winbind identity module itself is registered with the VFS by
+         * the server (chimera_server_init), which treats this flag as an alias
+         * for an identity-block entry. */
         chimera_smb_info("SMB Auth: Winbind integration enabled (domain: %s)",
                          shared->config.auth.winbind_domain[0] ? shared->config.auth.winbind_domain : "(not set)");
-
-        /* Register winbind as an identity-resolver miss handler so the VFS can
-         * resolve real AD SIDs <-> uids (and uid -> real SID) on demand, behind
-         * the default NSS handler. */
-        chimera_vfs_identity_register_handler(vfs, smb_wbclient_identity_handler,
-                                              NULL);
     }
     if (shared->config.auth.kerberos_enabled) {
 #ifndef CHIMERA_HAVE_GSSAPI
@@ -253,7 +250,7 @@ chimera_smb_server_init(
     /* Resolve the identity advertised in NTLM CHALLENGE messages once at
      * startup: the winbind lookup behind it is a blocking winbindd round
      * trip that must stay off the per-connection request path. */
-    smb_ntlm_resolve_server_identity(&shared->config.auth,
+    smb_ntlm_resolve_server_identity(vfs, &shared->config.auth,
                                      &shared->config.auth.server_identity);
 
     shared->config.soft_fail_bad_req            = chimera_server_config_get_soft_fail_bad_req(config);

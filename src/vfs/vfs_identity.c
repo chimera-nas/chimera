@@ -3,28 +3,24 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 /*
- * Asynchronous identity resolver -- see vfs_identity.h.
+ * Identity engine -- see vfs_identity.h.
  *
  * A cache hit resolves synchronously on the calling thread (lock-free RCU
- * read).  A miss is queued to a small pool of worker pthreads that run the
- * registered, blocking miss handlers (NSS by default; the SMB server registers
- * a winbind handler), populate the user cache, then hand the result back to the
- * originating evpl thread by appending it to that thread's pending-identity
- * queue and ringing its doorbell.
+ * read).  A miss is queued to a small pool of worker pthreads that walk the
+ * registered identity modules (sdk/vfs_identity_module.h), populate the user
+ * cache, then hand the result back to the originating evpl thread by appending
+ * it to that thread's pending-identity queue and ringing its doorbell.
  */
 
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <string.h>
 #include "common/thread.h"
-#ifndef _WIN32
-#include <pwd.h>
-#include <grp.h>
-#endif /* ifndef _WIN32 */
 #ifdef _WIN32
 #include "common/platform.h"
 #else  /* ifdef _WIN32 */
 #include <unistd.h>
+#include <dlfcn.h>
 #endif /* ifdef _WIN32 */
 
 #include "vfs.h"
@@ -34,10 +30,30 @@
 #include "common/macros.h"
 #include "common/pthread_util.h"
 
-struct chimera_vfs_identity_handler_entry {
-    chimera_vfs_identity_handler               handler;
-    void                                      *private_data;
-    struct chimera_vfs_identity_handler_entry *next;
+/* The in-tree modules, referenced directly so the symbols are retained
+ * regardless of library type and linker --as-needed, and found without a
+ * dlopen.  An out-of-tree module arrives via module_path instead. */
+#ifndef _WIN32
+extern struct chimera_vfs_identity_module        identity_nss;
+#endif /* ifndef _WIN32 */
+#ifdef HAVE_WBCLIENT
+extern struct chimera_vfs_identity_module        identity_winbind;
+#endif /* ifdef HAVE_WBCLIENT */
+
+static const struct chimera_vfs_identity_module *chimera_vfs_identity_builtins[] = {
+#ifndef _WIN32
+    &identity_nss,
+#endif /* ifndef _WIN32 */
+#ifdef HAVE_WBCLIENT
+    &identity_winbind,
+#endif /* ifdef HAVE_WBCLIENT */
+    NULL
+};
+
+struct chimera_vfs_identity_module_entry {
+    const struct chimera_vfs_identity_module *module;
+    void                                     *private_data;
+    struct chimera_vfs_identity_module_entry *next;
 };
 
 struct chimera_vfs_identity_request {
@@ -55,23 +71,23 @@ struct chimera_vfs_identity_request {
 };
 
 struct chimera_vfs_identity {
-    struct chimera_vfs                        *vfs;
-    int                                        num_workers;
-    evpl_native_thread_t                      *workers;
-    evpl_mutex_t                               lock;
-    evpl_cond_t                                cond;
-    struct chimera_vfs_identity_request       *queue;
-    int                                        shutdown;
-    evpl_mutex_t                               handler_lock;
-    struct chimera_vfs_identity_handler_entry *handlers;
+    struct chimera_vfs                       *vfs;
+    int                                       num_workers;
+    evpl_native_thread_t                     *workers;
+    evpl_mutex_t                              lock;
+    evpl_cond_t                               cond;
+    struct chimera_vfs_identity_request      *queue;
+    int                                       shutdown;
+    evpl_mutex_t                              module_lock;
+    struct chimera_vfs_identity_module_entry *modules;
 };
 
 /* Copy a cached user into a standalone result (so callbacks never hold an RCU
  * pointer). */
 static inline void
 chimera_vfs_identity_copy_user(
-    struct chimera_vfs_user       *dst,
-    const struct chimera_vfs_user *src)
+    struct chimera_vfs_identity_user *dst,
+    const struct chimera_vfs_user    *src)
 {
     dst->uid   = src->uid;
     dst->gid   = src->gid;
@@ -85,8 +101,8 @@ chimera_vfs_identity_copy_user(
 /* Copy a cached group into a standalone result. */
 static inline void
 chimera_vfs_identity_copy_group(
-    struct chimera_vfs_group       *dst,
-    const struct chimera_vfs_group *src)
+    struct chimera_vfs_identity_group *dst,
+    const struct chimera_vfs_group    *src)
 {
     dst->gid = src->gid;
     memcpy(dst->groupname, src->groupname, sizeof(dst->groupname));
@@ -157,51 +173,62 @@ chimera_vfs_identity_result_has_sid(const struct chimera_vfs_identity_result *re
 } /* chimera_vfs_identity_result_has_sid */
 
 /*
- * Run the registered miss handlers in order until one resolves the key.
+ * Walk the registered modules in order until one resolves the key.
  *
  * For the numeric keys (BY_UID / BY_GID) a plain first-wins walk is not enough.
  * NSS is registered first and, on a host whose nsswitch routes passwd/group
  * through winbind, it answers those keys itself -- with a name but never a SID,
  * because NSS has no notion of one.  That would short-circuit the winbind
- * handler, which is the only one that can supply the real SID, and the identity
+ * module, which is the only one that can supply the real SID, and the identity
  * would be cached SID-less; the cache hit then suppresses any further resolve,
  * so the SID never arrives and the marshaller falls back to the algorithmic
  * S-1-5-88 form for good.
  *
  * So for those two keys a SID-less success is only provisional: keep walking in
- * case a later handler can name the same identity properly, and settle for the
+ * case a later module can name the same identity properly, and settle for the
  * provisional answer only if none can.  This is safe precisely because the key
- * is numeric -- every handler is being asked about the same uid/gid, so they
+ * is numeric -- every module is being asked about the same uid/gid, so they
  * can only disagree about the SID, never about which identity it is.  BY_NAME
- * and BY_SID stay first-wins: there the key is a string that two handlers could
+ * and BY_SID stay first-wins: there the key is a string that two modules could
  * legitimately resolve to different identities (a local "alice" and a domain
  * "alice"), and preferring the SID-bearing answer would silently change which
  * account wins.
  */
 static int
-chimera_vfs_identity_run_handlers(
+chimera_vfs_identity_run_lookup(
     struct chimera_vfs_identity         *identity,
     struct chimera_vfs_identity_request *req)
 {
-    struct chimera_vfs_identity_handler_entry *entry;
-    struct chimera_vfs_identity_result         provisional;
-    int                                        have_provisional = 0;
-    int                                        prefer_sid;
-    int                                        rc = -1;
+    struct chimera_vfs_identity_module_entry *entry;
+    struct chimera_vfs_identity_result        provisional;
+    int                                       have_provisional = 0;
+    int                                       prefer_sid;
+    int                                       rc = -1;
+    enum chimera_vfs_identity_status          status;
 
     prefer_sid = (req->key == CHIMERA_VFS_IDENTITY_BY_UID ||
                   req->key == CHIMERA_VFS_IDENTITY_BY_GID);
 
-    evpl_mutex_lock(&identity->handler_lock);
-    entry = identity->handlers;
-    evpl_mutex_unlock(&identity->handler_lock);
+    evpl_mutex_lock(&identity->module_lock);
+    entry = identity->modules;
+    evpl_mutex_unlock(&identity->module_lock);
 
-    /* The handler list is only appended to at startup, so it is safe to walk
+    /* The module list is only appended to at startup, so it is safe to walk
      * after grabbing the head. */
     while (entry) {
+        if (!(entry->module->capabilities & CHIMERA_VFS_IDENTITY_CAP_LOOKUP)) {
+            entry = entry->next;
+            continue;
+        }
+
         memset(&req->result, 0, sizeof(req->result));
-        if (entry->handler(req->key, req->id, req->name, &req->result,
-                           entry->private_data) == 0) {
+        status = entry->module->lookup(entry->private_data, req->key, req->id,
+                                       req->name, &req->result);
+
+        if (status == CHIMERA_VFS_IDENTITY_UNAVAILABLE) {
+            chimera_vfs_error("identity module %s unavailable during lookup",
+                              entry->module->name);
+        } else if (status == CHIMERA_VFS_IDENTITY_OK) {
             if (!prefer_sid ||
                 chimera_vfs_identity_result_has_sid(&req->result)) {
                 rc = 0;
@@ -222,7 +249,7 @@ chimera_vfs_identity_run_handlers(
     }
 
     return rc;
-} /* chimera_vfs_identity_run_handlers */
+} /* chimera_vfs_identity_run_lookup */
 
 static void *
 chimera_vfs_identity_worker(void *arg)
@@ -231,8 +258,8 @@ chimera_vfs_identity_worker(void *arg)
     struct chimera_vfs_identity_request *req;
     struct chimera_vfs_thread           *origin;
 
-    /* Pure writer: this worker only runs miss handlers and populates the cache
-     * (retire + publish), never taking the read side -- the read-side
+    /* Pure writer: this worker only runs module lookups and populates the
+     * cache (retire + publish), never taking the read side -- the read-side
      * probe runs on the evpl threads.  So it is not registered as a QSBR
      * reader; registering it would put a thread that blocks in cond_wait and in
      * NSS/winbind resolution into the grace-period quorum and stall reclamation
@@ -254,7 +281,7 @@ chimera_vfs_identity_worker(void *arg)
         evpl_mutex_unlock(&identity->lock);
 
         /* Blocking resolution happens here, off the event loop. */
-        if (chimera_vfs_identity_run_handlers(identity, req) == 0) {
+        if (chimera_vfs_identity_run_lookup(identity, req) == 0) {
             req->found = 1;
             /* Populate the cache so future lookups for this identity are
              * synchronous (TTL-expiring, non-pinned).  A group goes to the
@@ -303,105 +330,80 @@ chimera_vfs_identity_worker(void *arg)
     return NULL;
 } /* chimera_vfs_identity_worker */
 
-/* ---- default NSS miss handler ------------------------------------------ */
-
-#ifndef _WIN32
-static int
-chimera_vfs_identity_nss_handler(
-    enum chimera_vfs_identity_key       key,
-    uint32_t                            id,
-    const char                         *name,
-    struct chimera_vfs_identity_result *out,
-    void                               *private_data)
-{
-    struct passwd       pw, *res = NULL;
-    struct group        gr, *gres = NULL;
-    char                buf[16384];
-    int                 rc;
-    chimera_grouplist_t grps[CHIMERA_VFS_CRED_MAX_GIDS];
-    int                 ng = CHIMERA_VFS_CRED_MAX_GIDS;
-    int                 i;
-
-    (void) private_data;
-
-    switch (key) {
-        case CHIMERA_VFS_IDENTITY_BY_UID:
-            rc = getpwuid_r(id, &pw, buf, sizeof(buf), &res);
-            break;
-        case CHIMERA_VFS_IDENTITY_BY_NAME:
-            rc = getpwnam_r(name, &pw, buf, sizeof(buf), &res);
-            break;
-        case CHIMERA_VFS_IDENTITY_BY_GID:
-            rc = getgrgid_r(id, &gr, buf, sizeof(buf), &gres);
-            if (rc != 0 || gres == NULL) {
-                return -1;
-            }
-            out->is_group  = 1;
-            out->group.gid = gr.gr_gid;
-            strncpy(out->group.groupname, gr.gr_name,
-                    sizeof(out->group.groupname) - 1);
-            out->group.groupname_len = (int) strlen(out->group.groupname);
-            /* NSS supplies no SID; left empty so the algorithmic idmap is
-             * used for this group. */
-            return 0;
-        default:
-            /* NSS has no notion of a Windows SID. */
-            return -1;
-    } /* switch */
-
-    if (rc != 0 || res == NULL) {
-        return -1;
-    }
-
-    out->user.uid = pw.pw_uid;
-    out->user.gid = pw.pw_gid;
-    strncpy(out->user.username, pw.pw_name, sizeof(out->user.username) - 1);
-    out->user.username_len = (int) strlen(out->user.username);
-
-    /* Supplementary groups (getgrouplist includes the primary gid; storing it
-     * twice is harmless for membership checks). */
-    if (getgrouplist(pw.pw_name, pw.pw_gid, grps, &ng) < 0) {
-        ng = CHIMERA_VFS_CRED_MAX_GIDS;
-    }
-    if (ng > CHIMERA_VFS_CRED_MAX_GIDS) {
-        ng = CHIMERA_VFS_CRED_MAX_GIDS;
-    }
-    out->user.ngids = ng;
-    for (i = 0; i < ng; i++) {
-        out->user.gids[i] = grps[i];
-    }
-
-    /* NSS supplies no SID; left empty so the algorithmic idmap is used. */
-    return 0;
-} /* chimera_vfs_identity_nss_handler */
-#endif /* ifndef _WIN32 */
-
+/* ---- module registration ----------------------------------------------- */
 
 static void
-chimera_vfs_identity_add_handler(
-    struct chimera_vfs_identity *identity,
-    chimera_vfs_identity_handler handler,
-    void                        *private_data)
+chimera_vfs_identity_add_module(
+    struct chimera_vfs_identity              *identity,
+    const struct chimera_vfs_identity_module *module,
+    const char                               *cfgdata)
 {
-    struct chimera_vfs_identity_handler_entry *entry, **pp;
+    struct chimera_vfs_identity_module_entry *entry, **pp;
 
-    entry               = calloc(1, sizeof(*entry));
-    entry->handler      = handler;
-    entry->private_data = private_data;
+    /* A module built against a different SDK contract would misinterpret the
+     * result structures; refuse it at load time rather than corrupt memory.
+     * Out-of-tree modules arrive via dlopen (module_path), so this is their
+     * only compatibility gate. */
+    chimera_vfs_abort_if(module->sdk_version != CHIMERA_VFS_IDENTITY_SDK_VERSION,
+                         "identity module %s was built against identity SDK version %u; "
+                         "this chimera provides version %u",
+                         module->name, module->sdk_version,
+                         CHIMERA_VFS_IDENTITY_SDK_VERSION);
 
-    evpl_mutex_lock(&identity->handler_lock);
-    /* Append to preserve registration order (NSS first, then winbind, ...). */
-    pp = &identity->handlers;
+    chimera_vfs_abort_if((module->capabilities & CHIMERA_VFS_IDENTITY_CAP_LOOKUP) &&
+                         !module->lookup,
+                         "identity module %s claims CAP_LOOKUP without a lookup op",
+                         module->name);
+    chimera_vfs_abort_if((module->capabilities & CHIMERA_VFS_IDENTITY_CAP_DOMAIN_INFO) &&
+                         !module->domain_info,
+                         "identity module %s claims CAP_DOMAIN_INFO without a domain_info op",
+                         module->name);
+
+    entry         = calloc(1, sizeof(*entry));
+    entry->module = module;
+
+    if (module->init) {
+        entry->private_data = module->init(cfgdata ? cfgdata : "",
+                                           identity->vfs->metrics.metrics);
+    }
+
+    evpl_mutex_lock(&identity->module_lock);
+    /* Append to preserve registration order (NSS first, then the configured
+     * modules in configuration order). */
+    pp = &identity->modules;
     while (*pp) {
         pp = &(*pp)->next;
     }
     *pp = entry;
-    evpl_mutex_unlock(&identity->handler_lock);
-} /* chimera_vfs_identity_add_handler */
+    evpl_mutex_unlock(&identity->module_lock);
+
+    chimera_vfs_info("identity module %s registered (capabilities 0x%x)",
+                     module->name, module->capabilities);
+} /* chimera_vfs_identity_add_module */
+
+/* Find a module by its symbol name: the built-in table first, then whatever
+ * the process (or a dlopen'ed shared object) exports. */
+static const struct chimera_vfs_identity_module *
+chimera_vfs_identity_find_module(const char *symbol)
+{
+    int i;
+
+    for (i = 0; chimera_vfs_identity_builtins[i]; i++) {
+        if (!strncmp(symbol, "identity_", 9) &&
+            !strcmp(symbol + 9, chimera_vfs_identity_builtins[i]->name)) {
+            return chimera_vfs_identity_builtins[i];
+        }
+    }
+#ifdef _WIN32
+    return NULL;
+#else  /* ifdef _WIN32 */
+    return dlsym(RTLD_DEFAULT, symbol);
+#endif /* ifdef _WIN32 */
+} /* chimera_vfs_identity_find_module */
 
 /* ---- lifecycle --------------------------------------------------------- */
 
-SYMBOL_EXPORT SYMBOL_EXPORT struct chimera_vfs_identity *
+SYMBOL_EXPORT struct chimera_vfs_identity *
 chimera_vfs_identity_create(
     struct chimera_vfs *vfs,
     int                 num_workers)
@@ -420,14 +422,13 @@ chimera_vfs_identity_create(
 
     evpl_mutex_init(&identity->lock, NULL);
     evpl_cond_init(&identity->cond, NULL);
-    evpl_mutex_init(&identity->handler_lock, NULL);
+    evpl_mutex_init(&identity->module_lock, NULL);
 
-    /* The default local/NSS handler is always present and tried first.
+    /* The default local/NSS module is always present and tried first.
      * (Registered directly on `identity`: vfs->identity is assigned only after
      * this function returns.) */
 #ifndef _WIN32
-    chimera_vfs_identity_add_handler(identity, chimera_vfs_identity_nss_handler,
-                                     NULL);
+    chimera_vfs_identity_add_module(identity, &identity_nss, "");
 #endif /* ifndef _WIN32 */
 
     for (i = 0; i < num_workers; i++) {
@@ -447,9 +448,9 @@ chimera_vfs_identity_create(
 SYMBOL_EXPORT void
 chimera_vfs_identity_destroy(struct chimera_vfs_identity *identity)
 {
-    struct chimera_vfs_identity_handler_entry *entry, *next;
-    struct chimera_vfs_identity_request       *req;
-    int                                        i;
+    struct chimera_vfs_identity_module_entry *entry, *next;
+    struct chimera_vfs_identity_request      *req;
+    int                                       i;
 
     evpl_mutex_lock(&identity->lock);
     identity->shutdown = 1;
@@ -467,29 +468,129 @@ chimera_vfs_identity_destroy(struct chimera_vfs_identity *identity)
         free(req);
     }
 
-    entry = identity->handlers;
+    entry = identity->modules;
     while (entry) {
         next = entry->next;
+        if (entry->module->destroy) {
+            entry->module->destroy(entry->private_data);
+        }
         free(entry);
         entry = next;
     }
 
     evpl_mutex_destroy(&identity->lock);
     evpl_cond_destroy(&identity->cond);
-    evpl_mutex_destroy(&identity->handler_lock);
+    evpl_mutex_destroy(&identity->module_lock);
 
     free(identity->workers);
     free(identity);
 } /* chimera_vfs_identity_destroy */
 
 SYMBOL_EXPORT void
-chimera_vfs_identity_register_handler(
-    struct chimera_vfs          *vfs,
-    chimera_vfs_identity_handler handler,
-    void                        *private_data)
+chimera_vfs_identity_register_module(
+    struct chimera_vfs                       *vfs,
+    const struct chimera_vfs_identity_module *module,
+    const char                               *cfgdata)
 {
-    chimera_vfs_identity_add_handler(vfs->identity, handler, private_data);
-} /* chimera_vfs_identity_register_handler */
+    chimera_vfs_identity_add_module(vfs->identity, module, cfgdata);
+} /* chimera_vfs_identity_register_module */
+
+SYMBOL_EXPORT void
+chimera_vfs_identity_load_modules(
+    struct chimera_vfs                  *vfs,
+    const struct chimera_vfs_module_cfg *module_cfgs,
+    int                                  num_modules)
+{
+    const struct chimera_vfs_identity_module *module;
+    char                                      modsym[80];
+    int                                       i;
+
+    for (i = 0; i < num_modules; i++) {
+        snprintf(modsym, sizeof(modsym), "identity_%s", module_cfgs[i].module_name);
+
+        /* NSS is registered unconditionally at create time; a configured
+         * entry for it only carries configuration, never a second instance. */
+        if (strcmp(module_cfgs[i].module_name, "nss") == 0) {
+            continue;
+        }
+
+        if (module_cfgs[i].module_path[0] != '\0') {
+            if (chimera_vfs_identity_find_module(modsym) != NULL) {
+                chimera_vfs_error("Identity module %s already loaded, skipping dlopen of %s",
+                                  module_cfgs[i].module_name, module_cfgs[i].module_path);
+            } else {
+#ifdef _WIN32
+                chimera_vfs_abort_if(1, "External identity modules require a shared-library build: %s",
+                                     module_cfgs[i].module_path);
+#else  /* ifdef _WIN32 */
+                void *handle = dlopen(module_cfgs[i].module_path, RTLD_NOW | RTLD_GLOBAL);
+
+                chimera_vfs_abort_if(!handle, "Failed to load identity module %s from %s: %s",
+                                     module_cfgs[i].module_name,
+                                     module_cfgs[i].module_path,
+                                     dlerror());
+                chimera_vfs_info("Identity module %s loaded from %s",
+                                 module_cfgs[i].module_name, module_cfgs[i].module_path);
+#endif /* ifdef _WIN32 */
+            }
+        }
+
+        module = chimera_vfs_identity_find_module(modsym);
+        chimera_vfs_abort_if(!module,
+                             "Identity module %s symbol %s not found (is this build missing its dependency?)",
+                             module_cfgs[i].module_name, modsym);
+
+        chimera_vfs_identity_add_module(vfs->identity, module, module_cfgs[i].config_data);
+    }
+} /* chimera_vfs_identity_load_modules */
+
+SYMBOL_EXPORT int
+chimera_vfs_identity_has_capability(
+    struct chimera_vfs *vfs,
+    uint32_t            caps)
+{
+    struct chimera_vfs_identity              *identity = vfs->identity;
+    struct chimera_vfs_identity_module_entry *entry;
+    int                                       found = 0;
+
+    evpl_mutex_lock(&identity->module_lock);
+    for (entry = identity->modules; entry; entry = entry->next) {
+        if ((entry->module->capabilities & caps) == caps) {
+            found = 1;
+            break;
+        }
+    }
+    evpl_mutex_unlock(&identity->module_lock);
+
+    return found;
+} /* chimera_vfs_identity_has_capability */
+
+SYMBOL_EXPORT enum chimera_vfs_identity_status
+chimera_vfs_identity_domain_info(
+    struct chimera_vfs                      *vfs,
+    struct chimera_vfs_identity_domain_info *out)
+{
+    struct chimera_vfs_identity              *identity = vfs->identity;
+    struct chimera_vfs_identity_module_entry *entry;
+    enum chimera_vfs_identity_status          status = CHIMERA_VFS_IDENTITY_NOT_MINE;
+
+    evpl_mutex_lock(&identity->module_lock);
+    entry = identity->modules;
+    evpl_mutex_unlock(&identity->module_lock);
+
+    for (; entry; entry = entry->next) {
+        if (!(entry->module->capabilities & CHIMERA_VFS_IDENTITY_CAP_DOMAIN_INFO)) {
+            continue;
+        }
+        memset(out, 0, sizeof(*out));
+        status = entry->module->domain_info(entry->private_data, out);
+        if (status == CHIMERA_VFS_IDENTITY_OK) {
+            break;
+        }
+    }
+
+    return status;
+} /* chimera_vfs_identity_domain_info */
 
 SYMBOL_EXPORT void
 chimera_vfs_identity_resolve(

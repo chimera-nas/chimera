@@ -5,42 +5,25 @@
 #pragma once
 
 /*
- * Identity resolver: the asynchronous front-end to the user cache (the single
- * identity authority).  A lookup that hits the cache returns synchronously on
- * the calling thread (a lock-free RCU read).  A miss is dispatched to a pool of
- * worker threads which run the registered, potentially-blocking miss handlers
- * (NSS, winbind) off the event loop, populate the cache, and wake the caller on
- * its own evpl thread via the doorbell -- the same park-and-resume pattern the
- * VFS delegation threads use.  This keeps name/SID resolution out of the
- * protocol fast paths and gives every subsystem one consistent answer.
+ * Identity engine: the asynchronous front-end to the user cache (the single
+ * identity authority) and the host of the identity modules behind it.  A
+ * lookup that hits the cache returns synchronously on the calling thread (a
+ * lock-free RCU read).  A miss is dispatched to a pool of worker threads which
+ * walk the registered modules (sdk/vfs_identity_module.h) -- NSS, winbind, an
+ * out-of-tree backend -- off the event loop, populate the cache, and wake the
+ * caller on its own evpl thread via the doorbell -- the same park-and-resume
+ * pattern the VFS delegation threads use.  This keeps name/SID resolution out
+ * of the protocol fast paths and gives every subsystem one consistent answer.
  */
 
 #include <stdint.h>
 
-#include "vfs_user_cache.h"
+#include "sdk/vfs_identity_module.h"
 
 struct chimera_vfs;
 struct chimera_vfs_thread;
 struct chimera_vfs_identity;
-
-enum chimera_vfs_identity_key {
-    CHIMERA_VFS_IDENTITY_BY_UID,
-    CHIMERA_VFS_IDENTITY_BY_GID,
-    CHIMERA_VFS_IDENTITY_BY_NAME,
-    CHIMERA_VFS_IDENTITY_BY_SID,
-};
-
-/*
- * A resolved identity.  An identity is either a user or a group, and the two
- * are not interchangeable -- a SID in particular is ambiguous until resolved,
- * so the resolver tags which kind came back rather than forcing a group through
- * a user-shaped record.
- */
-struct chimera_vfs_identity_result {
-    int                      is_group;
-    struct chimera_vfs_user  user;  /* valid when !is_group */
-    struct chimera_vfs_group group; /* valid when  is_group */
-};
+struct chimera_vfs_module_cfg;
 
 /*
  * Delivered to the resolve callback.  `result` is NULL when the identity could
@@ -51,20 +34,6 @@ typedef void (*chimera_vfs_identity_callback)(
     const struct chimera_vfs_identity_result *result,
     void                                     *private_data);
 
-/*
- * A miss handler performs a (possibly blocking) lookup on a resolver worker
- * thread and fills `*out`: either out->user (uid/gid/ngids/gids/username/sid)
- * or out->group (gid/groupname/sid) with out->is_group set.  Returns 0 on
- * success, -1 if it cannot resolve the key.  Handlers are tried in registration
- * order until one succeeds.
- */
-typedef int (*chimera_vfs_identity_handler)(
-    enum chimera_vfs_identity_key       key,
-    uint32_t                            id,
-    const char                         *name,
-    struct chimera_vfs_identity_result *out,
-    void                               *private_data);
-
 struct chimera_vfs_identity *
 chimera_vfs_identity_create(
     struct chimera_vfs *vfs,
@@ -74,12 +43,31 @@ void
 chimera_vfs_identity_destroy(
     struct chimera_vfs_identity *identity);
 
-/* Register a miss handler (e.g. the SMB server registers a winbind handler). */
+/*
+ * Load and register the configured identity modules, in order.  Each entry
+ * names a module (symbol identity_<module_name>); a module_path is dlopen'ed
+ * first for an out-of-tree module, otherwise the symbol must already be linked
+ * in.  Configuration order is walk order.  The built-in NSS module is always
+ * registered first at create time, so this only adds to it.
+ */
 void
-chimera_vfs_identity_register_handler(
-    struct chimera_vfs          *vfs,
-    chimera_vfs_identity_handler handler,
-    void                        *private_data);
+chimera_vfs_identity_load_modules(
+    struct chimera_vfs                  *vfs,
+    const struct chimera_vfs_module_cfg *module_cfgs,
+    int                                  num_modules);
+
+/* Register one module directly (the loader and tests use this). */
+void
+chimera_vfs_identity_register_module(
+    struct chimera_vfs                       *vfs,
+    const struct chimera_vfs_identity_module *module,
+    const char                               *cfgdata);
+
+/* Non-zero if some registered module has every capability bit in `caps`. */
+int
+chimera_vfs_identity_has_capability(
+    struct chimera_vfs *vfs,
+    uint32_t            caps);
 
 /*
  * Resolve an identity.  On a cache hit the callback fires inline before this
@@ -112,3 +100,15 @@ chimera_vfs_identity_cached(
     enum chimera_vfs_identity_key key,
     uint32_t                      id,
     const char                   *name);
+
+/*
+ * The names the host is domain-joined with, from the first module that has
+ * CAP_DOMAIN_INFO and answers.  Synchronous and potentially blocking (a
+ * winbindd round trip): for startup, never the request path.  Returns OK with
+ * *out filled, NOT_MINE when no module can say, UNAVAILABLE when the one that
+ * could is down.
+ */
+enum chimera_vfs_identity_status
+chimera_vfs_identity_domain_info(
+    struct chimera_vfs                      *vfs,
+    struct chimera_vfs_identity_domain_info *out);

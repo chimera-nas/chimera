@@ -148,7 +148,7 @@ Domain-authentication backends for SMB.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `winbind_enabled` | bool | `false` | Authenticate via Winbind (domain-joined). |
+| `winbind_enabled` | bool | `false` | Authenticate via Winbind (domain-joined). Also an alias for a `winbind` entry in [`server.identity`](#serveridentity---identity-modules). |
 | `winbind_domain` | string | - | Winbind domain name. |
 | `kerberos_enabled` | bool | `false` | Enable Kerberos authentication. |
 | `kerberos_keytab` | string | - | Path to the Kerberos keytab. |
@@ -207,6 +207,33 @@ is registered here, keyed by module name, before it can be used in `mounts`:
 |---|---|---|
 | `path` | string | Filesystem path to the module's `.so`. |
 | `config` | object | Module-specific options passed to the module at init (see [VFS module options](#vfs-module-options)). |
+
+#### `server.identity` - identity modules
+
+Identity modules resolve names, uids, gids and Windows SIDs into identity
+records behind the user cache (see the
+[identity module SDK](vfs-module-sdk#identity-modules)). The built-in `nss`
+module (the host's nsswitch) is always present and consulted first; the
+modules listed here are walked after it, in the order written. A module
+shipped as a separate shared object is loaded from `path`; a module built into
+chimera (`winbind`, when built with libwbclient) needs none.
+
+```json
+"server": {
+    "identity": {
+        "winbind": {}
+    }
+}
+```
+
+| Key | Type | Description |
+|---|---|---|
+| `path` | string | Filesystem path to the module's `.so` (out-of-tree modules only). |
+| `config` | object | Module-specific options passed to the module at init. |
+
+Naming a module this build cannot provide (for example `winbind` without
+libwbclient) is fatal at startup. `server.smb_auth.winbind_enabled` remains
+supported and behaves as an implicit `"winbind": {}` entry here.
 
 ### `mounts`
 
