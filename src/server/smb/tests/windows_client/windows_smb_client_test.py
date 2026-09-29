@@ -126,6 +126,41 @@ def wait_until_ready(proc, log_path, timeout=120):
         time.sleep(0.2)
 
 
+def find_cdb():
+    """The console debugger from the Windows SDK, for this machine's architecture."""
+    native = os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")
+    arches = {"AMD64": ["x64"], "ARM64": ["arm64"], "x86": ["x86"]}.get(native.upper(), [])
+    for base in filter(None, (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"))):
+        for arch in arches + ["x64", "arm64"]:
+            cdb = Path(base) / "Windows Kits" / "10" / "Debuggers" / arch / "cdb.exe"
+            if cdb.exists():
+                return cdb
+    found = shutil.which("cdb")
+    return Path(found) if found else None
+
+
+def dump_stacks(pid, chimera):
+    """Print every thread's stack of a daemon that will not stop.
+
+    A non-invasive attach: the threads are suspended while cdb reads them and
+    released when it detaches, so the kill that follows still works.  Symbols
+    come from the PDB beside the daemon and Microsoft's public symbol server."""
+    cdb = find_cdb()
+    if cdb is None:
+        print("cdb not found; cannot capture the hung daemon's stacks", flush=True)
+        return
+    cache = Path(tempfile.gettempdir()) / "symbols"
+    sympath = f"{Path(chimera).resolve().parent};srv*{cache}*https://msdl.microsoft.com/download/symbols"
+    try:
+        result = subprocess.run([str(cdb), "-pv", "-p", str(pid), "-y", sympath,
+                                 "-c", "!uniqstack; qd"],
+                                capture_output=True, text=True, timeout=600)
+        output = result.stdout + result.stderr
+    except subprocess.TimeoutExpired as e:
+        output = f"cdb timed out:\n{e.stdout or ''}"
+    print(f"---- stacks of hung daemon (pid {pid}) ----\n{output}", flush=True)
+
+
 def free_drive_letter():
     for letter in reversed(string.ascii_uppercase[7:]):
         if not os.path.exists(f"{letter}:\\"):
@@ -640,6 +675,7 @@ def run_all(chimera, backends):
                     proc.wait(timeout=120)
                 except subprocess.TimeoutExpired:
                     shutdown_failure = "daemon still running 120s after CTRL_BREAK; killed"
+                    dump_stacks(proc.pid, chimera)
                     proc.kill()
                     proc.wait()
             stopped = time.monotonic() - stopping
