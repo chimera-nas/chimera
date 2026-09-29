@@ -4174,8 +4174,21 @@ chimera_smb_create_check_access(
     granted = chimera_vfs_access_check(
         attr, &request->session_handle->session->cred, CHIMERA_ACE_MASK_ALL);
 
-    return (req & ~granted) == 0 ?
-           SMB2_STATUS_SUCCESS : SMB2_STATUS_ACCESS_DENIED;
+    if (req & ~granted) {
+        chimera_smb_debug(
+            "CREATE access denied: requested %08x granted %08x missing %08x "
+            "(attr mask %" PRIx64 " mode %o uid %" PRIu64 " gid %" PRIu64 " aces %d; caller uid %u)",
+            req, granted, req & ~granted, attr->va_set_mask,
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) ? (unsigned) attr->va_mode : 0,
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ? attr->va_uid : 0,
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_GID) ? attr->va_gid : 0,
+            ((attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attr->va_acl) ?
+            (int) attr->va_acl->num_aces : -1,
+            request->session_handle->session->cred.uid);
+        return SMB2_STATUS_ACCESS_DENIED;
+    }
+
+    return SMB2_STATUS_SUCCESS;
 } /* chimera_smb_create_check_access */
 
 /*
