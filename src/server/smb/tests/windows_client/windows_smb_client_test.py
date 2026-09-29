@@ -46,7 +46,6 @@ if os.name == "nt":
 SKIP = 77
 USER = "smbclient"
 PASSWORD = "Chimera-Test-1"
-SHARE = "share"
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True) if os.name == "nt" else None
 
@@ -67,7 +66,8 @@ def client_supports_alternate_port():
     return "TCPPORT" in (usage.stdout + usage.stderr).upper()
 
 
-def daemon_config(backend, scratch, smb_port, metrics_port):
+def daemon_config(backends, scratch, smb_port, metrics_port):
+    """One daemon, one share per backend, each share named after its backend."""
     config = {
         "common": {"huge_pages": False, "sync_delegation_threads": 2},
         "server": {
@@ -78,30 +78,33 @@ def daemon_config(backend, scratch, smb_port, metrics_port):
             "smb_port": smb_port,
             "metrics_port": metrics_port,
             "state_dir": (scratch / "state").as_posix(),
+            "vfs": {},
         },
         "users": [{
             "username": USER, "password": PASSWORD, "smbpasswd": PASSWORD,
             "uid": 1000, "gid": 1000,
         }],
-        "filesystems": {"fs0": {"module": backend}},
-        "mounts": {"share": {"module": backend, "path": "fs0"}},
-        "shares": {SHARE: {"path": "/share"}},
+        "filesystems": {},
+        "mounts": {},
+        "shares": {},
     }
-    if backend == "diskfs":
+    for backend in backends:
+        config["filesystems"][f"fs-{backend}"] = {"module": backend}
+        config["mounts"][backend] = {"module": backend, "path": f"fs-{backend}"}
+        config["shares"][backend] = {"path": f"/{backend}"}
+    if "diskfs" in backends:
         devices = []
         for i in range(2):
             device = scratch / f"device-{i}.img"
             with device.open("wb") as f:
                 f.truncate(1024 * 1024 * 1024)
             devices.append({"type": "pread", "size": 1, "path": device.as_posix()})
-        config["server"]["vfs"] = {"diskfs": {"path": None, "config": {
-            "initialize": True, "devices": devices, "intent_log_size": 67108864}}}
-    elif backend == "cairn":
+        config["server"]["vfs"]["diskfs"] = {"path": None, "config": {
+            "initialize": True, "devices": devices, "intent_log_size": 67108864}}
+    if "cairn" in backends:
         (scratch / "cairn").mkdir()
-        config["server"]["vfs"] = {"cairn": {"path": None, "config": {
-            "initialize": True, "path": (scratch / "cairn").as_posix()}}}
-    elif backend != "memfs":
-        raise SystemExit(f"unknown backend {backend}")
+        config["server"]["vfs"]["cairn"] = {"path": None, "config": {
+            "initialize": True, "path": (scratch / "cairn").as_posix()}}
     return config
 
 
@@ -130,9 +133,9 @@ def free_drive_letter():
     raise RuntimeError("no free drive letter")
 
 
-def net_use(drive, port):
+def net_use(drive, share, port):
     """Map the share, retrying: the first logon can race the listener."""
-    command = ["net", "use", f"{drive}:", f"\\\\127.0.0.1\\{SHARE}", f"/TCPPORT:{port}",
+    command = ["net", "use", f"{drive}:", f"\\\\127.0.0.1\\{share}", f"/TCPPORT:{port}",
                f"/USER:{USER}", PASSWORD, "/PERSISTENT:NO"]
     last = None
     for _ in range(5):
@@ -140,7 +143,12 @@ def net_use(drive, port):
         if last.returncode == 0:
             return
         time.sleep(2)
-    raise RuntimeError(f"net use failed ({last.returncode}):\n{last.stdout}{last.stderr}")
+    connections = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "Get-SmbConnection | Format-Table -AutoSize | Out-String -Width 200"],
+        capture_output=True, text=True)
+    raise RuntimeError(f"net use failed ({last.returncode}):\n{last.stdout}{last.stderr}\n"
+                       f"client SMB connections:\n{connections.stdout}")
 
 
 def net_use_delete(drive):
@@ -581,35 +589,48 @@ def write_junit(path, results, os_label):
     ElementTree.ElementTree(suites).write(path, encoding="utf-8", xml_declaration=True)
 
 
-def run_backend(chimera, backend):
-    """Serve one backend, map it, run every check, tear it all down."""
-    scratch = Path(tempfile.mkdtemp(prefix=f"chimera-smbclient-{backend}-"))
+def run_all(chimera, backends):
+    """Serve every backend from one daemon, map each share, run the checks.
+
+    One daemon rather than one per backend: the client keeps its session to a
+    server for a while after the last drive is unmapped, and a mapping to a new
+    daemon at the same address inherits that dead session -- the Windows 11
+    client then fails it with "network name cannot be found" without
+    connecting.  It only accepts 127.0.0.1 for a local server, so a fresh
+    loopback address per daemon is not an option either."""
+    scratch = Path(tempfile.mkdtemp(prefix="chimera-smbclient-"))
     (scratch / "state").mkdir()
     smb_port, metrics_port = free_ports(2)
     config_path = scratch / "config.json"
-    config_path.write_text(json.dumps(daemon_config(backend, scratch, smb_port, metrics_port)),
+    config_path.write_text(json.dumps(daemon_config(backends, scratch, smb_port, metrics_port)),
                            encoding="utf-8")
     env = os.environ.copy()
     env.update(TEMP=str(scratch), TMP=str(scratch))
-    drive = None
+    drives = []
     results = []
     with (scratch / "daemon.log").open("w+b") as log:
         proc = subprocess.Popen([chimera, "-c", str(config_path)], stdout=log, stderr=log,
                                 env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
         try:
             wait_until_ready(proc, scratch / "daemon.log")
-            drive = free_drive_letter()
-            net_use(drive, smb_port)
-            print(f"{backend}: mapped {drive}: to \\\\127.0.0.1\\{SHARE} on port {smb_port}",
-                  flush=True)
-            root = Path(f"{drive}:\\") / f"run-{os.getpid()}"
-            root.mkdir()
-            results = run_checks(root, backend)
-        except Exception:  # noqa: BLE001 - a setup failure is one failed result
-            results.append((f"{backend}/setup", 0.0, traceback.format_exc(), None))
+            for backend in backends:
+                try:
+                    drive = free_drive_letter()
+                    net_use(drive, backend, smb_port)
+                    drives.append(drive)
+                    print(f"{backend}: mapped {drive}: to \\\\127.0.0.1\\{backend} "
+                          f"on port {smb_port}", flush=True)
+                    root = Path(f"{drive}:\\") / f"run-{os.getpid()}"
+                    root.mkdir()
+                    results.extend(run_checks(root, backend))
+                except Exception:  # noqa: BLE001 - a setup failure is one failed result
+                    results.append((f"{backend}/setup", 0.0, traceback.format_exc(), None))
+                    print(results[-1][2], flush=True)
+        except Exception:  # noqa: BLE001 - so is a daemon that never came up
+            results.append(("daemon/startup", 0.0, traceback.format_exc(), None))
             print(results[-1][2], flush=True)
         finally:
-            if drive:
+            for drive in drives:
                 net_use_delete(drive)
             if proc.poll() is None:
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
@@ -619,12 +640,12 @@ def run_backend(chimera, backend):
                     proc.kill()
                     proc.wait()
             if proc.returncode != 0:
-                results.append((f"{backend}/shutdown", 0.0,
+                results.append(("daemon/shutdown", 0.0,
                                 f"daemon exited with status {proc.returncode}", None))
             if any(r[2] for r in results):
                 log.seek(0)
-                tail = log.read().decode("utf-8", errors="replace").splitlines()[-200:]
-                print(f"---- {backend} daemon log (last 200 lines) ----")
+                tail = log.read().decode("utf-8", errors="replace").splitlines()[-300:]
+                print("---- daemon log (last 300 lines) ----")
                 print("\n".join(tail), flush=True)
     shutil.rmtree(scratch, ignore_errors=True)
     return results
@@ -651,9 +672,7 @@ def main():
     print(f"client: {os_label}", flush=True)
 
     start = time.monotonic()
-    results = []
-    for backend in args.backends:
-        results.extend(run_backend(args.chimera, backend))
+    results = run_all(args.chimera, list(dict.fromkeys(args.backends)))
     if args.junit:
         write_junit(args.junit, results, os_label)
     if args.duration:
