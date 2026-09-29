@@ -216,7 +216,7 @@ client_test_init(
             free(json_str);
             json_decref(cfg);
 
-            chimera_server_config_add_module(server_config, "diskfs", "/build/test/diskfs", diskfs_cfg);
+            chimera_server_config_add_module(server_config, "diskfs", NULL, diskfs_cfg);
         } else if (strcmp(backend, "cairn") == 0) {
             char    cairn_cfg[4096];
             char   *json_str;
@@ -230,7 +230,7 @@ client_test_init(
             free(json_str);
             json_decref(cfg);
 
-            chimera_server_config_add_module(server_config, "cairn", "/build/test/cairn", cairn_cfg);
+            chimera_server_config_add_module(server_config, "cairn", NULL, cairn_cfg);
         }
 
         env->server = chimera_server_init(server_config, env->server_metrics);
@@ -294,7 +294,7 @@ client_test_init(
         client_json_root   = json_object();
         client_json_config = json_object();
 
-        /* SMB mode: register the (built-in) smb client VFS module so the client
+        /* SMB mode: register the (in-tree) smb client VFS module so the client
          * can mount "smb"; the backend is served remotely over SMB. */
         if (env->use_smb) {
             json_t *vfs       = json_object();
@@ -356,7 +356,6 @@ client_test_init(
 
                 vfs       = json_object();
                 vfs_entry = json_object();
-                json_object_set_new(vfs_entry, "path", json_string("/build/test/diskfs"));
                 json_object_set_new(vfs_entry, "config", json_string(diskfs_cfg));
                 json_object_set_new(vfs, "diskfs", vfs_entry);
                 json_object_set_new(client_json_config, "vfs", vfs);
@@ -375,7 +374,6 @@ client_test_init(
 
                 vfs       = json_object();
                 vfs_entry = json_object();
-                json_object_set_new(vfs_entry, "path", json_string("/build/test/cairn"));
                 json_object_set_new(vfs_entry, "config", json_string(cairn_cfg));
                 json_object_set_new(vfs, "cairn", vfs_entry);
                 json_object_set_new(client_json_config, "vfs", vfs);

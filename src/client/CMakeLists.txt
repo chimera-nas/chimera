@@ -11,6 +11,8 @@ add_library(chimera_client ${CHIMERA_LIBRARY_TYPE} client.c client_dispatch.c
             client_fstatfs.c client_commit.c client_ftruncate.c
             client_copy_range.c client_clone_range.c client_write_same.c)
 target_link_libraries(chimera_client chimera_vfs evpl prometheus-c)
+# The VFS backends are loaded at runtime, not linked (src/vfs/CMakeLists.txt).
+add_dependencies(chimera_client chimera_vfs_modules)
 
 install(TARGETS chimera_client DESTINATION lib)
 

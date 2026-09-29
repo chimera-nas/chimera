@@ -212,7 +212,6 @@ main(
         posix_test_configure_client(config);
         vfs       = json_object();
         vfs_entry = json_object();
-        json_object_set_new(vfs_entry, "path", json_string("/build/test/diskfs"));
         json_object_set_new(vfs_entry, "config", json_string(diskfs_cfg));
         json_object_set_new(vfs, "diskfs", vfs_entry);
         json_object_set_new(config, "vfs", vfs);

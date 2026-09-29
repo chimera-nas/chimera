@@ -370,7 +370,9 @@ fio_chimera_init(struct thread_data *td)
                     module_path = json_object_get(module, "module_path");
                     config_obj  = json_object_get(module, "config");
 
-                    if (!module_name || !module_path) {
+                    /* module_path is optional: without one the VFS loads the
+                     * module by name from its module directory. */
+                    if (!module_name) {
                         chimera_fio_error("Invalid module config");
                         return EINVAL;
                     }
@@ -383,10 +385,11 @@ fio_chimera_init(struct thread_data *td)
 
                     chimera_fio_info("Loading module %s path %s",
                                      json_string_value(module_name),
-                                     json_string_value(module_path));
+                                     module_path ? json_string_value(module_path) : "(module dir)");
 
                     chimera_client_config_add_module(ChimeraClientConfig, json_string_value(module_name),
-                                                     json_string_value(module_path), config_str ? config_str : "");
+                                                     module_path ? json_string_value(module_path) : "",
+                                                     config_str ? config_str : "");
 
                     free(config_str);
 

@@ -739,8 +739,7 @@ main(
         free(json_str);
         json_decref(cfg);
 
-        chimera_server_config_add_module(config, "diskfs",
-                                         "/build/test/diskfs", diskfs_cfg);
+        chimera_server_config_add_module(config, "diskfs", NULL, diskfs_cfg);
     } else if (strcmp(backend, "cairn") == 0) {
         char    cairn_cfg[4096];
         char   *json_str;
@@ -754,8 +753,7 @@ main(
         free(json_str);
         json_decref(cfg);
 
-        chimera_server_config_add_module(config, "cairn",
-                                         "/build/test/cairn", cairn_cfg);
+        chimera_server_config_add_module(config, "cairn", NULL, cairn_cfg);
     }
 
     /* The smb2.session-require-signing suite checks that the server advertises

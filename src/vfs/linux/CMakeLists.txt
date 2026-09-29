@@ -2,10 +2,10 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
-add_library(chimera_vfs_linux ${CHIMERA_LIBRARY_TYPE}
+add_library(chimera_vfs_linux ${CHIMERA_VFS_MODULE_TYPE}
     linux.c
 )
 
 target_link_libraries(chimera_vfs_linux evpl jansson)
 
-install(TARGETS chimera_vfs_linux DESTINATION lib)
+chimera_vfs_module(chimera_vfs_linux)

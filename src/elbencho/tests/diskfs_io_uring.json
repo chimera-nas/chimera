@@ -2,7 +2,6 @@
     "modules": [
         {
             "module": "diskfs",
-            "module_path": "${CMAKE_BINARY_DIR}/src/vfs/diskfs/libchimera_vfs_diskfs.so",
             "config": {
                 "initialize": true,
                 "unsafe_async": true,

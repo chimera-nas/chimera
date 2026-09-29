@@ -1032,7 +1032,6 @@ posix_test_init(
                                             diskfs_cfg, sizeof(diskfs_cfg));
                 vfs       = json_object();
                 vfs_entry = json_object();
-                json_object_set_new(vfs_entry, "path", json_string("/build/test/diskfs"));
                 json_object_set_new(vfs_entry, "config", json_string(diskfs_cfg));
                 json_object_set_new(vfs, "diskfs", vfs_entry);
                 json_object_set_new(posix_json_config, "vfs", vfs);
@@ -1042,7 +1041,6 @@ posix_test_init(
                 posix_test_configure_cairn(env->session_dir, cairn_cfg, sizeof(cairn_cfg));
                 vfs       = json_object();
                 vfs_entry = json_object();
-                json_object_set_new(vfs_entry, "path", json_string("/build/test/cairn"));
                 json_object_set_new(vfs_entry, "config", json_string(cairn_cfg));
                 json_object_set_new(vfs, "cairn", vfs_entry);
                 json_object_set_new(posix_json_config, "vfs", vfs);

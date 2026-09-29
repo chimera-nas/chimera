@@ -67,6 +67,39 @@ install(FILES
         ${CMAKE_SOURCE_DIR}/ext/libevpl/ext/oteltracing-c/oteltracing.h
         DESTINATION include/chimera)
 
+# The VFS backends are plugins: each builds as a loadable module that
+# chimera_vfs_init dlopens by name at runtime (src/vfs/vfs.c), and none is
+# linked into chimera_vfs.  They land beside libchimera_vfs in the build tree
+# and install beside it, which is where the loader looks for a module whose
+# config gives no explicit module_path.  The native Windows build is all
+# static archives (cmake/Platform.cmake) with no shared VFS core for a plugin
+# to bind to, so there the backends stay linked in and are resolved from a
+# built-in table.
+if (WIN32)
+    set(CHIMERA_VFS_MODULE_TYPE STATIC)
+else ()
+    set(CHIMERA_VFS_MODULE_TYPE MODULE)
+endif ()
+
+target_compile_definitions(chimera_vfs PRIVATE
+    CHIMERA_VFS_MODULE_PREFIX="${CMAKE_SHARED_MODULE_PREFIX}chimera_vfs_"
+    CHIMERA_VFS_MODULE_SUFFIX="${CMAKE_SHARED_MODULE_SUFFIX}"
+    CHIMERA_VFS_MODULE_INSTALL_DIR="${CMAKE_INSTALL_PREFIX}/lib")
+
+# Finish a backend target created with add_library(... ${CHIMERA_VFS_MODULE_TYPE}):
+# place it where the loader finds it and bind it to the VFS core it plugs into.
+function(chimera_vfs_module target)
+    if (NOT WIN32)
+        set_target_properties(${target} PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY ${CHIMERA_VFS_BINARY_DIR})
+        target_link_libraries(${target} chimera_vfs)
+    endif ()
+    install(TARGETS ${target} DESTINATION lib)
+    set_property(GLOBAL APPEND PROPERTY CHIMERA_VFS_MODULE_TARGETS ${target})
+endfunction()
+
+set(CHIMERA_VFS_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
+
 add_subdirectory(memfs)
 add_subdirectory(memkv)
 
@@ -103,30 +136,18 @@ else ()
     message(STATUS "sqlite3 not found; skipping chimera_vfs_sqlite")
 endif()
 
+get_property(CHIMERA_VFS_MODULE_TARGETS GLOBAL PROPERTY CHIMERA_VFS_MODULE_TARGETS)
+
 target_link_libraries(chimera_vfs
-    chimera_vfs_memfs chimera_vfs_memkv chimera_vfs_diskfs
-    chimera_vfs_nfs chimera_vfs_smb
     chimera_common prometheus-c xxhash ${CHIMERA_DL_LIB} ${CHIMERA_RCU_LIBS})
 
-if (CHIMERA_LINUX)
-    target_link_libraries(chimera_vfs chimera_vfs_linux)
+if (WIN32)
+    target_link_libraries(chimera_vfs ${CHIMERA_VFS_MODULE_TARGETS})
 endif()
 
-if (CHIMERA_VFS_IO_URING)
-    target_link_libraries(chimera_vfs chimera_vfs_io_uring)
-endif()
-
-if (SQLITE_ENABLED)
-    target_link_libraries(chimera_vfs chimera_vfs_sqlite)
-endif()
-
-if (DEMFS_ENABLED)
-    target_link_libraries(chimera_vfs chimera_vfs_diskfs)
-endif()
-
-if (CAIRN_ENABLED)
-    target_link_libraries(chimera_vfs chimera_vfs_cairn)
-endif()
+# Nothing links the backends, so give the libraries that bring up a VFS a
+# build dependency on them: building any of those builds a loadable set.
+add_custom_target(chimera_vfs_modules DEPENDS ${CHIMERA_VFS_MODULE_TARGETS})
 
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)

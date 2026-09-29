@@ -51,6 +51,7 @@ target_include_directories(test_replay_slot PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${NFS_COMMON_INCLUDE_DIR})
 target_link_libraries(test_replay_slot chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
+add_dependencies(test_replay_slot chimera_nfs_common)
 add_test(NAME chimera/server/nfs/replay_slot COMMAND test_replay_slot)
 
 # Cross-reboot persistence: record (de)serialization + cold-start session/slot
@@ -74,6 +75,7 @@ target_include_directories(test_nfs_persist PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${NFS_COMMON_INCLUDE_DIR})
 target_link_libraries(test_nfs_persist chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
+add_dependencies(test_nfs_persist chimera_nfs_common)
 add_test(NAME chimera/server/nfs/nfs_persist COMMAND test_nfs_persist)
 
 # NSM/statd persistence: KV key/value formats, odd-state bump, monitor table.
