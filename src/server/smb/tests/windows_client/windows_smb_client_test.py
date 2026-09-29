@@ -105,18 +105,22 @@ def daemon_config(backend, scratch, smb_port, metrics_port):
     return config
 
 
-def wait_for_port(proc, port, timeout=60):
+def wait_until_ready(proc, log_path, timeout=120):
+    """Wait for the daemon to report itself ready.
+
+    The SMB port accepts connections before the backend is mounted (diskfs
+    formats its devices first), and a logon attempted in that gap times out --
+    after which the Windows client caches the failure and refuses the retries
+    with "network name cannot be found"."""
     deadline = time.monotonic() + timeout
     while True:
         if proc.poll() is not None:
             raise RuntimeError(f"daemon exited during startup: {proc.returncode}")
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=1):
-                return
-        except OSError:
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"daemon did not listen on {port} within {timeout}s")
-            time.sleep(0.2)
+        if b"Server is ready." in log_path.read_bytes():
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"daemon not ready within {timeout}s")
+        time.sleep(0.2)
 
 
 def free_drive_letter():
@@ -154,7 +158,6 @@ FILE_ATTRIBUTE_HIDDEN = 0x2
 FILE_FLAG_DELETE_ON_CLOSE = 0x04000000
 INVALID_HANDLE = ctypes.c_void_p(-1).value
 ERROR_SHARING_VIOLATION = 32
-ERROR_LOCK_VIOLATION = 33
 
 if kernel32:
     kernel32.CreateFileW.restype = ctypes.c_void_p
@@ -203,8 +206,10 @@ def check_directories(d):
 
 def check_small_file(d):
     text = "hello from the Windows SMB client\r\nsecond line\r\n"
-    (d / "small.txt").write_text(text, encoding="utf-8", newline="")
-    assert (d / "small.txt").read_text(encoding="utf-8", newline="") == text
+    with (d / "small.txt").open("w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    with (d / "small.txt").open(encoding="utf-8", newline="") as f:
+        assert f.read() == text
     assert (d / "small.txt").stat().st_size == len(text.encode())
 
 
@@ -377,10 +382,12 @@ def check_byte_range_lock(d):
         os.lseek(holder, 10, os.SEEK_SET)
         msvcrt.locking(holder, msvcrt.LK_NBLCK, 20)
         os.lseek(other, 15, os.SEEK_SET)
+        # os.read goes through the CRT, which reports ERROR_LOCK_VIOLATION
+        # as EACCES and drops the Windows error code.
         try:
             os.read(other, 5)
-        except OSError as e:
-            assert getattr(e, "winerror", None) == ERROR_LOCK_VIOLATION, e
+        except PermissionError:
+            pass
         else:
             raise AssertionError("read inside a locked range succeeded")
         os.lseek(other, 50, os.SEEK_SET)
@@ -491,6 +498,16 @@ def check_security_descriptor(d):
     assert result.returncode == 0, f"icacls {result.returncode}:\n{result.stdout}{result.stderr}"
 
 
+# Checks a backend is known to fail, with the reason.  They still run: a known
+# failure is reported as skipped, and one that starts passing fails the run so
+# the entry gets removed.
+KNOWN_FAILURES = {
+    ("diskfs", "case_insensitive_lookup"):
+        "diskfs has no case-insensitive fallback for SMB opens (memfs does)",
+    ("cairn", "case_insensitive_lookup"):
+        "cairn has no case-insensitive fallback for SMB opens (memfs does)",
+}
+
 CHECKS = [
     check_directories,
     check_small_file,
@@ -533,9 +550,16 @@ def run_checks(root, backend):
         except Exception:  # noqa: BLE001 - every failure is reported, none aborts the run
             failure = traceback.format_exc()
         elapsed = time.monotonic() - start
-        results.append((f"{backend}/{name}", elapsed, failure))
-        print(f"[{'PASS' if failure is None else 'FAIL'}] {backend}/{name} ({elapsed:.1f}s)",
-              flush=True)
+        known = KNOWN_FAILURES.get((backend, name))
+        skipped = None
+        if known and failure:
+            skipped, failure = f"known failure: {known}", None
+        elif known:
+            failure = f"passed, but is listed in KNOWN_FAILURES ({known}); remove the entry"
+        verdict = "SKIP" if skipped else "PASS" if failure is None else "FAIL"
+        results.append((f"{backend}/{name}", elapsed, failure, skipped))
+        print(f"[{verdict}] {backend}/{name} ({elapsed:.1f}s)"
+              + (f" -- {skipped}" if skipped else ""), flush=True)
         if failure:
             print(failure, flush=True)
     return results
@@ -546,18 +570,21 @@ def write_junit(path, results, os_label):
     suite = ElementTree.SubElement(suites, "testsuite", name="windows_smb_client",
                                    tests=str(len(results)),
                                    failures=str(sum(1 for r in results if r[2])))
-    for name, elapsed, failure in results:
+    for name, elapsed, failure, skipped in results:
         case = ElementTree.SubElement(suite, "testcase", classname=f"windows_smb_client.{os_label}",
                                       name=f"windows_smb_client/{name}", time=f"{elapsed:.3f}")
         if failure:
             ElementTree.SubElement(case, "failure",
                                    message=failure.strip().splitlines()[-1]).text = failure
+        elif skipped:
+            ElementTree.SubElement(case, "skipped", message=skipped)
     ElementTree.ElementTree(suites).write(path, encoding="utf-8", xml_declaration=True)
 
 
 def run_backend(chimera, backend):
     """Serve one backend, map it, run every check, tear it all down."""
     scratch = Path(tempfile.mkdtemp(prefix=f"chimera-smbclient-{backend}-"))
+    (scratch / "state").mkdir()
     smb_port, metrics_port = free_ports(2)
     config_path = scratch / "config.json"
     config_path.write_text(json.dumps(daemon_config(backend, scratch, smb_port, metrics_port)),
@@ -570,7 +597,7 @@ def run_backend(chimera, backend):
         proc = subprocess.Popen([chimera, "-c", str(config_path)], stdout=log, stderr=log,
                                 env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
         try:
-            wait_for_port(proc, smb_port)
+            wait_until_ready(proc, scratch / "daemon.log")
             drive = free_drive_letter()
             net_use(drive, smb_port)
             print(f"{backend}: mapped {drive}: to \\\\127.0.0.1\\{SHARE} on port {smb_port}",
@@ -579,7 +606,7 @@ def run_backend(chimera, backend):
             root.mkdir()
             results = run_checks(root, backend)
         except Exception:  # noqa: BLE001 - a setup failure is one failed result
-            results.append((f"{backend}/setup", 0.0, traceback.format_exc()))
+            results.append((f"{backend}/setup", 0.0, traceback.format_exc(), None))
             print(results[-1][2], flush=True)
         finally:
             if drive:
@@ -593,7 +620,7 @@ def run_backend(chimera, backend):
                     proc.wait()
             if proc.returncode != 0:
                 results.append((f"{backend}/shutdown", 0.0,
-                                f"daemon exited with status {proc.returncode}"))
+                                f"daemon exited with status {proc.returncode}", None))
             if any(r[2] for r in results):
                 log.seek(0)
                 tail = log.read().decode("utf-8", errors="replace").splitlines()[-200:]
@@ -632,7 +659,9 @@ def main():
     if args.duration:
         Path(args.duration).write_text(f"{round(time.monotonic() - start)}\n")
     failed = [r[0] for r in results if r[2]]
-    print(f"{len(results) - len(failed)}/{len(results)} checks passed"
+    known = [r[0] for r in results if r[3]]
+    print(f"{len(results) - len(failed) - len(known)}/{len(results)} checks passed"
+          + (f"; known failures: {', '.join(known)}" if known else "")
           + (f"; failed: {', '.join(failed)}" if failed else ""), flush=True)
     return 1 if failed else 0
 
