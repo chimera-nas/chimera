@@ -11,6 +11,9 @@
         "threads": 4,
         "rest_http_port": 8080
     },
+    "filesystems": {
+        "memfs": { "module": "memfs" }
+    },
     "mounts": {
         "export": {
             "module": "linux",
@@ -18,7 +21,7 @@
         },
         "memfs": {
             "module": "memfs",
-            "path": "/"
+            "path": "memfs"
         }
     },
     "exports": {
