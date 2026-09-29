@@ -209,6 +209,52 @@ test_smb1_negotiate_bad_bcc(void)
           "SMB1 NEGOTIATE oversized byte count: dialect copy rejected (no abort)");
 } /* test_smb1_negotiate_bad_bcc */
 
+/* Drive the sequence window the way a Windows client's connection does: an
+ * SMB1 multi-protocol NEGOTIATE on the implicit MessageId 0, then SMB2 requests
+ * from MessageId 1, each charging one credit and asking for more.  Returns the
+ * number of SMB2 requests accepted before the first rejection (or `count`). */
+static uint64_t
+seq_window_run(
+    int      consume_smb1_negotiate,
+    uint64_t count)
+{
+    struct chimera_smb_conn *conn = calloc(1, sizeof(*conn));
+    uint64_t                 mid;
+
+    /* As chimera_smb_server_accept initializes it: only MessageId 0 granted. */
+    conn->seq_low       = 0;
+    conn->seq_high      = 1;
+    conn->seq_bitmap[0] = 1ULL;
+
+    if (consume_smb1_negotiate) {
+        (void) chimera_smb_seq_window_consume(conn, 0, 1);
+    }
+    (void) chimera_smb_grant_credits(conn, 1, 1);
+
+    for (mid = 1; mid <= count; mid++) {
+        if (chimera_smb_seq_window_consume(conn, mid, 1) != 0) {
+            break;
+        }
+        (void) chimera_smb_grant_credits(conn, 1, 32);
+    }
+
+    free(conn);
+    return mid - 1;
+} /* seq_window_run */
+
+/* Regression: the SMB1 NEGOTIATE upgrade path never consumed MessageId 0, which
+ * pinned the window's base at 0; once the window reached its
+ * CHIMERA_SMB_MAX_CREDITS width, MessageId 8192 was rejected and the Windows
+ * client's connection dropped mid-workload. */
+static void
+test_seq_window_after_smb1_negotiate(void)
+{
+    CHECK(seq_window_run(1, 20000) == 20000,
+          "sequence window keeps sliding after an SMB1 NEGOTIATE consumes MessageId 0");
+    CHECK(seq_window_run(0, 20000) == CHIMERA_SMB_MAX_CREDITS - 1,
+          "an unconsumed MessageId 0 caps the connection at CHIMERA_SMB_MAX_CREDITS requests");
+} /* test_seq_window_after_smb1_negotiate */
+
 /* ------------------------------------------------------------------ *
 *  smb_cursor_seek_to                                                *
 * ------------------------------------------------------------------ */
@@ -434,6 +480,9 @@ main(
     fprintf(stderr, "=== SMB parse hardening: pre-dispatch frame bounds ===\n");
     test_short_nbss_frame_protocol_id();
     test_smb1_negotiate_bad_bcc();
+
+    fprintf(stderr, "=== SMB command sequence window ===\n");
+    test_seq_window_after_smb1_negotiate();
 
     fprintf(stderr, "=== SMB parse hardening: smb_cursor_seek_to ===\n");
     test_seek_to();
