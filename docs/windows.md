@@ -133,6 +133,28 @@ virtual filesystems; they do not implement POSIX semantics for arbitrary
 Windows host files. Fork-based stress programs, kernel mounts, network
 namespaces, and external Unix Samba tools remain Unix test paths.
 
+### Windows SMB client
+
+`src/server/smb/tests/windows_client/windows_smb_client_test.py` drives a
+native daemon with the real Windows SMB client on the same machine. One
+daemon serves each requested backend (memfs, diskfs, cairn) as a share, and
+the script maps each with `net use /TCPPORT` and runs file-level checks
+through the ordinary Win32 APIs, robocopy and icacls. Port 445 belongs to the
+kernel's own SMB server and cannot be freed without a reboot, so the test
+needs a client that can reach an alternate port: Windows 11 24H2 or Windows
+Server 2025. It exits 77 (skipped) on older clients, including Server 2022.
+
+```powershell
+python src/server/smb/tests/windows_client/windows_smb_client_test.py `
+  build/bin/chimera.exe memfs diskfs cairn --daemon-log daemon.log
+```
+
+`--daemon-debug` starts the daemon with `-d`, which dumps every SMB request.
+If the daemon fails to stop, the script prints every thread's stack with `cdb`
+from the Windows SDK before killing it. CI runs it in the `smb-client` job of
+the Windows workflow against the Release build: on Server 2025 for x64 and on
+Windows 11 for ARM64.
+
 ## Platform choices
 
 * Native threads, synchronization, scalar atomics, timers and secure randomness
