@@ -17,10 +17,15 @@
 	"smb_enabled": true,
 	"threads": 16
     },
+    "filesystems": {
+	"memfs": {
+	    "module": "memfs"
+	}
+    },
     "mounts": {
 	"memfs_dir": {
 	    "module": "memfs",
-	    "path": "/"
+	    "path": "memfs"
 	}
     },
     "exports": {
