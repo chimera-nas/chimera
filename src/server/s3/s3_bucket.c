@@ -204,8 +204,9 @@ chimera_s3_create_bucket(
 
     chimera_s3_request_get(request);
 
+    chimera_s3_refresh_root(thread);
     chimera_vfs_lookup(thread->vfs, &request->cred,
-                       shared->root_fh, shared->root_fh_len,
+                       thread->root_fh, thread->root_fh_len,
                        shared->bucket_root_path, shared->bucket_root_pathlen,
                        CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
                        chimera_s3_create_bucket_lookup_cb, request);
@@ -340,7 +341,6 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
 {
     struct chimera_s3_request       *request = ctx->request;
     struct chimera_server_s3_thread *thread  = request->thread;
-    struct chimera_server_s3_shared *shared  = thread->shared;
 
     if (ctx->cur < ctx->ndirs) {
         chimera_vfs_remove(thread->vfs, &request->cred,
@@ -351,8 +351,9 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
     }
 
     /* All scaffolding gone; remove the bucket directory from the bucket root. */
+    chimera_s3_refresh_root(thread);
     chimera_vfs_remove(thread->vfs, &request->cred,
-                       shared->root_fh, shared->root_fh_len,
+                       thread->root_fh, thread->root_fh_len,
                        ctx->bucket_path, ctx->bucket_path_len, 0,
                        chimera_s3_delbucket_root_removed, ctx);
 } /* chimera_s3_delbucket_remove_next */
@@ -468,8 +469,9 @@ chimera_s3_delete_bucket(
                                     request->bucket_namelen, request->bucket_name);
 
     /* Resolve the bucket directory, then walk + purge it. */
+    chimera_s3_refresh_root(thread);
     chimera_vfs_lookup(thread->vfs, &request->cred,
-                       shared->root_fh, shared->root_fh_len,
+                       thread->root_fh, thread->root_fh_len,
                        ctx->bucket_path, ctx->bucket_path_len,
                        CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
                        chimera_s3_delbucket_lookup_cb, ctx);

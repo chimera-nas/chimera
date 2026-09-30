@@ -10,6 +10,7 @@
 #include "vfs_procs.h"
 #include "vfs_pnfs.h"
 #include "vfs_internal.h"
+#include "vfs_mount_table.h"
 #include "vfs_release.h"
 #include "sdk/vfs_access.h"
 #include "common/misc.h"
@@ -565,8 +566,20 @@ chimera_vfs_open_at_hs_dispatch(
     void                            *private_data)
 {
     struct chimera_vfs_request *request;
+    uint8_t                     cross_fh[CHIMERA_VFS_FH_SIZE + 16];
+    int                         cross_fh_len;
 
     chimera_vfs_abort_if(!set_attr, "no setattr provided");
+
+    /* A mount point opens as the root of what is mounted on it. */
+    if (chimera_vfs_mount_table_cover_root(thread->vfs->mount_table,
+                                           handle->fh, handle->fh_len,
+                                           name, namelen,
+                                           cross_fh, &cross_fh_len, NULL) == 0) {
+        chimera_vfs_open_at_redirect(thread, cred, cross_fh, cross_fh_len, flags,
+                                     set_attr, attr_mask, callback, private_data);
+        return;
+    }
 
     /* On a creating open the trailing component is a new name; reject one longer
      * than {NAME_MAX} -- but search permission on the directory that would hold

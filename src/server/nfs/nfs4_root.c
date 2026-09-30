@@ -134,7 +134,7 @@ nfs4_root_lookup_export(
     }
 
     req->handle = NULL; // Ensure handle is NULL so that the lookup callback does not attempt to release it
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(nfs_thread->vfs_thread->vfs, root_fh, &root_fh_len);
     chimera_vfs_lookup(nfs_thread->vfs_thread,
                        &req->cred,
                        root_fh,
@@ -281,7 +281,7 @@ nfs4_root_export_fh_resolve(
         path++;
     }
 
-    chimera_vfs_get_root_fh(fh, &fh_len);
+    chimera_vfs_get_root_fh(thread->vfs_thread->vfs, fh, &fh_len);
 
     if (path[0] == '\0') {
         /* The "/" export's path is the VFS root itself; nothing to resolve. */
@@ -753,7 +753,7 @@ nfs4_root_readdir(
     state->error_code  = CHIMERA_VFS_OK;
     state->attrmask    = chimera_nfs4_attr2mask(args->attr_request,
                                                 args->num_attr_request);
-    chimera_vfs_get_root_fh(state->root_fh, &state->root_fh_len);
+    chimera_vfs_get_root_fh(nfs_thread->vfs_thread->vfs, state->root_fh, &state->root_fh_len);
 
     nfs4_root_readdir_advance(state);
 } /* nfs4_root_readdir */

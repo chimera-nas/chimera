@@ -71,11 +71,12 @@ chimera_stat_walk(
 {
     struct chimera_vfs_open_handle *parent = request->stat.handle;
 
+    chimera_client_refresh_root(thread);
     chimera_vfs_lookup(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        parent ? parent->fh : thread->client->root_fh,
-        parent ? parent->fh_len : thread->client->root_fh_len,
+        parent ? parent->fh : thread->root_fh,
+        parent ? parent->fh_len : thread->root_fh_len,
         request->stat.path,
         request->stat.path_len,
         CHIMERA_VFS_ATTR_MASK_STAT,

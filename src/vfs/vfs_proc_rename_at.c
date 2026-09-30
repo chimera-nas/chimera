@@ -6,6 +6,7 @@
 #include "vfs_procs.h"
 #include "vfs_claim.h"
 #include "vfs_internal.h"
+#include "vfs_mount_table.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
 #include "vfs_notify.h"
@@ -736,6 +737,16 @@ chimera_vfs_rename_at(
         (new_namelen == 1 && new_name[0] == '.') ||
         (new_namelen == 2 && new_name[0] == '.' && new_name[1] == '.')) {
         callback(CHIMERA_VFS_EINVAL, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
+    /* As on Linux, a mount point can be neither renamed nor replaced while
+     * something is mounted on it. */
+    if (chimera_vfs_mount_table_cover_root(thread->vfs->mount_table, fh, fhlen,
+                                           name, namelen, NULL, NULL, NULL) == 0 ||
+        chimera_vfs_mount_table_cover_root(thread->vfs->mount_table, new_fh, new_fhlen,
+                                           new_name, new_namelen, NULL, NULL, NULL) == 0) {
+        callback(CHIMERA_VFS_EBUSY, NULL, NULL, NULL, NULL, private_data);
         return;
     }
 

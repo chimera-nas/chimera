@@ -158,6 +158,11 @@ chimera_vfs_find_result_free(
  * resolution is not, because umount's own closes run against exactly such a
  * mount and still have to find the filesystem their handle belongs to.
  */
+void
+chimera_vfs_mount_retire(
+    struct chimera_vfs       *vfs,
+    struct chimera_vfs_mount *mount);
+
 static inline struct chimera_vfs_module *
 chimera_vfs_resolve_mount(
     struct chimera_vfs_thread *thread,

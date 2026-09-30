@@ -83,11 +83,12 @@ chimera_dispatch_readlink(
      * and FH-relative backends.  NOFOLLOW keeps the final symlink itself
      * (its target is what we want to read), rather than following it.
      */
+    chimera_client_refresh_root(thread);
     chimera_vfs_open(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
+        thread->root_fh,
+        thread->root_fh_len,
         request->readlink.path,
         request->readlink.path_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_NOFOLLOW,

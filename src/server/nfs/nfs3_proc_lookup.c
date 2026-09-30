@@ -74,12 +74,23 @@ chimera_nfs3_lookup_open_callback(
     int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
+        const char *name    = args->what.name.str;
+        int         namelen = args->what.name.len;
+
         req->handle = handle;
+
+        /* ".." from the export's mount root would leave the export: answer
+         * with the directory itself, as the root of a filesystem does. */
+        if (namelen == 2 && name[0] == '.' && name[1] == '.' &&
+            chimera_nfs_dotdot_stays(req, handle->fh, handle->fh_len)) {
+            name    = ".";
+            namelen = 1;
+        }
 
         chimera_vfs_lookup_at(thread->vfs_thread, &req->cred,
                               handle,
-                              args->what.name.str,
-                              args->what.name.len,
+                              name,
+                              namelen,
                               CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
                               CHIMERA_NFS3_ATTR_MASK,
                               chimera_nfs3_lookup_complete,

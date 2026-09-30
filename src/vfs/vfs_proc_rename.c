@@ -10,55 +10,6 @@
 #include "common/misc.h"
 #include "common/macros.h"
 
-/*
- * See vfs_proc_open.c for the rationale.  When `path` (slash-stripped, relative
- * to the global vfs root) resolves into a path-only mount, copy out the mount's
- * re-openable root fh and return the offset of the in-mount remainder.  Returns
- * -1 when the target is not under a path-only mount.
- */
-static int
-chimera_vfs_pathonly_rebase(
-    struct chimera_vfs_thread *thread,
-    const char                *path,
-    int                        pathlen,
-    uint8_t                   *r_root_fh,
-    int                       *r_root_fh_len)
-{
-    struct chimera_vfs_mount_table       *table = thread->vfs->mount_table;
-    struct chimera_vfs_mount_table_entry *entry;
-    uint32_t                              i;
-    int                                   offset = -1;
-
-    chimera_rcu_read_lock(&table->rcu);
-
-    for (i = 0; i < table->num_buckets && offset < 0; i++) {
-        entry = chimera_rcu_deref(table->buckets[i]);
-        while (entry) {
-            struct chimera_vfs_mount *mount = entry->mount;
-
-            if (mount->pathlen <= (uint32_t) pathlen &&
-                memcmp(mount->path, path, mount->pathlen) == 0 &&
-                (mount->pathlen == (uint32_t) pathlen ||
-                 path[mount->pathlen] == '/') &&
-                chimera_vfs_module_is_path_only(mount->module)) {
-
-                memcpy(r_root_fh, mount->root_fh, mount->root_fh_len);
-                *r_root_fh_len = mount->root_fh_len;
-
-                offset = mount->pathlen;
-                while (offset < pathlen && path[offset] == '/') {
-                    offset++;
-                }
-                break;
-            }
-            entry = chimera_rcu_deref(entry->next);
-        }
-    }
-
-    chimera_rcu_read_unlock(&table->rcu);
-
-    return offset;
-} /* chimera_vfs_pathonly_rebase */
 
 static void
 chimera_vfs_rename_op_complete(
@@ -309,7 +260,7 @@ chimera_vfs_rename(
     request->rename.callback     = callback;
     request->rename.private_data = private_data;
 
-    if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
+    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
         /* Fast path: pass full paths directly, kernel resolves */
         request->rename.name_offset     = 0;
         request->rename.new_name_offset = 0;
@@ -373,12 +324,12 @@ chimera_vfs_rename(
         int     new_root_fh_len = 0;
         int     old_rebase, new_rebase;
 
-        old_rebase = chimera_vfs_pathonly_rebase(thread, request->rename.path,
+        old_rebase = chimera_vfs_pathonly_rebase(thread, request->fh, request->fh_len, request->rename.path,
                                                  request->rename.pathlen,
                                                  old_root_fh, &old_root_fh_len);
 
         if (old_rebase >= 0 && old_rebase < request->rename.pathlen) {
-            new_rebase = chimera_vfs_pathonly_rebase(thread, request->rename.new_path,
+            new_rebase = chimera_vfs_pathonly_rebase(thread, request->fh, request->fh_len, request->rename.new_path,
                                                      request->rename.new_pathlen,
                                                      new_root_fh, &new_root_fh_len);
 

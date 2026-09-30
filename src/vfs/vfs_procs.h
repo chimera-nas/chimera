@@ -25,11 +25,37 @@ typedef void (*chimera_vfs_mount_callback_t)(
     enum chimera_vfs_error     status,
     void                      *private_data);
 
+/*
+ * Mount module_name's module_path at mount_path in the namespace, as on Linux:
+ * "/" replaces the built-in rootfs (EBUSY once something else is mounted
+ * there or on the rootfs's directories); any other path must name an existing
+ * directory, reached through whatever is already mounted, that is not itself
+ * a mount point (EBUSY) and does not live on a path-only filesystem (ENOTSUP).
+ * Where the path runs through the built-in rootfs, missing directories are
+ * created.
+ */
 void
 chimera_vfs_mount(
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     const char                    *mount_path,
+    const char                    *module_name,
+    const char                    *module_path,
+    const char                    *options,
+    chimera_vfs_mount_callback_t   callback,
+    void                          *private_data);
+
+/*
+ * Mount without a place in the namespace, reachable only through its handles
+ * (the mount table routes them as for any mount).  `name` identifies it to
+ * chimera_vfs_umount and chimera_vfs_mount_table_find_exact; it must be unique
+ * among mount paths.
+ */
+void
+chimera_vfs_mount_detached(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const char                    *name,
     const char                    *module_name,
     const char                    *module_path,
     const char                    *options,
@@ -112,6 +138,19 @@ chimera_vfs_lookup_at(
     uint32_t                         namelen,
     uint64_t                         attr_mask,
     uint64_t                         dir_attr_mask,
+    chimera_vfs_lookup_at_callback_t callback,
+    void                            *private_data);
+
+/* Answer a name lookup with the handle it resolved to on another filesystem
+ * (a mount point's root, or the parent of a mount root): open it, fetch
+ * attr_mask, and complete as lookup_at would.  See vfs_mount_cross.c. */
+void
+chimera_vfs_lookup_at_redirect(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const uint8_t                   *fh,
+    int                              fhlen,
+    uint64_t                         attr_mask,
     chimera_vfs_lookup_at_callback_t callback,
     void                            *private_data);
 
@@ -453,6 +492,20 @@ chimera_vfs_open_at(
     uint64_t                        post_attr_mask,
     chimera_vfs_open_at_callback_t  callback,
     void                           *private_data);
+
+/* Answer an open_at whose name is a mount point by opening the mounted
+ * root (handle fh) instead.  See vfs_mount_cross.c. */
+void
+chimera_vfs_open_at_redirect(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const uint8_t                 *fh,
+    int                            fhlen,
+    unsigned int                   flags,
+    struct chimera_vfs_attrs      *set_attr,
+    uint64_t                       attr_mask,
+    chimera_vfs_open_at_callback_t callback,
+    void                          *private_data);
 
 /* Variant that persists an opaque handle-state record atomically with the
  * open (backends advertising CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE); handle_state

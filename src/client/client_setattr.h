@@ -99,11 +99,12 @@ chimera_dispatch_setattr(
         open_flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
     }
 
+    chimera_client_refresh_root(thread);
     chimera_vfs_open(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
+        thread->root_fh,
+        thread->root_fh_len,
         request->setattr.path,
         request->setattr.path_len,
         open_flags,
@@ -133,11 +134,12 @@ chimera_dispatch_lsetattr(
     }
     open_flags |= CHIMERA_VFS_OPEN_NOFOLLOW;
 
+    chimera_client_refresh_root(thread);
     chimera_vfs_open(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
+        thread->root_fh,
+        thread->root_fh_len,
         request->setattr.path,
         request->setattr.path_len,
         open_flags,

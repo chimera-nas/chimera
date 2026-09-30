@@ -5,6 +5,7 @@
 #include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
+#include "vfs_mount_table.h"
 #include "vfs_release.h"
 #include "common/misc.h"
 #include "common/macros.h"
@@ -146,7 +147,7 @@ chimera_vfs_mknod(
     request->mknod.callback     = callback;
     request->mknod.private_data = private_data;
 
-    if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
+    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
         request->mknod.name_offset = 0;
 
         memcpy(request->mknod.parent_fh, fh, fhlen);

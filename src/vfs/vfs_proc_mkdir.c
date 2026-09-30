@@ -10,56 +10,6 @@
 #include "common/misc.h"
 #include "common/macros.h"
 
-/*
- * See vfs_proc_open.c for the rationale.  When `path` (slash-stripped, relative
- * to the global vfs root) resolves into a path-only mount, copy out the mount's
- * re-openable root fh and return the offset of the in-mount remainder; the
- * caller opens the mount root and hands the whole sub-path to mkdir_at.  Returns
- * -1 when the target is not under a path-only mount (behavior unchanged).
- */
-static int
-chimera_vfs_pathonly_rebase(
-    struct chimera_vfs_thread *thread,
-    const char                *path,
-    int                        pathlen,
-    uint8_t                   *r_root_fh,
-    int                       *r_root_fh_len)
-{
-    struct chimera_vfs_mount_table       *table = thread->vfs->mount_table;
-    struct chimera_vfs_mount_table_entry *entry;
-    uint32_t                              i;
-    int                                   offset = -1;
-
-    chimera_rcu_read_lock(&table->rcu);
-
-    for (i = 0; i < table->num_buckets && offset < 0; i++) {
-        entry = chimera_rcu_deref(table->buckets[i]);
-        while (entry) {
-            struct chimera_vfs_mount *mount = entry->mount;
-
-            if (mount->pathlen <= (uint32_t) pathlen &&
-                memcmp(mount->path, path, mount->pathlen) == 0 &&
-                (mount->pathlen == (uint32_t) pathlen ||
-                 path[mount->pathlen] == '/') &&
-                chimera_vfs_module_is_path_only(mount->module)) {
-
-                memcpy(r_root_fh, mount->root_fh, mount->root_fh_len);
-                *r_root_fh_len = mount->root_fh_len;
-
-                offset = mount->pathlen;
-                while (offset < pathlen && path[offset] == '/') {
-                    offset++;
-                }
-                break;
-            }
-            entry = chimera_rcu_deref(entry->next);
-        }
-    }
-
-    chimera_rcu_read_unlock(&table->rcu);
-
-    return offset;
-} /* chimera_vfs_pathonly_rebase */
 
 static void
 chimera_vfs_mkdir_op_complete(
@@ -198,7 +148,7 @@ chimera_vfs_mkdir(
     request->mkdir.callback     = callback;
     request->mkdir.private_data = private_data;
 
-    if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
+    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
         /* Fast path: pass the whole in-mount name to mkdir_at and let the
          * backend resolve it -- but ONLY when there is no mid-path component.
          * A mid-path symlink must be followed in the core (it may target a
@@ -226,7 +176,7 @@ chimera_vfs_mkdir(
          * and dispatch mkdir_at with the in-mount sub-path as the name -- again
          * only when that sub-path is a single component; a mid-path symlink
          * falls through so the core resolves (and follows) the parent. */
-        int rebase = chimera_vfs_pathonly_rebase(thread, request->mkdir.path,
+        int rebase = chimera_vfs_pathonly_rebase(thread, request->fh, request->fh_len, request->mkdir.path,
                                                  request->mkdir.pathlen,
                                                  request->mkdir.parent_fh,
                                                  &request->mkdir.parent_fh_len);

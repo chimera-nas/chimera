@@ -346,10 +346,11 @@ chimera_posix_utimensat(
     if (dirfd == AT_FDCWD || pathname[0] == '/') {
         /* Resolve relative to the namespace root.  chimera_vfs_lookup strips
          * leading slashes, so an absolute path works as-is. */
-        struct chimera_client *client = worker->client_thread->client;
+        struct chimera_client_thread *client_thread = worker->client_thread;
 
-        memcpy(ctx.start_fh, client->root_fh, client->root_fh_len);
-        ctx.start_fh_len = client->root_fh_len;
+        chimera_client_refresh_root(client_thread);
+        memcpy(ctx.start_fh, client_thread->root_fh, client_thread->root_fh_len);
+        ctx.start_fh_len = client_thread->root_fh_len;
         ctx.dir_handle   = NULL;
     } else {
         dir_entry = chimera_posix_fd_acquire(posix, dirfd, 0);

@@ -36,11 +36,12 @@ chimera_dispatch_mkdir(
     }
 
     /* set_attr (creation mode) is initialized by the caller. */
+    chimera_client_refresh_root(thread);
     chimera_vfs_mkdir(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
+        thread->root_fh,
+        thread->root_fh_len,
         request->mkdir.path,
         request->mkdir.path_len,
         &request->mkdir.set_attr,

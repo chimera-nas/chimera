@@ -12,6 +12,7 @@
 #include "vfs_mount_table.h"
 #include "vfs_open_cache.h"
 #include "vfs_claim.h"
+#include "vfs_rootfs.h"
 #include "common/macros.h"
 
 
@@ -70,20 +71,39 @@ chimera_vfs_mount_reclaim_rcu(chimera_rcu_head *head)
     free(mount->path);
     free(mount->module_path);
     free(mount->options);
+    free(mount->cover_name);
     free(mount);
     free(reclaim);
 } /* chimera_vfs_mount_reclaim_rcu */
 
+/* Free a mount that has been unlinked from the mount table once every reader
+ * that could still hold it has left the read side. */
+void
+chimera_vfs_mount_retire(
+    struct chimera_vfs       *vfs,
+    struct chimera_vfs_mount *mount)
+{
+    struct chimera_vfs_mount_reclaim *reclaim = malloc(sizeof(*reclaim));
+
+    if (likely(reclaim)) {
+        reclaim->mount = mount;
+        chimera_rcu_retire(&vfs->mount_table->rcu, &reclaim->rcu,
+                           chimera_vfs_mount_reclaim_rcu);
+    }
+    /* Out of memory: leak the mount rather than free it early.  It is one
+     * small allocation on a path that only runs at umount, and the alternative
+     * is the use-after-free this exists to prevent. */
+} /* chimera_vfs_mount_retire */
+
 static void
 chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_thread        *thread   = request->thread;
-    chimera_vfs_umount_callback_t     callback = request->proto_callback;
+    struct chimera_vfs_thread    *thread   = request->thread;
+    chimera_vfs_umount_callback_t callback = request->proto_callback;
     /* Read the mount out before the request is freed -- the frees below used
      * to reach through request->umount.mount after chimera_vfs_request_free()
      * had already returned the request to its magazine. */
-    struct chimera_vfs_mount         *mount = request->umount.mount;
-    struct chimera_vfs_mount_reclaim *reclaim;
+    struct chimera_vfs_mount     *mount = request->umount.mount;
 
     chimera_vfs_complete(request);
 
@@ -93,17 +113,7 @@ chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 
     chimera_vfs_umount_wake(thread);
 
-    reclaim = malloc(sizeof(*reclaim));
-
-    if (likely(reclaim)) {
-        reclaim->mount = mount;
-        chimera_rcu_retire(&thread->vfs->mount_table->rcu, &reclaim->rcu,
-                           chimera_vfs_mount_reclaim_rcu);
-    }
-    /* Out of memory: leak the mount rather than free it early.  It is one
-     * small allocation on a path that only runs at umount, and the alternative
-     * is the use-after-free this exists to prevent. */
-
+    chimera_vfs_mount_retire(thread->vfs, mount);
 } /* chimera_vfs_umount_complete */
 
 
@@ -138,8 +148,20 @@ chimera_vfs_umount_dispatch(struct chimera_vfs_request *request)
     struct chimera_vfs        *vfs    = thread->vfs;
     struct chimera_vfs_mount  *mount  = request->umount.mount;
 
-    chimera_vfs_mount_table_remove_by_path(vfs->mount_table, mount->path,
-                                           mount->pathlen);
+    /* Unmounting "/" hands the namespace back to the built-in rootfs; put it
+     * in place before the outgoing root leaves so there is always a root. */
+    if (mount->pathlen == 0 && !mount->detached) {
+        chimera_vfs_rootfs_mount(vfs);
+    }
+
+    chimera_vfs_mount_table_remove_mount(vfs->mount_table, mount);
+
+    /* Rootfs directories exist only to hold mount points; drop the ones this
+     * mount point needed that nothing needs any longer, so a namespace path
+     * whose mount has gone is gone too rather than an empty directory. */
+    if (mount->cover_fh_len > 0) {
+        chimera_vfs_rootfs_prune(vfs, mount->cover_fh, mount->cover_fh_len);
+    }
 
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_umount_dispatch */
@@ -441,16 +463,34 @@ chimera_vfs_umount(
     struct chimera_vfs         *vfs = thread->vfs;
     struct chimera_vfs_mount   *mount;
     struct chimera_vfs_request *request;
-    const char                 *path = mount_path;
+    char                        path[CHIMERA_VFS_PATH_MAX];
+    int                         pathlen;
 
-    while (*path == '/') {
-        path++;
+    pathlen = chimera_vfs_mount_path_normalize(mount_path, path, sizeof(path));
+
+    if (pathlen < 0) {
+        callback(thread, CHIMERA_VFS_EINVAL, private_data);
+        return;
     }
 
-    mount = chimera_vfs_mount_table_find_exact(vfs->mount_table, path, strlen(path));
+    mount = chimera_vfs_mount_table_find_exact(vfs->mount_table, path, pathlen);
 
     if (!mount) {
         callback(thread, CHIMERA_VFS_ENOENT, private_data);
+        return;
+    }
+
+    /* The built-in rootfs is not a mount anyone placed; it leaves only when a
+     * mount at "/" replaces it. */
+    if (mount->module == &chimera_vfs_rootfs_module) {
+        callback(thread, CHIMERA_VFS_EBUSY, private_data);
+        return;
+    }
+
+    /* As on Linux, a filesystem holding another mount's mount point stays
+     * until that mount is gone. */
+    if (chimera_vfs_mount_table_has_submounts(vfs->mount_table, mount)) {
+        callback(thread, CHIMERA_VFS_EBUSY, private_data);
         return;
     }
 

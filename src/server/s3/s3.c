@@ -1214,10 +1214,11 @@ s3_server_dispatch(
 
         chimera_s3_request_get(s3_request);
 
+        chimera_s3_refresh_root(thread);
         chimera_vfs_lookup(thread->vfs,
                            &s3_request->cred,
-                           shared->root_fh,
-                           shared->root_fh_len,
+                           thread->root_fh,
+                           thread->root_fh_len,
                            bucket_path,
                            strlen(bucket_path),
                            CHIMERA_VFS_ATTR_FH,
@@ -1423,7 +1424,6 @@ s3_server_init(
     shared->multipart_table = chimera_s3_multipart_table_create(256);
 
     /* Initialize the root file handle for VFS lookups */
-    chimera_vfs_get_root_fh(shared->root_fh, &shared->root_fh_len);
 
     return shared;
 } /* s3_server_init */

@@ -450,7 +450,7 @@ main(
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(ctx.vfs_thread->vfs, root_fh, &root_fh_len);
     chimera_vfs_lookup(ctx.vfs_thread, &creds[ACTOR_ROOT], root_fh, root_fh_len,
                        "test", 4,
                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,

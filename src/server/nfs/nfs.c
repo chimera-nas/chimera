@@ -22,6 +22,7 @@
 #include "server/protocol.h"
 #include "server/server.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_mount_table.h"
 #include "evpl/evpl_rpc2.h"
 #include "evpl/evpl_rpc2_gss.h"
 #include "nfs_gss.h"
@@ -1662,3 +1663,42 @@ SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .thread_init    = nfs_server_thread_init,
     .thread_destroy = nfs_server_thread_destroy,
 };
+
+int
+chimera_nfs_dotdot_stays(
+    struct nfs_request *req,
+    const uint8_t      *fh,
+    int                 fhlen)
+{
+    struct chimera_vfs_mount_table  *table = req->thread->vfs_thread->vfs->mount_table;
+    const struct chimera_nfs_export *export;
+    struct chimera_vfs_mount        *mount;
+    char                             epath[CHIMERA_VFS_PATH_MAX];
+    int                              elen = -1, stays = 0;
+
+    export = chimera_nfs_get_export_by_id(req->thread->shared, req->export_id);
+
+    if (export) {
+        elen = chimera_vfs_mount_path_normalize(export->path, epath, sizeof(epath));
+    }
+
+    chimera_rcu_read_lock(&table->rcu);
+
+    mount = fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE ?
+        chimera_vfs_mount_table_lookup(table, fh) : NULL;
+
+    if (mount && !mount->detached && mount->cover_parent_fh_len > 0 &&
+        mount->root_fh_len == fhlen && memcmp(mount->root_fh, fh, fhlen) == 0) {
+        /* At a mount root.  Going up stays inside the export only when the
+         * export lies above this mount, i.e. this mount's path does not
+         * prefix the export's. */
+        stays = elen < 0 ||
+            (mount->pathlen <= (uint32_t) elen &&
+             memcmp(mount->path, epath, mount->pathlen) == 0 &&
+             (mount->pathlen == (uint32_t) elen || epath[mount->pathlen] == '/'));
+    }
+
+    chimera_rcu_read_unlock(&table->rcu);
+
+    return stays;
+} /* chimera_nfs_dotdot_stays */

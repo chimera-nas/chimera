@@ -16,7 +16,6 @@
 # needs but does not contain breaks that build.
 #
 # Exempt from the check:
-#   - root: the pseudo-filesystem is VFS-core plumbing, not a backend.
 #   - nfs:  the NFS client backend re-exports mounts and reaches into the
 #           open cache / request internals; untangling it is future work.
 

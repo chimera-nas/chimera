@@ -1198,6 +1198,9 @@ main(
     mounts = json_object_get(config, "mounts");
 
     if (mounts) {
+        /* Mounts are made in file order, as fstab's are: a mount point must
+         * exist when its mount is made, so a mount inside another comes after
+         * it, and a mount at "/" covers whatever the built-in root held. */
         json_object_foreach(mounts, name, mount)
         {
             const char *mount_options;

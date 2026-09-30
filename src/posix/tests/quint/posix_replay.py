@@ -78,7 +78,9 @@ def host_errno_to_linux(err):
     return _LINUX_ERRNO.get(name, err)
 
 
-MOUNT = "/test"
+# The driver mounts the backend at the namespace root (POSIX_DRIVER_MOUNT in
+# posix_driver.c), so model paths take no prefix; the model root is "/".
+MOUNT = ""
 BADFD = 999999
 
 # Explicit utimensat instants: model reserved value -> (sec, nsec).  Kept in
@@ -250,7 +252,7 @@ def real_path(pth):
         p = MOUNT + "".join("/" + c for c in comps)
         if pth["slash"] and comps:
             p += "/"
-        return p
+        return p or "/"
     p = "/".join(comps)
     if pth["slash"] and comps:
         p += "/"
@@ -260,7 +262,7 @@ def real_path(pth):
 def real_target(tgt):
     comps = [_expand(c) for c in tgt["comps"]]
     if tgt["abs"]:
-        return MOUNT + "".join("/" + c for c in comps)
+        return MOUNT + "".join("/" + c for c in comps) or "/"
     return "/".join(comps)
 
 
@@ -1159,7 +1161,7 @@ class Replayer:
             ino, rpath = stack.pop()
             node = fs["inodes"][ino]
 
-            r = self.drv.request(op="opendir", pid=3, path=MOUNT + rpath)
+            r = self.drv.request(op="opendir", pid=3, path=MOUNT + rpath or "/")
             if r["err"] != 0:
                 mism.append(f"audit: opendir {rpath or '/'}: errno "
                             f"{r['err']}")

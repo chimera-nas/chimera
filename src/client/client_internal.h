@@ -492,15 +492,29 @@ struct CHIMERA_ALIGNED(64) chimera_client {
     const struct chimera_client_config *config;
     struct chimera_vfs                 *vfs;
     struct chimera_vfs_cred             cred;
-    uint32_t                            root_fh_len;
-    uint8_t                             root_fh[CHIMERA_VFS_FH_SIZE];
 };
 
 struct CHIMERA_ALIGNED(64) chimera_client_thread {
     struct chimera_client         *client;
     struct chimera_vfs_thread     *vfs_thread;
     struct chimera_client_request *free_requests;
+    /* The namespace root handle, as of this thread's latest path operation
+     * (see chimera_client_refresh_root). */
+    uint32_t                       root_fh_len;
+    uint8_t                        root_fh[CHIMERA_VFS_FH_SIZE];
 };
+
+/*
+ * Refresh thread->root_fh, where path operations start.  The namespace root
+ * changes when a mount is placed at "/" or removed from it, so it is fetched
+ * per operation rather than once at init; the VFS copies the handle into its
+ * request, and the bytes only differ after such a change.
+ */
+static inline void
+chimera_client_refresh_root(struct chimera_client_thread *thread)
+{
+    chimera_vfs_get_root_fh(thread->client->vfs, thread->root_fh, &thread->root_fh_len);
+} /* chimera_client_refresh_root */
 
 /*
  * Return the effective credential for a request: the per-request override when

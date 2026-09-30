@@ -771,6 +771,19 @@ chimera_nfs_fh_decode(
 } /* chimera_nfs_fh_decode */
 
 /*
+ * True when ".." from `fh` must stay at `fh` because following it would leave
+ * the request's export.  The VFS follows ".." from a mount's root to the
+ * directory holding its mount point, as Linux does; like nfsd, the server
+ * stops at the root of the mount the export sits on (or at any mount root
+ * when the handle carries no export).  See nfs.c.
+ */
+int
+chimera_nfs_dotdot_stays(
+    struct nfs_request *req,
+    const uint8_t      *fh,
+    int                 fhlen);
+
+/*
  * Set the request's current export (when known directly, e.g. resolved by name
  * at the NFSv4 pseudo-fs or NFSv3 MOUNT) and apply its squash policy.  Child
  * handles minted in the reply inherit this export id.

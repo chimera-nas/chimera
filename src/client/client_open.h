@@ -29,11 +29,12 @@ chimera_dispatch_open(
     struct chimera_client_request *request)
 {
     /* set_attr (creation mode) is initialized by the caller. */
+    chimera_client_refresh_root(thread);
     chimera_vfs_open(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
+        thread->root_fh,
+        thread->root_fh_len,
         request->open.path,
         request->open.path_len,
         request->open.flags,

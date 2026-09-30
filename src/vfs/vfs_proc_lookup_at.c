@@ -8,6 +8,7 @@
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
+#include "vfs_mount_table.h"
 #include "sdk/vfs_access.h"
 #include "sdk/vfs_acl.h"
 #include "common/format.h"
@@ -89,6 +90,31 @@ chimera_vfs_lookup_at_dispatch(
     uint64_t                       name_hash;
     int                            rc;
     struct chimera_vfs_attrs       cached_attr, cached_dir_attr;
+    uint8_t                        cross_fh[CHIMERA_VFS_FH_SIZE + 16];
+    int                            cross_fh_len;
+
+    /* Mount point crossing, as on Linux: ".." from a mount's root leaves for
+     * the directory holding its mount point, and a name that is a mount
+     * point resolves to the root of what is mounted there.  Both are decided
+     * here, ahead of the name cache and the backend, which know only their
+     * own filesystem. */
+    if (namelen == 2 && name[0] == '.' && name[1] == '.' &&
+        chimera_vfs_mount_table_cover_parent(thread->vfs->mount_table,
+                                             handle->fh, handle->fh_len,
+                                             cross_fh, &cross_fh_len) == 0) {
+        chimera_vfs_lookup_at_redirect(thread, cred, cross_fh, cross_fh_len,
+                                       attr_mask, callback, private_data);
+        return;
+    }
+
+    if (chimera_vfs_mount_table_cover_root(thread->vfs->mount_table,
+                                           handle->fh, handle->fh_len,
+                                           name, namelen,
+                                           cross_fh, &cross_fh_len, NULL) == 0) {
+        chimera_vfs_lookup_at_redirect(thread, cred, cross_fh, cross_fh_len,
+                                       attr_mask, callback, private_data);
+        return;
+    }
 
     name_hash = chimera_vfs_hash(name, namelen);
 

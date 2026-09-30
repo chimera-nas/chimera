@@ -34,11 +34,12 @@ chimera_dispatch_mknod(
         return;
     }
 
+    chimera_client_refresh_root(thread);
     chimera_vfs_mknod(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
+        thread->root_fh,
+        thread->root_fh_len,
         request->mknod.path,
         request->mknod.path_len,
         &request->mknod.set_attr,

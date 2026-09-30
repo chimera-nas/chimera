@@ -104,6 +104,29 @@ struct chimera_vfs_mount {
     struct chimera_vfs_mount      *prev;
     struct chimera_vfs_mount      *next;
 
+    /* Where the mount sits in the namespace.  path is the normalized
+     * namespace path with no leading or trailing '/' ("" for the mount at
+     * "/").  A mount other than the root covers the directory named
+     * cover_name in the directory whose handle is cover_parent_fh -- the
+     * mount point -- exactly as a Linux mount covers a dentry: a lookup of
+     * that name there lands on this mount's root, and ".." from this mount's
+     * root lands on cover_parent_fh.  cover_parent_fh_len is 0 for the root
+     * mount and for a detached mount, which has no namespace position at all
+     * and is reachable only by its handles. */
+    int                            detached;
+    uint8_t                        cover_parent_fh[CHIMERA_VFS_FH_SIZE];
+    int                            cover_parent_fh_len;
+    uint8_t                        cover_fh[CHIMERA_VFS_FH_SIZE];   /* the covered directory */
+    int                            cover_fh_len;
+    char                          *cover_name;
+    int                            cover_namelen;
+    uint64_t                       cover_hash;
+
+    /* The mount root's attributes as of mount time, with no pointer-valued
+     * attributes, for the directory entry that names the mount point when a
+     * fresher copy is not cached (see chimera_vfs_readdir). */
+    struct chimera_vfs_attrs       root_attrs;
+
     /* The first CHIMERA_VFS_MOUNT_ID_SIZE (16) bytes of root_fh is the mount_id,
      * which is itself a 128-bit hash. The remaining bytes are the fh_fragment.
      * Extra space is provided for NFS file handles which may exceed CHIMERA_VFS_FH_SIZE.
@@ -276,11 +299,15 @@ chimera_vfs_set_umount_timeout(
     struct chimera_vfs *vfs,
     int                 timeout_ms);
 
-/* Get the root pseudo-filesystem's file handle */
+/* Get the handle of the namespace root: the root of the mount at "/", which
+ * is the built-in rootfs unless a mount has been placed there.  It changes
+ * when a mount at "/" is added or removed, so callers resolving namespace
+ * paths should fetch it per use rather than cache it. */
 void
 chimera_vfs_get_root_fh(
-    uint8_t  *fh,
-    uint32_t *fh_len);
+    struct chimera_vfs *vfs,
+    uint8_t            *fh,
+    uint32_t           *fh_len);
 
 struct chimera_vfs_thread *
 chimera_vfs_thread_init(

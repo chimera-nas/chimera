@@ -313,7 +313,7 @@ chimera_nfs_mount_mnt(
     chimera_nfs_mount_copy_path(&args->path, directory, sizeof(directory));
     chimera_nfs_mount_record(shared, hostname, directory);
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(thread->vfs_thread->vfs, root_fh, &root_fh_len);
     chimera_vfs_lookup(thread->vfs_thread,
                        &req->cred,
                        root_fh,

@@ -135,6 +135,17 @@ add_executable(vfs_statfs_mask_test vfs_statfs_mask_test.c)
 target_link_libraries(vfs_statfs_mask_test chimera_vfs chimera_vfs_memfs chimera_vfs_memkv evpl)
 add_test(chimera/vfs/statfs_mask_test vfs_statfs_mask_test)
 
+# Mount points (nested paths through the built-in rootfs, a filesystem at
+# "/", mounts inside mounts) are not modelled by the protocol traces, so keep
+# this in the quick tier.
+add_executable(vfs_mount_tree_test vfs_mount_tree_test.c)
+target_link_libraries(vfs_mount_tree_test chimera_vfs evpl)
+set(_mount_tree_saved_tier "${CHIMERA_TEST_TIER}")
+set(CHIMERA_TEST_TIER quick)
+add_test(chimera/vfs/mount_tree_test vfs_mount_tree_test)
+set_tests_properties(chimera/vfs/mount_tree_test PROPERTIES TIMEOUT 60)
+set(CHIMERA_TEST_TIER "${_mount_tree_saved_tier}")
+
 add_executable(vfs_umount_wait_test vfs_umount_wait_test.c)
 target_link_libraries(vfs_umount_wait_test chimera_vfs chimera_vfs_memfs chimera_vfs_memkv evpl)
 add_test(chimera/vfs/umount_wait_test vfs_umount_wait_test)

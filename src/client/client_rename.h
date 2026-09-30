@@ -33,11 +33,12 @@ chimera_dispatch_rename(
         return;
     }
 
+    chimera_client_refresh_root(thread);
     chimera_vfs_rename(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
+        thread->root_fh,
+        thread->root_fh_len,
         request->rename.source_path,
         request->rename.source_path_len,
         request->rename.dest_path,

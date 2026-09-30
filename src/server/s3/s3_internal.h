@@ -311,7 +311,20 @@ struct chimera_server_s3_thread {
     struct chimera_vfs_thread       *vfs;
     struct chimera_s3_request       *free_requests;
     struct chimera_s3_io            *free_ios;
+    /* The namespace root handle as of this thread's latest bucket path
+     * lookup (see chimera_s3_refresh_root). */
+    uint32_t                         root_fh_len;
+    uint8_t                          root_fh[CHIMERA_VFS_FH_SIZE];
 };
+
+/* Bucket paths are namespace paths, resolved from the namespace root, which
+ * changes when a mount is placed at "/" or removed from it; fetch it per
+ * lookup.  The VFS copies the handle into its request. */
+static inline void
+chimera_s3_refresh_root(struct chimera_server_s3_thread *thread)
+{
+    chimera_vfs_get_root_fh(thread->vfs->vfs, thread->root_fh, &thread->root_fh_len);
+} /* chimera_s3_refresh_root */
 
 struct chimera_server_s3_shared {
     struct chimera_s3_config          *config;
@@ -326,9 +339,7 @@ struct chimera_server_s3_shared {
      * built from it too, since the in-process transport is named rather
      * than bound. */
     enum chimera_tcp_flavor            tcp_flavor;
-    uint32_t                           root_fh_len;
-    uint8_t                            root_fh[CHIMERA_VFS_FH_SIZE];
-    /* VFS path (relative to root_fh) under which dynamically created buckets
+    /* VFS path (relative to the namespace root) under which dynamically created buckets
      * are materialized as directories. Empty if runtime bucket creation is
      * disabled (no bucket root configured). */
     int                                bucket_root_pathlen;

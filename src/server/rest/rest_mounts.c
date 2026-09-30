@@ -31,11 +31,6 @@ mount_to_json_callback(
     struct mount_list_ctx *ctx = data;
     json_t                *obj;
 
-    /* The "root" pseudo-mount is a Chimera-internal entry that is not meant to
-     * be managed by clients, so omit it from the listing. */
-    if (strcmp(module_name, "root") == 0) {
-        return 0;
-    }
 
     obj = json_object();
     json_object_set_new(obj, "name", json_string(mount_path));
@@ -81,11 +76,6 @@ mount_get_callback(
 {
     struct mount_get_ctx *ctx = data;
 
-    /* The "root" pseudo-mount is a Chimera-internal entry and must not be
-     * retrievable through the REST API. */
-    if (strcmp(module_name, "root") == 0) {
-        return 0;
-    }
 
     if (strcmp(mount_path, ctx->name) != 0) {
         return 0;

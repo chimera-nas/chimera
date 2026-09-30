@@ -11,6 +11,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_claim.h"
 #include "vfs/vfs_internal.h"
+#include "vfs/vfs_mount_table.h"
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
 #include "vfs/vfs_open_cache.h"
@@ -426,6 +427,14 @@ chimera_vfs_remove_at_common(
     }
     if (namelen == 2 && name[0] == '.' && name[1] == '.') {
         callback(CHIMERA_VFS_ENOTEMPTY, NULL, NULL, private_data);
+        return;
+    }
+
+    /* A mount point cannot be removed while something is mounted on it. */
+    if (chimera_vfs_mount_table_cover_root(thread->vfs->mount_table,
+                                           handle->fh, handle->fh_len,
+                                           name, namelen, NULL, NULL, NULL) == 0) {
+        callback(CHIMERA_VFS_EBUSY, NULL, NULL, private_data);
         return;
     }
 

@@ -23,8 +23,13 @@ chimera_nfs4_fh_is_vfs_mount_root(
 
     chimera_rcu_read_lock(&vfs->mount_table->rcu);
     mount = chimera_vfs_mount_table_lookup(vfs->mount_table, fh);
+    /* Only a mount directly under "/" grafts into the pseudo-root; a mount
+     * nested inside another mount has a real parent directory, which the VFS
+     * returns for ".." like any other. */
     if (mount &&
+        !mount->detached &&
         mount->pathlen > 0 &&
+        memchr(mount->path, '/', mount->pathlen) == NULL &&
         mount->root_fh_len == (int) fhlen &&
         memcmp(mount->root_fh, fh, fhlen) == 0) {
         is_root = true;
@@ -127,7 +132,8 @@ chimera_nfs4_lookupp_continue(
      * "/" export's real root when one is configured, the synthetic
      * pseudo-root otherwise -- not the backend's physical parent handle.
      */
-    if (chimera_nfs4_fh_is_vfs_mount_root(thread->vfs, req->fh, req->fhlen)) {
+    if (chimera_nfs4_fh_is_vfs_mount_root(thread->vfs, req->fh, req->fhlen) ||
+        chimera_nfs_dotdot_stays(req, req->fh, req->fhlen)) {
         struct chimera_nfs_export root_export;
         uint32_t                  fhlen;
 
