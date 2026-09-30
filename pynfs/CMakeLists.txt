@@ -432,3 +432,22 @@ set_tests_properties(chimera/pynfs/kerberos/sec_krb5p_only_allow_memfs_nfs4.1 PR
     LABELS "pynfs;pynfs_kerberos;rpcsec_gss;memfs;nfs4.1"
     SKIP_RETURN_CODE 77
     ENVIRONMENT "PYTHONUNBUFFERED=1;NFS_EXPORT_SEC=krb5p;NFS_KRB_SEC=krb5p")
+
+# Cold restarts against a persistent KV store (cairn).  The recovery load must
+# finish before the first EXCHANGE_ID (no NFS4ERR_DELAY), a record left by a
+# client that was alive at the crash opens grace once and is purged when the
+# window closes, and a record whose lease had lapsed before the crash is
+# skipped and purged at load.  Every other pynfs run uses memkv, where none of
+# these paths execute.  The clients come from a small driver on pynfs's nfs4.1
+# library (the testserver destroys its clients at exit, so it cannot leave a
+# confirmed one behind).  Three daemon boots plus ~20 s of deliberate sleeps.
+if(CAIRN_ENABLED)
+    set(COLD_RESTART_WRAPPER ${CMAKE_SOURCE_DIR}/scripts/pynfs_cold_restart_test_wrapper.sh)
+    set(COLD_RESTART_CLIENT ${CMAKE_SOURCE_DIR}/src/server/nfs/tests/nfs4_cold_restart_client.py)
+    add_test(NAME chimera/pynfs/cold_restart/cairn_nfs4.1
+        COMMAND bash ${COLD_RESTART_WRAPPER} ${CHIMERA_BINARY} ${PYNFS_DIR} ${COLD_RESTART_CLIENT})
+    set_tests_properties(chimera/pynfs/cold_restart/cairn_nfs4.1 PROPERTIES
+        LABELS "pynfs;pynfs_cold_restart;cairn;nfs4.1"
+        TIMEOUT 240
+        ENVIRONMENT "PYTHONUNBUFFERED=1")
+endif()
