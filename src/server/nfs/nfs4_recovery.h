@@ -87,6 +87,7 @@ struct nfs_recovery {
     _Atomic int                 load_state;          /* enum nfs_recovery_load_state */
     uint32_t                    stale_purged;        /* records skipped + deleted at cold start */
     uint32_t                    unreclaimed_purged;  /* records deleted at grace end, cumulative */
+    uint32_t                    store_errors;        /* KV reads that failed during the cold start */
 };
 
 struct nfs_client;
@@ -122,6 +123,19 @@ nfs_recovery_free(
 void
 nfs_recovery_cold_start(
     struct nfs_recovery *rec);
+
+/*
+ * Record a KV read that failed during the cold-start load (`error` is the
+ * enum chimera_vfs_error the callback received; a missing key is not an
+ * error).  Logged at once and counted, so the completion line can say the
+ * store failed -- a failed scan must not read as "nothing was persisted",
+ * because a client owed a reclaim then meets a closed window.
+ */
+void
+nfs_recovery_note_store_error(
+    struct nfs_recovery *rec,
+    const char          *what,
+    int                  error);
 
 /*
  * True while the persistent cold-start load (recovery records + DRC session

@@ -960,6 +960,38 @@ test_grace_deadline_purges_unreclaimed_records(void)
     printf("ok: grace_deadline_purges_unreclaimed_records\n");
 } /* test_grace_deadline_purges_unreclaimed_records */
 
+/*
+ * A KV read that fails during the cold start must not masquerade as "nothing
+ * was persisted": the loader counts it so the completion line can say the
+ * store failed and reclaim may be refused, instead of a quiet "grace
+ * skipped".  A store that has never been written (not-found) is not an error.
+ */
+static void
+test_cold_start_counts_store_errors(void)
+{
+    struct nfs_recovery rec;
+
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
+    CHECK(rec.store_errors == 0);
+
+    nfs_recovery_note_store_error(&rec,"epoch read",CHIMERA_VFS_EIO);
+    CHECK(rec.store_errors == 1);
+    nfs_recovery_note_store_error(&rec,"record scan",CHIMERA_VFS_EIO);
+    CHECK(rec.store_errors == 2);
+
+    /* A clean load (nothing to read) reports none. */
+    nfs_recovery_cold_start(&rec);
+    CHECK(!nfs_recovery_loading(&rec));
+    nfs_recovery_free(&rec);
+
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
+    nfs_recovery_cold_start(&rec);
+    CHECK(rec.store_errors == 0);
+    nfs_recovery_free(&rec);
+
+    printf("ok: cold_start_counts_store_errors\n");
+} /* test_cold_start_counts_store_errors */
+
 /* ------------------------------------------------------------------ *
 *  NFSv3 DRC                                                          *
 * ------------------------------------------------------------------ */
@@ -1604,6 +1636,7 @@ main(void)
     test_persist_and_heartbeat_cadence();
     test_stale_record_classification();
     test_grace_deadline_purges_unreclaimed_records();
+    test_cold_start_counts_store_errors();
 
     test_nfs3_key_encoding();
     test_nfs3_checksum_and_cacheable();
