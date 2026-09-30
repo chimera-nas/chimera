@@ -84,6 +84,7 @@ struct nfs_recovery {
     bool                        persistence_disabled;/* kv_module is non-persistent */
     bool                        nfs4_drc;            /* reply-cache persistence on   */
     _Atomic int                 load_state;          /* enum nfs_recovery_load_state */
+    uint32_t                    stale_purged;        /* records skipped + deleted at cold start */
 };
 
 struct nfs_client;
@@ -259,6 +260,20 @@ nfs_recovery_deserialize(
     const uint8_t              *buf,
     uint32_t                    len,
     struct nfs_recovery_record *out);
+
+/*
+ * True when the record's client had provably lost its lease before the
+ * previous instance's last heartbeat (last_alive_ns, the epoch record's
+ * written_at).  The persisted stamp lags the real renewal by at most half a
+ * lease, so a gap above 1.5 leases means the lease had lapsed before the
+ * crash.  Unstamped (legacy) records and a store with no epoch are never
+ * stale.  Exposed for unit tests.
+ */
+bool
+nfs_recovery_record_stale(
+    const struct nfs_recovery        *rec,
+    const struct nfs_recovery_record *r,
+    uint64_t                          last_alive_ns);
 
 uint32_t
 nfs_recovery_epoch_serialize(
