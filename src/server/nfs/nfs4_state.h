@@ -261,6 +261,10 @@ struct nfs_client {
      * A reclaimed client is not revived by a returning op. */
     _Atomic uint8_t          reclaim_pending;
     uint64_t                 last_touch_ns;
+    /* Monotonic ns of the last time this client's recovery record was written
+     * to the KV store (nfs_recovery_persist).  Read by the lease sweeper to
+     * decide when the record's renewal stamp is due a refresh. */
+    _Atomic uint64_t         recovery_stamp_ns;
 
     /* Owners are hashed by their byte string. */
     struct nfs_open_owner   *open_owners_by_str;

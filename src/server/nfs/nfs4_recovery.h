@@ -39,6 +39,11 @@ struct nfs_recovery_record {
     uint64_t       client_id_hint; /* not authoritative; just a sticky ID */
     uint64_t       verifier;
     uint64_t       boot_id;
+    /* CLOCK_REALTIME ns of the client's last lease renewal as of the last
+     * persist (see nfs_recovery_persist / the lease sweeper refresh).  0 for a
+     * record written before the stamp existed, which the loader treats as
+     * "unknown, keep". */
+    uint64_t       last_renew_ns;
     bool           reclaimed;
     UT_hash_handle hh;
 };
@@ -72,6 +77,10 @@ struct nfs_recovery {
     struct chimera_vfs         *vfs;                 /* for the cold-start load */
     uint16_t                    node_id;             /* scopes our records in a shared store */
     uint32_t                    grace_time_s;        /* captured for deferred begin */
+    uint32_t                    lease_time_s;        /* refresh + heartbeat cadence, stale test */
+    /* Monotonic ns at which the next epoch heartbeat is due; claimed by CAS so
+     * exactly one sweeper thread writes it per interval. */
+    _Atomic uint64_t            next_heartbeat_ns;
     bool                        persistence_disabled;/* kv_module is non-persistent */
     bool                        nfs4_drc;            /* reply-cache persistence on   */
     _Atomic int                 load_state;          /* enum nfs_recovery_load_state */
@@ -80,8 +89,8 @@ struct nfs_recovery {
 struct nfs_client;
 
 /*
- * Initialize recovery state at shared init.  Records `vfs` and `grace_time_s`
- * for the deferred load, detects whether the configured KV module is
+ * Initialize recovery state at shared init.  Records `vfs`, `lease_time_s`
+ * (refresh cadence and stale bound) and `grace_time_s` for the cold-start load, detects whether the configured KV module is
  * persistent (memkv is not -> persistence_disabled + a warning), and leaves
  * load_state = IDLE.  The actual KV scan happens later in nfs_recovery_kickoff.
  */
@@ -90,6 +99,7 @@ nfs_recovery_load(
     struct nfs_recovery *rec,
     struct chimera_vfs  *vfs,
     uint16_t             node_id,
+    uint32_t             lease_time_s,
     uint32_t             grace_time_s,
     bool                 nfs4_drc);
 
@@ -145,12 +155,40 @@ nfs_recovery_in_grace(
  * Persist a newly-confirmed client's recovery record to the KV store
  * (fire-and-forget).  No-op when persistence is disabled (memkv backend) or
  * client is NULL.  Safe to call from any NFSv4 compound (uses vfs_thread).
+ * Stamps client->recovery_stamp_ns so the lease sweeper knows when the record
+ * is due a refresh.
  */
 void
 nfs_recovery_persist(
     struct chimera_vfs_thread *vfs_thread,
     struct nfs_recovery       *rec,
-    const struct nfs_client   *client);
+    struct nfs_client         *client);
+
+/*
+ * Lease-sweeper cadence.  A live, confirmed client's record is re-persisted
+ * once per half lease so its last_renew_ns stays within half a lease of the
+ * truth; the epoch record is rewritten on the same cadence so its written_at
+ * field records when this instance was last alive.  Together they let the
+ * next boot tell a client that was alive at the crash from one whose lease had
+ * already lapsed (nfs_recovery_record_stale).  The interval floors at 1 s.
+ */
+bool
+nfs_recovery_persist_due(
+    const struct nfs_recovery *rec,
+    const struct nfs_client   *client,
+    uint64_t                   now_ns);
+
+/* Claims the current heartbeat slot; true for exactly one caller per interval. */
+bool
+nfs_recovery_heartbeat_due(
+    struct nfs_recovery *rec,
+    uint64_t             now_ns);
+
+/* Rewrites the epoch record if a heartbeat is due.  Fire-and-forget. */
+void
+nfs_recovery_heartbeat(
+    struct nfs_recovery       *rec,
+    struct chimera_vfs_thread *vfs_thread);
 
 /*
  * Forget a record (DESTROY_CLIENTID / lease teardown): delete it from the KV
@@ -231,4 +269,5 @@ int
 nfs_recovery_epoch_deserialize(
     const uint8_t *buf,
     uint32_t       len,
-    uint64_t      *out_boot_id);
+    uint64_t      *out_boot_id,
+    uint64_t      *out_written_ns);

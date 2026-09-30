@@ -21,14 +21,26 @@
 #include "vfs/vfs_procs.h"
 
 /* Record magics (little-endian first word of each value blob). */
-#define NFS_RECOVERY_RECORD_MAGIC    0x3152464Eu /* "NFR1" */
+#define NFS_RECOVERY_RECORD_MAGIC_V1 0x3152464Eu /* "NFR1": no renewal stamp */
+#define NFS_RECOVERY_RECORD_MAGIC    0x3252464Eu /* "NFR2" */
 #define NFS_RECOVERY_EPOCH_MAGIC     0x31504645u /* "EPF1" */
 
-/* Recovery value: magic(4) boot_id(8) verifier(8) client_id_hint(8)
- * owner_len(2) + owner bytes. */
-#define NFS_RECOVERY_VALUE_HDR_LEN   30u
+/* Recovery value (NFR2): magic(4) boot_id(8) verifier(8) client_id_hint(8)
+ * last_renew_ns(8) owner_len(2) + owner bytes.  NFR1 has no last_renew_ns. */
+#define NFS_RECOVERY_V1_HDR_LEN      30u
+#define NFS_RECOVERY_VALUE_HDR_LEN   38u
 #define NFS_RECOVERY_VALUE_MAX       (NFS_RECOVERY_VALUE_HDR_LEN + NFS4_OPAQUE_LIMIT)
+/* Epoch value: magic(4) boot_id(8) written_at_ns(8, CLOCK_REALTIME). */
 #define NFS_RECOVERY_EPOCH_VALUE_LEN 20u
+
+static uint64_t
+nfs_recovery_wall_now_ns(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
+} /* nfs_recovery_wall_now_ns */
 
 /*
  * Generate a fresh, monotonic boot_id from CLOCK_REALTIME.  The cold-start
@@ -37,11 +49,24 @@
 static uint64_t
 nfs_recovery_fresh_boot_id(void)
 {
-    struct timespec ts;
-
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
+    return nfs_recovery_wall_now_ns();
 } /* nfs_recovery_fresh_boot_id */
+
+/* The client's last_touch_ns is CLOCK_MONOTONIC, meaningless to the next boot;
+ * carry it as CLOCK_REALTIME.  Never 0: 0 marks a record with no stamp. */
+static uint64_t
+nfs_recovery_last_renew_wall_ns(const struct nfs_client *c)
+{
+    uint64_t now_mono = nfs_lease_now_ns();
+    uint64_t now_wall = nfs_recovery_wall_now_ns();
+    uint64_t age;
+
+    if (c->last_touch_ns == 0 || c->last_touch_ns >= now_mono) {
+        return now_wall;
+    }
+    age = now_mono - c->last_touch_ns;
+    return age < now_wall ? now_wall - age : 1;
+} /* nfs_recovery_last_renew_wall_ns */
 
 /* ------------------------------------------------------------------ *
 *  (de)serialization                                                 *
@@ -63,6 +88,7 @@ nfs_recovery_serialize(
     nfs_kv_put_le64(buf, &p, c->boot_id);
     nfs_kv_put_le64(buf, &p, c->verifier);
     nfs_kv_put_le64(buf, &p, c->client_id);
+    nfs_kv_put_le64(buf, &p, nfs_recovery_last_renew_wall_ns(c));
     buf[p]     = c->owner_len & 0xff;
     buf[p + 1] = (c->owner_len >> 8) & 0xff;
     p         += 2;
@@ -79,10 +105,22 @@ nfs_recovery_deserialize(
     struct nfs_recovery_record *out)
 {
     uint32_t p = 4;
+    uint32_t magic;
+    uint32_t hdr_len;
     uint16_t owner_len;
 
-    if (len < NFS_RECOVERY_VALUE_HDR_LEN ||
-        nfs_kv_le32(buf) != NFS_RECOVERY_RECORD_MAGIC) {
+    if (len < 4) {
+        return -1;
+    }
+    magic = nfs_kv_le32(buf);
+    if (magic == NFS_RECOVERY_RECORD_MAGIC) {
+        hdr_len = NFS_RECOVERY_VALUE_HDR_LEN;
+    } else if (magic == NFS_RECOVERY_RECORD_MAGIC_V1) {
+        hdr_len = NFS_RECOVERY_V1_HDR_LEN;
+    } else {
+        return -1;
+    }
+    if (len < hdr_len) {
         return -1;
     }
 
@@ -92,8 +130,14 @@ nfs_recovery_deserialize(
     p                  += 8;
     out->client_id_hint = nfs_kv_le64(buf + p);
     p                  += 8;
-    owner_len           = (uint16_t) buf[p] | ((uint16_t) buf[p + 1] << 8);
-    p                  += 2;
+    if (magic == NFS_RECOVERY_RECORD_MAGIC) {
+        out->last_renew_ns = nfs_kv_le64(buf + p);
+        p                 += 8;
+    } else {
+        out->last_renew_ns = 0;
+    }
+    owner_len = (uint16_t) buf[p] | ((uint16_t) buf[p + 1] << 8);
+    p        += 2;
 
     if (owner_len > NFS4_OPAQUE_LIMIT || p + owner_len > len) {
         return -1;
@@ -122,13 +166,17 @@ int
 nfs_recovery_epoch_deserialize(
     const uint8_t *buf,
     uint32_t       len,
-    uint64_t      *out_boot_id)
+    uint64_t      *out_boot_id,
+    uint64_t      *out_written_ns)
 {
     if (len < NFS_RECOVERY_EPOCH_VALUE_LEN ||
         nfs_kv_le32(buf) != NFS_RECOVERY_EPOCH_MAGIC) {
         return -1;
     }
     *out_boot_id = nfs_kv_le64(buf + 4);
+    if (out_written_ns) {
+        *out_written_ns = nfs_kv_le64(buf + 12);
+    }
     return 0;
 } /* nfs_recovery_epoch_deserialize */
 
@@ -141,6 +189,7 @@ nfs_recovery_load(
     struct nfs_recovery *rec,
     struct chimera_vfs  *vfs,
     uint16_t             node_id,
+    uint32_t             lease_time_s,
     uint32_t             grace_time_s,
     bool                 nfs4_drc)
 {
@@ -155,7 +204,9 @@ nfs_recovery_load(
     rec->vfs             = vfs;
     rec->node_id         = node_id;
     rec->grace_time_s    = grace_time_s;
-    rec->nfs4_drc        = nfs4_drc;
+    rec->lease_time_s    = lease_time_s;
+    atomic_store(&rec->next_heartbeat_ns, 0);
+    rec->nfs4_drc = nfs4_drc;
     atomic_store(&rec->load_state, NFS_REC_LOAD_IDLE);
 
     kvname                    = (vfs && vfs->kv_module) ? vfs->kv_module->name : "";
@@ -257,7 +308,7 @@ void
 nfs_recovery_persist(
     struct chimera_vfs_thread *vfs_thread,
     struct nfs_recovery       *rec,
-    const struct nfs_client   *client)
+    struct nfs_client         *client)
 {
     struct nfs_recovery_kv_ctx *ctx;
 
@@ -275,6 +326,8 @@ nfs_recovery_persist(
         return;
     }
 
+    atomic_store_explicit(&client->recovery_stamp_ns, nfs_lease_now_ns(),
+                          memory_order_relaxed);
     chimera_vfs_put_key(vfs_thread, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len,
                         nfs_recovery_kv_done, ctx);
@@ -312,6 +365,74 @@ nfs_recovery_forget(
     chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
                            nfs_recovery_kv_done, ctx);
 } /* nfs_recovery_forget */
+
+/* ------------------------------------------------------------------ *
+*  refresh cadence                                                    *
+* ------------------------------------------------------------------ */
+
+static uint64_t
+nfs_recovery_refresh_interval_ns(const struct nfs_recovery *rec)
+{
+    uint64_t half = (uint64_t) rec->lease_time_s * 1000000000ULL / 2;
+
+    return half ? half : 1000000000ULL;
+} /* nfs_recovery_refresh_interval_ns */
+
+bool
+nfs_recovery_persist_due(
+    const struct nfs_recovery *rec,
+    const struct nfs_client   *client,
+    uint64_t                   now_ns)
+{
+    uint64_t stamp;
+
+    if (rec->persistence_disabled || !client->confirmed || client->expired) {
+        return false;
+    }
+    stamp = atomic_load_explicit(&client->recovery_stamp_ns,
+                                 memory_order_relaxed);
+    return now_ns > stamp &&
+           now_ns - stamp >= nfs_recovery_refresh_interval_ns(rec);
+} /* nfs_recovery_persist_due */
+
+bool
+nfs_recovery_heartbeat_due(
+    struct nfs_recovery *rec,
+    uint64_t             now_ns)
+{
+    uint64_t next = atomic_load_explicit(&rec->next_heartbeat_ns,
+                                         memory_order_relaxed);
+
+    if (rec->persistence_disabled || now_ns < next) {
+        return false;
+    }
+    return atomic_compare_exchange_strong(
+        &rec->next_heartbeat_ns, &next,
+        now_ns + nfs_recovery_refresh_interval_ns(rec));
+} /* nfs_recovery_heartbeat_due */
+
+void
+nfs_recovery_heartbeat(
+    struct nfs_recovery       *rec,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    struct nfs_recovery_kv_ctx *ctx;
+
+    if (!nfs_recovery_heartbeat_due(rec, nfs_lease_now_ns())) {
+        return;
+    }
+    if (nfs_recovery_loading(rec)) {
+        return; /* current_boot_id is not final until the load is READY */
+    }
+
+    ctx            = malloc(sizeof(*ctx));
+    ctx->key_len   = nfs_kv_epoch_key(ctx->key, rec->node_id);
+    ctx->value_len = nfs_recovery_epoch_serialize(ctx->value,
+                                                  rec->current_boot_id);
+    chimera_vfs_put_key(vfs_thread, ctx->key, ctx->key_len,
+                        ctx->value, ctx->value_len,
+                        nfs_recovery_kv_done, ctx);
+} /* nfs_recovery_heartbeat */
 
 /* ------------------------------------------------------------------ *
 *  cold-start load (synchronous, before the NFS listeners start)      *
@@ -371,6 +492,10 @@ nfs_recovery_finalize_load(struct nfs_recovery *rec)
         "reloaded, grace %s (boot_id %lu)",
         loaded, in_grace ? "active" : "skipped",
         (unsigned long) rec->current_boot_id);
+
+    /* The epoch was just written; the first heartbeat is due one interval on. */
+    atomic_store(&rec->next_heartbeat_ns,
+                 nfs_lease_now_ns() + nfs_recovery_refresh_interval_ns(rec));
 
     atomic_store_explicit(&rec->load_state, NFS_REC_LOAD_READY,
                           memory_order_release);
@@ -448,7 +573,7 @@ nfs_recovery_epoch_cb(
 
     now = nfs_recovery_fresh_boot_id();
     if (error_code == CHIMERA_VFS_OK && value &&
-        nfs_recovery_epoch_deserialize(value, value_len, &prev) == 0) {
+        nfs_recovery_epoch_deserialize(value, value_len, &prev, NULL) == 0) {
         /* Bump strictly past the prior boot epoch. */
         rec->current_boot_id = (prev >= now) ? prev + 1 : now;
     } else {

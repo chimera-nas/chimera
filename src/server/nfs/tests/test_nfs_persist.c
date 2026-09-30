@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "common/logging.h"
 #include "nfs_common.h"
@@ -128,6 +129,9 @@ test_recovery_record_roundtrip(void)
     c.boot_id   = 0x0102030405060708ULL;
     c.owner_len = 11;
     memcpy(c.owner_string, "client/abc1", 11);
+    /* last_touch_ns is monotonic; the record carries it as wall-clock so the
+     * next boot can compare it against the previous boot's heartbeat. */
+    c.last_touch_ns = nfs_lease_now_ns() - 5ULL * 1000000000ULL;
 
     len = nfs_recovery_serialize(buf, sizeof(buf), &c);
     CHECK(len > 0);
@@ -139,6 +143,16 @@ test_recovery_record_roundtrip(void)
     CHECK(out.owner_len == c.owner_len);
     CHECK(memcmp(out.owner_string, c.owner_string, c.owner_len) == 0);
     CHECK(!out.reclaimed);
+    {
+        struct timespec ts;
+        uint64_t        wall;
+
+        clock_gettime(CLOCK_REALTIME, &ts);
+        wall = (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
+        CHECK(out.last_renew_ns != 0);
+        CHECK(out.last_renew_ns <= wall - 4ULL * 1000000000ULL);
+        CHECK(out.last_renew_ns >= wall - 6ULL * 1000000000ULL);
+    }
 
     /* A truncated / corrupt buffer is rejected, not misparsed. */
     CHECK(nfs_recovery_deserialize(buf, 4, &out) != 0);
@@ -148,18 +162,53 @@ test_recovery_record_roundtrip(void)
     printf("ok: recovery_record_roundtrip\n");
 } /* test_recovery_record_roundtrip */
 
+/* A record written by a build that predates the renewal stamp ("NFR1", 30-byte
+* header) must still parse, with last_renew_ns == 0 marking it as unstamped. */
+static void
+test_recovery_record_legacy_v1(void)
+{
+    struct nfs_recovery_record out;
+    uint8_t                    buf[64];
+    uint32_t                   p = 0;
+
+    nfs_kv_put_le32(buf, &p, 0x3152464Eu);        /* "NFR1" */
+    nfs_kv_put_le64(buf, &p, 0x11ULL);            /* boot_id */
+    nfs_kv_put_le64(buf, &p, 0x22ULL);            /* verifier */
+    nfs_kv_put_le64(buf, &p, 0x33ULL);            /* client_id_hint */
+    buf[p++] = 5;
+    buf[p++] = 0;                                 /* owner_len = 5 */
+    memcpy(buf + p, "owner", 5);
+    p += 5;
+
+    CHECK(nfs_recovery_deserialize(buf, p, &out) == 0);
+    CHECK(out.boot_id == 0x11ULL);
+    CHECK(out.verifier == 0x22ULL);
+    CHECK(out.client_id_hint == 0x33ULL);
+    CHECK(out.last_renew_ns == 0);
+    CHECK(out.owner_len == 5);
+    CHECK(memcmp(out.owner_string, "owner", 5) == 0);
+
+    /* Truncated inside the v1 header is still rejected. */
+    CHECK(nfs_recovery_deserialize(buf, 29, &out) != 0);
+
+    printf("ok: recovery_record_legacy_v1\n");
+} /* test_recovery_record_legacy_v1 */
+
 static void
 test_epoch_record_roundtrip(void)
 {
     uint8_t  buf[64];
     uint32_t len;
-    uint64_t boot = 0;
+    uint64_t boot    = 0;
+    uint64_t written = 0;
 
     len = nfs_recovery_epoch_serialize(buf, 0x0011223344556677ULL);
     CHECK(len > 0);
-    CHECK(nfs_recovery_epoch_deserialize(buf, len, &boot) == 0);
+    CHECK(nfs_recovery_epoch_deserialize(buf, len, &boot, &written) == 0);
     CHECK(boot == 0x0011223344556677ULL);
-    CHECK(nfs_recovery_epoch_deserialize(buf, 4, &boot) != 0);
+    CHECK(written != 0);                                   /* the write time */
+    CHECK(nfs_recovery_epoch_deserialize(buf, len, &boot, NULL) == 0);
+    CHECK(nfs_recovery_epoch_deserialize(buf, 4, &boot, &written) != 0);
 
     printf("ok: epoch_record_roundtrip\n");
 } /* test_epoch_record_roundtrip */
@@ -583,7 +632,7 @@ test_grace_survives_sweep_during_load(void)
 
     /* vfs == NULL leaves kv_module unset, so persistence stays enabled --
      * persistence_disabled keys off the module name being "memkv". */
-    CHECK(nfs_recovery_load(&rec,NULL,1,180,true) == 0);
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
     CHECK(!rec.persistence_disabled);
 
     /* Mimic kickoff: claim the load, then force the window open with the scan
@@ -611,7 +660,7 @@ test_grace_survives_sweep_during_load(void)
      * window while the load is in flight.  (That bounds rec->in_grace only;
      * nfs_recovery_open_check answers NFS4ERR_GRACE until the load is READY
      * regardless, so a load that never settles is an outage either way.) */
-    CHECK(nfs_recovery_load(&rec,NULL,1,180,true) == 0);
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
     atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
     evpl_mutex_lock(&rec.lock);
     rec.in_grace     = true;
@@ -679,7 +728,7 @@ test_grace_survives_reclaim_complete_during_load(void)
     recovery_client(&stranger,"co_owner_never_persisted");
 
     /* nfs4_drc off: the configuration in which nothing delays the clients */
-    CHECK(nfs_recovery_load(&rec,NULL,1,180,false) == 0);
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,false) == 0);
     CHECK(!rec.persistence_disabled);
 
     /* kickoff: load claimed, window forced open, scan outstanding */
@@ -744,7 +793,7 @@ test_cold_start_without_store_is_ready(void)
     recovery_client(&c,"co_owner_cold");
 
     /* vfs == NULL: persistence stays enabled (only "memkv" disables it). */
-    CHECK(nfs_recovery_load(&rec,NULL,1,180,true) == 0);
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
     CHECK(!rec.persistence_disabled);
     CHECK(nfs_recovery_loading(&rec));          /* IDLE still counts as loading */
 
@@ -762,6 +811,61 @@ test_cold_start_without_store_is_ready(void)
     nfs_recovery_free(&rec);
     printf("ok: cold_start_without_store_is_ready\n");
 } /* test_cold_start_without_store_is_ready */
+
+/*
+ * The lease sweeper keeps each live client's stable-storage record fresh and
+ * heartbeats the epoch record, both once per half lease.  The cadence
+ * decisions are pure so they can be pinned here; the KV writes they drive are
+ * exercised by the pynfs cold-restart leg.
+ */
+static void
+test_persist_and_heartbeat_cadence(void)
+{
+    struct nfs_recovery      rec;
+    static struct nfs_client c;
+    const uint64_t           S   = 1000000000ULL;
+    uint64_t                 now = nfs_lease_now_ns();
+
+    recovery_client(&c,"co_owner_cadence");
+    c.confirmed = 1;
+    atomic_store(&c.recovery_stamp_ns,now);
+
+    /* lease 90 s -> refresh and heartbeat every 45 s */
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
+
+    CHECK(!nfs_recovery_persist_due(&rec,&c,now));
+    CHECK(!nfs_recovery_persist_due(&rec,&c,now + 44 * S));
+    CHECK(nfs_recovery_persist_due(&rec,&c,now + 45 * S));
+    /* A reaped or unconfirmed client is never refreshed. */
+    c.expired = 1;
+    CHECK(!nfs_recovery_persist_due(&rec,&c,now + 100 * S));
+    c.expired   = 0;
+    c.confirmed = 0;
+    CHECK(!nfs_recovery_persist_due(&rec,&c,now + 100 * S));
+    c.confirmed = 1;
+
+    /* Heartbeat: the first claim wins; the next is due one interval later. */
+    CHECK(nfs_recovery_heartbeat_due(&rec,now));
+    CHECK(!nfs_recovery_heartbeat_due(&rec,now));
+    CHECK(!nfs_recovery_heartbeat_due(&rec,now + 44 * S));
+    CHECK(nfs_recovery_heartbeat_due(&rec,now + 45 * S));
+    CHECK(!nfs_recovery_heartbeat_due(&rec,now + 45 * S));
+
+    /* Nothing is written for a non-persistent backend. */
+    rec.persistence_disabled = true;
+    CHECK(!nfs_recovery_persist_due(&rec,&c,now + 400 * S));
+    CHECK(!nfs_recovery_heartbeat_due(&rec,now + 400 * S));
+    nfs_recovery_free(&rec);
+
+    /* A degenerate lease floors the interval at 1 s rather than every tick. */
+    CHECK(nfs_recovery_load(&rec,NULL,1,0,180,true) == 0);
+    atomic_store(&c.recovery_stamp_ns,now);
+    CHECK(!nfs_recovery_persist_due(&rec,&c,now + S / 2));
+    CHECK(nfs_recovery_persist_due(&rec,&c,now + S));
+    nfs_recovery_free(&rec);
+
+    printf("ok: persist_and_heartbeat_cadence\n");
+} /* test_persist_and_heartbeat_cadence */
 
 /* ------------------------------------------------------------------ *
 *  NFSv3 DRC                                                          *
@@ -1393,6 +1497,7 @@ main(void)
 
     test_key_encoding();
     test_recovery_record_roundtrip();
+    test_recovery_record_legacy_v1();
     test_epoch_record_roundtrip();
     test_session_record_roundtrip();
     test_reply_record_roundtrip();
@@ -1403,6 +1508,7 @@ main(void)
     test_grace_survives_sweep_during_load();
     test_grace_survives_reclaim_complete_during_load();
     test_cold_start_without_store_is_ready();
+    test_persist_and_heartbeat_cadence();
 
     test_nfs3_key_encoding();
     test_nfs3_checksum_and_cacheable();

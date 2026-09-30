@@ -154,6 +154,17 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
             }
         }
 
+        /* Keep the client's stable-storage record within half a lease of the
+         * truth: the next boot compares its renewal stamp with this boot's
+         * last heartbeat to tell a client that was alive at the crash from one
+         * whose lease had already lapsed.  Issued under the table lock so the
+         * client cannot be freed under the serialize; the KV write itself is
+         * asynchronous and copies its input. */
+        if (nfs_recovery_persist_due(&shared->nfs4_recovery, uc, now_ns)) {
+            nfs_recovery_persist(thread->vfs_thread, &shared->nfs4_recovery,
+                                 uc);
+        }
+
         /* Detect delegation recalls the client never answered. */
         nfs_deleg_recall_timeout_check(uc);
     }
@@ -167,6 +178,9 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
     }
     free(expired_clients);
 #endif /* ifndef __clang_analyzer__ */
+
+    /* Record that this instance was alive (see nfs_recovery_heartbeat). */
+    nfs_recovery_heartbeat(&thread->shared->nfs4_recovery, thread->vfs_thread);
 
     /* Phase 5: piggyback grace-window expiry on the lease tick. */
     nfs_recovery_sweep_once(&thread->shared->nfs4_recovery);
