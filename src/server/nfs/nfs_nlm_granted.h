@@ -39,7 +39,7 @@ struct nlm_grant_request {
     uint32_t oh_len;
     int32_t  svid;
     uint64_t offset;
-    uint64_t length;                    /* UINT64_MAX == to EOF (wire convention) */
+    uint64_t length;                    /* wire convention: 0 == to EOF (nfs_nlm_range.h) */
     int      exclusive;
 };
 

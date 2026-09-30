@@ -134,6 +134,16 @@ target_include_directories(test_xattr_name PRIVATE
     ${NFS_COMMON_INCLUDE_DIR})
 add_test(NAME chimera/server/nfs/xattr_name COMMAND test_xattr_name)
 
+# Unit test for the NLM byte-range length conventions (nfs_nlm_range.h): the
+# two wire spellings of to-EOF, the stored POSIX form, the VFS sentinel, and
+# the wire form the server itself must emit (l_len 0).
+add_executable(test_nlm_range test_nlm_range.c)
+target_include_directories(test_nlm_range PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+add_test(NAME chimera/server/nfs/nlm_range COMMAND test_nlm_range)
+
 # Unit test for the ACCESS xattr-bit decision logic (nfs4_access.h), incl. the
 # RFC 8276 named-attribute bits.  nfs4_access.h pulls in the generated
 # nfs4_xdr.h, so depend on chimera_nfs_common to guarantee it is generated
