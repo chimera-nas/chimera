@@ -619,7 +619,7 @@ test_hydrated_client_leaves_owner_table(void)
 } /* test_hydrated_client_leaves_owner_table */
 
 /*
- * nfs_recovery_kickoff() forces the grace window open before its async KV
+ * A cold-start loader that forced the grace window open before its async KV
  * reads have populated to_reclaim, so pending_reclaim is legitimately 0 while
  * the scan is in flight.  The 1 Hz sweep must not read that as "everybody
  * reclaimed" and close the window: a reclaim arriving after it would be
@@ -635,7 +635,7 @@ test_grace_survives_sweep_during_load(void)
     CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
     CHECK(!rec.persistence_disabled);
 
-    /* Mimic kickoff: claim the load, then force the window open with the scan
+    /* Mimic such a loader: claim the load, then force the window open with the scan
      * still outstanding and nothing counted yet. */
     atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
     evpl_mutex_lock(&rec.lock);
@@ -731,7 +731,7 @@ test_grace_survives_reclaim_complete_during_load(void)
     CHECK(nfs_recovery_load(&rec,NULL,1,90,180,false) == 0);
     CHECK(!rec.persistence_disabled);
 
-    /* kickoff: load claimed, window forced open, scan outstanding */
+    /* load claimed, window forced open, scan outstanding */
     atomic_store(&rec.load_state,NFS_REC_LOAD_RUNNING);
     evpl_mutex_lock(&rec.lock);
     rec.in_grace     = true;

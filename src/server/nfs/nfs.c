@@ -444,9 +444,9 @@ nfs_server_init(
     shared->nfs_grace_time_s    = chimera_server_config_get_nfs4_grace_time(config);
     shared->nfs_courtesy_time_s = chimera_server_config_get_nfs4_courtesy_time(config);
 
-    /* Server-reboot recovery / grace window.  Records the VFS and grace time
-     * for the cold-start load, which nfs_server_start runs synchronously
-     * before the listeners are bound (nfs_recovery_cold_start). */
+    /* Server-reboot recovery / grace window.  Records the VFS, lease and
+     * grace times for the cold-start load, which nfs_server_start runs
+     * synchronously before the listeners are bound (nfs_recovery_cold_start). */
     nfs_recovery_load(&shared->nfs4_recovery,
                       shared->vfs,
                       shared->node_id,

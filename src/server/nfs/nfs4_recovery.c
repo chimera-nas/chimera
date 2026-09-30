@@ -888,17 +888,13 @@ nfs_recovery_reclaim_complete(
         return;
     }
 
-    /* Same hazard as in nfs_recovery_sweep_once: while the cold-start scan is
-     * still streaming records in, pending_reclaim counts only the clients
-     * loaded so far.  The NFS4ERR_DELAY gates in EXCHANGE_ID and
-     * CREATE_SESSION would keep every client away until the load settles,
-     * but they are conditioned on server.nfs4_drc, which is off by default,
-     * whereas the load runs for any durable KV module -- so with the reply
-     * cache disabled a client whose record has already loaded can
-     * re-establish and send its global RECLAIM_COMPLETE while a slower
-     * record is still in flight.  Retire its record either way, but honour
-     * the zero count only once the load is READY; until then the deadline,
-     * or the first sweep tick after READY, ends the window. */
+    /* Same guard as in nfs_recovery_sweep_once: while a load is in flight,
+     * pending_reclaim counts only the clients streamed in so far, so a zero
+     * count does not mean everyone has reclaimed.  The load completes in
+     * nfs_server_start before any listener exists, so no request can reach
+     * this path mid-load today; the guard defends against a future caller
+     * that serves before the load.  Retire the record either way, but honour
+     * the zero count only once the load is READY. */
     loading = nfs_recovery_loading(rec);
 
     evpl_mutex_lock(&rec->lock);
@@ -923,18 +919,17 @@ nfs_recovery_sweep_once(
     uint64_t now;
     bool     loading;
 
-    /* to_reclaim is populated asynchronously by the cold-start scan, but
-     * nfs_recovery_kickoff forces the window open before that scan has
-     * returned its first record.  A tick landing in that gap sees
-     * pending_reclaim == 0, reads it as "every client has reclaimed", and
-     * closes a window that had not started; nfs_recovery_finalize_load never
-     * re-arms it, so the CLAIM_PREVIOUS that arrives once the records do load
-     * is refused NFS4ERR_NO_GRACE and the client silently loses its locks.
-     * While the load is in flight only the grace_end_ns deadline may end the
-     * window.  load_state is read outside rec->lock exactly as
-     * nfs_recovery_open_check reads it: it is atomic, and the helper answers
-     * false when persistence is disabled (memkv), where in_grace is never set
-     * anyway. */
+    /* While a load is in flight, pending_reclaim counts only the clients
+     * streamed in so far; a tick reading that zero as "every client has
+     * reclaimed" would close a window that had not started, and the
+     * CLAIM_PREVIOUS arriving once the records do load would be refused
+     * NFS4ERR_NO_GRACE.  The load completes in nfs_server_start before any
+     * listener exists, so today no tick can land mid-load; the guard defends
+     * against a future caller that serves before the load.  While loading,
+     * only the grace_end_ns deadline may end the window.  load_state is read
+     * outside rec->lock exactly as nfs_recovery_open_check reads it: it is
+     * atomic, and the helper answers false when persistence is disabled
+     * (memkv), where in_grace is never set anyway. */
     loading = nfs_recovery_loading(rec);
 
     evpl_mutex_lock(&rec->lock);
