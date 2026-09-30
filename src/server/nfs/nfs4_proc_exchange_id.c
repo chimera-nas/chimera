@@ -118,8 +118,10 @@ chimera_nfs4_exchange_id(
     clock_gettime(CLOCK_REALTIME, &now);
 
     /* While the persistent cold-start reconstruction is still in flight, hold
-    * the client off so it cannot create a fresh record that races the
-    * reconstructed one for the same owner (NFS4ERR_DELAY = retry shortly). */
+     * the client off so it cannot create a fresh record that races the
+     * reconstructed one for the same owner (NFS4ERR_DELAY = retry shortly).  The
+     * load finishes in nfs_server_start before any listener exists, so this is a
+     * defensive gate, not a path a client normally hits. */
     if (chimera_server_config_get_nfs4_drc(thread->shared->config) &&
         nfs_recovery_loading(&thread->shared->nfs4_recovery)) {
         res->eir_status = NFS4ERR_DELAY;

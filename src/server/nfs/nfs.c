@@ -444,18 +444,14 @@ nfs_server_init(
     shared->nfs_grace_time_s    = chimera_server_config_get_nfs4_grace_time(config);
     shared->nfs_courtesy_time_s = chimera_server_config_get_nfs4_courtesy_time(config);
 
-    /* Server-reboot recovery / grace window.  Records the VFS + grace time for
-     * the deferred cold-start load; the async KV scan that populates the
-     * to_reclaim set runs on the first NFSv4 compound (nfs_recovery_kickoff).
-     * begin_grace short-circuits to in_grace=false here (to_reclaim is empty);
-     * the kickoff forces the window open while the scan is in flight. */
+    /* Server-reboot recovery / grace window.  Records the VFS and grace time
+     * for the cold-start load, which nfs_server_start runs synchronously
+     * before the listeners are bound (nfs_recovery_cold_start). */
     nfs_recovery_load(&shared->nfs4_recovery,
                       shared->vfs,
                       shared->node_id,
                       shared->nfs_grace_time_s,
                       chimera_server_config_get_nfs4_drc(config));
-    nfs_recovery_begin_grace(&shared->nfs4_recovery,
-                             shared->nfs_grace_time_s);
 
     nlm_state_init(&shared->nlm_state,
                    chimera_server_config_get_state_dir(config));
@@ -583,6 +579,11 @@ nfs_server_start(void *arg)
     enum evpl_protocol_id             rdma_protocol;
     enum evpl_protocol_id             stream_protocol;
     int                               rc;
+
+    /* Reload the persisted client records and open the grace window before a
+     * single connection can be accepted: the first EXCHANGE_ID after a restart
+     * must find the load finished, not race it. */
+    nfs_recovery_cold_start(&shared->nfs4_recovery);
 
     /* One transport for every service this server offers.  The auxiliary ones
      * used to name EVPL_STREAM_SOCKET_TCP outright, which meant they ignored

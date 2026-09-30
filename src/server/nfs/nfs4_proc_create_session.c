@@ -50,7 +50,9 @@ chimera_nfs4_create_session(
 
     /* Hold off until the persistent cold-start reconstruction has finished, so
      * a reclaimed session/client is restored before the client re-creates one
-     * (NFS4ERR_DELAY = retry shortly). */
+     * (NFS4ERR_DELAY = retry shortly).  The load finishes in nfs_server_start
+     * before any listener exists, so this is a defensive gate, not a path a
+     * client normally hits. */
     if (chimera_server_config_get_nfs4_drc(shared->config) &&
         nfs_recovery_loading(&shared->nfs4_recovery)) {
         res->csr_status = NFS4ERR_DELAY;
