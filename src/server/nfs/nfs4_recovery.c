@@ -205,6 +205,7 @@ nfs_recovery_load(
     rec->node_id         = node_id;
     rec->grace_time_s    = grace_time_s;
     rec->lease_time_s    = lease_time_s;
+    rec->stale_purged    = 0;
     atomic_store(&rec->next_heartbeat_ns, 0);
     rec->nfs4_drc = nfs4_drc;
     atomic_store(&rec->load_state, NFS_REC_LOAD_IDLE);
@@ -438,16 +439,41 @@ nfs_recovery_heartbeat(
 *  cold-start load (synchronous, before the NFS listeners start)      *
 * ------------------------------------------------------------------ */
 
+struct nfs_recovery_stale_owner {
+    uint8_t  owner[NFS4_OPAQUE_LIMIT];
+    uint16_t owner_len;
+};
+
 struct nfs_recovery_load_ctx {
-    struct nfs_recovery       *rec;
-    struct chimera_vfs_thread *vfs_thread;
+    struct nfs_recovery             *rec;
+    struct chimera_vfs_thread       *vfs_thread;
     /* The async KV layer does NOT copy keys, so every key handed to it must
      * outlive the call -- these live in this heap ctx, not on the stack. */
-    uint8_t                    ekey[CHIMERA_KV_PREFIX_LEN];
-    uint8_t                    start[CHIMERA_KV_PREFIX_LEN];
-    int                        outstanding; /* KV writes not yet completed */
-    bool                       scan_done;
+    uint8_t                          ekey[CHIMERA_KV_PREFIX_LEN];
+    uint8_t                          start[CHIMERA_KV_PREFIX_LEN];
+    int                              outstanding;   /* KV writes not yet completed */
+    bool                             scan_done;
+    uint64_t                         last_alive_ns; /* previous instance's last epoch write */
+    struct nfs_recovery_stale_owner *stale;         /* records to delete once the scan ends */
+    uint32_t                         nstale;
+    uint32_t                         stale_cap;
 };
+
+bool
+nfs_recovery_record_stale(
+    const struct nfs_recovery        *rec,
+    const struct nfs_recovery_record *r,
+    uint64_t                          last_alive_ns)
+{
+    uint64_t lease_ns = (uint64_t) rec->lease_time_s * 1000000000ULL;
+    uint64_t bound_ns = lease_ns + lease_ns / 2;
+
+    if (r->last_renew_ns == 0 || last_alive_ns == 0) {
+        return false;
+    }
+    return last_alive_ns > r->last_renew_ns &&
+           last_alive_ns - r->last_renew_ns > bound_ns;
+} /* nfs_recovery_record_stale */
 
 /* One KV write issued by the loader.  Unlike nfs_recovery_kv_done it reports
  * back to the load ctx: the private vfs_thread that drives the load must not
@@ -489,8 +515,8 @@ nfs_recovery_finalize_load(struct nfs_recovery *rec)
      * "cold-start load complete: <n>" head is parsed by the KVM reboot test. */
     chimera_nfs_info(
         "NFSv4 recovery: cold-start load complete: %u client record(s) "
-        "reloaded, grace %s (boot_id %lu)",
-        loaded, in_grace ? "active" : "skipped",
+        "reloaded, %u stale record(s) purged, grace %s (boot_id %lu)",
+        loaded, rec->stale_purged, in_grace ? "active" : "skipped",
         (unsigned long) rec->current_boot_id);
 
     /* The epoch was just written; the first heartbeat is due one interval on. */
@@ -526,6 +552,24 @@ nfs_recovery_scan_cb(
         return 0;
     }
 
+    if (nfs_recovery_record_stale(rec, r, ctx->last_alive_ns)) {
+        /* Lease lapsed before the crash: not owed a reclaim.  Deleting during
+         * the scan would mutate the band being iterated, so remember the
+         * owner and delete once the scan has completed. */
+        if (ctx->nstale == ctx->stale_cap) {
+            ctx->stale_cap = ctx->stale_cap ? ctx->stale_cap * 2 : 8;
+            ctx->stale     = realloc(ctx->stale,
+                                     ctx->stale_cap * sizeof(*ctx->stale));
+            chimera_nfs_abort_if(ctx->stale == NULL,
+                                 "recovery stale-owner list realloc failed");
+        }
+        ctx->stale[ctx->nstale].owner_len = r->owner_len;
+        memcpy(ctx->stale[ctx->nstale].owner, r->owner_string, r->owner_len);
+        ctx->nstale++;
+        free(r);
+        return 0;
+    }
+
     evpl_mutex_lock(&rec->lock);
     HASH_FIND(hh, rec->to_reclaim, r->owner_string, r->owner_len, existing);
     if (existing) {
@@ -546,8 +590,24 @@ nfs_recovery_scan_complete(
     void                  *private_data)
 {
     struct nfs_recovery_load_ctx *ctx = private_data;
+    struct nfs_recovery          *rec = ctx->rec;
 
     (void) error_code;
+
+    /* The scan is over, so the band can be mutated: drop the records of the
+     * clients whose leases had lapsed before the crash. */
+    for (uint32_t i = 0; i < ctx->nstale; i++) {
+        struct nfs_recovery_load_op *op = malloc(sizeof(*op));
+
+        op->load       = ctx;
+        op->kv.key_len = nfs_kv_recovery_key(op->kv.key, rec->node_id,
+                                             ctx->stale[i].owner,
+                                             ctx->stale[i].owner_len);
+        ctx->outstanding++;
+        chimera_vfs_delete_key(ctx->vfs_thread, op->kv.key, op->kv.key_len,
+                               nfs_recovery_load_op_done, op);
+    }
+    rec->stale_purged = ctx->nstale;
 
     /* The confirmed-client identity set is loaded, so EXCHANGE_ID can resolve a
      * returning owner to its original clientid.  4.1 sessions + reply slots are
@@ -573,11 +633,13 @@ nfs_recovery_epoch_cb(
 
     now = nfs_recovery_fresh_boot_id();
     if (error_code == CHIMERA_VFS_OK && value &&
-        nfs_recovery_epoch_deserialize(value, value_len, &prev, NULL) == 0) {
+        nfs_recovery_epoch_deserialize(value, value_len, &prev,
+                                       &ctx->last_alive_ns) == 0) {
         /* Bump strictly past the prior boot epoch. */
         rec->current_boot_id = (prev >= now) ? prev + 1 : now;
     } else {
         rec->current_boot_id = now;
+        ctx->last_alive_ns   = 0; /* no heartbeat on record: keep everything */
     }
 
     /* Write the new epoch so the next restart bumps again. */
@@ -656,6 +718,7 @@ nfs_recovery_cold_start(struct nfs_recovery *rec)
 
     chimera_vfs_thread_destroy(ctx->vfs_thread);
     evpl_destroy(evpl);
+    free(ctx->stale);
     free(ctx);
 } /* nfs_recovery_cold_start */
 

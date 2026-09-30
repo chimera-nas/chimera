@@ -867,6 +867,43 @@ test_persist_and_heartbeat_cadence(void)
     printf("ok: persist_and_heartbeat_cadence\n");
 } /* test_persist_and_heartbeat_cadence */
 
+/*
+ * A reloaded record whose renewal stamp is more than 1.5 leases behind the
+ * previous instance's last heartbeat belongs to a client whose lease had
+ * lapsed before the crash; it must not open the grace window.  Anything
+ * closer, anything unstamped, and anything from a store with no heartbeat
+ * is kept: refusing a live client its reclaim loses locks, keeping a dead
+ * one costs at most one grace window (and the grace-end purge drops it).
+ */
+static void
+test_stale_record_classification(void)
+{
+    struct nfs_recovery        rec;
+    struct nfs_recovery_record r;
+    const uint64_t             S     = 1000000000ULL;
+    const uint64_t             alive = 100000ULL * S;
+
+    /* lease 90 s -> threshold 135 s */
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
+    memset(&r,0,sizeof(r));
+
+    r.last_renew_ns = 0;                       /* legacy NFR1: unknown, keep */
+    CHECK(!nfs_recovery_record_stale(&rec,&r,alive));
+    r.last_renew_ns = alive - 135 * S;         /* exactly at the bound: live */
+    CHECK(!nfs_recovery_record_stale(&rec,&r,alive));
+    r.last_renew_ns = alive - 135 * S - 1;     /* past it: lapsed before crash */
+    CHECK(nfs_recovery_record_stale(&rec,&r,alive));
+    r.last_renew_ns = alive - 3600 * S;
+    CHECK(nfs_recovery_record_stale(&rec,&r,alive));
+    r.last_renew_ns = alive + 5 * S;           /* clock stepped back: keep */
+    CHECK(!nfs_recovery_record_stale(&rec,&r,alive));
+    r.last_renew_ns = alive - 3600 * S;
+    CHECK(!nfs_recovery_record_stale(&rec,&r,0)); /* no heartbeat on record */
+
+    nfs_recovery_free(&rec);
+    printf("ok: stale_record_classification\n");
+} /* test_stale_record_classification */
+
 /* ------------------------------------------------------------------ *
 *  NFSv3 DRC                                                          *
 * ------------------------------------------------------------------ */
@@ -1509,6 +1546,7 @@ main(void)
     test_grace_survives_reclaim_complete_during_load();
     test_cold_start_without_store_is_ready();
     test_persist_and_heartbeat_cadence();
+    test_stale_record_classification();
 
     test_nfs3_key_encoding();
     test_nfs3_checksum_and_cacheable();
