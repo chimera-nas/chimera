@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: LGPL-2.1-only
+"""Experiment: run IFSTest against a chimera share mapped by the Windows SMB client.
+
+Usage: ifstest_chimera.py <chimera.exe> <backend> <ifstest dir> <log dir> <timeout s>
+"""
+import json
+import os
+from pathlib import Path
+import secrets
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src/server/smb/tests/windows_client"))
+import windows_smb_client_test as t  # noqa: E402
+
+chimera, backend, kit, logdir, timeout = sys.argv[1], sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), int(sys.argv[5])
+logdir.mkdir(parents=True, exist_ok=True)
+scratch = Path(tempfile.mkdtemp(prefix="ifstest-chimera-"))
+(scratch / "state").mkdir()
+port, metrics = t.free_ports(2)
+(scratch / "config.json").write_text(json.dumps(t.daemon_config([backend], scratch, port, metrics)))
+log = (logdir / f"daemon-{backend}.log").open("w+b")
+proc = subprocess.Popen([chimera, "-c", str(scratch / "config.json")], stdout=log, stderr=log,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+rc = 1
+try:
+    t.wait_until_ready(proc, logdir / f"daemon-{backend}.log")
+    drive = t.free_drive_letter()
+    t.net_use(drive, backend, port)
+    print(f"mapped {drive}: to \\\\127.0.0.1\\{backend} on port {port}", flush=True)
+    password = "Ifs-" + secrets.token_urlsafe(18)
+    args = [str(kit / "ifstest.exe"), f"{drive}:", "-g", "Virus",
+            "/n", str(logdir / f"ifstest-chimera-{backend}.log"), "/N", "356789AB",
+            "/T", "/p", "/m", "/E", "/j", "/r", "c:", "-d", "\\Ntfs",
+            "-a", "\\datacoh.exe", "/u", "ifstest", "/U", password]
+    print("running:", " ".join(a if a != password else "<password>" for a in args), flush=True)
+    start = time.monotonic()
+    ifs = subprocess.Popen(args, cwd=kit)
+    try:
+        rc = ifs.wait(timeout=timeout)
+        print(f"ifstest exited {rc} after {time.monotonic() - start:.0f}s", flush=True)
+    except subprocess.TimeoutExpired:
+        print(f"ifstest still running after {timeout}s; killing", flush=True)
+        ifs.kill()
+        ifs.wait()
+    t.net_use_delete(drive)
+finally:
+    if proc.poll() is None:
+        proc.send_signal(signal.CTRL_BREAK_EVENT)
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    log.close()
+sys.exit(0)

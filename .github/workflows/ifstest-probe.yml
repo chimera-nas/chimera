@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: Unlicense
+#
+# Experiment: run Microsoft's IFSTest (Windows HLK) against a local NTFS
+# baseline and against a chimera share mapped by the Windows SMB client.
+#
+# Nothing from the HLK is stored anywhere we control: every run fetches the one
+# package that carries IFSTest ("HLK Filter.Driver Content", about 25 MB with
+# its cabinets) from Microsoft's public download location, found through the
+# official HLKSetup.exe link on learn.microsoft.com/windows-hardware/test/hlk,
+# extracts it with an administrative install, and discards the runner.
+name: IFSTest probe
+on:
+  push:
+    branches: [ifstest-probe]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    name: IFSTest on Server 2025
+    runs-on: windows-2025
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch the IFS test kit from Microsoft
+        shell: pwsh
+        run: |
+          # Windows HLK for Windows 11 26H1, from the HLK download page.
+          $link = 'https://go.microsoft.com/fwlink/?linkid=2374411'
+          $head = Invoke-WebRequest $link -Method Head -MaximumRedirection 0 -SkipHttpErrorCheck
+          $setup = [string]$head.Headers.Location[0]
+          if ($setup -notmatch '^https://download\.microsoft\.com/.+/HLKSetup\.exe$') { throw "unexpected kit location: $setup" }
+          $base = $setup -replace '/HLKSetup\.exe$', ''
+          "kit base: $base"
+
+          $kit = "$env:RUNNER_TEMP\hlk"
+          New-Item -ItemType Directory -Force $kit | Out-Null
+          $msi = 'HLK Filter.Driver Content-x86_en-us.msi'
+          Invoke-WebRequest "$base/Installers/$([uri]::EscapeDataString($msi))" -OutFile "$kit\$msi"
+
+          # The cabinet names change with every kit release; read them from the
+          # package's own Media table.
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @("$kit\$msi", 0))
+          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `Cabinet` FROM `Media`'))
+          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
+          $cabs = @()
+          while ($record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)) {
+            $cab = $record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, 1)
+            if ($cab) { $cabs += $cab }
+          }
+          $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
+          [System.Runtime.InteropServices.Marshal]::ReleaseComObject($db) | Out-Null
+          foreach ($cab in $cabs) {
+            Invoke-WebRequest "$base/Installers/$cab" -OutFile "$kit\$cab"
+            "fetched $cab ($([math]::Round((Get-Item "$kit\$cab").Length / 1MB, 1)) MB)"
+          }
+
+          $extract = "$env:RUNNER_TEMP\hlkx"
+          $p = Start-Process msiexec.exe -ArgumentList @('/a', "`"$kit\$msi`"", '/qn', "TARGETDIR=`"$extract`"", '/l*v', "`"$env:RUNNER_TEMP\msiexec.log`"") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\msiexec.log" -Tail 40; throw "administrative extract failed: $($p.ExitCode)" }
+
+          # One ifs_test_kit per architecture; pick the one built for this
+          # machine from ifstest.exe's PE header.
+          $want = @{ AMD64 = 0x8664; ARM64 = 0xAA64 }[$env:PROCESSOR_ARCHITECTURE]
+          $dir = $null
+          foreach ($exe in Get-ChildItem $extract -Recurse -Filter ifstest.exe) {
+            $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+            $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+            $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+            "{0} machine=0x{1:x4}" -f $exe.FullName, $machine
+            if ($machine -eq $want) { $dir = $exe.DirectoryName }
+          }
+          if (-not $dir) { throw "no ifstest.exe for $env:PROCESSOR_ARCHITECTURE" }
+          Get-ChildItem $dir | Format-Table Name, Length -AutoSize | Out-String -Width 200
+          # The HLK wrapper passes "-a \datacoh.exe"; give it one at the root too.
+          Copy-Item "$dir\datacoh.exe" C:\ -Force
+          "IFSTEST_DIR=$dir" >> $env:GITHUB_ENV
+
+      - name: Baseline - IFSTest on a fresh NTFS volume
+        shell: pwsh
+        timeout-minutes: 60
+        run: |
+          $vhd = "$env:RUNNER_TEMP\ntfs.vhdx"
+          New-VHD -Path $vhd -SizeBytes 4GB -Dynamic | Out-Null
+          Mount-VHD $vhd -Passthru | Initialize-Disk -PartitionStyle GPT -PassThru |
+            New-Partition -UseMaximumSize -DriveLetter T |
+            Format-Volume -FileSystem NTFS -NewFileSystemLabel IFSNTFS -Confirm:$false | Out-Null
+          New-Item -ItemType Directory -Force ifstest-logs | Out-Null
+          fsutil 8dot3name set 0 | Out-Null
+          $password = 'Ifs-' + [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(18))
+          $log = "$pwd\ifstest-logs\ifstest-ntfs.log"
+          $args = @('T:', '-g', 'Virus', '/n', $log, '/N', '356789AB', '/T', '/p', '/m', '/E', '/j', '/r', 'c:', '-d', '\Ntfs', '-a', '\datacoh.exe', '/u', 'ifstest', '/U', $password)
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          $p = Start-Process "$env:IFSTEST_DIR\ifstest.exe" -ArgumentList $args -WorkingDirectory $env:IFSTEST_DIR -PassThru
+          if (-not $p.WaitForExit(50 * 60 * 1000)) { "ifstest still running after 50 min; killing"; $p.Kill() }
+          "ifstest exited $($p.ExitCode) after $([math]::Round($timer.Elapsed.TotalMinutes, 1)) min"
+          fsutil 8dot3name set 2 | Out-Null
+          Get-ChildItem ifstest-logs | Format-Table Name, Length -AutoSize | Out-String
+          exit 0
+
+      - name: Fetch the chimera daemon
+        id: bundle
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: windows-smb-client-bundle-x64
+          path: bundle
+          run-id: 36636807236
+          github-token: ${{ github.token }}
+
+      - name: IFSTest on a chimera memfs share
+        if: steps.bundle.outcome == 'success'
+        shell: pwsh
+        timeout-minutes: 60
+        run: python scratch/ifstest_chimera.py bundle/chimera.exe memfs $env:IFSTEST_DIR ifstest-logs 3000
+
+      - name: Summarize
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($f in Get-ChildItem ifstest-logs -Filter 'ifstest-*.log' -ErrorAction SilentlyContinue) {
+            "==== $($f.Name) ($($f.Length) bytes)"
+            $text = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
+            foreach ($k in 'PASS', 'FAIL', 'BLOCK', 'WARN', 'SEV1', 'SEV2', 'SEV3', 'ABORT') {
+              "{0,-6} {1}" -f $k, ([regex]::Matches($text, "\b$k\b")).Count
+            }
+            Get-Content $f.FullName -Tail 60
+          }
+          exit 0
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ifstest-logs
+          path: ifstest-logs/
+          retention-days: 7
