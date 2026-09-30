@@ -7,7 +7,6 @@ Usage: ifstest_chimera.py <chimera.exe> <backend> <ifstest dir> <log dir> <timeo
 import json
 import os
 from pathlib import Path
-import secrets
 import signal
 import subprocess
 import sys
@@ -32,21 +31,9 @@ try:
     drive = t.free_drive_letter()
     t.net_use(drive, backend, port)
     print(f"mapped {drive}: to \\\\127.0.0.1\\{backend} on port {port}", flush=True)
-    password = "Ifs-" + secrets.token_urlsafe(18)
-    args = [str(kit / "ifstest.exe"), f"{drive}:", "-g", "Virus",
-            "/n", str(logdir / f"ifstest-chimera-{backend}.log"), "/N", "356789AB",
-            "/T", "/p", "/m", "/E", "/j", "/r", "c:", "-d", "\\Ntfs",
-            "-a", "\\datacoh.exe", "/u", "ifstest", "/U", password]
-    print("running:", " ".join(a if a != password else "<password>" for a in args), flush=True)
-    start = time.monotonic()
-    ifs = subprocess.Popen(args, cwd=kit)
-    try:
-        rc = ifs.wait(timeout=timeout)
-        print(f"ifstest exited {rc} after {time.monotonic() - start:.0f}s", flush=True)
-    except subprocess.TimeoutExpired:
-        print(f"ifstest still running after {timeout}s; killing", flush=True)
-        ifs.kill()
-        ifs.wait()
+    import ifstest_run
+    ifstest_run.run(kit, f"{drive}:", logdir / f"ifstest-chimera-{backend}.log", timeout)
+    rc = 0
     t.net_use_delete(drive)
 finally:
     if proc.poll() is None:

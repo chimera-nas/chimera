@@ -36,31 +36,34 @@ jobs:
           "kit base: $base"
 
           $kit = "$env:RUNNER_TEMP\hlk"
-          New-Item -ItemType Directory -Force $kit | Out-Null
-          $msi = 'HLK Filter.Driver Content-x86_en-us.msi'
-          Invoke-WebRequest "$base/Installers/$([uri]::EscapeDataString($msi))" -OutFile "$kit\$msi"
-
-          # The cabinet names change with every kit release; read them from the
-          # package's own Media table.
-          $installer = New-Object -ComObject WindowsInstaller.Installer
-          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @("$kit\$msi", 0))
-          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `Cabinet` FROM `Media`'))
-          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
-          $cabs = @()
-          while ($record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)) {
-            $cab = $record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, 1)
-            if ($cab) { $cabs += $cab }
-          }
-          $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
-          [System.Runtime.InteropServices.Marshal]::ReleaseComObject($db) | Out-Null
-          foreach ($cab in $cabs) {
-            Invoke-WebRequest "$base/Installers/$cab" -OutFile "$kit\$cab"
-            "fetched $cab ($([math]::Round((Get-Item "$kit\$cab").Length / 1MB, 1)) MB)"
-          }
-
           $extract = "$env:RUNNER_TEMP\hlkx"
-          $p = Start-Process msiexec.exe -ArgumentList @('/a', "`"$kit\$msi`"", '/qn', "TARGETDIR=`"$extract`"", '/l*v', "`"$env:RUNNER_TEMP\msiexec.log`"") -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\msiexec.log" -Tail 40; throw "administrative extract failed: $($p.ExitCode)" }
+          New-Item -ItemType Directory -Force $kit | Out-Null
+          # IFSTest itself, and the package carrying the NTLog library its
+          # logging loads.
+          foreach ($msi in 'HLK Filter.Driver Content-x86_en-us.msi', 'HLK OnecoreUAP.Filter.Driver Content-x86_en-us.msi') {
+            Invoke-WebRequest "$base/Installers/$([uri]::EscapeDataString($msi))" -OutFile "$kit\$msi"
+
+            # The cabinet names change with every kit release; read them from
+            # the package's own Media table.
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+            $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @("$kit\$msi", 0))
+            $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT `Cabinet` FROM `Media`'))
+            $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
+            $cabs = @()
+            while ($record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)) {
+              $cab = $record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, 1)
+              if ($cab) { $cabs += $cab }
+            }
+            $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
+            [System.Runtime.InteropServices.Marshal]::ReleaseComObject($db) | Out-Null
+            foreach ($cab in $cabs) {
+              Invoke-WebRequest "$base/Installers/$cab" -OutFile "$kit\$cab"
+              "fetched $cab ($([math]::Round((Get-Item "$kit\$cab").Length / 1MB, 1)) MB) for $msi"
+            }
+
+            $p = Start-Process msiexec.exe -ArgumentList @('/a', "`"$kit\$msi`"", '/qn', "TARGETDIR=`"$extract`"", '/l*v', "`"$env:RUNNER_TEMP\msiexec.log`"") -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\msiexec.log" -Tail 40; throw "administrative extract of $msi failed: $($p.ExitCode)" }
+          }
 
           # One ifs_test_kit per architecture; pick the one built for this
           # machine from ifstest.exe's PE header.
@@ -74,6 +77,22 @@ jobs:
             if ($machine -eq $want) { $dir = $exe.DirectoryName }
           }
           if (-not $dir) { throw "no ifstest.exe for $env:PROCESSOR_ARCHITECTURE" }
+
+          # Its logging libraries live elsewhere in the kit; the HLK's own jobs
+          # put them beside the binaries.  Take the build for this machine.
+          foreach ($lib in 'ntlog.dll', 'FbsLog.dll') {
+            $found = $false
+            foreach ($f in Get-ChildItem $extract -Recurse -Filter $lib) {
+              $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+              $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+              if ([BitConverter]::ToUInt16($bytes, $pe + 4) -eq $want) {
+                Copy-Item $f.FullName $dir -Force; "using $($f.FullName)"; $found = $true; break
+              }
+            }
+            if (-not $found) { throw "no $lib for $env:PROCESSOR_ARCHITECTURE" }
+          }
+          $ini = Get-ChildItem $extract -Recurse -Filter ntlogger.ini | Select-Object -First 1
+          if ($ini) { Copy-Item $ini.FullName $dir -Force; "using $($ini.FullName)" }
           Get-ChildItem $dir | Format-Table Name, Length -AutoSize | Out-String -Width 200
           # The HLK wrapper passes "-a \datacoh.exe"; give it one at the root too.
           Copy-Item "$dir\datacoh.exe" C:\ -Force
@@ -90,15 +109,8 @@ jobs:
             Format-Volume -FileSystem NTFS -NewFileSystemLabel IFSNTFS -Confirm:$false | Out-Null
           New-Item -ItemType Directory -Force ifstest-logs | Out-Null
           fsutil 8dot3name set 0 | Out-Null
-          $password = 'Ifs-' + [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(18))
-          $log = "$pwd\ifstest-logs\ifstest-ntfs.log"
-          $args = @('T:', '-g', 'Virus', '/n', $log, '/N', '356789AB', '/T', '/p', '/m', '/E', '/j', '/r', 'c:', '-d', '\Ntfs', '-a', '\datacoh.exe', '/u', 'ifstest', '/U', $password)
-          $timer = [Diagnostics.Stopwatch]::StartNew()
-          $p = Start-Process "$env:IFSTEST_DIR\ifstest.exe" -ArgumentList $args -WorkingDirectory $env:IFSTEST_DIR -PassThru
-          if (-not $p.WaitForExit(50 * 60 * 1000)) { "ifstest still running after 50 min; killing"; $p.Kill() }
-          "ifstest exited $($p.ExitCode) after $([math]::Round($timer.Elapsed.TotalMinutes, 1)) min"
+          python scratch/ifstest_run.py $env:IFSTEST_DIR T: "$pwd\ifstest-logs\ifstest-ntfs.log" 2700
           fsutil 8dot3name set 2 | Out-Null
-          Get-ChildItem ifstest-logs | Format-Table Name, Length -AutoSize | Out-String
           exit 0
 
       - name: Fetch the chimera daemon
@@ -108,7 +120,7 @@ jobs:
         with:
           name: windows-smb-client-bundle-x64
           path: bundle
-          run-id: 36636807236
+          run-id: 36784406163
           github-token: ${{ github.token }}
 
       - name: IFSTest on a chimera memfs share
