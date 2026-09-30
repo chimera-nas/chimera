@@ -113,6 +113,22 @@ jobs:
           fsutil 8dot3name set 2 | Out-Null
           exit 0
 
+      # The real baseline for a network file system: Windows' own SMB server,
+      # sharing the same NTFS volume, reached through the same redirector the
+      # chimera runs use.  A test that fails here is a limit of IFSTest over
+      # SMB, not of chimera.
+      - name: Baseline - IFSTest over Windows' SMB server
+        shell: pwsh
+        timeout-minutes: 45
+        run: |
+          New-Item -ItemType Directory -Force T:\smbshare | Out-Null
+          New-SmbShare -Name ifsbase -Path T:\smbshare -FullAccess Everyone | Out-Null
+          net use W: \\localhost\ifsbase /persistent:no
+          if ($LASTEXITCODE -ne 0) { throw "net use failed" }
+          python scratch/ifstest_run.py $env:IFSTEST_DIR W: "$pwd\ifstest-logs\ifstest-winsmb.log" 1500
+          net use W: /delete /y
+          exit 0
+
       - name: Fetch the chimera daemon
         id: bundle
         continue-on-error: true
@@ -132,22 +148,7 @@ jobs:
       - name: Summarize
         if: always()
         shell: pwsh
-        run: |
-          foreach ($f in Get-ChildItem ifstest-logs -Filter 'ifstest-*.log' -ErrorAction SilentlyContinue) {
-            "==== $($f.Name) ($($f.Length) bytes)"
-            $lines = Get-Content $f.FullName -ErrorAction SilentlyContinue
-            $i = 0
-            foreach ($line in $lines) {
-              if ($line -match '\+TEST\+(SEV[123]|BLOCK|ABORT|WARN)\s*:\s*Test\s*:(\S+)') {
-                $group = ($lines[$i + 1] -replace '^Group\s*:', '').Trim()
-                $status = ($lines[$i + 2] -replace '^Status\s*:', '').Trim()
-                "{0,-5} {1}:{2}  {3}" -f $Matches[1], $group, $Matches[2], $status
-              }
-              $i++
-            }
-            $lines | Select-String -Pattern 'NTLOG REPORT' -Context 0, 10 | ForEach-Object { $_.Line; $_.Context.PostContext }
-          }
-          exit 0
+        run: python scratch/ifstest_compare.py ifstest-logs
 
       - uses: actions/upload-artifact@v6
         if: always()
