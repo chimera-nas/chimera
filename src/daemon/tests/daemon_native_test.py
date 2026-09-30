@@ -52,21 +52,29 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
         )
         try:
             deadline = time.monotonic() + 60
-            while True:
-                if proc.poll() is not None:
-                    raise RuntimeError(f"daemon exited during startup: {proc.returncode}")
-                try:
-                    with opener.open(
-                        f"http://127.0.0.1:{http_port}/api/v1/exports", timeout=2
-                    ) as response:
-                        assert response.status == 200
-                        json.load(response)
-                    break
-                except (OSError, urllib.error.URLError):
-                    if time.monotonic() >= deadline:
-                        raise
-                    time.sleep(0.1)
-            with opener.open(f"http://127.0.0.1:{metrics_port}/metrics", timeout=5) as response:
+
+            def open_when_ready(client, url):
+                """Wait for one listener; HTTP can accept before HTTPS starts."""
+                while True:
+                    if proc.poll() is not None:
+                        raise RuntimeError(
+                            f"daemon exited during startup: {proc.returncode}"
+                        )
+                    try:
+                        return client.open(url, timeout=2)
+                    except (OSError, urllib.error.URLError):
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.1)
+
+            with open_when_ready(
+                opener, f"http://127.0.0.1:{http_port}/api/v1/exports"
+            ) as response:
+                assert response.status == 200
+                json.load(response)
+            with open_when_ready(
+                opener, f"http://127.0.0.1:{metrics_port}/metrics"
+            ) as response:
                 assert response.status == 200
                 response.read()
             # Exercise HTTPS itself; the default identity is intentionally self-signed.
@@ -76,8 +84,8 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
             https = urllib.request.build_opener(
                 urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=tls)
             )
-            with https.open(
-                f"https://127.0.0.1:{https_port}/api/v1/exports", timeout=5
+            with open_when_ready(
+                https, f"https://127.0.0.1:{https_port}/api/v1/exports"
             ) as response:
                 assert response.status == 200
                 json.load(response)
