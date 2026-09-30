@@ -4,6 +4,7 @@
 
 #include "vfs/vfs_procs.h"
 #include "vfs_internal.h"
+#include "vfs_mount_table.h"
 #include "common/macros.h"
 
 static void
@@ -36,6 +37,19 @@ chimera_vfs_getparent(
     struct chimera_vfs_request *request;
     uint64_t                    fh_hash;
     void                       *mount_private;
+    uint8_t                     parent_fh[CHIMERA_VFS_FH_SIZE + 16];
+    int                         parent_fh_len;
+    char                        name[CHIMERA_VFS_NAME_MAX];
+    int                         namelen;
+
+    /* A mount's root sits in the namespace at its mount point: its parent is
+    * the directory holding the mount point, under the mount point's name. */
+    if (chimera_vfs_mount_table_cover_parent_name(thread->vfs->mount_table, fh, fhlen,
+                                                  parent_fh, &parent_fh_len,
+                                                  name, &namelen) == 0) {
+        callback(CHIMERA_VFS_OK, parent_fh, parent_fh_len, name, namelen, private_data);
+        return;
+    }
 
     module = chimera_vfs_resolve_mount(thread, fh, fhlen, 1, &mount_private);
 

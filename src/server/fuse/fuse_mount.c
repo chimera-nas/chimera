@@ -82,7 +82,7 @@ chimera_fuse_resolve_root(
 
     vfs_thread = chimera_vfs_thread_init(evpl, shared->vfs);
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(shared->vfs, root_fh, &root_fh_len);
 
     chimera_vfs_lookup(vfs_thread, &cred,
                        root_fh, root_fh_len,

@@ -135,11 +135,12 @@ chimera_dispatch_getacl(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
+    chimera_client_refresh_root(thread);
     chimera_vfs_lookup(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
+        thread->root_fh,
+        thread->root_fh_len,
         request->getacl.path,
         request->getacl.path_len,
         CHIMERA_VFS_ATTR_FH,

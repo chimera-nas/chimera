@@ -37,11 +37,12 @@ chimera_dispatch_symlink(
     request->symlink.set_attr.va_req_mask = 0;
     request->symlink.set_attr.va_set_mask = 0;
 
+    chimera_client_refresh_root(thread);
     chimera_vfs_symlink(
         thread->vfs_thread,
         chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
+        thread->root_fh,
+        thread->root_fh_len,
         request->symlink.path,
         request->symlink.path_len,
         request->symlink.target,

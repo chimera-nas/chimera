@@ -16,7 +16,7 @@ add_compile_definitions(_LGPL_SOURCE)
 
 add_library(chimera_vfs ${CHIMERA_LIBRARY_TYPE} vfs.c vfs_lsan.c vfs_cred.c vfs_sdk_utils.c
             vfs_acl.c vfs_acl_serialize.c vfs_access.c vfs_idmap.c vfs_identity.c
-            vfs_sid.c
+            vfs_sid.c vfs_rootfs.c vfs_mount_cross.c
             vfs_proc_mount.c vfs_proc_umount.c
             vfs_proc_mkfs.c vfs_proc_rmfs.c
             vfs_proc_mkdir_at.c vfs_proc_mknod_at.c vfs_proc_close.c vfs_proc_open_fh.c
@@ -67,7 +67,6 @@ install(FILES
         ${CMAKE_SOURCE_DIR}/ext/libevpl/ext/oteltracing-c/oteltracing.h
         DESTINATION include/chimera)
 
-add_subdirectory(root)
 add_subdirectory(memfs)
 add_subdirectory(memkv)
 
@@ -105,7 +104,7 @@ else ()
 endif()
 
 target_link_libraries(chimera_vfs
-    chimera_vfs_root chimera_vfs_memfs chimera_vfs_memkv chimera_vfs_diskfs
+    chimera_vfs_memfs chimera_vfs_memkv chimera_vfs_diskfs
     chimera_vfs_nfs chimera_vfs_smb
     chimera_common prometheus-c xxhash ${CHIMERA_DL_LIB} ${CHIMERA_RCU_LIBS})
 

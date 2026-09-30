@@ -189,7 +189,7 @@ main(
         uint8_t  root_fh[CHIMERA_VFS_FH_SIZE], tfh[CHIMERA_VFS_FH_SIZE];
         uint32_t root_len, tlen;
 
-        chimera_vfs_get_root_fh(root_fh, &root_len);
+        chimera_vfs_get_root_fh(dh.thread->vfs, root_fh, &root_len);
         assert(dh_lookup(&dh, root_fh, root_len, "test") == CHIMERA_VFS_OK);
         tlen = dh.fh_len;
         memcpy(tfh, dh.fh, tlen);

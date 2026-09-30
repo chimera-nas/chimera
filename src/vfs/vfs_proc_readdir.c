@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
+#include "vfs_mount_table.h"
 #include "common/misc.h"
 #include "common/macros.h"
 
@@ -152,6 +153,8 @@ chimera_vfs_dirent_match(
 } /* chimera_vfs_dirent_match */
 
 /* Per-entry interposer: drop entries that do not match the readdir's pattern,
+ * and present an entry that is a mount point as the root of what is mounted
+ * there -- its handle and attributes, as a lookup of the name would return --
  * forwarding the rest to the path's real callback. */
 static int
 chimera_vfs_readdir_filter_callback(
@@ -162,12 +165,30 @@ chimera_vfs_readdir_filter_callback(
     const struct chimera_vfs_attrs *attrs,
     void                           *arg)
 {
-    struct chimera_vfs_request *request = arg;
+    struct chimera_vfs_request     *request = arg;
+    struct chimera_vfs_open_handle *dir     = request->readdir.handle;
+    struct chimera_vfs_attrs        cross;
+    uint8_t                         cross_fh[CHIMERA_VFS_FH_SIZE + 16];
+    int                             cross_fh_len;
 
-    if (!chimera_vfs_dirent_match(name, namelen,
+    if (request->readdir.match_pattern &&
+        !chimera_vfs_dirent_match(name, namelen,
                                   request->readdir.match_pattern,
                                   request->readdir.match_pattern_len)) {
         return 0;
+    }
+
+    if (chimera_vfs_mount_table_cover_root(request->thread->vfs->mount_table,
+                                           dir->fh, dir->fh_len, name, namelen,
+                                           cross_fh, &cross_fh_len, &cross) == 0) {
+        cross.va_req_mask = attrs->va_req_mask;
+        memcpy(cross.va_fh, cross_fh, cross_fh_len);
+        cross.va_fh_len    = cross_fh_len;
+        cross.va_set_mask |= CHIMERA_VFS_ATTR_FH;
+        if (cross.va_set_mask & CHIMERA_VFS_ATTR_INUM) {
+            inum = cross.va_ino;
+        }
+        attrs = &cross;
     }
 
     return request->readdir.inner_callback(inum, cookie, name, namelen, attrs,
@@ -351,19 +372,25 @@ chimera_vfs_readdir(
         request->complete = chimera_vfs_readdir_complete;
     }
 
-    /* When a wildcard is supplied, interpose the filter over whichever per-entry
-     * callback the path above established (the caller's directly, or the bounce
-     * collector): the backend keeps emitting every entry, and the filter drops
-     * the non-matching ones before they reach it.  Skip the interposition for
-     * the universal "*" (and NULL), which match everything. */
+    /* When a wildcard is supplied, or something is mounted below "/" (so an
+     * entry may be a mount point), interpose the filter over whichever
+     * per-entry callback the path above established (the caller's directly,
+     * or the bounce collector): the backend keeps emitting every entry, and
+     * the filter drops the non-matching ones and presents mount points before
+     * they reach it.  Skip the pattern for the universal "*" (and NULL), which
+     * matches everything. */
     request->readdir.match_pattern = NULL;
     if (match_pattern && match_pattern_len > 0 &&
         !(match_pattern_len == 1 && match_pattern[0] == '*')) {
         request->readdir.match_pattern     = match_pattern;
         request->readdir.match_pattern_len = match_pattern_len;
-        request->readdir.inner_callback    = request->readdir.callback;
-        request->readdir.inner_arg         = request->proto_private_data;
-        request->readdir.callback          = chimera_vfs_readdir_filter_callback;
+    }
+    if (request->readdir.match_pattern ||
+        chimera_atomic_load_n(&thread->vfs->mount_table->num_covers,
+                              CHIMERA_MEMORY_RELAXED) > 0) {
+        request->readdir.inner_callback = request->readdir.callback;
+        request->readdir.inner_arg      = request->proto_private_data;
+        request->readdir.callback       = chimera_vfs_readdir_filter_callback;
         /* The blocking path already saves orig_private_data and restores it in
          * bounce_complete; the non-blocking path's completion goes straight to
          * chimera_vfs_readdir_complete, so wrap it to restore the caller's

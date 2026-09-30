@@ -31,7 +31,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_open_cache.h"
-#include "vfs/root/vfs_root.h"
+#include "vfs/vfs_rootfs.h"
 #include "vfs/vfs_dump.h"
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
@@ -605,13 +605,12 @@ static struct chimera_vfs_module *
 chimera_vfs_find_module(const char *symbol)
 {
 #ifdef _WIN32
-    extern struct chimera_vfs_module vfs_root, vfs_memfs, vfs_memkv;
+    extern struct chimera_vfs_module vfs_memfs, vfs_memkv;
     extern struct chimera_vfs_module vfs_nfs, vfs_smb, vfs_diskfs;
 #ifdef CHIMERA_HAVE_SQLITE_VFS
     extern struct chimera_vfs_module vfs_sqlite;
 #endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
     struct chimera_vfs_module       *builtins[] = {
-        &vfs_root,
         &vfs_memfs,
         &vfs_memkv,
         &vfs_nfs,
@@ -723,12 +722,18 @@ chimera_vfs_init(
     vfs->vfs_state  = chimera_vfs_state_init();
     vfs->pnfs       = chimera_vfs_pnfs_create();
 
-    /* Register the root pseudo-filesystem module */
-    chimera_vfs_register(vfs, &vfs_root, NULL);
-    /* Create the root mount entry in the mount table */
-    chimera_vfs_root_register_mount(vfs);
+    /* Until a mount is placed at "/", the built-in rootfs is the namespace
+     * root (see vfs_rootfs.h). */
+    chimera_vfs_register(vfs, &chimera_vfs_rootfs_module, NULL);
+    chimera_vfs_rootfs_mount(vfs);
 
     for (int i = 0; i < num_modules; i++) {
+        /* The namespace root used to be a module named "root" that configs
+         * listed; it is now part of the VFS core. */
+        if (!strcmp(module_cfgs[i].module_name, "root")) {
+            continue;
+        }
+
         chimera_vfs_info("Initializing VFS module %s...", module_cfgs[i].module_name);
         snprintf(modsym, sizeof(modsym), "vfs_%s", module_cfgs[i].module_name);
 
@@ -1487,10 +1492,13 @@ chimera_vfs_thread_drain(struct chimera_vfs_thread *thread)
 
 SYMBOL_EXPORT void
 chimera_vfs_get_root_fh(
-    uint8_t  *fh,
-    uint32_t *fh_len)
+    struct chimera_vfs *vfs,
+    uint8_t            *fh,
+    uint32_t           *fh_len)
 {
-    chimera_vfs_root_get_fh(fh, fh_len);
+    if (chimera_vfs_mount_table_namespace_root(vfs->mount_table, fh, fh_len) != 0) {
+        chimera_vfs_rootfs_root_fh(fh, fh_len);
+    }
 } /* chimera_vfs_get_root_fh */
 
 SYMBOL_EXPORT int

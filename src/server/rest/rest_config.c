@@ -21,8 +21,8 @@
  * Reconstructs a JSON document compatible with the chimera.json file format
  * from live runtime state.  The "users" section is intentionally omitted (it
  * would expose passwords) and the "server" section is omitted (a partially
- * reconstructed server section is more confusing than useful).  The internal
- * "root" pseudo-mount is skipped.
+ * reconstructed server section is more confusing than useful).  The VFS's
+ * internal mounts (the built-in rootfs, detached mounts) are not listed.
  */
 
 static int
@@ -36,11 +36,6 @@ config_mount_callback(
     json_t *mounts = data;
     json_t *obj;
 
-    /* The "root" pseudo-mount is a Chimera-internal entry, not part of the
-     * user-facing configuration. */
-    if (strcmp(module_name, "root") == 0) {
-        return 0;
-    }
 
     obj = json_object();
     json_object_set_new(obj, "module", json_string(module_name));
@@ -49,7 +44,8 @@ config_mount_callback(
         json_object_set_new(obj, "options", json_string(options));
     }
 
-    json_object_set_new(mounts, mount_path, obj);
+    /* A mount at "/" has the empty path; the config file names it "/". */
+    json_object_set_new(mounts, mount_path[0] ? mount_path : "/", obj);
 
     return 0;
 } /* config_mount_callback */
@@ -123,7 +119,7 @@ chimera_rest_handle_config(
 
     root = json_object();
 
-    /* mounts (the internal "root" mount is filtered out) */
+    /* mounts */
     mounts = json_object();
     chimera_server_iterate_mounts(server, config_mount_callback, mounts);
     json_object_set_new(root, "mounts", mounts);

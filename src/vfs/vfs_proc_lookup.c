@@ -536,7 +536,7 @@ chimera_vfs_lookup_pathonly_readlink_complete(
              * relative splices that follow it are lexical on that path and
              * must keep resolving from the same root. */
             lp_request->fh_len = sizeof(lp_request->fh);
-            chimera_vfs_get_root_fh(lp_request->fh, &lp_request->fh_len);
+            chimera_vfs_get_root_fh(lp_request->thread->vfs, lp_request->fh, &lp_request->fh_len);
 
             while (*target == '/') {
                 target++;
@@ -646,6 +646,56 @@ chimera_vfs_lookup_pathonly_complete(
     callback(error_code, error_code == CHIMERA_VFS_OK ? attr : NULL, priv);
 } /* chimera_vfs_lookup_pathonly_complete */
 
+/* An empty path: fetch the starting directory's own attributes. */
+struct chimera_vfs_lookup_self_ctx {
+    struct chimera_vfs_thread      *thread;
+    const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_open_handle *handle;
+    uint64_t                        attr_mask;
+    chimera_vfs_lookup_callback_t   callback;
+    void                           *private_data;
+};
+
+static void
+chimera_vfs_lookup_self_getattr_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_lookup_self_ctx *ctx    = private_data;
+    struct chimera_vfs_open_handle     *handle = ctx->handle;
+
+    if (error_code == CHIMERA_VFS_OK) {
+        memcpy(attr->va_fh, handle->fh, handle->fh_len);
+        attr->va_fh_len    = handle->fh_len;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    }
+
+    ctx->callback(error_code, error_code == CHIMERA_VFS_OK ? attr : NULL,
+                  ctx->private_data);
+    chimera_vfs_release(ctx->thread, handle);
+    free(ctx);
+} /* chimera_vfs_lookup_self_getattr_cb */
+
+static void
+chimera_vfs_lookup_self_open_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct chimera_vfs_lookup_self_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        ctx->callback(error_code, NULL, ctx->private_data);
+        free(ctx);
+        return;
+    }
+
+    ctx->handle = handle;
+    chimera_vfs_getattr(ctx->thread, ctx->cred, handle, ctx->attr_mask,
+                        chimera_vfs_lookup_self_getattr_cb, ctx);
+} /* chimera_vfs_lookup_self_open_cb */
+
 SYMBOL_EXPORT void
 chimera_vfs_lookup(
     struct chimera_vfs_thread     *thread,
@@ -687,6 +737,26 @@ chimera_vfs_lookup(
 
     if (pathlen == 0) {
         struct chimera_vfs_attrs attr;
+
+        /* The path names the starting directory itself: answer with its
+         * handle, and its attributes when asked for more (stat of "/"). */
+        if (attr_mask & ~CHIMERA_VFS_ATTR_FH) {
+            struct chimera_vfs_lookup_self_ctx *ctx = malloc(sizeof(*ctx));
+
+            if (!ctx) {
+                callback(CHIMERA_VFS_EIO, NULL, private_data);
+                return;
+            }
+            ctx->thread       = thread;
+            ctx->cred         = cred;
+            ctx->attr_mask    = attr_mask;
+            ctx->callback     = callback;
+            ctx->private_data = private_data;
+            chimera_vfs_open_fh(thread, cred, fh, fhlen,
+                                CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
+                                chimera_vfs_lookup_self_open_cb, ctx);
+            return;
+        }
 
         attr.va_req_mask = attr_mask;
         attr.va_set_mask = CHIMERA_VFS_ATTR_FH;

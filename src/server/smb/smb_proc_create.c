@@ -4964,7 +4964,7 @@ chimera_smb_revalidate_tree(
     uint8_t                    root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                   root_fh_len;
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(vfs_thread->vfs, root_fh, &root_fh_len);
 
     chimera_vfs_lookup(
         vfs_thread,

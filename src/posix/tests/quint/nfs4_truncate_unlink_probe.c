@@ -41,7 +41,7 @@ main(
     memset(data, 1, sizeof(data));
     for (int i = 0; i < 20; i++) {
         operation = "create";
-        fd        = chimera_posix_open("/test/file", O_CREAT | O_WRONLY,
+        fd        = chimera_posix_open("/file", O_CREAT | O_WRONLY,
                                        write_only ? 0200 : 0444);
         if (fd < 0) {
             goto out;
@@ -58,17 +58,17 @@ main(
         usleep(250000);
 
         operation = "truncate";
-        if (chimera_posix_truncate("/test/file", sizeof(data))) {
+        if (chimera_posix_truncate("/file", sizeof(data))) {
             goto out;
         }
         operation = "open existing file";
-        fd        = chimera_posix_open("/test/file", (write_only ? O_WRONLY : O_RDONLY) |
+        fd        = chimera_posix_open("/file", (write_only ? O_WRONLY : O_RDONLY) |
                                        O_APPEND | O_NOFOLLOW);
         if (fd < 0) {
             goto out;
         }
         operation = "unlink";
-        if (chimera_posix_unlink("/test/file")) {
+        if (chimera_posix_unlink("/file")) {
             goto out;
         }
         usleep(250000);

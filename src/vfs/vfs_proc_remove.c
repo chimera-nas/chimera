@@ -14,57 +14,6 @@
 #include "common/misc.h"
 #include "common/macros.h"
 
-/*
- * See vfs_proc_open.c for the rationale.  When `path` (slash-stripped, relative
- * to the global vfs root) resolves into a path-only mount, copy out the mount's
- * re-openable root fh and return the offset of the in-mount remainder; the
- * caller opens the mount root and hands the whole sub-path to remove_at (the
- * path-only branch in chimera_vfs_remove_parent_open_complete then removes by
- * path).  Returns -1 when the target is not under a path-only mount.
- */
-static int
-chimera_vfs_pathonly_rebase(
-    struct chimera_vfs_thread *thread,
-    const char                *path,
-    int                        pathlen,
-    uint8_t                   *r_root_fh,
-    int                       *r_root_fh_len)
-{
-    struct chimera_vfs_mount_table       *table = thread->vfs->mount_table;
-    struct chimera_vfs_mount_table_entry *entry;
-    uint32_t                              i;
-    int                                   offset = -1;
-
-    chimera_rcu_read_lock(&table->rcu);
-
-    for (i = 0; i < table->num_buckets && offset < 0; i++) {
-        entry = chimera_rcu_deref(table->buckets[i]);
-        while (entry) {
-            struct chimera_vfs_mount *mount = entry->mount;
-
-            if (mount->pathlen <= (uint32_t) pathlen &&
-                memcmp(mount->path, path, mount->pathlen) == 0 &&
-                (mount->pathlen == (uint32_t) pathlen ||
-                 path[mount->pathlen] == '/') &&
-                chimera_vfs_module_is_path_only(mount->module)) {
-
-                memcpy(r_root_fh, mount->root_fh, mount->root_fh_len);
-                *r_root_fh_len = mount->root_fh_len;
-
-                offset = mount->pathlen;
-                while (offset < pathlen && path[offset] == '/') {
-                    offset++;
-                }
-                break;
-            }
-            entry = chimera_rcu_deref(entry->next);
-        }
-    }
-
-    chimera_rcu_read_unlock(&table->rcu);
-
-    return offset;
-} /* chimera_vfs_pathonly_rebase */
 
 static void
 chimera_vfs_remove_op_complete(
@@ -168,9 +117,12 @@ chimera_vfs_remove_parent_open_complete(
 
     request->remove.parent_handle = oh;
 
-    /* Path-only backends have no child fh; remove by path directly (the backend
-     * deletes by path) -- skip the child lookup that yields nothing usable. */
-    if (chimera_vfs_module_is_path_only(request->module)) {
+    /* A path handed whole to a path-only backend is removed by path directly
+     * (the backend deletes by path) -- skip the child lookup that yields
+     * nothing usable.  A path from the namespace root that was rebased into a
+     * path-only mount keeps the lookup, whose answer (ENOTDIR, ELOOP) the
+     * backend's delete would lose. */
+    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
         request->remove.child_fh_len = 0;
         chimera_vfs_remove_at(
             thread,
@@ -282,7 +234,7 @@ chimera_vfs_remove(
     request->remove.callback     = callback;
     request->remove.private_data = private_data;
 
-    if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
+    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
         request->remove.name_offset = 0;
 
         memcpy(request->remove.parent_fh, fh, fhlen);
@@ -302,7 +254,7 @@ chimera_vfs_remove(
     /* Deep path crossing into a path-only mount: rebase onto the mount root and
      * dispatch remove_at with the whole in-mount sub-path as the name. */
     {
-        int rebase = chimera_vfs_pathonly_rebase(thread, request->remove.path,
+        int rebase = chimera_vfs_pathonly_rebase(thread, request->fh, request->fh_len, request->remove.path,
                                                  request->remove.pathlen,
                                                  request->remove.parent_fh,
                                                  &request->remove.parent_fh_len);

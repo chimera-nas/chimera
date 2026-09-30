@@ -231,7 +231,6 @@ chimera_client_init(
     chimera_vfs_set_umount_timeout(client->vfs, config->umount_timeout_ms);
 
     /* Initialize the root file handle after VFS is initialized */
-    chimera_vfs_get_root_fh(client->root_fh, &client->root_fh_len);
 
     return client;
 } /* chimera_client_init */

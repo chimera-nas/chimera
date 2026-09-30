@@ -249,7 +249,7 @@ probe_working_surface(void)
     long long fd;
 
     /* The mount root, as the driver normalized it. */
-    res = op_stat("/test", 1);
+    res = op_stat("/", 1);
     probe_ok("stat mount root", json_incref(res));
     {
         const char *ftype = json_string_value(json_object_get(res, "ftype"));
@@ -260,13 +260,13 @@ probe_working_surface(void)
     }
     json_decref(res);
 
-    probe_ok("mkdir", op_mkdir("/test/w", 0755));
-    probe_ok("mkdir nested", op_mkdir("/test/w/sub", 0755));
+    probe_ok("mkdir", op_mkdir("/w", 0755));
+    probe_ok("mkdir nested", op_mkdir("/w/sub", 0755));
 
     /* Create, write, read back, at depth: the path-op strategy resolves the
      * whole path against the mount root, so depth is not a limit here (unlike
      * SD5's parent-handle route). */
-    res = op_open("/test/w/sub/f", O_CREAT | O_RDWR, 0644);
+    res = op_open("/w/sub/f", O_CREAT | O_RDWR, 0644);
     probe_ok("open O_CREAT", json_incref(res));
     fd = probe_ret(res);
     json_decref(res);
@@ -299,37 +299,37 @@ probe_working_surface(void)
         probe_ok("close", op_fd("close", (int) fd));
     }
 
-    res = op_stat("/test/w/sub/f", 1);
+    res = op_stat("/w/sub/f", 1);
     probe_ok("stat the written file", json_incref(res));
     probe_eq("size reflects the write", probe_field(res, "size"), 5);
     json_decref(res);
 
     /* Exclusive create over an existing name is refused. */
     probe_err("O_CREAT|O_EXCL over an existing file",
-              op_open("/test/w/sub/f", O_CREAT | O_EXCL | O_WRONLY, 0644));
+              op_open("/w/sub/f", O_CREAT | O_EXCL | O_WRONLY, 0644));
 
     /* Truncate by path, then observe the new size. */
     res = probe_req("truncate");
-    probe_set_str(res, "path", "/test/w/sub/f");
+    probe_set_str(res, "path", "/w/sub/f");
     probe_set_int(res, "len", 2);
     probe_ok("truncate", probe_call(res));
-    res = op_stat("/test/w/sub/f", 1);
+    res = op_stat("/w/sub/f", 1);
     probe_eq("size reflects the truncate", probe_field(res, "size"), 2);
     json_decref(res);
 
     /* Rename and remove, both at depth. */
-    probe_ok("rename", op_two_path("rename", "/test/w/sub/f", "/test/w/sub/g"));
-    probe_ok("stat the renamed file", op_stat("/test/w/sub/g", 1));
-    probe_err("stat the old name", op_stat("/test/w/sub/f", 1));
-    probe_ok("unlink", op_path("unlink", "/test/w/sub/g"));
+    probe_ok("rename", op_two_path("rename", "/w/sub/f", "/w/sub/g"));
+    probe_ok("stat the renamed file", op_stat("/w/sub/g", 1));
+    probe_err("stat the old name", op_stat("/w/sub/f", 1));
+    probe_ok("unlink", op_path("unlink", "/w/sub/g"));
 
     /* Type assertions on removal. */
-    probe_err("unlink of a directory", op_path("unlink", "/test/w/sub"));
-    probe_ok("rmdir", op_path("rmdir", "/test/w/sub"));
-    probe_err("rmdir of a missing name", op_path("rmdir", "/test/w/sub"));
-    probe_err("stat of a missing name", op_stat("/test/w/missing", 1));
+    probe_err("unlink of a directory", op_path("unlink", "/w/sub"));
+    probe_ok("rmdir", op_path("rmdir", "/w/sub"));
+    probe_err("rmdir of a missing name", op_path("rmdir", "/w/sub"));
+    probe_err("stat of a missing name", op_stat("/w/missing", 1));
 
-    probe_ok("statvfs", op_path("statvfs", "/test"));
+    probe_ok("statvfs", op_path("statvfs", "/"));
 } /* probe_working_surface */
 
 /* ---- the pinned defects ------------------------------------------------- */
@@ -347,15 +347,15 @@ probe_pin_readdir(void)
     long long                sid;
     size_t                   i, n;
 
-    probe_ok("readdir setup mkdir", op_mkdir("/test/rd", 0755));
+    probe_ok("readdir setup mkdir", op_mkdir("/rd", 0755));
     for (i = 0; i < 3; i++) {
         char path[64];
 
-        snprintf(path, sizeof(path), "/test/rd/%s", names[i]);
+        snprintf(path, sizeof(path), "/rd/%s", names[i]);
         probe_touch(path);
     }
 
-    res = op_path("opendir", "/test/rd");
+    res = op_path("opendir", "/rd");
     probe_ok("opendir", json_incref(res));
     sid = probe_ret(res);
     json_decref(res);
@@ -393,12 +393,12 @@ probe_pin_symlink(void)
     const char *ftype, *tgt;
 
     res = probe_req("symlink");
-    probe_set_str(res, "path", "/test/sym");
+    probe_set_str(res, "path", "/sym");
     probe_set_str(res, "target", "w");
     probe_ok("symlink create", probe_call(res));
 
     /* lstat sees the link itself. */
-    res   = op_stat("/test/sym", 0);
+    res   = op_stat("/sym", 0);
     ftype = json_string_value(json_object_get(res, "ftype"));
     if (probe_ret(res) < 0 || !ftype || strcmp(ftype, "lnk") != 0) {
         probe_fail("symlink lstat", "expected an lnk, link not visible");
@@ -407,7 +407,7 @@ probe_pin_symlink(void)
 
     /* readlink returns the stored target. */
     res = probe_req("readlink");
-    probe_set_str(res, "path", "/test/sym");
+    probe_set_str(res, "path", "/sym");
     res = probe_call(res);
     tgt = json_string_value(json_object_get(res, "target"));
     if (probe_ret(res) < 0 || !tgt || strcmp(tgt, "w") != 0) {
@@ -427,31 +427,31 @@ probe_pin_no_posix_metadata(void)
 {
     json_t *res;
 
-    probe_touch("/test/meta");
+    probe_touch("/meta");
 
     res = probe_req("chmod");
-    probe_set_str(res, "path", "/test/meta");
+    probe_set_str(res, "path", "/meta");
     probe_set_int(res, "mode", 0700);
     json_decref(probe_call(res));
 
-    res = op_stat("/test/meta", 1);
+    res = op_stat("/meta", 1);
     probe_eq("SD4: chmod is reflected in the reported mode",
              probe_field(res, "mode") & 0777, 0700);
     json_decref(res);
 
     res = probe_req("chown");
-    probe_set_str(res, "path", "/test/meta");
+    probe_set_str(res, "path", "/meta");
     probe_set_int(res, "uid", 4242);
     probe_set_int(res, "gid", 4243);
     json_object_set_new(res, "follow", json_boolean(1));
     json_decref(probe_call(res));
 
-    res = op_stat("/test/meta", 1);
+    res = op_stat("/meta", 1);
     probe_eq("SD4: chown sets the reported uid", probe_field(res, "uid"), 4242);
     probe_eq("SD4: chown sets the reported gid", probe_field(res, "gid"), 4243);
     json_decref(res);
 
-    res = op_stat("/test/w", 1);
+    res = op_stat("/w", 1);
     if (probe_field(res, "nlink") < 2) {
         probe_fail("SD4: directory nlink",
                    "a directory's link count is < 2 (POSIX requires itself and \".\")");
@@ -471,13 +471,13 @@ probe_pin_parent_handle_ops(void)
 {
     json_t *res;
 
-    probe_touch("/test/src");
+    probe_touch("/src");
 
-    probe_ok("hard link", op_two_path("link", "/test/src", "/test/dst"));
-    probe_ok("hard link visible", op_stat("/test/dst", 0));
+    probe_ok("hard link", op_two_path("link", "/src", "/dst"));
+    probe_ok("hard link visible", op_stat("/dst", 0));
 
     res = probe_req("utimens");
-    probe_set_str(res, "path", "/test/src");
+    probe_set_str(res, "path", "/src");
     probe_set_str(res, "atype", "val");
     probe_set_int(res, "asec", 1000);
     probe_set_int(res, "ansec", 0);
@@ -488,7 +488,7 @@ probe_pin_parent_handle_ops(void)
     probe_ok("utimens by path (SD5 fixed)", probe_call(res));
 
     res = probe_req("mknod");
-    probe_set_str(res, "path", "/test/w/fifo");
+    probe_set_str(res, "path", "/w/fifo");
     probe_set_int(res, "mode", 0644);
     probe_set_str(res, "ftype", "fifo");
     probe_ok("mknod below the mount root (SD5 fixed)", probe_call(res));
@@ -528,7 +528,7 @@ probe_compressible_roundtrip(void)
     }
     payload[PROBE_BLOB_LEN] = '\0';
 
-    res = op_open("/test/blob", O_CREAT | O_RDWR, 0644);
+    res = op_open("/blob", O_CREAT | O_RDWR, 0644);
     fd  = probe_ret(res);
     json_decref(res);
     if (fd < 0) {
@@ -700,8 +700,8 @@ main(
      * is empty. */
     res = probe_req("newfs");
     probe_ok("newfs recycle", probe_call(res));
-    probe_err("the recycled filesystem is empty", op_stat("/test/w", 1));
-    probe_ok("the recycled filesystem is usable", op_mkdir("/test/after", 0755));
+    probe_err("the recycled filesystem is empty", op_stat("/w", 1));
+    probe_ok("the recycled filesystem is usable", op_mkdir("/after", 0755));
 
     posix_env_teardown();
 

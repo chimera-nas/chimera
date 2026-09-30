@@ -23,69 +23,6 @@
  * the target file (moved to vfs_internal.h as
  * chimera_vfs_open_required_access, shared with the open_at wrapper). */
 
-/*
- * Path-only deep-path rebasing.
- *
- * Operations arrive against the GLOBAL vfs-root fh with a full path (e.g.
- * "share/a/b/file").  When that path resolves into a path-only mount, the
- * intermediate directories (share/a/b) have NO re-openable file handles, so the
- * usual "resolve immediate parent dir + dispatch _at on the leaf" scheme breaks
- * for anything deeper than a single level.
- *
- * This helper detects that case: if `path` (already slash-stripped, relative to
- * the global vfs root) falls under a path-only mount, it copies out that mount's
- * re-openable root fh and returns the byte offset of the in-mount remainder
- * within `path`.  The caller then opens the mount root as a directory handle and
- * dispatches the _at op with the entire in-mount sub-path as the name; the
- * path-only backend resolves the whole sub-path in one operation.
- *
- * Returns the in-mount offset (>= 0) on a path-only match, or -1 otherwise (in
- * which case the caller keeps its existing FH-relative behavior unchanged).
- */
-static int
-chimera_vfs_pathonly_rebase(
-    struct chimera_vfs_thread *thread,
-    const char                *path,
-    int                        pathlen,
-    uint8_t                   *r_root_fh,
-    int                       *r_root_fh_len)
-{
-    struct chimera_vfs_mount_table       *table = thread->vfs->mount_table;
-    struct chimera_vfs_mount_table_entry *entry;
-    uint32_t                              i;
-    int                                   offset = -1;
-
-    chimera_rcu_read_lock(&table->rcu);
-
-    for (i = 0; i < table->num_buckets && offset < 0; i++) {
-        entry = chimera_rcu_deref(table->buckets[i]);
-        while (entry) {
-            struct chimera_vfs_mount *mount = entry->mount;
-
-            if (mount->pathlen <= (uint32_t) pathlen &&
-                memcmp(mount->path, path, mount->pathlen) == 0 &&
-                (mount->pathlen == (uint32_t) pathlen ||
-                 path[mount->pathlen] == '/') &&
-                chimera_vfs_module_is_path_only(mount->module)) {
-
-                memcpy(r_root_fh, mount->root_fh, mount->root_fh_len);
-                *r_root_fh_len = mount->root_fh_len;
-
-                offset = mount->pathlen;
-                /* Skip the separating slash to land on the in-mount remainder. */
-                while (offset < pathlen && path[offset] == '/') {
-                    offset++;
-                }
-                break;
-            }
-            entry = chimera_rcu_deref(entry->next);
-        }
-    }
-
-    chimera_rcu_read_unlock(&table->rcu);
-
-    return offset;
-} /* chimera_vfs_pathonly_rebase */
 
 static void
 chimera_vfs_open_root_complete(
@@ -627,7 +564,7 @@ chimera_vfs_open(
     unsigned int pathonly_metadata = (flags & CHIMERA_VFS_OPEN_PATH) &&
         !(flags & (CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_NOFOLLOW));
 
-    if ((request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) &&
+    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len) &&
         !pathonly_metadata) {
         int i;
 
@@ -662,7 +599,7 @@ chimera_vfs_open(
     /* Deep path crossing into a path-only mount: rebase onto the mount root and
      * dispatch open_at with the whole in-mount sub-path as the name. */
     {
-        int rebase = chimera_vfs_pathonly_rebase(thread, request->open.path,
+        int rebase = chimera_vfs_pathonly_rebase(thread, request->fh, request->fh_len, request->open.path,
                                                  request->open.pathlen,
                                                  request->open.parent_fh,
                                                  &request->open.parent_fh_len);

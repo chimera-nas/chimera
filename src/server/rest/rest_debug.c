@@ -220,7 +220,7 @@ chimera_rest_handle_debug_fsop(
     ctx->vfs_thread = thread->vfs_thread;
     snprintf(ctx->path, sizeof(ctx->path), "%s", path);
 
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(ctx->vfs_thread->vfs, root_fh, &root_fh_len);
 
     if (strcmp(op, "unlink") == 0) {
         chimera_vfs_remove(ctx->vfs_thread, cred, root_fh, root_fh_len,

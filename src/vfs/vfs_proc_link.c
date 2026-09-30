@@ -5,6 +5,7 @@
 #include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
+#include "vfs_mount_table.h"
 #include "vfs_release.h"
 #include "common/misc.h"
 #include "common/macros.h"
@@ -66,48 +67,6 @@ chimera_vfs_link_dest_parent_lookup_complete(
         chimera_vfs_link_op_complete,
         request);
 } /* chimera_vfs_link_dest_parent_lookup_complete */
-
-static void
-chimera_vfs_link_source_lookup_fast_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_vfs_request *request = private_data;
-    struct chimera_vfs_thread  *thread  = request->thread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_link_callback_t callback = request->link.callback;
-        void                       *priv     = request->link.private_data;
-
-        chimera_vfs_request_free(thread, request);
-        callback(error_code, NULL, priv);
-        return;
-    }
-
-    memcpy(request->link.source_fh, attr->va_fh, attr->va_fh_len);
-    request->link.source_fh_len = attr->va_fh_len;
-
-    /* Dest parent FH and full path already set up; skip dest lookup */
-    chimera_vfs_link_at(
-        thread,
-        request->cred,
-        request->link.source_fh,
-        request->link.source_fh_len,
-        request->link.dest_parent_fh,
-        request->link.dest_parent_fh_len,
-        request->link.new_path + request->link.new_name_offset,
-        request->link.new_pathlen - request->link.new_name_offset,
-        request->link.replace,
-        request->link.attr_mask,
-        0,
-        0,
-        NULL,
-        NULL,
-        chimera_vfs_link_op_complete,
-        request);
-} /* chimera_vfs_link_source_lookup_fast_complete */
-
 static void
 chimera_vfs_link_source_lookup_complete(
     enum chimera_vfs_error    error_code,
@@ -214,7 +173,7 @@ chimera_vfs_link(
     request->link.callback     = callback;
     request->link.private_data = private_data;
 
-    if (chimera_vfs_module_is_path_only(request->module)) {
+    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
         /* Hardlink needs a stable source fh, which a path-only backend cannot
         * provide; report it as unsupported without a wasted source lookup. */
         chimera_vfs_link_callback_t cb   = request->link.callback;
@@ -225,53 +184,30 @@ chimera_vfs_link(
         return;
     }
 
-    if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
-        /* Fast path: pass full dest path directly, kernel resolves */
-        request->link.new_name_offset = 0;
+    /* Resolve both paths component-by-component.  Split the new path for
+     * the destination parent and name. */
+    slash = strrchr(request->link.new_path, '/');
 
-        memcpy(request->link.dest_parent_fh, fh, fhlen);
-        request->link.dest_parent_fh_len = fhlen;
-
-        /* Still need to resolve source path to get source FH; the caller's
-         * lookup flags decide whether a final-component symlink is
-         * followed (linkat AT_SYMLINK_FOLLOW) or linked itself. */
-        chimera_vfs_lookup(
-            thread,
-            cred,
-            fh,
-            fhlen,
-            request->link.path,
-            request->link.pathlen,
-            CHIMERA_VFS_ATTR_FH,
-            source_lookup_flags & CHIMERA_VFS_LOOKUP_FOLLOW,
-            chimera_vfs_link_source_lookup_fast_complete,
-            request);
+    if (slash) {
+        request->link.new_parent_len  = slash - request->link.new_path;
+        request->link.new_name_offset = (slash + 1) - request->link.new_path;
     } else {
-        /* Fallback: resolve both paths component-by-component */
-
-        /* Split new path for dest parent/name */
-        slash = strrchr(request->link.new_path, '/');
-
-        if (slash) {
-            request->link.new_parent_len  = slash - request->link.new_path;
-            request->link.new_name_offset = (slash + 1) - request->link.new_path;
-        } else {
-            request->link.new_parent_len  = 0;
-            request->link.new_name_offset = 0;
-        }
-
-        /* Resolve source (full path) to get source FH; follow semantics
-         * as above. */
-        chimera_vfs_lookup(
-            thread,
-            cred,
-            fh,
-            fhlen,
-            request->link.path,
-            request->link.pathlen,
-            CHIMERA_VFS_ATTR_FH,
-            source_lookup_flags & CHIMERA_VFS_LOOKUP_FOLLOW,
-            chimera_vfs_link_source_lookup_complete,
-            request);
+        request->link.new_parent_len  = 0;
+        request->link.new_name_offset = 0;
     }
+
+    /* Resolve the source (full path) to get its FH; the caller's lookup
+     * flags decide whether a final-component symlink is followed (linkat
+     * AT_SYMLINK_FOLLOW) or linked itself. */
+    chimera_vfs_lookup(
+        thread,
+        cred,
+        fh,
+        fhlen,
+        request->link.path,
+        request->link.pathlen,
+        CHIMERA_VFS_ATTR_FH,
+        source_lookup_flags & CHIMERA_VFS_LOOKUP_FOLLOW,
+        chimera_vfs_link_source_lookup_complete,
+        request);
 } /* chimera_vfs_link */

@@ -1692,10 +1692,11 @@ chimera_s3_upload_part_copy(
         return;
     }
 
+    chimera_s3_refresh_root(thread);
     chimera_vfs_lookup(thread->vfs,
                        &request->cred,
-                       shared->root_fh,
-                       shared->root_fh_len,
+                       thread->root_fh,
+                       thread->root_fh_len,
                        src_path,
                        strlen(src_path),
                        CHIMERA_VFS_ATTR_FH,

@@ -57,15 +57,21 @@
 #include "client/client.h"
 #include "server/server.h"
 #include "common/test_users.h"
+
+/* The backend under test is mounted at "/", so it is the namespace root the
+ * model's absolute paths and ".." resolve against, exactly as the model's own
+ * root does -- including ".." out of the backend's root, which a mount below
+ * "/" would follow to the directory holding its mount point. */
+#define POSIX_DRIVER_MOUNT "/"
 #include "common/logging.h"
 #include "common/platform.h"
 #include "common/tcp_flavor.h"
 #include "prometheus-c.h"
 #include "common/mbt_artifacts.h"
 
-#define DRIVER_BLOCK_SIZE 4096
-#define MAX_PIDS          4
-#define MAX_DIRS          64
+#define DRIVER_BLOCK_SIZE  4096
+#define MAX_PIDS           4
+#define MAX_DIRS           64
 
 /* SMB2 loopback (smb_<module>): the client mounts the in-process chimera SMB
  * server through the smb VFS proxy module.  Unlike NFS's per-request AUTH_SYS
@@ -75,7 +81,7 @@
  * all.  Every model process therefore reaches the server as uid 0 -- one of
  * the reasons this backend cannot satisfy the POSIX model yet; the SD* list in
  * CMakeLists.txt has the rest. */
-#define SMB_LOOPBACK_PATH "127.0.0.1:share"
+#define SMB_LOOPBACK_PATH  "127.0.0.1:share"
 #define SMB_LOOPBACK_OPTS \
         "user=root,password=" CHIMERA_TEST_USER_SMBPASSWD ",domain=WORKGROUP"
 
@@ -361,11 +367,11 @@ normalize_root(void)
     }
     chimera_posix_set_cred(&g_root_cred);
     (void) chimera_posix_umask(0);
-    if (chimera_posix_chmod("/test", 0777) != 0) {
+    if (chimera_posix_chmod(POSIX_DRIVER_MOUNT, 0777) != 0) {
         fprintf(stderr, "posix_driver: normalize chmod: %s\n", strerror(errno));
         return -1;
     }
-    if (chimera_posix_chown("/test", 0, 0) != 0) {
+    if (chimera_posix_chown(POSIX_DRIVER_MOUNT, 0, 0) != 0) {
         fprintf(stderr, "posix_driver: normalize chown: %s\n", strerror(errno));
         return -1;
     }
@@ -1075,7 +1081,7 @@ handle(json_t *req)
              * so a small ceiling is already a long real wait -- and on a true
              * leak every attempt logs the still-open handles at error level,
              * so a low ceiling keeps the log readable. */
-            while (chimera_posix_umount("/test") != 0) {
+            while (chimera_posix_umount(POSIX_DRIVER_MOUNT) != 0) {
                 if (errno != EBUSY || ++tries >= 15) {
                     fprintf(stderr,
                             "posix_driver: newfs client umount failed: %s\n",
@@ -1166,7 +1172,7 @@ handle(json_t *req)
                     return res_int(-1, chimera_posix_errno_from_status(rc));
                 }
                 if (chimera_posix_mount_with_options(
-                        "/test", "smb", SMB_LOOPBACK_PATH,
+                        POSIX_DRIVER_MOUNT, "smb", SMB_LOOPBACK_PATH,
                         smb_mount_options(smb_options,
                                           sizeof(smb_options))) != 0) {
                     fprintf(stderr,
@@ -1177,7 +1183,7 @@ handle(json_t *req)
             } else {
                 snprintf(mount_options, sizeof(mount_options), "vers=%d",
                          g_nfs_version);
-                if (chimera_posix_mount_with_options("/test", "nfs",
+                if (chimera_posix_mount_with_options(POSIX_DRIVER_MOUNT, "nfs",
                                                      "127.0.0.1:/share",
                                                      mount_options) != 0) {
                     fprintf(stderr,
@@ -1198,7 +1204,7 @@ handle(json_t *req)
          * EBUSY for a short window.  Retry rather than race it -- the same
          * bounded-retry shape the SMB/NFS4 harness teardown uses (5s ceiling). */
         int umount_tries = 0;
-        while (chimera_posix_umount("/test") != 0) {
+        while (chimera_posix_umount(POSIX_DRIVER_MOUNT) != 0) {
             if (errno != EBUSY || ++umount_tries >= 5000) {
                 fprintf(stderr, "posix_driver: newfs umount failed: %s\n",
                         strerror(errno));
@@ -1227,7 +1233,7 @@ handle(json_t *req)
                         new_dir, strerror(errno));
                 return res_int(-1, errno);
             }
-            if (chimera_posix_mount("/test", g_module, new_dir) != 0) {
+            if (chimera_posix_mount(POSIX_DRIVER_MOUNT, g_module, new_dir) != 0) {
                 fprintf(stderr, "posix_driver: newfs mount %s failed: %s\n",
                         new_dir, strerror(errno));
                 return res_int(-1, errno);
@@ -1260,7 +1266,7 @@ handle(json_t *req)
                     g_fsname, strerror(errno));
             return res_int(-1, errno);
         }
-        if (chimera_posix_mount("/test", g_module, g_fsname) != 0) {
+        if (chimera_posix_mount(POSIX_DRIVER_MOUNT, g_module, g_fsname) != 0) {
             fprintf(stderr, "posix_driver: newfs mount %s failed: %s\n",
                     g_fsname, strerror(errno));
             return res_int(-1, errno);
@@ -1580,7 +1586,7 @@ posix_env_setup(
 
         if (smb) {
             if (chimera_posix_mount_with_options(
-                    "/test", "smb", SMB_LOOPBACK_PATH,
+                    POSIX_DRIVER_MOUNT, "smb", SMB_LOOPBACK_PATH,
                     smb_mount_options(smb_options,
                                       sizeof(smb_options))) != 0) {
                 fprintf(stderr, "posix_driver: smb mount failed: %s\n",
@@ -1593,7 +1599,7 @@ posix_env_setup(
         } else {
             snprintf(mount_options, sizeof(mount_options), "vers=%d",
                      nfs_version);
-            if (chimera_posix_mount_with_options("/test", "nfs",
+            if (chimera_posix_mount_with_options(POSIX_DRIVER_MOUNT, "nfs",
                                                  "127.0.0.1:/share",
                                                  mount_options) != 0) {
                 fprintf(stderr, "posix_driver: nfs%d mount failed\n",
@@ -1637,7 +1643,7 @@ posix_env_setup(
                         strerror(errno));
                 return 1;
             }
-            if (chimera_posix_mount("/test", module, dir) != 0) {
+            if (chimera_posix_mount(POSIX_DRIVER_MOUNT, module, dir) != 0) {
                 if (errno == ENOTSUP || errno == EOPNOTSUPP) {
                     /* The scratch filesystem cannot produce file handles
                      * (name_to_handle_at): tmpfs/overlayfs, e.g. a /tmp or
@@ -1662,7 +1668,7 @@ posix_env_setup(
                 return 1;
             }
 
-            if (chimera_posix_mount("/test", module, "fs0") != 0) {
+            if (chimera_posix_mount(POSIX_DRIVER_MOUNT, module, "fs0") != 0) {
                 fprintf(stderr, "posix_driver: %s mount failed\n", backend);
                 return 1;
             }
@@ -1697,7 +1703,7 @@ posix_env_teardown(void)
      * it the same bounded retry the newfs recycle uses. */
     {
         int tries = 0;
-        while (chimera_posix_umount("/test") != 0 &&
+        while (chimera_posix_umount(POSIX_DRIVER_MOUNT) != 0 &&
                errno == EBUSY && ++tries < 15) {
             usleep(1000);
         }

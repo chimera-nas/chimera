@@ -209,7 +209,7 @@ test_memfs_behaviour(void)
     assert(ctx.status == CHIMERA_VFS_OK);
 
     /* Resolve the mounted share's root handle. */
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(ctx.vfs_thread->vfs, root_fh, &root_fh_len);
     chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, root_fh_len, "test", 4,
                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
                        lookup_cb, &ctx);

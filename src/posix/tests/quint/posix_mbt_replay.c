@@ -152,7 +152,10 @@ map_get_pair(
 #define R_MAXSID 64
 #define R_MAXINO 8192
 #define BADFD    999999
-#define MOUNT    "/test"
+/* Prefix model paths take on the client: the backend is mounted at the
+ * namespace root (POSIX_DRIVER_MOUNT), so none -- the model root's path is
+ * empty and is spelled "/" where a path is built from it. */
+#define MOUNT    ""
 
 static int           g_fdmap[R_MAXPID][R_MAXFD]; /* (pid, model fd) -> real fd     */
 static CHIMERA_DIR  *g_dirmap[R_MAXSID];    /* model sid -> live DIR*         */
@@ -724,6 +727,10 @@ real_path(
         buf[len++] = '/';
         buf[len]   = '\0';
     }
+    if (abs && len == 0 && cap > 1) {
+        buf[0] = '/';
+        buf[1] = '\0';
+    }
 } /* real_path */
 
 /* Build a symlink target string (no MOUNT prefix unless abs). */
@@ -750,6 +757,10 @@ real_target(
         buf[len] = '\0';
         append_comp(buf, cap, &len,
                     json_string_value(json_array_get(comps, i)));
+    }
+    if (abs && len == 0 && cap > 1) {
+        buf[0] = '/';
+        buf[1] = '\0';
     }
 } /* real_target */
 
@@ -3137,7 +3148,7 @@ audit_silly_links(const chimera_posix_stat_t *target)
         CHIMERA_DIR    *dir;
         int             n;
 
-        snprintf(full, sizeof(full), "%s%.4095s", MOUNT, entry.path);
+        snprintf(full, sizeof(full), "%s%.4095s", MOUNT, entry.path[0] ? entry.path : "/");
         dir = chimera_posix_opendir(full);
         if (!dir) {
             continue;
@@ -3216,7 +3227,7 @@ final_audit(json_t *fs)
         int             nnames, k;
         size_t          i;
 
-        snprintf(dirpath, sizeof(dirpath), "%s%.4095s", MOUNT, e.path);
+        snprintf(dirpath, sizeof(dirpath), "%s%.4095s", MOUNT, e.path[0] ? e.path : "/");
         d = chimera_posix_opendir(dirpath);
         if (!d) {
             mism("audit: opendir %s: errno %d", e.path[0] ? e.path : "/",

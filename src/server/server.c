@@ -2070,9 +2070,9 @@ chimera_mkpath_mounted_cb(
         return;
     }
 
-    m = chimera_vfs_mount_table_find_by_path(ctx->vfs->mount_table,
-                                             CHIMERA_MKPATH_TMP_NAME,
-                                             strlen(CHIMERA_MKPATH_TMP_NAME));
+    m = chimera_vfs_mount_table_find_exact(ctx->vfs->mount_table,
+                                           CHIMERA_MKPATH_TMP_NAME,
+                                           strlen(CHIMERA_MKPATH_TMP_NAME));
     if (!m) {
         chimera_mkpath_finish(ctx, CHIMERA_VFS_EIO);
         return;
@@ -2141,9 +2141,9 @@ chimera_server_mkpath(
     ctx.pathlen = snprintf(ctx.path, sizeof(ctx.path), "%s", walk);
 
     /* Transiently mount the backend root so we have a handle to walk under. */
-    chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
-                      CHIMERA_MKPATH_TMP_NAME, module_name, mount_root, NULL,
-                      chimera_mkpath_mounted_cb, &ctx);
+    chimera_vfs_mount_detached(ctx.thread, chimera_vfs_get_server_cred(),
+                               CHIMERA_MKPATH_TMP_NAME, module_name, mount_root, NULL,
+                               chimera_mkpath_mounted_cb, &ctx);
 
     while (!ctx.done) {
         evpl_continue(evpl);
@@ -2345,9 +2345,9 @@ chimera_seed_mounted_cb(
         return;
     }
 
-    m = chimera_vfs_mount_table_find_by_path(ctx->vfs->mount_table,
-                                             CHIMERA_SEED_TMP_NAME,
-                                             strlen(CHIMERA_SEED_TMP_NAME));
+    m = chimera_vfs_mount_table_find_exact(ctx->vfs->mount_table,
+                                           CHIMERA_SEED_TMP_NAME,
+                                           strlen(CHIMERA_SEED_TMP_NAME));
     if (!m) {
         chimera_seed_finish(ctx, CHIMERA_VFS_EIO);
         return;
@@ -2379,9 +2379,9 @@ chimera_server_seed_symlinks(
     ctx.thread = chimera_vfs_thread_init(evpl, server->vfs);
     ctx.status = CHIMERA_VFS_OK;
 
-    chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
-                      CHIMERA_SEED_TMP_NAME, module_name, module_path, NULL,
-                      chimera_seed_mounted_cb, &ctx);
+    chimera_vfs_mount_detached(ctx.thread, chimera_vfs_get_server_cred(),
+                               CHIMERA_SEED_TMP_NAME, module_name, module_path, NULL,
+                               chimera_seed_mounted_cb, &ctx);
 
     while (!ctx.done) {
         evpl_continue(evpl);
@@ -2496,9 +2496,9 @@ chimera_seed_fsa_mounted_cb(
         return;
     }
 
-    m = chimera_vfs_mount_table_find_by_path(ctx->vfs->mount_table,
-                                             CHIMERA_SEED_TMP_NAME,
-                                             strlen(CHIMERA_SEED_TMP_NAME));
+    m = chimera_vfs_mount_table_find_exact(ctx->vfs->mount_table,
+                                           CHIMERA_SEED_TMP_NAME,
+                                           strlen(CHIMERA_SEED_TMP_NAME));
     if (!m) {
         chimera_seed_finish(ctx, CHIMERA_VFS_EIO);
         return;
@@ -2530,9 +2530,9 @@ chimera_server_seed_fsa(
     ctx.thread = chimera_vfs_thread_init(evpl, server->vfs);
     ctx.status = CHIMERA_VFS_OK;
 
-    chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
-                      CHIMERA_SEED_TMP_NAME, module_name, module_path, NULL,
-                      chimera_seed_fsa_mounted_cb, &ctx);
+    chimera_vfs_mount_detached(ctx.thread, chimera_vfs_get_server_cred(),
+                               CHIMERA_SEED_TMP_NAME, module_name, module_path, NULL,
+                               chimera_seed_fsa_mounted_cb, &ctx);
 
     while (!ctx.done) {
         evpl_continue(evpl);
@@ -3270,6 +3270,12 @@ chimera_server_iterate_mounts(
 
         for (entry = table->buckets[i]; entry; entry = entry->next) {
             struct chimera_vfs_mount *mount = entry->mount;
+
+            /* The built-in rootfs and detached mounts are VFS-internal: no
+             * one configured them and there is nothing to manage. */
+            if (mount->detached || !strcmp(mount->module->name, "rootfs")) {
+                continue;
+            }
 
             item = calloc(1, sizeof(*item));
             if (!item) {

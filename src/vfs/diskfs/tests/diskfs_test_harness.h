@@ -502,7 +502,7 @@ dh_root_handle(struct dh *dh)
     uint8_t  root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t root_len;
 
-    chimera_vfs_get_root_fh(root_fh, &root_len);
+    chimera_vfs_get_root_fh(dh->thread->vfs, root_fh, &root_len);
     chimera_vfs_lookup(dh->thread, &dh->cred, root_fh, root_len, "test", 4,
                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
                        dh_lookup_cb, dh);
