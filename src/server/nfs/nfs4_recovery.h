@@ -93,9 +93,10 @@ struct nfs_client;
 
 /*
  * Initialize recovery state at shared init.  Records `vfs`, `lease_time_s`
- * (refresh cadence and stale bound) and `grace_time_s` for the cold-start load, detects whether the configured KV module is
- * persistent (memkv is not -> persistence_disabled + a warning), and leaves
- * load_state = IDLE.  The actual KV scan happens later in nfs_recovery_kickoff.
+ * (refresh cadence and stale bound) and `grace_time_s` for the cold-start
+ * load, detects whether the configured KV module is persistent (memkv is not
+ * -> persistence_disabled + a warning), and leaves load_state = IDLE.  The KV
+ * scan itself runs in nfs_recovery_cold_start.
  */
 int
 nfs_recovery_load(
