@@ -172,9 +172,14 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
     evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     for (size_t i = 0; i < expired_count; i++) {
-        nfs_client_expire_state(expired_clients[i],
-                                &shared->nfs4_state_table,
+        struct nfs_client *uc = expired_clients[i];
+
+        nfs_client_expire_state(uc, &shared->nfs4_state_table,
                                 thread->vfs_thread);
+        /* Its lease is gone for good: drop the stable-storage record too, so
+         * the next reboot does not wait on a client that cannot reclaim. */
+        nfs_recovery_forget(thread->vfs_thread, &shared->nfs4_recovery,
+                            uc->owner_string, uc->owner_len);
     }
     free(expired_clients);
 #endif /* ifndef __clang_analyzer__ */
@@ -183,7 +188,7 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
     nfs_recovery_heartbeat(&thread->shared->nfs4_recovery, thread->vfs_thread);
 
     /* Phase 5: piggyback grace-window expiry on the lease tick. */
-    nfs_recovery_sweep_once(&thread->shared->nfs4_recovery);
+    nfs_recovery_sweep_once(&thread->shared->nfs4_recovery, thread->vfs_thread);
 } /* nfs_lease_sweep_once */
 
 static void

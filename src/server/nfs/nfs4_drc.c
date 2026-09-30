@@ -406,7 +406,7 @@ nfs4_drc_forget_session(
 /* Reconstruct (idempotently) a confirmed client record with its original
  * clientid so the post-restart EXCHANGE_ID from the same owner resolves to it.
  * Runs under the table lock. */
-static void
+static struct nfs_client *
 nfs4_drc_ensure_client(
     struct nfs4_client_table *table,
     uint64_t                  client_id,
@@ -428,7 +428,7 @@ nfs4_drc_ensure_client(
               &client_id, sizeof(client_id), client);
     if (client) {
         evpl_mutex_unlock(&table->nfs4_ct_lock);
-        return;
+        return client->unified;
     }
 
     client                        = calloc(1, sizeof(*client));
@@ -462,12 +462,13 @@ nfs4_drc_ensure_client(
      *    one held; it could once the window closed regardless.  Revisit the
      *    day open or lock state is persisted, or the day hydrated clients
      *    are asked to reclaim.
-     *  - The client's own to_reclaim record is retired only by the grace
-     *    deadline or DESTROY_CLIENTID: a global RECLAIM_COMPLETE from it is
+     *  - The reloaded to_reclaim record for this client is marked returned
+     *    when the hydration path re-persists it
+     *    (nfs4_drc_hydrate_session_complete), so the grace-end purge keeps
+     *    its stable-storage record; its global RECLAIM_COMPLETE is
      *    NFS4ERR_COMPLETE_ALREADY before it reaches the recovery
-     *    bookkeeping.  Such a client never sent one, so no outcome changes,
-     *    but the server-wide window cannot end early on the all-reclaimed
-     *    exit while a hydrated client's record is outstanding.
+     *    bookkeeping, so the window cannot end early on the all-reclaimed
+     *    exit while that record is outstanding -- the deadline ends it.
      *
      * Set directly rather than through nfs4_client_mark_reclaim_complete():
      * nfs4_ct_lock is held here and is not recursive. */
@@ -506,9 +507,10 @@ nfs4_drc_ensure_client(
     }
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
+    return client->unified;
 } /* nfs4_drc_ensure_client */
 
-void
+struct nfs_client *
 nfs4_drc_reconstruct_session(
     struct nfs4_client_table             *table,
     const uint8_t                        *sessionid,
@@ -516,11 +518,13 @@ nfs4_drc_reconstruct_session(
     uint64_t                              boot_id)
 {
     struct nfs4_session *session;
+    struct nfs_client   *unified;
 
-    nfs4_drc_ensure_client(table, rec->clientid, rec->verifier,
-                           rec->owner, rec->owner_len,
-                           rec->princ_flavor, rec->princ_uid, rec->princ_gid,
-                           rec->mach, rec->mach_len, boot_id);
+    unified = nfs4_drc_ensure_client(table, rec->clientid, rec->verifier,
+                                     rec->owner, rec->owner_len,
+                                     rec->princ_flavor, rec->princ_uid,
+                                     rec->princ_gid,
+                                     rec->mach, rec->mach_len, boot_id);
 
     session = nfs4_create_session(table, rec->clientid, 0,
                                   rec->replay_max_slots, rec->replay_maxresp_cached,
@@ -530,6 +534,7 @@ nfs4_drc_reconstruct_session(
         /* Drop the +1 caller ref; the hash holds the session. */
         nfs4_session_put(session);
     }
+    return unified;
 } /* nfs4_drc_reconstruct_session */
 
 void
@@ -623,6 +628,7 @@ struct nfs4_drc_hydrate_ctx {
     uint8_t                           rstart[CHIMERA_KV_REPLY_KEY_LEN];
     bool                              found;
     uint32_t                          nreplies;
+    struct nfs_client                *hydrated; /* the client the session rebuilt */
 };
 
 static int
@@ -647,8 +653,9 @@ nfs4_drc_hydrate_session_cb(
         return 0;  /* skip a corrupt record */
     }
 
-    nfs4_drc_reconstruct_session(table, ctx->sessionid, &rec,
-                                 thread->shared->nfs4_recovery.current_boot_id);
+    ctx->hydrated = nfs4_drc_reconstruct_session(
+        table, ctx->sessionid, &rec,
+        thread->shared->nfs4_recovery.current_boot_id);
     ctx->found = true;
     return 0;
 } /* nfs4_drc_hydrate_session_cb */
@@ -728,9 +735,18 @@ nfs4_drc_hydrate_session_complete(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
-    struct nfs4_drc_hydrate_ctx *ctx = private_data;
+    struct nfs4_drc_hydrate_ctx      *ctx    = private_data;
+    struct chimera_server_nfs_thread *thread = ctx->thread;
 
     (void) error_code;
+
+    /* The client is back without an EXCHANGE_ID, so nothing else re-persists
+     * its recovery record: do it here, which also marks the reloaded record as
+     * returned so the grace-end purge keeps it. */
+    if (ctx->hydrated) {
+        nfs_recovery_persist(thread->vfs_thread,
+                             &thread->shared->nfs4_recovery, ctx->hydrated);
+    }
 
     /* Session (and its client) are in place; now repopulate its reply slots.
      * The [hdr] + sessionid prefix selects exactly this session's reply band;

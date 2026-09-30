@@ -645,13 +645,13 @@ test_grace_survives_sweep_during_load(void)
     CHECK(rec.pending_reclaim == 0);
 
     /* A sweep tick lands here.  The window must survive it. */
-    nfs_recovery_sweep_once(&rec);
+    nfs_recovery_sweep_once(&rec,NULL);
     CHECK(rec.in_grace);
 
     /* Once the scan has settled with nothing to reclaim, the same tick may
      * close the window -- that is the intended fast path, still reachable. */
     atomic_store(&rec.load_state,NFS_REC_LOAD_READY);
-    nfs_recovery_sweep_once(&rec);
+    nfs_recovery_sweep_once(&rec,NULL);
     CHECK(!rec.in_grace);
 
     nfs_recovery_free(&rec);
@@ -666,7 +666,7 @@ test_grace_survives_sweep_during_load(void)
     rec.in_grace     = true;
     rec.grace_end_ns = 0;          /* deadline already in the past */
     evpl_mutex_unlock(&rec.lock);
-    nfs_recovery_sweep_once(&rec);
+    nfs_recovery_sweep_once(&rec,NULL);
     CHECK(!rec.in_grace);
 
     nfs_recovery_free(&rec);
@@ -749,14 +749,14 @@ test_grace_survives_reclaim_complete_during_load(void)
     nfs_recovery_reclaim_complete(&rec,&a);
     CHECK(rec.pending_reclaim == 0);
     CHECK(rec.in_grace);                 /* the window must survive that... */
-    nfs_recovery_sweep_once(&rec);
+    nfs_recovery_sweep_once(&rec,NULL);
     CHECK(rec.in_grace);                 /* ...and the next tick */
 
     /* B's record lands and the scan settles with B still owed its reclaim. */
     recovery_add_record(&rec,"co_owner_b");
     CHECK(rec.pending_reclaim == 1);
     atomic_store(&rec.load_state,NFS_REC_LOAD_READY);
-    nfs_recovery_sweep_once(&rec);
+    nfs_recovery_sweep_once(&rec,NULL);
     CHECK(rec.in_grace);
 
     /* What each client's OPEN sees while B is outstanding. */
@@ -770,6 +770,7 @@ test_grace_survives_reclaim_complete_during_load(void)
     nfs_recovery_reclaim_complete(&rec,&b);
     CHECK(rec.pending_reclaim == 0);
     CHECK(!rec.in_grace);
+    CHECK(rec.unreclaimed_purged == 0);   /* everyone reclaimed: nothing to purge */
     CHECK(nfs_recovery_open_check(&rec,&b,false) == NFS4_OK);
     CHECK(nfs_recovery_open_check(&rec,&b,true) == NFS4ERR_NO_GRACE);
     CHECK(nfs_recovery_io_check(&rec) == NFS4_OK);
@@ -903,6 +904,61 @@ test_stale_record_classification(void)
     nfs_recovery_free(&rec);
     printf("ok: stale_record_classification\n");
 } /* test_stale_record_classification */
+
+/*
+ * When the grace window closes on its deadline, a record that was neither
+ * reclaimed nor re-established belongs to a client that did not come back.
+ * RFC 8881 section 8.4.3 lets the server drop it, and dropping it is what
+ * stops the next restart from waiting on it again.  A client that came back
+ * (EXCHANGE_ID re-persisted its record) but has not yet sent RECLAIM_COMPLETE
+ * keeps its record: it is live, its record is fresh.
+ */
+static void
+test_grace_deadline_purges_unreclaimed_records(void)
+{
+    struct nfs_recovery      rec;
+    static struct nfs_client a,b,c;
+
+    recovery_client(&a,"co_owner_a");
+    recovery_client(&b,"co_owner_b");
+    recovery_client(&c,"co_owner_c");
+
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
+    recovery_add_record(&rec,"co_owner_a");
+    recovery_add_record(&rec,"co_owner_b");
+    recovery_add_record(&rec,"co_owner_c");
+    atomic_store(&rec.load_state,NFS_REC_LOAD_READY);
+    nfs_recovery_begin_grace(&rec,180);
+    CHECK(rec.in_grace);
+    CHECK(rec.pending_reclaim == 3);
+
+    nfs_recovery_reclaim_complete(&rec,&a);    /* a: reclaimed */
+    nfs_recovery_note_returned(&rec,&b);       /* b: back, RECLAIM_COMPLETE pending */
+    /* c never returns. */
+    CHECK(rec.in_grace);
+    CHECK(rec.pending_reclaim == 2);
+
+    /* Deadline. */
+    evpl_mutex_lock(&rec.lock);
+    rec.grace_end_ns = 0;
+    evpl_mutex_unlock(&rec.lock);
+    nfs_recovery_sweep_once(&rec,NULL);
+
+    CHECK(!rec.in_grace);
+    CHECK(rec.unreclaimed_purged == 1);        /* only c */
+    CHECK(HASH_COUNT(rec.to_reclaim) == 0);
+    CHECK(rec.pending_reclaim == 0);
+    CHECK(nfs_recovery_open_check(&rec,&c,true) == NFS4ERR_NO_GRACE);
+    CHECK(nfs_recovery_open_check(&rec,&c,false) == NFS4_OK);
+    CHECK(nfs_recovery_io_check(&rec) == NFS4_OK);
+
+    /* A second tick on a closed window is a no-op. */
+    nfs_recovery_sweep_once(&rec,NULL);
+    CHECK(rec.unreclaimed_purged == 1);
+
+    nfs_recovery_free(&rec);
+    printf("ok: grace_deadline_purges_unreclaimed_records\n");
+} /* test_grace_deadline_purges_unreclaimed_records */
 
 /* ------------------------------------------------------------------ *
 *  NFSv3 DRC                                                          *
@@ -1547,6 +1603,7 @@ main(void)
     test_cold_start_without_store_is_ready();
     test_persist_and_heartbeat_cadence();
     test_stale_record_classification();
+    test_grace_deadline_purges_unreclaimed_records();
 
     test_nfs3_key_encoding();
     test_nfs3_checksum_and_cacheable();
