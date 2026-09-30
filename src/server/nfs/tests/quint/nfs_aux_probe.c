@@ -438,6 +438,23 @@ probe_nlm(struct mbt_env *env)
     check_u64("TEST holder offset", r->holder_offset, 0);
     check_u64("TEST holder length", r->holder_length, 16);
 
+    /* A to-EOF holder is reported with l_len 0: the one spelling Linux lockd
+     * decodes as to-EOF from a nonzero offset (it computes end = off + len - 1,
+     * so 0xffffffffffffffff wraps).  Take the lock with the OTHER wire spelling
+     * to show the report normalizes rather than echoing the requester. */
+    r = mbt_nlm_lock(env, 2, PROBE_CALLER_A, &file_fh[0], oh_a, sizeof(oh_a),
+                     1, 1, 0, 0, 0, 4096, MBT_NLM_LEN_EOF, ck, sizeof(ck));
+    check_eq("LOCK excl [4096,EOF) as A", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[0], oh_b, sizeof(oh_b),
+                     2, 1, 6144, 16, ck, sizeof(ck));
+    check_eq("TEST excl [6144,6160) as B", r->nlm_stat, NLM4_DENIED);
+    check_eq("TEST to-EOF holder exclusive", r->holder_exclusive, 1);
+    check_u64("TEST to-EOF holder offset", r->holder_offset, 4096);
+    check_u64("TEST to-EOF holder length is wire 0", r->holder_length, 0);
+    r = mbt_nlm_unlock(env, 0, PROBE_CALLER_A, &file_fh[0], oh_a, sizeof(oh_a),
+                       1, 4096, 0, ck, sizeof(ck));
+    check_eq("UNLOCK [4096,EOF) as A", r->nlm_stat, NLM4_GRANTED);
+
     /* UNLOCK is always GRANTED, present or not. */
     r = mbt_nlm_unlock(env, 0, PROBE_CALLER_A, &file_fh[0], oh_a, sizeof(oh_a),
                        1, 0, 16, ck, sizeof(ck));

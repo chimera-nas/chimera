@@ -225,13 +225,14 @@ wire_len(int64_t model_len)
     return (uint64_t) model_len;
 } /* wire_len */
 
-/* The server stores to-EOF as POSIX length 0 and reports it back as the NLM
- * sentinel, so a holder's predicted l_len collapses both spellings. */
+/* The server stores to-EOF as POSIX length 0 and reports it back on the wire
+ * as l_len 0 whichever spelling the holder used, so a holder's predicted
+ * l_len collapses both spellings to 0. */
 static uint64_t
 holder_len(int64_t model_len)
 {
     if (model_len <= 0) {
-        return MBT_NLM_LEN_EOF;
+        return 0;
     }
     return (uint64_t) model_len;
 } /* holder_len */

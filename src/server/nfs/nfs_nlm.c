@@ -12,6 +12,7 @@
 #include "nfs_nlm.h"
 #include "common/format.h"
 #include "nfs_nlm_state.h"
+#include "nfs_nlm_range.h"
 #include "nfs_nlm_granted.h"
 #include "nfs_nsm.h"
 #include "vfs/vfs_procs.h"
@@ -60,14 +61,6 @@ nlm_conn_peer_addr(
         }
     }
 } /* nlm_conn_peer_addr */
-
-/* Convert NLM length (UINT64_MAX == to-EOF) to POSIX length (0 == to-EOF) */
-#define NLM_TO_POSIX_LEN(l)     ((l) == UINT64_MAX ? 0 : (l))
-
-/* NLM keeps its internal byte-range length in the POSIX convention (0 == to
- * EOF), but the VFS range layer uses UINT64_MAX for to-EOF (length 0 is a real
- * zero-byte range).  Translate when handing a length to a VFS claim/probe. */
-#define NLM_POSIX_LEN_TO_VFS(l) ((l) == 0 ? UINT64_MAX : (l))
 
 /* Map NLM caller_name (hostname) to a claim owner.client_key. */
 static inline uint64_t
@@ -256,7 +249,7 @@ chimera_nfs_nlm4_test_open_cb(
 
     chimera_vfs_claim_init_range(&probe, ctx->exclusive, /* smb */ false,
                                  ctx->offset,
-                                 NLM_POSIX_LEN_TO_VFS(ctx->length),
+                                 nlm_posix_len_to_vfs(ctx->length),
                                  &owner);
 
     memset(&conflict, 0, sizeof(conflict));
@@ -278,9 +271,9 @@ chimera_nfs_nlm4_test_open_cb(
         res.test_stat.holder.oh.len   = 0;
         res.test_stat.holder.oh.data  = NULL;
         res.test_stat.holder.l_offset = conflict.offset;
-        /* conflict.length already uses UINT64_MAX for a to-EOF/whole-file
-         * holder, which is exactly the NLM to-EOF sentinel. */
-        res.test_stat.holder.l_len = conflict.length;
+        /* conflict.length uses the VFS to-EOF sentinel (UINT64_MAX); on the
+         * wire a to-EOF holder is l_len 0 (see nfs_nlm_range.h). */
+        res.test_stat.holder.l_len = nlm_vfs_len_to_wire(conflict.length);
     }
 
     chimera_vfs_state_put(vfs_state, file_state);
@@ -375,9 +368,12 @@ chimera_nfs_nlm4_build_grant_locked(
     memcpy(req.oh, entry->oh, req.oh_len);
     req.svid   = entry->svid;
     req.offset = entry->offset;
-    /* entry->length uses the POSIX convention (0 == to EOF); the wire/NLM
-     * convention is UINT64_MAX == to EOF. */
-    req.length    = NLM_POSIX_LEN_TO_VFS(entry->length);
+    /* entry->length is the stored POSIX length (0 == to EOF); the callback
+     * must carry the wire form, which is also 0.  Linux lockd decodes
+     * UINT64_MAX from a nonzero offset as a wrapped, empty range and answers
+     * the grant with NLM_DENIED, leaving the waiter blocked for good (see
+     * nfs_nlm_range.h). */
+    req.length    = nlm_posix_len_to_wire(entry->length);
     req.exclusive = entry->exclusive ? 1 : 0;
 
     *reqp = req;
@@ -784,7 +780,7 @@ chimera_nfs_nlm4_lock_open_cb(
     chimera_vfs_claim_init_range(&entry->claim, entry->exclusive,
                                  /* smb */ false,
                                  entry->offset,
-                                 NLM_POSIX_LEN_TO_VFS(entry->length),
+                                 nlm_posix_len_to_vfs(entry->length),
                                  &owner);
 
     /* wait=ctx->block: a blocking LOCK rides out cross-protocol breaks;
@@ -901,7 +897,7 @@ chimera_nfs_nlm4_do_test(
     ctx->conn      = conn;
     ctx->proc      = proc;
     ctx->offset    = args->alock.l_offset;
-    ctx->length    = NLM_TO_POSIX_LEN(args->alock.l_len);
+    ctx->length    = nlm_wire_len_to_posix(args->alock.l_len);
     ctx->exclusive = args->exclusive;
     ctx->svid      = args->alock.svid;
 
@@ -1019,7 +1015,7 @@ chimera_nfs_nlm4_do_lock(
     memcpy(entry->oh, args->alock.oh.data, entry->oh_len);
     entry->svid      = args->alock.svid;
     entry->offset    = args->alock.l_offset;
-    entry->length    = NLM_TO_POSIX_LEN(args->alock.l_len);
+    entry->length    = nlm_wire_len_to_posix(args->alock.l_len);
     entry->exclusive = args->exclusive;
     entry->handle    = NULL;
     entry->pending   = true;
@@ -1198,7 +1194,7 @@ chimera_nfs_nlm4_do_cancel(
     memcpy(safe_hostname, args->alock.caller_name.str, hn_len);
     safe_hostname[hn_len] = '\0';
 
-    want_length = NLM_TO_POSIX_LEN(args->alock.l_len);
+    want_length = nlm_wire_len_to_posix(args->alock.l_len);
 
     evpl_mutex_lock(&shared->nlm_state.mutex);
     HASH_FIND_STR(shared->nlm_state.clients, safe_hostname, client);
@@ -1349,7 +1345,7 @@ chimera_nfs_nlm4_do_unlock(
                 args->alock.fh.data,
                 args->alock.fh.len,
                 args->alock.l_offset,
-                NLM_TO_POSIX_LEN(args->alock.l_len))) != NULL) {
+                nlm_wire_len_to_posix(args->alock.l_len))) != NULL) {
         DL_DELETE(client->locks, entry);
         entry->next = sweep;
         sweep       = entry;
