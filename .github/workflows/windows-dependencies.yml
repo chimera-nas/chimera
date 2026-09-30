@@ -5,10 +5,19 @@
 name: Publish Windows dependencies
 
 # Build the native MSVC dependencies separately from Chimera's test matrix.
-# Dispatch after merging dependency changes, or after a runner toolchain update.
 # Consumers use this same manifest/baseline and restore with --only-binarycaching.
+# Hosted runner images are mutable ABI inputs, so refresh the package set daily
+# as well as after changes to the manifest or either side of the cache contract.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '15 22 * * *'
+  push:
+    branches: [main]
+    paths:
+      - vcpkg.json
+      - .github/workflows/windows.yml
+      - .github/workflows/windows-dependencies.yml
 
 permissions:
   contents: read
@@ -21,7 +30,10 @@ concurrency:
 jobs:
   publish:
     name: Publish ${{ matrix.triplet }} (Debug and Release)
-    if: github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # Automatic publication is confined to the default branch by the triggers
+    # above. A maintainer may dispatch a reviewed branch to stage packages for
+    # an ABI-changing dependency PR before its read-only Windows checks run.
+    if: github.event_name == 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     permissions:
@@ -74,6 +86,11 @@ jobs:
           & ./_vcpkg/bootstrap-vcpkg.bat -disableMetrics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          $msvcTools = (Get-Content "$vs/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt" -Raw).Trim()
+          $hostArch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          $targetArch = $env:TRIPLET.Split('-')[0]
+          $compiler = Join-Path $vs "VC/Tools/MSVC/$msvcTools/bin/Host$hostArch/$targetArch/cl.exe"
+          if (-not (Test-Path $compiler)) { throw "Expected compiler at $compiler" }
           $metadata = [ordered]@{
             revision = $env:GITHUB_SHA
             manifest_sha256 = (Get-FileHash vcpkg.json -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -81,7 +98,11 @@ jobs:
             triplet = $env:TRIPLET
             runner_image = $env:ImageVersion
             visual_studio = $vs
-            msvc_tools = (Get-Content "$vs/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt" -Raw).Trim()
+            msvc_tools = $msvcTools
+            compiler = $compiler
+            compiler_sha256 = (Get-FileHash $compiler -Algorithm SHA256).Hash.ToLowerInvariant()
+            cmake = (cmake --version | Select-Object -First 1)
+            powershell = $PSVersionTable.PSVersion.ToString()
           }
           New-Item -ItemType Directory -Force dependency-report | Out-Null
           $metadata | ConvertTo-Json | Set-Content dependency-report/build.json
@@ -104,7 +125,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $nuget setapikey $env:GH_PACKAGES_TOKEN -Source $feed -ConfigFile $config -NonInteractive
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "VCPKG_BINARY_SOURCES=clear;nugetconfig,$config,readwrite" >> $env:GITHUB_ENV
+          "VCPKG_BINARY_SOURCES=clear;nugetconfig,$config,readwrite;nugettimeout,120" >> $env:GITHUB_ENV
 
       # Check the feed with a tiny CMake-script package before compiling the
       # full manifest. A failed upload must not cost another hour to detect.
@@ -114,10 +135,10 @@ jobs:
           $build = "$env:RUNNER_TEMP/chimera-dependencies-preflight"
           $restore = "$env:RUNNER_TEMP/chimera-dependencies-preflight-verify"
           if ((Test-Path $build) -or (Test-Path $restore)) { throw 'Preflight requires fresh install directories' }
-          & ./_vcpkg/vcpkg.exe install vcpkg-cmake --classic --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$build" --clean-after-build
+          & ./_vcpkg/vcpkg.exe install vcpkg-cmake --classic --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$build" --clean-after-build --x-abi-tools-use-exact-versions
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $env:VCPKG_BINARY_SOURCES = "clear;nugetconfig,$config,read"
-          & ./_vcpkg/vcpkg.exe install vcpkg-cmake --classic --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$restore" --only-binarycaching
+          $env:VCPKG_BINARY_SOURCES = "clear;nugetconfig,$config,read;nugettimeout,120"
+          & ./_vcpkg/vcpkg.exe install vcpkg-cmake --classic --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$restore" --only-binarycaching --x-abi-tools-use-exact-versions
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Standard Windows triplets build both configurations. Debug and Release
@@ -126,7 +147,7 @@ jobs:
       # completed dependencies even if a later package failed to build.
       - name: Build and publish dependency packages
         run: |
-          & ./_vcpkg/vcpkg.exe install --triplet $env:TRIPLET --host-triplet $env:TRIPLET --clean-after-build
+          & ./_vcpkg/vcpkg.exe install --triplet $env:TRIPLET --host-triplet $env:TRIPLET --clean-after-build --x-abi-tools-use-exact-versions
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # A vcpkg build can succeed even when binary-cache uploads fail. Verify
@@ -135,10 +156,10 @@ jobs:
       - name: Verify a fresh binary-only restore
         run: |
           $config = "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config"
-          $env:VCPKG_BINARY_SOURCES = "clear;nugetconfig,$config,read"
+          $env:VCPKG_BINARY_SOURCES = "clear;nugetconfig,$config,read;nugettimeout,120"
           $restore = "$env:RUNNER_TEMP/chimera-dependencies-verify"
           if (Test-Path $restore) { throw 'Verification requires a fresh install directory' }
-          & ./_vcpkg/vcpkg.exe install --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$restore" --only-binarycaching
+          & ./_vcpkg/vcpkg.exe install --triplet $env:TRIPLET --host-triplet $env:TRIPLET "--x-install-root=$restore" --only-binarycaching --x-abi-tools-use-exact-versions
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item "$restore/vcpkg/status" dependency-report/package-status.txt
           @(
