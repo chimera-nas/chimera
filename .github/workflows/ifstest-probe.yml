@@ -29,8 +29,8 @@ jobs:
         run: |
           # Windows HLK for Windows 11 26H1, from the HLK download page.
           $link = 'https://go.microsoft.com/fwlink/?linkid=2374411'
-          $head = Invoke-WebRequest $link -Method Head -MaximumRedirection 0 -SkipHttpErrorCheck
-          $setup = [string]$head.Headers.Location[0]
+          $head = Invoke-WebRequest $link -Method Head
+          $setup = $head.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
           if ($setup -notmatch '^https://download\.microsoft\.com/.+/HLKSetup\.exe$') { throw "unexpected kit location: $setup" }
           $base = $setup -replace '/HLKSetup\.exe$', ''
           "kit base: $base"
