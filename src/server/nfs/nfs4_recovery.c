@@ -208,6 +208,7 @@ nfs_recovery_load(
     rec->lease_time_s       = lease_time_s;
     rec->stale_purged       = 0;
     rec->unreclaimed_purged = 0;
+    rec->store_errors       = 0;
     atomic_store(&rec->next_heartbeat_ns, 0);
     rec->nfs4_drc = nfs4_drc;
     atomic_store(&rec->load_state, NFS_REC_LOAD_IDLE);
@@ -515,6 +516,18 @@ struct nfs_recovery_load_ctx {
     uint32_t                         stale_cap;
 };
 
+void
+nfs_recovery_note_store_error(
+    struct nfs_recovery *rec,
+    const char          *what,
+    int                  error)
+{
+    rec->store_errors++;
+    chimera_nfs_error(
+        "NFSv4 recovery: cold-start %s failed (error %d); clients owed a "
+        "reclaim may be refused", what, error);
+} /* nfs_recovery_note_store_error */
+
 bool
 nfs_recovery_record_stale(
     const struct nfs_recovery        *rec,
@@ -571,9 +584,10 @@ nfs_recovery_finalize_load(struct nfs_recovery *rec)
      * "cold-start load complete: <n>" head is parsed by the KVM reboot test. */
     chimera_nfs_info(
         "NFSv4 recovery: cold-start load complete: %u client record(s) "
-        "reloaded, %u stale record(s) purged, grace %s (boot_id %lu)",
+        "reloaded, %u stale record(s) purged, grace %s (boot_id %lu)%s",
         loaded, rec->stale_purged, in_grace ? "active" : "skipped",
-        (unsigned long) rec->current_boot_id);
+        (unsigned long) rec->current_boot_id,
+        rec->store_errors ? " -- WITH STORE ERRORS, see above" : "");
 
     /* The epoch was just written; the first heartbeat is due one interval on. */
     atomic_store(&rec->next_heartbeat_ns,
@@ -648,7 +662,11 @@ nfs_recovery_scan_complete(
     struct nfs_recovery_load_ctx *ctx = private_data;
     struct nfs_recovery          *rec = ctx->rec;
 
-    (void) error_code;
+    if (error_code != CHIMERA_VFS_OK) {
+        /* An empty band completes with OK and no callbacks; anything else
+         * means records may be missing from to_reclaim. */
+        nfs_recovery_note_store_error(rec, "record scan", error_code);
+    }
 
     /* The scan is over, so the band can be mutated: drop the records of the
      * clients whose leases had lapsed before the crash. */
@@ -694,6 +712,12 @@ nfs_recovery_epoch_cb(
         /* Bump strictly past the prior boot epoch. */
         rec->current_boot_id = (prev >= now) ? prev + 1 : now;
     } else {
+        if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_ENOENT) {
+            /* A store that has never been written answers ENOENT; anything
+             * else is a read that failed, and the boot epoch will not be
+             * strictly ordered after the previous one. */
+            nfs_recovery_note_store_error(rec, "epoch read", error_code);
+        }
         rec->current_boot_id = now;
         ctx->last_alive_ns   = 0; /* no heartbeat on record: keep everything */
     }
