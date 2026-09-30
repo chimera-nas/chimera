@@ -525,11 +525,6 @@ chimera_nfs4_compound(
     struct nfs_request               *req;
     int                               rc;
 
-    /* First NFSv4 compound on a worker thread (which owns a live vfs_thread)
-     * drives the deferred cold-start recovery load.  Run-once and cheap after
-     * the first call (atomic fast-path inside). */
-    nfs_recovery_kickoff(thread);
-
     req = nfs_request_alloc(thread, conn, encoding);
 
     chimera_nfs_map_cred_req(req, cred);

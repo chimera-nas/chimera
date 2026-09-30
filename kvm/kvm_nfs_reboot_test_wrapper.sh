@@ -250,8 +250,9 @@ if [ "${RC2:-1}" != "0" ]; then
     FAIL=1
 fi
 
-# The cold-start load runs on the first NFSv4 compound (i.e. when boot 2
-# mounts).  Its completion log reports how many client records were reloaded.
+# The cold-start load runs at startup, before the NFS listeners are bound, so
+# its completion line is already in the log once boot 2 is ready.  It reports
+# how many client records were reloaded.
 if grep -q "cold-start load complete:" "$CHIMERA_LOG"; then
     RELOADED=$(grep -oP 'cold-start load complete: \K[0-9]+' "$CHIMERA_LOG" | tail -1)
     echo "=== chimera B reloaded ${RELOADED} recovery record(s) ==="

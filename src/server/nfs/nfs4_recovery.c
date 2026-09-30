@@ -4,6 +4,7 @@
 
 #include "common/thread.h"
 #include <stdatomic.h>
+#include "evpl/evpl.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -211,19 +212,6 @@ nfs_recovery_begin_grace(
     evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_begin_grace */
 
-/* Unconditionally open the grace window for the configured duration.  Used at
- * cold-start kickoff while the to_reclaim set is still loading asynchronously,
- * so a reclaim that arrives before its record loads is not refused. */
-static void
-nfs_recovery_begin_grace_forced(struct nfs_recovery *rec)
-{
-    evpl_mutex_lock(&rec->lock);
-    rec->in_grace     = true;
-    rec->grace_end_ns = nfs_lease_now_ns() +
-        (uint64_t) rec->grace_time_s * 1000000000ULL;
-    evpl_mutex_unlock(&rec->lock);
-} /* nfs_recovery_begin_grace_forced */
-
 void
 nfs_recovery_end_grace(struct nfs_recovery *rec)
 {
@@ -326,17 +314,39 @@ nfs_recovery_forget(
 } /* nfs_recovery_forget */
 
 /* ------------------------------------------------------------------ *
-*  cold-start load (deferred to the first NFSv4 compound)            *
+*  cold-start load (synchronous, before the NFS listeners start)      *
 * ------------------------------------------------------------------ */
 
 struct nfs_recovery_load_ctx {
-    struct chimera_server_nfs_thread *thread;
-    struct nfs_recovery              *rec;
+    struct nfs_recovery       *rec;
+    struct chimera_vfs_thread *vfs_thread;
     /* The async KV layer does NOT copy keys, so every key handed to it must
      * outlive the call -- these live in this heap ctx, not on the stack. */
-    uint8_t                           ekey[CHIMERA_KV_PREFIX_LEN];
-    uint8_t                           start[CHIMERA_KV_PREFIX_LEN];
+    uint8_t                    ekey[CHIMERA_KV_PREFIX_LEN];
+    uint8_t                    start[CHIMERA_KV_PREFIX_LEN];
+    int                        outstanding; /* KV writes not yet completed */
+    bool                       scan_done;
 };
+
+/* One KV write issued by the loader.  Unlike nfs_recovery_kv_done it reports
+ * back to the load ctx: the private vfs_thread that drives the load must not
+ * be torn down while a write it issued is still in flight. */
+struct nfs_recovery_load_op {
+    struct nfs_recovery_load_ctx *load;
+    struct nfs_recovery_kv_ctx    kv;
+};
+
+static void
+nfs_recovery_load_op_done(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct nfs_recovery_load_op *op = private_data;
+
+    (void) error_code;
+    op->load->outstanding--;
+    free(op);
+} /* nfs_recovery_load_op_done */
 
 static void
 nfs_recovery_finalize_load(struct nfs_recovery *rec)
@@ -344,18 +354,18 @@ nfs_recovery_finalize_load(struct nfs_recovery *rec)
     uint32_t loaded;
     bool     in_grace;
 
+    /* Open the window only when somebody is owed a reclaim (the same rule
+     * nfs_recovery_begin_grace applies at shared init, when the set is
+     * necessarily empty). */
+    nfs_recovery_begin_grace(rec, rec->grace_time_s);
+
     evpl_mutex_lock(&rec->lock);
-    loaded = HASH_COUNT(rec->to_reclaim);
-    if (rec->to_reclaim == NULL) {
-        /* Nothing was persisted -- drop the forced grace window so normal
-         * traffic is accepted immediately (matches no-clients behavior). */
-        rec->in_grace     = false;
-        rec->grace_end_ns = 0;
-    }
+    loaded   = HASH_COUNT(rec->to_reclaim);
     in_grace = rec->in_grace;
     evpl_mutex_unlock(&rec->lock);
 
-    /* Assertable marker for cross-reboot tests + operational visibility. */
+    /* Assertable marker for cross-reboot tests + operational visibility.  The
+     * "cold-start load complete: <n>" head is parsed by the KVM reboot test. */
     chimera_nfs_info(
         "NFSv4 recovery: cold-start load complete: %u client record(s) "
         "reloaded, grace %s (boot_id %lu)",
@@ -411,19 +421,16 @@ nfs_recovery_scan_complete(
     void                  *private_data)
 {
     struct nfs_recovery_load_ctx *ctx = private_data;
-    struct nfs_recovery          *rec = ctx->rec;
 
     (void) error_code;
 
-    free(ctx);
-
     /* The confirmed-client identity set is loaded, so EXCHANGE_ID can resolve a
-     * returning owner to its original clientid; cold start is complete.  4.1
-     * sessions + reply slots are NOT bulk-reloaded here -- they are keyed by
-     * sessionid (not node) and reconstructed lazily, the first time a client
-     * presents an unknown sessionid to this node (nfs4_drc_session_hydrate),
-     * which also covers a client that failed over from a peer. */
-    nfs_recovery_finalize_load(rec);
+     * returning owner to its original clientid.  4.1 sessions + reply slots are
+     * NOT bulk-reloaded here -- they are keyed by sessionid (not node) and
+     * reconstructed lazily, the first time a client presents an unknown
+     * sessionid to this node (nfs4_drc_session_hydrate), which also covers a
+     * client that failed over from a peer. */
+    ctx->scan_done = true;
 } /* nfs_recovery_scan_complete */
 
 static void
@@ -437,8 +444,7 @@ nfs_recovery_epoch_cb(
     struct nfs_recovery          *rec  = ctx->rec;
     uint64_t                      prev = 0;
     uint64_t                      now;
-    struct nfs_recovery_kv_ctx   *ectx;
-    uint32_t                      ekey_len;
+    struct nfs_recovery_load_op  *op;
 
     now = nfs_recovery_fresh_boot_id();
     if (error_code == CHIMERA_VFS_OK && value &&
@@ -449,15 +455,16 @@ nfs_recovery_epoch_cb(
         rec->current_boot_id = now;
     }
 
-    /* Write the new epoch so the next restart bumps again (fire-and-forget). */
-    ectx            = malloc(sizeof(*ectx));
-    ekey_len        = nfs_kv_epoch_key(ectx->key, rec->node_id);
-    ectx->key_len   = ekey_len;
-    ectx->value_len = nfs_recovery_epoch_serialize(ectx->value,
-                                                   rec->current_boot_id);
-    chimera_vfs_put_key(ctx->thread->vfs_thread, ectx->key, ectx->key_len,
-                        ectx->value, ectx->value_len,
-                        nfs_recovery_kv_done, ectx);
+    /* Write the new epoch so the next restart bumps again. */
+    op               = malloc(sizeof(*op));
+    op->load         = ctx;
+    op->kv.key_len   = nfs_kv_epoch_key(op->kv.key, rec->node_id);
+    op->kv.value_len = nfs_recovery_epoch_serialize(op->kv.value,
+                                                    rec->current_boot_id);
+    ctx->outstanding++;
+    chimera_vfs_put_key(ctx->vfs_thread, op->kv.key, op->kv.key_len,
+                        op->kv.value, op->kv.value_len,
+                        nfs_recovery_load_op_done, op);
 
     /* Scan from this node's recovery band start with no end key (flags 0): the
      * KV search returns key-ordered results on every backend, so we stop in
@@ -465,7 +472,7 @@ nfs_recovery_epoch_cb(
      * node_id in the prefix is what keeps a node from reloading a live peer's
      * clients out of a shared store. */
     nfs_kv_node_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_RECOVERY, rec->node_id);
-    chimera_vfs_search_keys(ctx->thread->vfs_thread,
+    chimera_vfs_search_keys(ctx->vfs_thread,
                             ctx->start, CHIMERA_KV_PREFIX_LEN,
                             NULL, 0, 0,
                             nfs_recovery_scan_cb,
@@ -474,41 +481,58 @@ nfs_recovery_epoch_cb(
 } /* nfs_recovery_epoch_cb */
 
 void
-nfs_recovery_kickoff(struct chimera_server_nfs_thread *thread)
+nfs_recovery_cold_start(struct nfs_recovery *rec)
 {
-    struct nfs_recovery          *rec = &thread->shared->nfs4_recovery;
+    struct evpl                  *evpl;
     struct nfs_recovery_load_ctx *ctx;
+    uint32_t                      ekey_len;
     int                           expected = NFS_REC_LOAD_IDLE;
 
-    if (rec->persistence_disabled) {
-        return;
-    }
-    if (atomic_load_explicit(&rec->load_state, memory_order_acquire) !=
-        NFS_REC_LOAD_IDLE) {
-        return;
-    }
     if (!atomic_compare_exchange_strong(&rec->load_state, &expected,
                                         NFS_REC_LOAD_RUNNING)) {
+        return; /* already loaded */
+    }
+
+    if (rec->persistence_disabled) {
+        /* Nothing survives a restart on this backend; nfs_recovery_load
+         * already said so. */
+        atomic_store_explicit(&rec->load_state, NFS_REC_LOAD_READY,
+                              memory_order_release);
+        return;
+    }
+    if (rec->vfs == NULL) {
+        /* Unit-test harness: persistence on, no store to read. */
+        nfs_recovery_finalize_load(rec);
         return;
     }
 
-    /* We own the load.  Hold the grace window open until the scan completes. */
-    nfs_recovery_begin_grace_forced(rec);
+    chimera_nfs_info(
+        "NFSv4 recovery: reloading persisted client records from KV backend "
+        "'%s' before accepting connections", rec->vfs->kv_module->name);
 
-    ctx         = malloc(sizeof(*ctx));
-    ctx->thread = thread;
-    ctx->rec    = rec;
+    evpl            = evpl_create(NULL);
+    ctx             = calloc(1, sizeof(*ctx));
+    ctx->rec        = rec;
+    ctx->vfs_thread = chimera_vfs_thread_init(evpl, rec->vfs);
 
-    /* First read the boot epoch (to bump current_boot_id), then the records.
-     * The key lives in the heap ctx -- the async KV layer keeps the pointer and
-     * the delegation thread reads it after this function returns. */
-    {
-        uint32_t ekey_len = nfs_kv_epoch_key(ctx->ekey, rec->node_id);
+    ekey_len = nfs_kv_epoch_key(ctx->ekey, rec->node_id);
+    chimera_vfs_get_key(ctx->vfs_thread, ctx->ekey, ekey_len,
+                        nfs_recovery_epoch_cb, ctx);
 
-        chimera_vfs_get_key(thread->vfs_thread, ctx->ekey, ekey_len,
-                            nfs_recovery_epoch_cb, ctx);
+    /* Same drive loop as chimera_server_create_share(): the KV operations run
+     * on the delegation pool and complete on this private loop.  A backend
+     * that never answers holds the server here, exactly as an unanswered
+     * mount would -- serving NFSv4 without knowing who may reclaim is worse. */
+    while (!ctx->scan_done || ctx->outstanding > 0) {
+        evpl_continue(evpl);
     }
-} /* nfs_recovery_kickoff */
+
+    nfs_recovery_finalize_load(rec);
+
+    chimera_vfs_thread_destroy(ctx->vfs_thread);
+    evpl_destroy(evpl);
+    free(ctx);
+} /* nfs_recovery_cold_start */
 
 /* ------------------------------------------------------------------ *
 *  OPEN gate + reclaim bookkeeping                                   *

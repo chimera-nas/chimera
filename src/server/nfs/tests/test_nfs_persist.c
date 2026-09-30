@@ -729,6 +729,40 @@ test_grace_survives_reclaim_complete_during_load(void)
     printf("ok: grace_survives_reclaim_complete_during_load\n");
 } /* test_grace_survives_reclaim_complete_during_load */
 
+/*
+ * The cold-start load runs synchronously from nfs_server_start, before any
+ * listener exists, so no request can observe RUNNING.  Without a VFS there is
+ * nothing to read: the load must still settle to READY with the window
+ * closed, and a second call must be a no-op.
+ */
+static void
+test_cold_start_without_store_is_ready(void)
+{
+    struct nfs_recovery      rec;
+    static struct nfs_client c;
+
+    recovery_client(&c,"co_owner_cold");
+
+    /* vfs == NULL: persistence stays enabled (only "memkv" disables it). */
+    CHECK(nfs_recovery_load(&rec,NULL,1,180,true) == 0);
+    CHECK(!rec.persistence_disabled);
+    CHECK(nfs_recovery_loading(&rec));          /* IDLE still counts as loading */
+
+    nfs_recovery_cold_start(&rec);
+    CHECK(!nfs_recovery_loading(&rec));
+    CHECK(!rec.in_grace);
+    CHECK(nfs_recovery_open_check(&rec,&c,false) == NFS4_OK);
+    CHECK(nfs_recovery_open_check(&rec,&c,true) == NFS4ERR_NO_GRACE);
+    CHECK(nfs_recovery_io_check(&rec) == NFS4_OK);
+
+    nfs_recovery_cold_start(&rec);              /* run-once */
+    CHECK(!nfs_recovery_loading(&rec));
+    CHECK(!rec.in_grace);
+
+    nfs_recovery_free(&rec);
+    printf("ok: cold_start_without_store_is_ready\n");
+} /* test_cold_start_without_store_is_ready */
+
 /* ------------------------------------------------------------------ *
 *  NFSv3 DRC                                                          *
 * ------------------------------------------------------------------ */
@@ -1368,6 +1402,7 @@ main(void)
     test_hydrated_client_leaves_owner_table();
     test_grace_survives_sweep_during_load();
     test_grace_survives_reclaim_complete_during_load();
+    test_cold_start_without_store_is_ready();
 
     test_nfs3_key_encoding();
     test_nfs3_checksum_and_cacheable();

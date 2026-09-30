@@ -28,8 +28,9 @@
  *
  * When the configured KV module is non-persistent (memkv) the load finds
  * nothing, to_reclaim is empty, and grace short-circuits to in_grace = false --
- * matching the prior in-memory-only behavior.  The async KV scan is deferred to
- * the first NFSv4 compound (see nfs_recovery_kickoff).
+ * matching the prior in-memory-only behavior.  The KV scan runs synchronously
+ * from the NFS protocol start hook (nfs_recovery_cold_start), before any
+ * listener is bound, so no request ever races it.
  */
 
 struct nfs_recovery_record {
@@ -43,11 +44,12 @@ struct nfs_recovery_record {
 };
 
 /*
- * Cold-start load progresses IDLE -> RUNNING -> READY.  The async KV scan that
- * populates to_reclaim needs a worker thread + a live event loop, neither of
- * which exists at shared init, so the load is deferred to the first NFSv4
- * compound (which atomically claims the IDLE->RUNNING transition).  While not
- * READY the grace gate treats the server as in-grace (reclaim-eligible).
+ * Cold-start load progresses IDLE -> RUNNING -> READY.  nfs_recovery_cold_start
+ * drives the whole transition synchronously from nfs_server_start, before the
+ * RPC listeners exist, so RUNNING is never observable by a request.  The gates
+ * that consult it (EXCHANGE_ID / CREATE_SESSION DELAY, the in-grace treatment
+ * in nfs_recovery_open_check) remain as a defence against a future caller that
+ * starts serving before the load.
  */
 enum nfs_recovery_load_state {
     NFS_REC_LOAD_IDLE    = 0,
@@ -96,23 +98,23 @@ nfs_recovery_free(
     struct nfs_recovery *rec);
 
 /*
- * Run-once cold-start load, triggered from the first NFSv4 compound on a
- * worker thread (which owns a live vfs_thread).  Atomically claims the
- * IDLE->RUNNING transition; the loser returns immediately.  Forces the grace
- * window open, then issues async KV reads (epoch marker + recovery-record scan,
- * and -- when nfs4_drc is on -- the session + reply-cache reload) that populate
- * to_reclaim and flip load_state to READY on completion.
+ * Run-once cold-start load.  Called from nfs_server_start on the main thread
+ * BEFORE the RPC listeners are bound: reads the boot epoch, bumps and rewrites
+ * it, scans this node's recovery records into to_reclaim, opens the grace
+ * window iff any were loaded, and flips load_state to READY -- all on a
+ * private evpl loop, so it returns only when the store has answered.  A
+ * non-persistent backend (memkv) settles to READY at once.
  */
 void
-nfs_recovery_kickoff(
-    struct chimera_server_nfs_thread *thread);
+nfs_recovery_cold_start(
+    struct nfs_recovery *rec);
 
 /*
  * True while the persistent cold-start load (recovery records + DRC session
  * reconstruction) is still in flight.  EXCHANGE_ID / CREATE_SESSION return
- * NFS4ERR_DELAY in this window so a returning client cannot race ahead of the
- * reconstructed records and create a duplicate.  Always false when persistence
- * is disabled (memkv).
+ * NFS4ERR_DELAY in this window; since the load completes before the listeners
+ * start, that is a defensive gate rather than a path clients hit.  Always
+ * false when persistence is disabled (memkv).
  */
 bool
 nfs_recovery_loading(
