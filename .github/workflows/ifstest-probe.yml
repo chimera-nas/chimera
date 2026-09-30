@@ -123,11 +123,11 @@ jobs:
           run-id: 36784406163
           github-token: ${{ github.token }}
 
-      - name: IFSTest on a chimera memfs share
+      - name: IFSTest on chimera memfs, diskfs and cairn shares
         if: steps.bundle.outcome == 'success'
         shell: pwsh
-        timeout-minutes: 60
-        run: python scratch/ifstest_chimera.py bundle/chimera.exe memfs $env:IFSTEST_DIR ifstest-logs 3000
+        timeout-minutes: 90
+        run: python scratch/ifstest_chimera.py bundle/chimera.exe $env:IFSTEST_DIR ifstest-logs 1500 memfs diskfs cairn
 
       - name: Summarize
         if: always()
@@ -135,11 +135,17 @@ jobs:
         run: |
           foreach ($f in Get-ChildItem ifstest-logs -Filter 'ifstest-*.log' -ErrorAction SilentlyContinue) {
             "==== $($f.Name) ($($f.Length) bytes)"
-            $text = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
-            foreach ($k in 'PASS', 'FAIL', 'BLOCK', 'WARN', 'SEV1', 'SEV2', 'SEV3', 'ABORT') {
-              "{0,-6} {1}" -f $k, ([regex]::Matches($text, "\b$k\b")).Count
+            $lines = Get-Content $f.FullName -ErrorAction SilentlyContinue
+            $i = 0
+            foreach ($line in $lines) {
+              if ($line -match '\+TEST\+(SEV[123]|BLOCK|ABORT|WARN)\s*:\s*Test\s*:(\S+)') {
+                $group = ($lines[$i + 1] -replace '^Group\s*:', '').Trim()
+                $status = ($lines[$i + 2] -replace '^Status\s*:', '').Trim()
+                "{0,-5} {1}:{2}  {3}" -f $Matches[1], $group, $Matches[2], $status
+              }
+              $i++
             }
-            Get-Content $f.FullName -Tail 60
+            $lines | Select-String -Pattern 'NTLOG REPORT' -Context 0, 10 | ForEach-Object { $_.Line; $_.Context.PostContext }
           }
           exit 0
 
