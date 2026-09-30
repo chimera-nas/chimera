@@ -1992,6 +1992,25 @@ chimera_smb_create_release_parent(struct chimera_smb_request *request)
     }
 } /* chimera_smb_create_release_parent */
 
+/* True when the connection this CREATE arrived on has gone away while its VFS
+ * open was in flight -- the same test chimera_smb_compound_reply uses to drop a
+ * reply.  An in-flight CREATE holds no tree reference, so the disconnect has
+ * already torn the session's trees down and swept their opens; hashing a new
+ * open into that tree would leave its VFS handle referenced forever (and the
+ * tree may already be back in the free pool).  The client never saw a reply,
+ * so abandoning the open is indistinguishable from the CREATE not having run.
+ * Seen at shutdown with the Windows client: a background attribute query to a
+ * cairn share, whose opens complete on a delegation thread, landed after the
+ * connection closed and the leaked handle hung chimera_vfs_destroy. */
+static inline bool
+chimera_smb_create_conn_gone(struct chimera_smb_request *request)
+{
+    struct chimera_smb_compound *compound = request->compound;
+
+    return compound->conn->generation != compound->conn_generation ||
+           compound->conn->disconnecting;
+} /* chimera_smb_create_conn_gone */
+
 static inline void
 chimera_smb_create_finish_share_grant(
     struct chimera_smb_open_file  *open_file,
@@ -3047,6 +3066,13 @@ chimera_smb_create_open_at_callback(
         return;
     }
 
+    if (unlikely(chimera_smb_create_conn_gone(request))) {
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_CONNECTION_DISCONNECTED);
+        return;
+    }
+
     /* The opened leaf is itself a symbolic link.  Unless the caller asked to
      * open the reparse point directly (FILE_OPEN_REPARSE_POINT), SMB does not
      * follow it on the server: return STATUS_STOPPED_ON_SYMLINK so the client
@@ -3151,6 +3177,9 @@ chimera_smb_create_open_at_callback(
 
             if (request->create.desired_access &
                 (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA)) {
+                chimera_smb_debug("CREATE access denied: write open of a "
+                                  "FILE_ATTRIBUTE_READONLY file (dos attributes %x)",
+                                  (unsigned) attr->va_dos_attributes);
                 chimera_vfs_release(vfs_thread, oh);
                 chimera_vfs_release(vfs_thread, request->create.parent_handle);
                 chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
@@ -4174,8 +4203,21 @@ chimera_smb_create_check_access(
     granted = chimera_vfs_access_check(
         attr, &request->session_handle->session->cred, CHIMERA_ACE_MASK_ALL);
 
-    return (req & ~granted) == 0 ?
-           SMB2_STATUS_SUCCESS : SMB2_STATUS_ACCESS_DENIED;
+    if (req & ~granted) {
+        chimera_smb_debug(
+            "CREATE access denied: requested %08x granted %08x missing %08x "
+            "(attr mask %" PRIx64 " mode %o uid %" PRIu64 " gid %" PRIu64 " aces %d; caller uid %u)",
+            req, granted, req & ~granted, attr->va_set_mask,
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) ? (unsigned) attr->va_mode : 0,
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ? attr->va_uid : 0,
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_GID) ? attr->va_gid : 0,
+            ((attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attr->va_acl) ?
+            (int) attr->va_acl->num_aces : -1,
+            request->session_handle->session->cred.uid);
+        return SMB2_STATUS_ACCESS_DENIED;
+    }
+
+    return SMB2_STATUS_SUCCESS;
 } /* chimera_smb_create_check_access */
 
 /*
@@ -4311,6 +4353,12 @@ chimera_smb_create_open_callback(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
+        return;
+    }
+
+    if (unlikely(chimera_smb_create_conn_gone(request))) {
+        chimera_smb_create_release_handle(vfs_thread, oh);
+        chimera_smb_complete_request(request, SMB2_STATUS_CONNECTION_DISCONNECTED);
         return;
     }
 
@@ -6912,12 +6960,20 @@ chimera_smb_parse_create(
      * a prior CREATE; clear it explicitly so the backend's create-time ACL
      * precedence check (which keys off the va_acl pointer, since
      * <backend>_apply_attrs strips the va_set_mask ACL bit before
-     * <backend>_inherit_acl runs) doesn't fire on a stale pointer. */
-    request->create.set_attr.va_req_mask = 0;
-    request->create.set_attr.va_set_mask = 0;
-    request->create.set_attr.va_acl      = NULL;
-    request->create.ctx_present_mask     = 0;
-    request->create.ea_buf_len           = 0;
+     * <backend>_inherit_acl runs) doesn't fire on a stale pointer.
+     *
+     * va_dos_attributes is cleared for the same reason: the create path ORs
+     * FILE_ATTRIBUTE_ARCHIVE into it, and it is only assigned when the client's
+     * FileAttributes carry a settable bit.  A plain create (FILE_ATTRIBUTE_NORMAL)
+     * therefore stamped the new file with whatever the slot last held -- a new
+     * file came out READONLY (0x21) after an earlier request on the same slot
+     * carried 0x21, and every later write open of it was refused. */
+    request->create.set_attr.va_req_mask       = 0;
+    request->create.set_attr.va_set_mask       = 0;
+    request->create.set_attr.va_acl            = NULL;
+    request->create.set_attr.va_dos_attributes = 0;
+    request->create.ctx_present_mask           = 0;
+    request->create.ea_buf_len                 = 0;
 
     /* The request slot is pooled, so the AppInstanceId/AppInstanceVersion
      * fields survive from a prior CREATE on this same slot.  Each create

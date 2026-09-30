@@ -2301,6 +2301,23 @@ chimera_smb_server_handle_smb1(
         return;
     }
 
+    /* The multi-protocol NEGOTIATE spends the connection's one implicit credit,
+     * MessageId 0, and the client's first SMB2 request follows at MessageId 1
+     * (MS-SMB2 3.3.5.3.1).  Consume it here as the SMB2 path does for every
+     * request.  Left granted, it pins the sequence window's base at 0 for the
+     * life of the connection, so the window can never slide and the request at
+     * MessageId CHIMERA_SMB_MAX_CREDITS is rejected and the connection dropped:
+     * the Windows client, which opens every connection this way, lost its
+     * connection after about 8192 requests.  A second SMB1 NEGOTIATE on the
+     * same connection finds MessageId 0 already used and is refused the same
+     * way. */
+    if (chimera_smb_seq_window_consume(conn, 0, 1) != 0) {
+        chimera_smb_error("SMB1 NEGOTIATE with MessageId 0 already consumed; closing connection");
+        chimera_smb_request_free(thread, request);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
     compound = chimera_smb_compound_alloc(thread);
 
     compound->thread          = thread;
