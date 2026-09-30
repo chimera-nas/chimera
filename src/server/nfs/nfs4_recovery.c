@@ -145,6 +145,7 @@ nfs_recovery_deserialize(
     out->owner_len = owner_len;
     memcpy(out->owner_string, buf + p, owner_len);
     out->reclaimed = false;
+    out->returned  = false;
 
     return 0;
 } /* nfs_recovery_deserialize */
@@ -196,16 +197,17 @@ nfs_recovery_load(
     const char *kvname;
 
     evpl_mutex_init(&rec->lock, NULL);
-    rec->to_reclaim      = NULL;
-    rec->pending_reclaim = 0;
-    rec->current_boot_id = nfs_recovery_fresh_boot_id();
-    rec->grace_end_ns    = 0;
-    rec->in_grace        = false;
-    rec->vfs             = vfs;
-    rec->node_id         = node_id;
-    rec->grace_time_s    = grace_time_s;
-    rec->lease_time_s    = lease_time_s;
-    rec->stale_purged    = 0;
+    rec->to_reclaim         = NULL;
+    rec->pending_reclaim    = 0;
+    rec->current_boot_id    = nfs_recovery_fresh_boot_id();
+    rec->grace_end_ns       = 0;
+    rec->in_grace           = false;
+    rec->vfs                = vfs;
+    rec->node_id            = node_id;
+    rec->grace_time_s       = grace_time_s;
+    rec->lease_time_s       = lease_time_s;
+    rec->stale_purged       = 0;
+    rec->unreclaimed_purged = 0;
     atomic_store(&rec->next_heartbeat_ns, 0);
     rec->nfs4_drc = nfs4_drc;
     atomic_store(&rec->load_state, NFS_REC_LOAD_IDLE);
@@ -242,8 +244,72 @@ nfs_recovery_free(struct nfs_recovery *rec)
 } /* nfs_recovery_free */
 
 /* ------------------------------------------------------------------ *
-*  grace window                                                      *
+*  KV write context + grace window                                   *
 * ------------------------------------------------------------------ */
+
+struct nfs_recovery_kv_ctx {
+    uint8_t  key[CHIMERA_KV_NFS_KEY_MAX];
+    uint32_t key_len;
+    uint8_t  value[NFS_RECOVERY_VALUE_MAX];
+    uint32_t value_len;
+};
+
+static void
+nfs_recovery_kv_done(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    (void) error_code;
+    free(private_data);
+} /* nfs_recovery_kv_done */
+
+/* Caller holds rec->lock.  Closes the window and retires the to_reclaim set.
+ * A record that was neither reclaimed nor re-established belongs to a client
+ * that did not come back: RFC 8881 section 8.4.3 lets the server drop it, and
+ * dropping it is what keeps the next reboot from waiting on it again.  With
+ * vfs_thread NULL (tests, and the all-reclaimed exit where nothing is owed)
+ * only the in-memory set is retired. */
+static void
+nfs_recovery_close_grace_locked(
+    struct nfs_recovery       *rec,
+    struct chimera_vfs_thread *vfs_thread,
+    const char                *reason)
+{
+    uint32_t                    purged = 0;
+
+    rec->in_grace     = false;
+    rec->grace_end_ns = 0;
+
+#ifndef __clang_analyzer__
+    struct nfs_recovery_record *r, *tmp;
+
+    HASH_ITER(hh, rec->to_reclaim, r, tmp)
+    {
+        if (!r->reclaimed && !r->returned) {
+            if (vfs_thread) {
+                struct nfs_recovery_kv_ctx *ctx = malloc(sizeof(*ctx));
+
+                ctx->key_len = nfs_kv_recovery_key(
+                    ctx->key, rec->node_id,
+                    (const uint8_t *) r->owner_string, r->owner_len);
+                chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
+                                       nfs_recovery_kv_done, ctx);
+            }
+            purged++;
+        }
+        HASH_DEL(rec->to_reclaim, r);
+        free(r);
+    }
+#endif /* ifndef __clang_analyzer__ */
+
+    rec->pending_reclaim     = 0;
+    rec->unreclaimed_purged += purged;
+
+    chimera_nfs_info(
+        "NFSv4 recovery: grace window closed (%s): %u unreclaimed client "
+        "record(s) purged", reason, purged);
+} /* nfs_recovery_close_grace_locked */
+
 
 void
 nfs_recovery_begin_grace(
@@ -268,8 +334,9 @@ void
 nfs_recovery_end_grace(struct nfs_recovery *rec)
 {
     evpl_mutex_lock(&rec->lock);
-    rec->in_grace     = false;
-    rec->grace_end_ns = 0;
+    if (rec->in_grace) {
+        nfs_recovery_close_grace_locked(rec, NULL, "forced");
+    }
     evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_end_grace */
 
@@ -289,22 +356,6 @@ nfs_recovery_in_grace(struct nfs_recovery *rec)
 *  persist / forget (fire-and-forget KV writes)                      *
 * ------------------------------------------------------------------ */
 
-struct nfs_recovery_kv_ctx {
-    uint8_t  key[CHIMERA_KV_NFS_KEY_MAX];
-    uint32_t key_len;
-    uint8_t  value[NFS_RECOVERY_VALUE_MAX];
-    uint32_t value_len;
-};
-
-static void
-nfs_recovery_kv_done(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
-{
-    (void) error_code;
-    free(private_data);
-} /* nfs_recovery_kv_done */
-
 void
 nfs_recovery_persist(
     struct chimera_vfs_thread *vfs_thread,
@@ -313,7 +364,12 @@ nfs_recovery_persist(
 {
     struct nfs_recovery_kv_ctx *ctx;
 
-    if (!client || rec->persistence_disabled) {
+    if (!client) {
+        return;
+    }
+    /* Whatever the backend, a client that persists again has come back. */
+    nfs_recovery_note_returned(rec, client);
+    if (rec->persistence_disabled) {
         return;
     }
 
@@ -853,18 +909,18 @@ nfs_recovery_reclaim_complete(
             rec->pending_reclaim--;
         }
         if (rec->pending_reclaim == 0 && !loading) {
-            rec->in_grace     = false;
-            rec->grace_end_ns = 0;
+            nfs_recovery_close_grace_locked(rec, NULL, "all clients reclaimed");
         }
     }
     evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_reclaim_complete */
 
 void
-nfs_recovery_sweep_once(struct nfs_recovery *rec)
+nfs_recovery_sweep_once(
+    struct nfs_recovery       *rec,
+    struct chimera_vfs_thread *vfs_thread)
 {
     uint64_t now;
-    bool     end_now = false;
     bool     loading;
 
     /* to_reclaim is populated asynchronously by the cold-start scan, but
@@ -887,12 +943,25 @@ nfs_recovery_sweep_once(struct nfs_recovery *rec)
         return;
     }
     now = nfs_lease_now_ns();
-    if (now >= rec->grace_end_ns || (rec->pending_reclaim == 0 && !loading)) {
-        end_now = true;
-    }
-    if (end_now) {
-        rec->in_grace     = false;
-        rec->grace_end_ns = 0;
+    if (now >= rec->grace_end_ns) {
+        nfs_recovery_close_grace_locked(rec, vfs_thread, "deadline");
+    } else if (rec->pending_reclaim == 0 && !loading) {
+        nfs_recovery_close_grace_locked(rec, NULL, "all clients reclaimed");
     }
     evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_sweep_once */
+
+void
+nfs_recovery_note_returned(
+    struct nfs_recovery     *rec,
+    const struct nfs_client *client)
+{
+    struct nfs_recovery_record *r;
+
+    evpl_mutex_lock(&rec->lock);
+    HASH_FIND(hh, rec->to_reclaim, client->owner_string, client->owner_len, r);
+    if (r) {
+        r->returned = true;
+    }
+    evpl_mutex_unlock(&rec->lock);
+} /* nfs_recovery_note_returned */

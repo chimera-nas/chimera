@@ -157,7 +157,7 @@ struct nfs4_client_table;
 /* Reconstruct a persistent session (and its owning confirmed client, with the
  * persisted clientid) into `table`, keyed by the original `sessionid`.  Exposed
  * for the cold-start reload and for unit tests (test_nfs_persist). */
-void
+struct nfs_client *
 nfs4_drc_reconstruct_session(
     struct nfs4_client_table             *table,
     const uint8_t                        *sessionid,

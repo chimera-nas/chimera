@@ -45,6 +45,7 @@ struct nfs_recovery_record {
      * "unknown, keep". */
     uint64_t       last_renew_ns;
     bool           reclaimed;
+    bool           returned;  /* re-established this boot (its record was re-persisted) */
     UT_hash_handle hh;
 };
 
@@ -85,6 +86,7 @@ struct nfs_recovery {
     bool                        nfs4_drc;            /* reply-cache persistence on   */
     _Atomic int                 load_state;          /* enum nfs_recovery_load_state */
     uint32_t                    stale_purged;        /* records skipped + deleted at cold start */
+    uint32_t                    unreclaimed_purged;  /* records deleted at grace end, cumulative */
 };
 
 struct nfs_client;
@@ -235,12 +237,26 @@ nfs_recovery_reclaim_complete(
     const struct nfs_client *client);
 
 /*
- * Called from the lease sweeper at 1Hz.  Ends the grace window when
- * grace_end_ns has been reached or the to_reclaim set is fully reclaimed.
+ * Called from the lease sweeper at 1Hz with the sweeping thread's vfs_thread.
+ * Ends the grace window when grace_end_ns has been reached or the to_reclaim
+ * set is fully reclaimed; on the deadline, deletes the records of clients that
+ * neither reclaimed nor returned (vfs_thread may be NULL in tests: bookkeeping
+ * only).
  */
 void
 nfs_recovery_sweep_once(
-    struct nfs_recovery *rec);
+    struct nfs_recovery       *rec,
+    struct chimera_vfs_thread *vfs_thread);
+
+/*
+ * Mark a reloaded record as belonging to a client that has re-established
+ * itself this boot.  nfs_recovery_persist calls it; such a record is kept when
+ * the window closes even if the client has not yet sent RECLAIM_COMPLETE.
+ */
+void
+nfs_recovery_note_returned(
+    struct nfs_recovery     *rec,
+    const struct nfs_client *client);
 
 /* ----------------------------------------------------------------------- *
 *  Record (de)serialization -- exposed for unit tests (test_nfs_persist).  *
