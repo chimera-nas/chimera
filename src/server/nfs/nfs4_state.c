@@ -635,6 +635,7 @@ nfs_client_alloc(
     c->verifier      = verifier;
     c->minor         = minor;
     c->last_touch_ns = nfs_lease_now_ns();
+    atomic_init(&c->recovery_stamp_ns, c->last_touch_ns);
     if (owner_len > NFS4_OPAQUE_LIMIT) {
         owner_len = NFS4_OPAQUE_LIMIT;
     }

@@ -450,6 +450,7 @@ nfs_server_init(
     nfs_recovery_load(&shared->nfs4_recovery,
                       shared->vfs,
                       shared->node_id,
+                      shared->nfs_lease_time_s,
                       shared->nfs_grace_time_s,
                       chimera_server_config_get_nfs4_drc(config));
 
