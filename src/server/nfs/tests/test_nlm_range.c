@@ -52,6 +52,10 @@ test_posix_to_vfs(void)
     CHECK(nlm_posix_len_to_vfs(0) == UINT64_MAX);
     CHECK(nlm_posix_len_to_vfs(4096) == 4096);
     CHECK(nlm_posix_len_to_vfs(UINT64_MAX - 1) == UINT64_MAX - 1);
+    CHECK(nlm_vfs_len_to_posix(UINT64_MAX) == 0);
+    CHECK(nlm_vfs_len_to_posix(4096) == 4096);
+    CHECK(nlm_vfs_len_to_posix(nlm_posix_len_to_vfs(0)) == 0);
+    CHECK(nlm_vfs_len_to_posix(nlm_posix_len_to_vfs(4096)) == 4096);
     return 0;
 } /* test_posix_to_vfs */
 

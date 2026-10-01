@@ -479,8 +479,9 @@ chimera_vfs_claim_cancel(
  * owner's coverage of [offset, offset+length).  v1 is carve-only —
  * new_mask MUST be 0 (aborts otherwise); the replacement extent, when any,
  * is the caller's subsequent acquire.  The core consumes fresh claim
- * structs from `spare` (caller-provided, up to two) for split remainders
- * and hands released fragments back via the release callback.  Used by the
+ * structs from `spare` (caller-provided, n_spare of them: a claim that
+ * straddles both edges of the range needs two) for split remainders and
+ * hands released fragments back via the release callback.  Used by the
  * POSIX client (and later NFSv4 LOCKU); SMB stays exact-stack.
  *
  * `except`, when non-NULL, is left alone: it is how a re-lock expresses
@@ -495,7 +496,8 @@ chimera_vfs_claim_range_replace(
     uint64_t                          offset,
     uint64_t                          length,
     uint8_t                           new_mask,
-    struct chimera_vfs_claim         *spare[2],
+    struct chimera_vfs_claim        **spare,
+    int                               n_spare,
     int                              *spare_used,
     void (                           *released_cb )(
         struct chimera_vfs_claim *claim,

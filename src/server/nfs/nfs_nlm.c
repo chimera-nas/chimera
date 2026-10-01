@@ -1266,6 +1266,260 @@ chimera_nfs_nlm4_cancel(
                                3);
 } /* chimera_nfs_nlm4_cancel */
 
+/*
+ * Insert `entry` right after `anchor` on client->locks (NULL: at the head).
+ * The anchor is re-validated against the list: another UNLOCK may have
+ * removed it while the mutex was dropped, in which case the end of the list
+ * is the best position left.  Called with nlm_state.mutex held.
+ */
+static void
+chimera_nfs_nlm4_unlock_place_locked(
+    struct nlm_client     *client,
+    struct nlm_lock_entry *anchor,
+    struct nlm_lock_entry *entry)
+{
+    struct nlm_lock_entry *scan;
+
+    entry->next = NULL;
+    entry->prev = NULL;
+
+    if (!anchor) {
+        DL_PREPEND(client->locks, entry);
+        return;
+    }
+
+    for (scan = client->locks; scan && scan != anchor; scan = scan->next) {
+    }
+    if (scan) {
+        DL_APPEND_ELEM(client->locks, anchor, entry);
+    } else {
+        DL_APPEND(client->locks, entry);
+    }
+} /* chimera_nfs_nlm4_unlock_place_locked */
+
+/*
+ * Put the carve remainders where their parents sat on client->locks.  That
+ * order is the one nlm_client_release_all_locks releases in, pumping the
+ * blocking queue after each lock, so it decides which queued waiter a
+ * FREE_ALL or a disconnect lets through first; a lock that shrank keeps its
+ * place.  `straddle` chains the detached parents in their list order, each
+ * with its anchor: the predecessor that survived the sweep (NULL: it led the
+ * list).  The parents are walked in that order and each takes back its place
+ * with the remainders it contains in ascending offset (head, then tail), so
+ * the result never depends on the order the claim core handed the remainders
+ * out in -- that is the core's own list order, which a remainder of an
+ * earlier carve has already turned around.  Consecutive parents share an
+ * anchor when nothing kept lay between them; the later one then follows what
+ * the earlier one just placed.  A remainder no parent contains (the core
+ * carved an entry the sweep did not see) goes at the end.
+ *
+ * With `rem` NULL the parents themselves are put back, each at its own
+ * place: the carve could not run.  Placed remainders are NULLed in rem[].
+ * Called with nlm_state.mutex held.
+ */
+static void
+chimera_nfs_nlm4_unlock_relink_locked(
+    struct nlm_client      *client,
+    struct nlm_lock_entry  *straddle,
+    struct nlm_lock_entry **rem,
+    int                     n_rem)
+{
+    struct nlm_lock_entry *parent;
+    struct nlm_lock_entry *next;
+    struct nlm_lock_entry *anchor;
+    struct nlm_lock_entry *prev_anchor = NULL;
+    struct nlm_lock_entry *cursor      = NULL;
+    uint64_t               parent_end;
+    uint64_t               rem_end;
+    bool                   have_prev = false;
+    int                    i;
+    int                    best;
+
+    for (parent = straddle; parent; parent = next) {
+        next = parent->next;
+
+        anchor = parent->carve_anchor;
+        if (have_prev && anchor == prev_anchor) {
+            anchor = cursor;
+        }
+        prev_anchor = parent->carve_anchor;
+        have_prev   = true;
+
+        if (!rem) {
+            chimera_nfs_nlm4_unlock_place_locked(client, anchor, parent);
+            cursor = parent;
+            continue;
+        }
+
+        parent_end = nlm_range_end(parent->offset, parent->length);
+        for (;;) {
+            best = -1;
+            for (i = 0; i < n_rem; i++) {
+                if (!rem[i] || !rem[i]->file_state) {
+                    continue;
+                }
+                rem_end = nlm_range_end(rem[i]->offset, rem[i]->length);
+                if (rem[i]->offset < parent->offset || rem_end > parent_end) {
+                    continue;
+                }
+                if (best < 0 || rem[i]->offset < rem[best]->offset) {
+                    best = i;
+                }
+            }
+            if (best < 0) {
+                break;
+            }
+            chimera_nfs_nlm4_unlock_place_locked(client, anchor, rem[best]);
+            anchor    = rem[best];
+            rem[best] = NULL;
+        }
+        cursor = anchor;
+    }
+
+    for (i = 0; rem && i < n_rem; i++) {
+        if (rem[i] && rem[i]->file_state) {
+            DL_APPEND(client->locks, rem[i]);
+            rem[i] = NULL;
+        }
+    }
+} /* chimera_nfs_nlm4_unlock_relink_locked */
+
+/*
+ * Carve the UNLOCK range out of every claim this owner holds on the file and
+ * re-home the remainders as fresh lock entries.  `straddle` chains, in
+ * their client->locks order, the detached entries whose ranges cross a
+ * boundary of the unlock range (the only ones that leave remainders); any of
+ * them supplies the file_state, an open handle to dup and the claim owner.
+ * The claim core does the carve in one step under file->lock, so no waiter
+ * can slip into a remainder between the parent going away and the remainder
+ * taking its place -- the release-then-reacquire shortcut would leave that
+ * window.  Runs with nlm_state.mutex NOT held: the carve pumps waiters,
+ * whose completion callbacks take it.
+ *
+ * Returns false only when the remainder entries could not be allocated; the
+ * core was not touched and the caller puts the straddlers back untouched.
+ */
+static bool
+chimera_nfs_nlm4_unlock_carve(
+    struct chimera_server_nfs_thread *thread,
+    struct nlm_client                *client,
+    const struct nlm4_unlockargs     *args,
+    struct nlm_lock_entry            *straddle,
+    int                               n_straddle,
+    uint64_t                          reap_gen)
+{
+    struct chimera_server_nfs_shared *shared    = thread->shared;
+    struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
+    struct chimera_vfs_open_handle   *handle    = straddle->handle;
+    struct chimera_claim_owner        owner     = straddle->claim.owner;
+    struct nlm_lock_entry           **rem;
+    struct chimera_vfs_claim        **spare;
+    struct nlm_lock_entry            *entry;
+    uint64_t                          u_len      = nlm_wire_len_to_posix(args->alock.l_len);
+    int                               n_spare    = 2 * n_straddle;  /* head + tail each */
+    int                               spare_used = 0;
+    int                               i;
+    bool                              reaped;
+
+    rem   = calloc((size_t) n_spare, sizeof(*rem));
+    spare = calloc((size_t) n_spare, sizeof(*spare));
+
+    for (i = 0; rem && spare && i < n_spare; i++) {
+        rem[i] = nlm_lock_entry_alloc();
+        if (!rem[i]) {
+            break;
+        }
+        spare[i] = &rem[i]->claim;
+    }
+
+    if (!rem || !spare || i < n_spare) {
+        while (rem && i-- > 0) {
+            nlm_lock_entry_free(rem[i]);
+        }
+        free(rem);
+        free(spare);
+        return false;
+    }
+
+    chimera_vfs_claim_range_replace(vfs_state, straddle->file_state, &owner,
+                                    /* except   */ NULL,
+                                    args->alock.l_offset,
+                                    nlm_posix_len_to_vfs(u_len),
+                                    /* new_mask */ 0,
+                                    spare, n_spare, &spare_used,
+                                    /* released_cb */ NULL, NULL);
+
+    if (spare_used > n_spare) {
+        spare_used = n_spare;
+    }
+
+    /* A consumed spare is now a linked claim carrying the parent's owner,
+     * mode and the remainder geometry; dress it as a lock entry.  Identity
+     * (fh/oh/svid) is the requester's, which is the parents' too. */
+    for (i = 0; i < spare_used; i++) {
+        entry = rem[i];
+
+        entry->fh_len = args->alock.fh.len < NFS4_FHSIZE ? args->alock.fh.len : NFS4_FHSIZE;
+        memcpy(entry->fh, args->alock.fh.data, entry->fh_len);
+        entry->oh_len = args->alock.oh.len < LM_MAXSTRLEN ? args->alock.oh.len : LM_MAXSTRLEN;
+        memcpy(entry->oh, args->alock.oh.data, entry->oh_len);
+        entry->svid           = args->alock.svid;
+        entry->offset         = entry->claim.offset;
+        entry->length         = nlm_vfs_len_to_posix(entry->claim.length);
+        entry->exclusive      = (entry->claim.used & CHIMERA_CLAIM_LW) != 0;
+        entry->pending        = false;
+        entry->claim_inserted = true;
+        entry->file_state     = chimera_vfs_state_get(vfs_state,
+                                                      handle->fh, handle->fh_len,
+                                                      handle->fh_hash, true);
+        chimera_vfs_dup_handle(thread->vfs_thread, handle);
+        entry->handle = handle;
+
+        chimera_nfs_debug("NLM UNLOCK: carve remainder [%lu,+%lu) %s for '%s'",
+                          (unsigned long) entry->offset,
+                          (unsigned long) entry->length,
+                          entry->exclusive ? "excl" : "shared",
+                          client->hostname);
+    }
+
+    for (i = spare_used; i < n_spare; i++) {
+        nlm_lock_entry_free(rem[i]);
+    }
+
+    /* Re-link the remainders -- unless the client was reaped while the mutex
+     * was dropped (last connection gone, SM_NOTIFY, FREE_ALL), in which case
+     * it has been declared lock-free and the remainders must go too. */
+    evpl_mutex_lock(&shared->nlm_state.mutex);
+    reaped = client->reap_gen != reap_gen;
+    if (!reaped) {
+        chimera_nfs_nlm4_unlock_relink_locked(client, straddle, rem, spare_used);
+    }
+    evpl_mutex_unlock(&shared->nlm_state.mutex);
+
+    for (i = 0; i < spare_used; i++) {
+        entry = rem[i];
+        if (!entry) {
+            continue;
+        }
+        chimera_nfs_debug("NLM UNLOCK: dropping carve remainder for '%s' (%s)",
+                          client->hostname,
+                          reaped ? "client reaped" : "no file state");
+        chimera_vfs_claim_release(vfs_state,
+                                  entry->file_state ? entry->file_state
+                                  : straddle->file_state,
+                                  &entry->claim);
+        if (entry->file_state) {
+            chimera_vfs_state_put(vfs_state, entry->file_state);
+        }
+        chimera_vfs_release(thread->vfs_thread, entry->handle);
+        nlm_lock_entry_free(entry);
+    }
+
+    free(rem);
+    free(spare);
+    return true;
+} /* chimera_nfs_nlm4_unlock_carve */
+
 static void
 chimera_nfs_nlm4_do_unlock(
     struct evpl               *evpl,
@@ -1328,30 +1582,63 @@ chimera_nfs_nlm4_do_unlock(
         return;
     }
 
-    /* Sweep every lock this owner holds within the range: UNLOCK releases
-     * the covered locks (RFC 1813), and clients routinely unlock [0, ~0) at
-     * close(2) to drop everything they still hold on the file.  Exact-match
-     * lookup alone left those locks -- and the open handles pinning their
-     * files -- held forever.  Entries are unhooked under the mutex, chained,
-     * and released outside it (same ownership discipline as the single-entry
-     * path replaced here). */
-    struct nlm_lock_entry *sweep = NULL;
+    /* Sweep every lock this owner holds that overlaps the range: UNLOCK
+     * releases the covered bytes with POSIX fcntl semantics (RFC 1813
+     * A.6.4).  An entry inside the range goes away whole; one straddling a
+     * range edge is carved and the bytes outside the range live on as one or
+     * two remainder entries.  Linux lockd forwards the process's unlock
+     * range verbatim, so both shapes arrive: [0, ~0) at close(2) to drop
+     * everything still held on the file, and sub-range unlocks that split a
+     * lock (cthon04 lock test 10 unlocks the middle byte of a three-byte
+     * lock).  Entries are unhooked under the mutex, chained, and released
+     * outside it: the claim core may pump waiters whose completion
+     * callbacks take this mutex. */
+    struct nlm_lock_entry *sweep         = NULL; /* released below */
+    struct nlm_lock_entry *straddle      = NULL; /* need a carve first */
+    struct nlm_lock_entry *straddle_tail = NULL;
+    struct nlm_lock_entry *last_kept     = NULL; /* list predecessor that stays */
+    struct nlm_lock_entry *next;
+    int                    n_straddle = 0;
+    uint64_t               u_len      = nlm_wire_len_to_posix(args->alock.l_len);
+    uint64_t               u_end      = nlm_range_end(args->alock.l_offset, u_len);
+    uint64_t               reap_gen   = client->reap_gen;
 
-    while ((entry = nlm_client_find_lock_in_range(
-                client,
-                args->alock.oh.data,
-                args->alock.oh.len,
-                args->alock.svid,
-                args->alock.fh.data,
-                args->alock.fh.len,
-                args->alock.l_offset,
-                nlm_wire_len_to_posix(args->alock.l_len))) != NULL) {
+    for (entry = client->locks; entry; entry = next) {
+        next = entry->next;
+
+        if (!nlm_lock_entry_in_unlock_range(entry,
+                                            args->alock.oh.data,
+                                            args->alock.oh.len,
+                                            args->alock.svid,
+                                            args->alock.fh.data,
+                                            args->alock.fh.len,
+                                            args->alock.l_offset,
+                                            u_len)) {
+            last_kept = entry;
+            continue;
+        }
+
         DL_DELETE(client->locks, entry);
-        entry->next = sweep;
-        sweep       = entry;
+        if (entry->claim_inserted &&
+            (entry->offset < args->alock.l_offset ||
+             nlm_range_end(entry->offset, entry->length) > u_end)) {
+            /* Chained in list order: the relink walks the parents in it. */
+            entry->carve_anchor = last_kept;
+            entry->next         = NULL;
+            if (straddle_tail) {
+                straddle_tail->next = entry;
+            } else {
+                straddle = entry;
+            }
+            straddle_tail = entry;
+            n_straddle++;
+        } else {
+            entry->next = sweep;
+            sweep       = entry;
+        }
     }
 
-    if (!sweep) {
+    if (!sweep && !straddle) {
         evpl_mutex_unlock(&shared->nlm_state.mutex);
         chimera_nfs_debug("NLM UNLOCK: lock entry not found -> NLM4_GRANTED");
         /* Lock not found -- treat as already unlocked */
@@ -1370,6 +1657,54 @@ chimera_nfs_nlm4_do_unlock(
     }
 
     evpl_mutex_unlock(&shared->nlm_state.mutex);
+
+    if (straddle) {
+        if (chimera_nfs_nlm4_unlock_carve(thread, client, args, straddle,
+                                          n_straddle, reap_gen)) {
+            /* The carve unlinked the straddlers' claims and re-homed their
+             * remainders; what is left of the straddlers is torn down with
+             * the sweep.  They keep claim_inserted so the sweep still runs
+             * the release on them: on an unlinked claim that is a no-op,
+             * except that it hands back a backend token the carve left
+             * behind -- the core releases tokens for the first
+             * CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH claims it unlinks and no
+             * more, and a straddler past that would otherwise keep its
+             * whole parent range locked at the backend. */
+            while (straddle) {
+                entry    = straddle;
+                straddle = entry->next;
+
+                entry->next = sweep;
+                sweep       = entry;
+            }
+        } else {
+            /* Out of memory for the remainders.  Leaving a straddler intact
+             * keeps more bytes locked than the client asked, which is the
+             * safer failure (its next UNLOCK retries); put them back where
+             * they were -- unless the client was reaped while the mutex was
+             * dropped (last connection gone, SM_NOTIFY, FREE_ALL): it has
+             * been declared lock-free, and putting them back would
+             * resurrect its locks, so they go with the sweep instead. */
+            evpl_mutex_lock(&shared->nlm_state.mutex);
+            if (client->reap_gen != reap_gen) {
+                chimera_nfs_info("NLM UNLOCK: cannot carve %d lock(s) for '%s'; "
+                                 "client reaped meanwhile, releasing them",
+                                 n_straddle, safe_hostname);
+                while (straddle) {
+                    entry    = straddle;
+                    straddle = entry->next;
+
+                    entry->next = sweep;
+                    sweep       = entry;
+                }
+            } else {
+                chimera_nfs_info("NLM UNLOCK: cannot carve %d lock(s) for '%s'; "
+                                 "leaving them held", n_straddle, safe_hostname);
+                chimera_nfs_nlm4_unlock_relink_locked(client, straddle, NULL, 0);
+            }
+            evpl_mutex_unlock(&shared->nlm_state.mutex);
+        }
+    }
 
     /* Release each swept lock: the claim (sync), the file_state ref (sync),
      * and the open handle that was held for the lock's lifetime.  RFC 1813

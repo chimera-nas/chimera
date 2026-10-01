@@ -37,6 +37,14 @@ nlm_wire_len_to_posix(uint64_t wire_len)
     return wire_len == UINT64_MAX ? 0 : wire_len;
 } /* nlm_wire_len_to_posix */
 
+/* Claim core -> stored: the VFS to-EOF sentinel becomes POSIX 0.  A carve
+ * remainder comes back from the claim core in VFS form. */
+static inline uint64_t
+nlm_vfs_len_to_posix(uint64_t vfs_len)
+{
+    return vfs_len == UINT64_MAX ? 0 : vfs_len;
+} /* nlm_vfs_len_to_posix */
+
 /* Stored -> claim core: POSIX 0 becomes the VFS to-EOF sentinel. */
 static inline uint64_t
 nlm_posix_len_to_vfs(uint64_t posix_len)

@@ -1978,7 +1978,8 @@ chimera_vfs_claim_range_replace(
     uint64_t                          offset,
     uint64_t                          length,
     uint8_t                           new_mask,
-    struct chimera_vfs_claim         *spare[2],
+    struct chimera_vfs_claim        **spare,
+    int                               n_spare_max,
     int                              *spare_used,
     void (                           *released_cb )(
         struct chimera_vfs_claim *claim,
@@ -2038,7 +2039,7 @@ chimera_vfs_claim_range_replace(
              * consequently held locally but unprojected until it is
              * re-locked; projecting it needs a vfs thread here, which the
              * carve path does not have. */
-            if (has_left && n_spare < 2 && spare && spare[n_spare]) {
+            if (has_left && n_spare < n_spare_max && spare && spare[n_spare]) {
                 struct chimera_vfs_claim *left = spare[n_spare++];
 
                 *left               = *cur;
@@ -2049,7 +2050,7 @@ chimera_vfs_claim_range_replace(
                 left->next          = NULL;
                 chimera_vfs_claim_link_locked(file, left);
             }
-            if (has_right && n_spare < 2 && spare && spare[n_spare]) {
+            if (has_right && n_spare < n_spare_max && spare && spare[n_spare]) {
                 struct chimera_vfs_claim *right = spare[n_spare++];
 
                 *right        = *cur;
