@@ -364,14 +364,20 @@ function(add_test)
         if(WIN32 AND _a STREQUAL "${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh")
             continue()
         endif()
-        # Old test helpers pass build-directory paths instead of target names.
-        # Native multi-config generators put executables in bin/<config>.
+        # Old test helpers pass extensionless build-directory paths instead of
+        # target names.  Native multi-config generators put executables in
+        # bin/<config>.  Do not rewrite other files with the same stem as an
+        # executable target: for example, chimera.json is an argument to the
+        # shipped-config test, not another spelling of the chimera executable.
         if(WIN32 AND IS_ABSOLUTE "${_a}")
-            get_filename_component(_candidate "${_a}" NAME_WE)
-            if(TARGET "${_candidate}")
-                get_target_property(_kind "${_candidate}" TYPE)
-                if(_kind STREQUAL "EXECUTABLE")
-                    set(_a "$<TARGET_FILE:${_candidate}>")
+            get_filename_component(_extension "${_a}" LAST_EXT)
+            if(NOT _extension OR _extension MATCHES "^\\.[Ee][Xx][Ee]$")
+                get_filename_component(_candidate "${_a}" NAME_WE)
+                if(TARGET "${_candidate}")
+                    get_target_property(_kind "${_candidate}" TYPE)
+                    if(_kind STREQUAL "EXECUTABLE")
+                        set(_a "$<TARGET_FILE:${_candidate}>")
+                    endif()
                 endif()
             endif()
         endif()
