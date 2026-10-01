@@ -60,6 +60,13 @@ struct nlm_lock_entry {
      * acquire callback must tear the entry down instead of completing it.
      * Exactly one of the reaper and the callback frees the entry. */
     bool                               reaped;
+    /* UNLOCK carve bookkeeping, valid only while chimera_nfs_nlm4_do_unlock
+     * holds this entry detached: the entry that preceded it on
+     * client->locks (NULL == it was first), so a remainder can take the
+     * parent's place in the list.  The list order is the release order of
+     * nlm_client_release_all_locks, and a lock that shrank is still the lock
+     * the client took when it took it. */
+    struct nlm_lock_entry             *carve_anchor;
     struct nlm_lock_entry             *next;
     struct nlm_lock_entry             *prev;
 };
@@ -73,6 +80,11 @@ struct nlm_client {
     uint32_t               conn_count;      /* # active conns with private_data set */
     char                   hostname[LM_MAXSTRLEN + 1];
     struct nlm_lock_entry *locks;           /* DL_LIST of active locks */
+    /* Bumped by nlm_client_release_all_locks.  A path that detaches entries
+     * from `locks`, drops the mutex, and later re-links derived entries (the
+     * UNLOCK carve) compares this to know whether the client was declared
+     * lock-free in between -- re-linking then would resurrect locks. */
+    uint64_t               reap_gen;
     UT_hash_handle         hh;              /* keyed by hostname */
 };
 
@@ -318,56 +330,48 @@ nlm_client_find_lock(
 } /* nlm_client_find_lock */
 
 /*
- * Find a lock entry held by (owner handle, svid) on fh that lies WITHIN the
- * byte range [offset, offset+length).  UNLOCK per RFC 1813 releases the
- * owner's locks covered by the range, not only an exactly-equal one -- in
- * particular every real client unlocks [0, ~0) at close(2) to drop whatever
- * it still holds on the file.  Containment only: a lock partially straddling
- * the range would need a carve (split), which no chimera-side caller emits
- * today.  Callers loop until NULL to sweep multi-lock owners.
+ * Exclusive end of [offset, offset+length) in NLM's internal POSIX
+ * convention (length 0 == to EOF); saturates at UINT64_MAX.
  */
-static inline struct nlm_lock_entry *
-nlm_client_find_lock_in_range(
-    struct nlm_client *client,
-    const uint8_t     *oh,
-    uint32_t           oh_len,
-    int32_t            svid,
-    const uint8_t     *fh,
-    uint32_t           fh_len,
-    uint64_t           offset,
-    uint64_t           length)
+static inline uint64_t
+nlm_range_end(
+    uint64_t offset,
+    uint64_t length)
 {
-    struct nlm_lock_entry *entry;
-    uint64_t               end;
+    return (length == 0 || offset + length < offset)
+           ? UINT64_MAX : offset + length;
+} /* nlm_range_end */
 
-    /* Lengths here are in NLM's internal POSIX convention: 0 = to EOF
-     * (see NLM_TO_POSIX_LEN). */
-    end = (length == 0 || offset + length < offset)
-        ? UINT64_MAX : offset + length;
-
-    DL_FOREACH(client->locks, entry)
-    {
-        uint64_t entry_end;
-
-        if (entry->pending) {
-            continue;
-        }
-        entry_end = (entry->length == 0 ||
-                     entry->offset + entry->length < entry->offset)
-            ? UINT64_MAX : entry->offset + entry->length;
-
-        if (entry->oh_len == oh_len &&
-            entry->svid == svid &&
-            entry->fh_len == fh_len &&
-            entry->offset >= offset &&
-            entry_end <= end &&
-            memcmp(entry->oh, oh, oh_len) == 0 &&
-            memcmp(entry->fh, fh, fh_len) == 0) {
-            return entry;
-        }
-    }
-    return NULL;
-} /* nlm_client_find_lock_in_range */
+/*
+ * Does this confirmed lock entry belong to (owner handle, svid) on fh and
+ * OVERLAP the byte range [offset, offset+length)?  UNLOCK per RFC 1813
+ * A.6.4 releases the owner's bytes within the range with POSIX fcntl
+ * semantics: a lock inside the range goes away, a lock straddling a range
+ * edge keeps the bytes outside it (chimera_nfs_nlm4_do_unlock carves those
+ * remainders).  Linux lockd forwards the process's unlock range as-is, so
+ * both shapes arrive: [0, ~0) at close(2) and sub-range unlocks that split
+ * a lock.  A pending entry (acquire still in flight) is never matched.
+ */
+static inline bool
+nlm_lock_entry_in_unlock_range(
+    const struct nlm_lock_entry *entry,
+    const uint8_t               *oh,
+    uint32_t                     oh_len,
+    int32_t                      svid,
+    const uint8_t               *fh,
+    uint32_t                     fh_len,
+    uint64_t                     offset,
+    uint64_t                     length)
+{
+    return !entry->pending &&
+           entry->oh_len == oh_len &&
+           entry->svid == svid &&
+           entry->fh_len == fh_len &&
+           entry->offset < nlm_range_end(offset, length) &&
+           offset < nlm_range_end(entry->offset, entry->length) &&
+           memcmp(entry->oh, oh, oh_len) == 0 &&
+           memcmp(entry->fh, fh, fh_len) == 0;
+} /* nlm_lock_entry_in_unlock_range */
 
 /* -------------------------------------------------------------------------
  * Functions implemented in nfs_nlm_state.c

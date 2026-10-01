@@ -472,6 +472,73 @@ probe_nlm(struct mbt_env *env)
     check_eq("LOCK excl [0,16) as B after A unlocked", r->nlm_stat,
              NLM4_GRANTED);
 
+    /* UNLOCK of part of a held range releases exactly those bytes and keeps
+     * the rest (RFC 1813 A.6.4 is POSIX fcntl semantics; Linux lockd forwards
+     * the process's unlock range as-is, which is what cthon04 lock test 10
+     * exercises).  A middle unlock splits the lock into two remainders, an
+     * edge unlock trims it, and a to-EOF remainder keeps its to-EOF spelling.
+     * f1 is left lock-free for the sections below. */
+    r = mbt_nlm_lock(env, 2, PROBE_CALLER_A, &file_fh[1], oh_a, sizeof(oh_a),
+                     1, 1, 0, 0, 0, 0, 3, ck, sizeof(ck));
+    check_eq("LOCK excl [0,3) as A on f1", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_unlock(env, 0, PROBE_CALLER_A, &file_fh[1], oh_a, sizeof(oh_a),
+                       1, 1, 1, ck, sizeof(ck));
+    check_eq("UNLOCK [1,2) as A (middle of [0,3))", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[1], oh_b, sizeof(oh_b),
+                     2, 1, 1, 1, ck, sizeof(ck));
+    check_eq("TEST excl [1,2) as B finds the hole", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[1], oh_b, sizeof(oh_b),
+                     2, 1, 0, 1, ck, sizeof(ck));
+    check_eq("TEST excl [0,1) as B hits the left remainder", r->nlm_stat,
+             NLM4_DENIED);
+    check_u64("split left remainder offset", r->holder_offset, 0);
+    check_u64("split left remainder length", r->holder_length, 1);
+    r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[1], oh_b, sizeof(oh_b),
+                     2, 1, 2, 1, ck, sizeof(ck));
+    check_eq("TEST excl [2,3) as B hits the right remainder", r->nlm_stat,
+             NLM4_DENIED);
+    check_u64("split right remainder offset", r->holder_offset, 2);
+    check_u64("split right remainder length", r->holder_length, 1);
+
+    /* Edge trim: unlocking the first byte leaves only [2,3). */
+    r = mbt_nlm_unlock(env, 0, PROBE_CALLER_A, &file_fh[1], oh_a, sizeof(oh_a),
+                       1, 0, 1, ck, sizeof(ck));
+    check_eq("UNLOCK [0,1) as A (left edge)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[1], oh_b, sizeof(oh_b),
+                     2, 1, 0, 2, ck, sizeof(ck));
+    check_eq("TEST excl [0,2) as B after the trim", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[1], oh_b, sizeof(oh_b),
+                     2, 1, 2, 1, ck, sizeof(ck));
+    check_eq("TEST excl [2,3) as B still held", r->nlm_stat, NLM4_DENIED);
+
+    /* A to-EOF lock trimmed at its start keeps a to-EOF remainder (wire 0). */
+    r = mbt_nlm_lock(env, 2, PROBE_CALLER_A, &file_fh[1], oh_a, sizeof(oh_a),
+                     1, 1, 0, 0, 0, 100, 0, ck, sizeof(ck));
+    check_eq("LOCK excl [100,EOF) as A on f1", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_unlock(env, 0, PROBE_CALLER_A, &file_fh[1], oh_a, sizeof(oh_a),
+                       1, 100, 10, ck, sizeof(ck));
+    check_eq("UNLOCK [100,110) as A (start of to-EOF)", r->nlm_stat,
+             NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[1], oh_b, sizeof(oh_b),
+                     2, 1, 105, 1, ck, sizeof(ck));
+    check_eq("TEST excl [105,106) as B in the trimmed part", r->nlm_stat,
+             NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[1], oh_b, sizeof(oh_b),
+                     2, 1, 110, 1, ck, sizeof(ck));
+    check_eq("TEST excl [110,111) as B hits the to-EOF remainder", r->nlm_stat,
+             NLM4_DENIED);
+    check_u64("to-EOF remainder offset", r->holder_offset, 110);
+    check_u64("to-EOF remainder length is wire 0", r->holder_length, 0);
+
+    /* The whole-file UNLOCK sweeps every remainder. */
+    r = mbt_nlm_unlock(env, 0, PROBE_CALLER_A, &file_fh[1], oh_a, sizeof(oh_a),
+                       1, 0, 0, ck, sizeof(ck));
+    check_eq("UNLOCK [0,EOF) as A on f1", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[1], oh_b, sizeof(oh_b),
+                     2, 1, 0, 0, ck, sizeof(ck));
+    check_eq("TEST excl [0,EOF) as B on f1 after the sweep", r->nlm_stat,
+             NLM4_GRANTED);
+
     /* CANCEL always answers GRANTED. */
     r = mbt_nlm_cancel(env, 0, PROBE_CALLER_A, &file_fh[0], oh_a,
                        sizeof(oh_a), 1, 1, 0, 0, 16, ck, sizeof(ck));
@@ -645,6 +712,47 @@ probe_nlm(struct mbt_env *env)
                           3, 1, 16, 8, ck, sizeof(ck))->nlm_stat,
              NLM4_DENIED);
     mbt_nlm_free_all(env, "quint-w2", 1);
+
+    /* An UNLOCK that straddles TWO of the blocker's locks, one of them a
+     * remainder of an earlier carve, must keep the remainders in the order
+     * the parents had: FREE_ALL releases that list one lock at a time and
+     * pumps the waiters after each, so the order decides who is promoted.
+     * w1 holds [512,516) then [517,520); the first carve shrinks the former
+     * to [512,515), the second leaves [512,513) and [519,520).  w2 queued
+     * for the whole of [512,520) must be promoted ahead of w3 queued for
+     * [519,520): releasing [512,513) first lets nobody through, releasing
+     * [519,520) then hands w2 everything.  The other order gives w3 the
+     * tail byte and starves w2. */
+    r = mbt_nlm_lock(env, 2, "quint-w1", &file_fh[1], oh_a, sizeof(oh_a), 1,
+                     1, 0, 0, 0, 512, 4, ck, sizeof(ck));
+    check_eq("LOCK excl f1 [512,516) as w1", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-w1", &file_fh[1], oh_a, sizeof(oh_a), 1,
+                     1, 0, 0, 0, 517, 3, ck, sizeof(ck));
+    check_eq("LOCK excl f1 [517,520) as w1", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_unlock(env, 0, "quint-w1", &file_fh[1], oh_a, sizeof(oh_a), 1,
+                       515, 1, ck, sizeof(ck));
+    check_eq("UNLOCK f1 [515,516) as w1 (first carve)", r->nlm_stat,
+             NLM4_GRANTED);
+    r = mbt_nlm_unlock(env, 0, "quint-w1", &file_fh[1], oh_a, sizeof(oh_a), 1,
+                       513, 6, ck, sizeof(ck));
+    check_eq("UNLOCK f1 [513,519) as w1 (straddles both)", r->nlm_stat,
+             NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-w2", &file_fh[1], oh_b, sizeof(oh_b), 2,
+                     1, 1 /* block */, 0, 0, 512, 8, ck, sizeof(ck));
+    check_eq("blocking LOCK f1 [512,520) as w2", r->nlm_stat, NLM4_BLOCKED);
+    r = mbt_nlm_lock(env, 2, "quint-w3", &file_fh[1], oh_a, sizeof(oh_a), 3,
+                     1, 1 /* block */, 0, 0, 519, 1, ck, sizeof(ck));
+    check_eq("blocking LOCK f1 [519,520) as w3", r->nlm_stat, NLM4_BLOCKED);
+    mbt_nlm_free_all(env, "quint-w1", 1);
+    mbt_aux_drain_us(env, 200000);
+    r = mbt_nlm_test(env, 0, "quint-w4", &file_fh[1], oh_a, sizeof(oh_a), 4,
+                     1, 512, 1, ck, sizeof(ck));
+    check_eq("TEST f1 [512,513) after FREE_ALL of two remainders (w2 promoted)",
+             r->nlm_stat, NLM4_DENIED);
+    check_u64("w2 holds the whole range: offset", r->holder_offset, 512);
+    check_u64("w2 holds the whole range: length", r->holder_length, 8);
+    mbt_nlm_free_all(env, "quint-w2", 1);
+    mbt_nlm_free_all(env, "quint-w3", 1);
 
     /* The same shape, but the blocker leaves via UNLOCK rather than
      * FREE_ALL -- the case the replay corpus already covers. */

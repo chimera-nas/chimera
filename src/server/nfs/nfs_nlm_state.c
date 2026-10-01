@@ -339,6 +339,8 @@ nlm_client_release_all_locks(
      * for that callback to remove and free. */
     evpl_mutex_lock(&state->mutex);
 
+    client->reap_gen++;
+
     DL_FOREACH(client->locks, entry)
     {
         count++;

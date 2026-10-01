@@ -274,12 +274,11 @@ chimera_posix_ofd_lock_carve(
 
     chimera_vfs_claim_range_replace(state, file, owner, except, offset, length,
                                     /* new_mask */ 0,
-                                    spare, &spare_used,
+                                    spare, POSIX_LOCK_CARVE_SPARES, &spare_used,
                                     chimera_posix_lock_carve_released, &ctx);
 
-    /* The core takes at most the spares it was handed -- vfs_claim.h fixes the
-     * array at spare[2] and vfs_claim.c guards with n_spare < 2 -- but it lives
-     * in another translation unit, so bound the count here to keep both loops
+    /* The core takes at most the spares it was handed, but it lives in
+     * another translation unit, so bound the count here to keep both loops
      * below inside spare_nodes[]. */
     if (spare_used > POSIX_LOCK_CARVE_SPARES) {
         spare_used = POSIX_LOCK_CARVE_SPARES;
