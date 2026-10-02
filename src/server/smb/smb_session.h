@@ -167,6 +167,9 @@ struct chimera_smb_open_file {
     uint32_t                         name_len;
     uint32_t                         flags;
     uint64_t                         position;
+    /* Open.NextEaEntry (MS-FSA 2.1.5.12.12): the user.* EA index, 0-based, a
+     * FileFullEaInformation scan without SL_RESTART_SCAN resumes from. */
+    uint32_t                         next_ea_index;
     uint32_t                         parent_fh_len;
     uint32_t                         refcnt;
     /* MS-SMB2 §3.3.5.2.10 channel-sequence tracking.  channel_sequence holds
