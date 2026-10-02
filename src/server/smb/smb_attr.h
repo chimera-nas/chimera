@@ -265,24 +265,31 @@ chimera_smb_round_cluster(uint64_t bytes)
     return (bytes + CHIMERA_SMB_CLUSTER_SIZE - 1) & ~(CHIMERA_SMB_CLUSTER_SIZE - 1);
 } /* chimera_smb_round_cluster */
 
-/* AllocationSize as a Windows file system reports it: a whole number of the
- * clusters the volume advertises, and -- unless the file is marked sparse --
- * never less than its end of file, because a non-sparse file is allocated
- * through EOF even where it was extended without being written.  Backends
- * report the bytes they actually consume (cairn exactly, memfs in 64 KiB
- * chunks), which Windows applications and IFSTest's allocation checks read
- * as a malformed volume. */
+/* AllocationSize as a Windows file system reports it (MS-FSA 2.1.5.15.1 /
+ * 2.1.5.15.5): a whole number of the clusters the volume advertises, covering
+ * the end of file and any AllocationSize reservation past it.  A non-sparse
+ * file is allocated through EOF whether or not it was written, so its backend
+ * usage -- memfs counts 64 KiB chunks, diskfs keeps blocks a truncation left
+ * behind -- does not enter into it.  A sparse file reports what the backend
+ * actually holds, capped at what the non-sparse rule would give. */
 static inline uint64_t
 chimera_smb_alloc_size(const struct chimera_vfs_attrs *attr)
 {
-    uint64_t used = attr->va_space_used;
+    uint64_t want = attr->va_size;
+    uint64_t used;
 
-    if (!((attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
-          (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE)) &&
-        attr->va_size > used) {
-        used = attr->va_size;
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_ALLOC_SIZE) &&
+        attr->va_alloc_size > want) {
+        want = attr->va_alloc_size;
     }
-    return chimera_smb_round_cluster(used);
+    want = chimera_smb_round_cluster(want);
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+        (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE)) {
+        used = chimera_smb_round_cluster(attr->va_space_used);
+        return used < want ? used : want;
+    }
+    return want;
 } /* chimera_smb_alloc_size */
 
 static inline void
@@ -719,7 +726,15 @@ chimera_smb_append_standard_info(
     evpl_iovec_cursor_append_uint64(cursor, attrs->smb_alloc_size);
     evpl_iovec_cursor_append_uint64(cursor, attrs->smb_size);
     evpl_iovec_cursor_append_uint32(cursor, attrs->smb_link_count);
-    evpl_iovec_cursor_append_uint8(cursor, !!(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE));
+    /* DeletePending belongs to the file, not the handle (MS-FSA
+     * Open.Link.IsDeleted): a disposition set through one open is seen through
+     * every other open of the file (IFSTest DispositionInformationTest).  A
+     * named-stream open's pending delete removes only that stream, so it is
+     * reported on that handle alone. */
+    evpl_iovec_cursor_append_uint8(cursor,
+                                   (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) ||
+                                   (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) &&
+                                    chimera_vfs_state_is_delete_pending(open_file->share_file_state)));
     evpl_iovec_cursor_append_uint8(cursor, attrs->smb_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY);
     evpl_iovec_cursor_append_uint16(cursor, 0); /* Reserved */
 } /* chimera_smb_append_standard_info */
