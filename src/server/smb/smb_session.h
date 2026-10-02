@@ -89,6 +89,10 @@ struct chimera_smb_file_id {
  * resolved zombie and a replay falls through to a fresh open
  * (smb2.replay.dhv2-pending2*-vs-{lease,oplock}-{sane,windows}). */
 #define CHIMERA_SMB_OPEN_FILE_PENDING_ORPHANED     0x00000800
+/* A write through this handle has already marked the file ARCHIVE (MS-FSA
+ * 2.1.4.17: modifying a data file sets FILE_ATTRIBUTE_ARCHIVE), so its later
+ * writes need not ask the backend for the DOS attributes again. */
+#define CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED        0x00001000
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases
