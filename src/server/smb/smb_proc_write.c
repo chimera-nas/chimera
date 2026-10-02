@@ -18,10 +18,21 @@ chimera_smb_write_pre_attr_mask(const struct chimera_smb_open_file *open_file)
            ? CHIMERA_VFS_ATTR_MTIME : 0;
 } /* chimera_smb_write_pre_attr_mask */
 
-/* Completion for the mtime-restore setattr issued after a write through a
- * write-time-sticky handle.  The write itself already succeeded; a failed
- * restore leaves a slightly-advanced write time but is not worth failing the
- * write over, so we always report success. */
+/* The first write through a handle asks for the file's DOS attributes after
+ * the write, so the callback can set ARCHIVE if it is clear. */
+static inline uint64_t
+chimera_smb_write_post_attr_mask(const struct chimera_smb_open_file *open_file)
+{
+    return (open_file->flags & (CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED |
+                                CHIMERA_SMB_OPEN_FILE_FLAG_STREAM))
+           ? 0 : CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+} /* chimera_smb_write_post_attr_mask */
+
+/* Completion for the setattr issued after a write to restore the mtime of a
+ * write-time-sticky handle and/or set ARCHIVE.  The write itself already
+ * succeeded; a failed setattr leaves a slightly-advanced write time or a clear
+ * ARCHIVE bit but is not worth failing the write over, so we always report
+ * success. */
 static void
 chimera_smb_write_sticky_restore_callback(
     enum chimera_vfs_error    error_code,
@@ -80,17 +91,36 @@ chimera_smb_write_callback(
         request->write.open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_MODIFIED;
     }
 
+    request->write.restore_attrs.va_req_mask = 0;
+    request->write.restore_attrs.va_set_mask = 0;
+
     /* A handle that explicitly set its write time has "taken control" of it:
      * the backend bumped mtime as a side effect of this write, so restore it to
      * the pre-write value (reported in pre_attr) to keep it frozen. */
     if (!error_code &&
         (request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) &&
         (pre_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+        request->write.restore_attrs.va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
+        request->write.restore_attrs.va_mtime     = pre_attr->va_mtime;
+    }
 
-        request->write.restore_attrs.va_req_mask = 0;
-        request->write.restore_attrs.va_set_mask = CHIMERA_VFS_ATTR_MTIME;
-        request->write.restore_attrs.va_mtime    = pre_attr->va_mtime;
+    /* Writing a data file marks it for backup (MS-FSA 2.1.4.17): set ARCHIVE
+     * if the first write through this handle found it clear (IFSTest
+     * UpdateOnCloseTest, ArchiveAttributeTest). */
+    if (!error_code &&
+        !(request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED)) {
+        request->write.open_file->flags |= CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED;
+        if (post_attr && (post_attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+            !(post_attr->va_dos_attributes &
+              (SMB2_FILE_ATTRIBUTE_ARCHIVE | SMB2_FILE_ATTRIBUTE_DIRECTORY))) {
+            request->write.restore_attrs.va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+            request->write.restore_attrs.va_dos_attributes =
+                (post_attr->va_dos_attributes & ~SMB2_FILE_ATTRIBUTE_NORMAL) |
+                SMB2_FILE_ATTRIBUTE_ARCHIVE;
+        }
+    }
 
+    if (request->write.restore_attrs.va_set_mask) {
         chimera_vfs_setattr(thread->vfs_thread,
                             &request->session_handle->session->cred,
                             request->write.open_file->handle,
@@ -162,7 +192,7 @@ chimera_smb_rdma_read_callback(
             request->write.length,
             !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
             chimera_smb_write_pre_attr_mask(request->write.open_file),
-            0,
+            chimera_smb_write_post_attr_mask(request->write.open_file),
             request->write.iov,
             request->write.niov,
             &io_owner,
@@ -408,7 +438,7 @@ chimera_smb_write(struct chimera_smb_request *request)
             request->write.length,
             !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH),
             chimera_smb_write_pre_attr_mask(request->write.open_file),
-            0,
+            chimera_smb_write_post_attr_mask(request->write.open_file),
             request->write.iov,
             request->write.niov,
             &io_owner,
