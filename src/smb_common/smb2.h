@@ -130,6 +130,7 @@
 #define SMB2_STATUS_NO_EAS_ON_FILE                    0xC0000052
 #define SMB2_STATUS_EA_CORRUPT_ERROR                  0xC0000053
 #define SMB2_STATUS_FILE_LOCK_CONFLICT                0xC0000054
+#define SMB2_STATUS_NO_MORE_EAS                       0x80000012
 #define SMB2_STATUS_INVALID_EA_NAME                   0x80000013
 #define SMB2_STATUS_EA_LIST_INCONSISTENT              0x80000014
 #define SMB2_STATUS_LOCK_NOT_GRANTED                  0xC0000055

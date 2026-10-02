@@ -858,6 +858,7 @@ chimera_smb_create_gen_open_file(
         open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
     }
     open_file->position        = 0;
+    open_file->next_ea_index   = 0;
     open_file->pipe_transceive = transceive;
     open_file->refcnt          = 2;
     /* Seed MS-SMB2 §3.3.5.2.10 channel-sequence tracking from the CREATE's
