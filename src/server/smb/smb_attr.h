@@ -255,6 +255,36 @@ chimera_smb_marshal_basic_attrs(
     smb_attr->smb_attr_mask |= SMB_ATTR_ATTRIBUTES;
 } /* chimera_smb_marshal_basic_attrs */
 
+/* Bytes in one allocation unit, as FileFsSizeInformation and
+ * FileFsFullSizeInformation report it (8 sectors of 512 bytes). */
+#define CHIMERA_SMB_CLUSTER_SIZE 4096ULL
+
+static inline uint64_t
+chimera_smb_round_cluster(uint64_t bytes)
+{
+    return (bytes + CHIMERA_SMB_CLUSTER_SIZE - 1) & ~(CHIMERA_SMB_CLUSTER_SIZE - 1);
+} /* chimera_smb_round_cluster */
+
+/* AllocationSize as a Windows file system reports it: a whole number of the
+ * clusters the volume advertises, and -- unless the file is marked sparse --
+ * never less than its end of file, because a non-sparse file is allocated
+ * through EOF even where it was extended without being written.  Backends
+ * report the bytes they actually consume (cairn exactly, memfs in 64 KiB
+ * chunks), which Windows applications and IFSTest's allocation checks read
+ * as a malformed volume. */
+static inline uint64_t
+chimera_smb_alloc_size(const struct chimera_vfs_attrs *attr)
+{
+    uint64_t used = attr->va_space_used;
+
+    if (!((attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+          (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE)) &&
+        attr->va_size > used) {
+        used = attr->va_size;
+    }
+    return chimera_smb_round_cluster(used);
+} /* chimera_smb_alloc_size */
+
 static inline void
 chimera_smb_marshal_standard_attrs(
     const struct chimera_vfs_attrs *attr,
@@ -270,7 +300,7 @@ chimera_smb_marshal_standard_attrs(
         smb_attr->smb_alloc_size = 0;
         smb_attr->smb_size       = 0;
     } else {
-        smb_attr->smb_alloc_size = attr->va_space_used;
+        smb_attr->smb_alloc_size = chimera_smb_alloc_size(attr);
         smb_attr->smb_size       = attr->va_size;
     }
     smb_attr->smb_attr_mask |= SMB_ATTR_ALLOC_SIZE;
@@ -467,7 +497,7 @@ chimera_smb_marshal_network_open_info(
     /* A directory's data stream has no size; report 0/0 like FileStandardInformation
      * (MS-FSCC 2.4.40), not the backend's internal directory size. */
     smb_attr->smb_alloc_size = ((attr->va_mode & S_IFMT) == S_IFDIR) ?
-        0 : attr->va_space_used;
+        0 : chimera_smb_alloc_size(attr);
     smb_attr->smb_attr_mask |= SMB_ATTR_ALLOC_SIZE;
 
     smb_attr->smb_size = ((attr->va_mode & S_IFMT) == S_IFDIR) ?

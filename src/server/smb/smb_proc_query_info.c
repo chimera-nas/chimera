@@ -238,7 +238,7 @@ chimera_smb_query_stream_info_default_callback(
         /* A zero-length name is what makes the emitter spell the default fork
          * ":" + "" + ":$DATA". */
         entry.size     = attr->va_size;
-        entry.alloc    = attr->va_space_used;
+        entry.alloc    = chimera_smb_alloc_size(attr);
         entry.name_len = 0;
 
         memcpy(request->query_info.stream_records, &entry, sizeof(entry));
@@ -871,7 +871,15 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                         chimera_smb_fs_attributes(
                             request->query_info.open_file->handle->vfs_module->capabilities,
                             thread->shared->config.named_streams);
-                    request->query_info.output_length = 16;
+                    /* 12-byte fixed part + "NTFS" (8 bytes).  The minimum is
+                     * sizeof(FILE_FS_ATTRIBUTE_INFORMATION), 16 with its one-WCHAR
+                     * name: smaller is INFO_LENGTH_MISMATCH
+                     * (smb2.getinfo.qfs_buffercheck), and exactly that much gets
+                     * the truncated reply and BUFFER_OVERFLOW, as every Windows
+                     * file system answers (IFSTest VolumeInformation:
+                     * AttributeInformationTest). */
+                    request->query_info.min_length    = 16;
+                    request->query_info.output_length = 20;
                     break;
                 case SMB2_FILE_FS_CONTROL_INFO:
                     /* FileFsControlInformation (MS-FSCC 2.5.2): quota control.
@@ -1085,15 +1093,19 @@ chimera_smb_query_info_reply(
                     evpl_iovec_cursor_append_uint32(reply_cursor,
                                                     request->query_info.r_fs_attrs.smb_fs_attributes);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 255);
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 4);
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 8);
 
+                    /* FileSystemName.  Windows applications key NTFS-only
+                     * behaviour (ACLs, streams, robocopy's security copy) off
+                     * this name, and Samba reports "NTFS" for the same reason;
+                     * the flag word above says what is actually supported. */
                     chimera_smb_utf8_to_utf16le(
                         &request->compound->thread->iconv_ctx,
-                        "fs",
-                        2,
+                        "NTFS",
+                        4,
                         namebuf,
                         8);
-                    evpl_iovec_cursor_append_blob(reply_cursor, namebuf, 4);
+                    evpl_iovec_cursor_append_blob(reply_cursor, namebuf, 8);
                     break;
                 case SMB2_FILE_FS_FULL_SIZE_INFO:
                     evpl_iovec_cursor_append_uint64(reply_cursor, request->query_info.r_fs_attrs.
