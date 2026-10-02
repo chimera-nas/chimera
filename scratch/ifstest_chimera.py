@@ -24,7 +24,10 @@ logdir.mkdir(parents=True, exist_ok=True)
 scratch = Path(tempfile.mkdtemp(prefix="ifstest-chimera-"))
 (scratch / "state").mkdir()
 port, metrics = t.free_ports(2)
-(scratch / "config.json").write_text(json.dumps(t.daemon_config(backends, scratch, port, metrics)))
+config = t.daemon_config(backends, scratch, port, metrics)
+# IFSTest's stream tests need named streams, which the daemon leaves off.
+config["server"]["smb_named_streams"] = True
+(scratch / "config.json").write_text(json.dumps(config))
 daemon_log = logdir / "daemon.log"
 log = daemon_log.open("w+b")
 proc = subprocess.Popen([chimera, "-c", str(scratch / "config.json")], stdout=log, stderr=log,
