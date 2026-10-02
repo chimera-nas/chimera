@@ -650,15 +650,18 @@ chimera_smb_set_info_rename_check_dest_callback(
     struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
 
     if (error_code == CHIMERA_VFS_OK) {
-        /* Destination exists.  A non-directory destination is overwritten only
-         * when ReplaceIfExists is set (POSIX rename always sets it, so this
-         * COLLISION only fires for an SMB caller that cleared it).  A directory
-         * destination is left to rename_at, which enforces POSIX rename(2)
-         * semantics: replace an empty directory, DIRECTORY_NOT_EMPTY otherwise,
-         * and FILE_IS_A_DIRECTORY when the source is not itself a directory.
-         * (The SMB "rename a file INTO a directory" shell behaviour is not
-         * rename(2) and is deliberately not applied here.) */
-        if (!S_ISDIR(attr->va_mode) && !rename_info->replace_if_exist) {
+        /* Destination exists.  Without ReplaceIfExists it is never replaced,
+         * whatever it is: MS-FSA 2.1.5.14.11 answers OBJECT_NAME_COLLISION for
+         * a directory destination too (IFSTest FileInformation:
+         * ConflictingRenameInformationTest; renaming a directory onto an empty
+         * one used to replace it silently).  POSIX rename always sets the flag,
+         * so with it set a directory destination is still left to rename_at,
+         * which enforces rename(2): replace an empty directory,
+         * DIRECTORY_NOT_EMPTY otherwise, and FILE_IS_A_DIRECTORY when the
+         * source is not itself a directory.  (The SMB "rename a file INTO a
+         * directory" shell behaviour is not rename(2) and is deliberately not
+         * applied here.) */
+        if (!rename_info->replace_if_exist) {
             if (rename_info->new_parent_handle) {
                 chimera_vfs_release(request->compound->thread->vfs_thread,
                                     rename_info->new_parent_handle);
