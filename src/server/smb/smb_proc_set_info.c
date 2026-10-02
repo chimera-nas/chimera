@@ -248,8 +248,11 @@ chimera_smb_set_info_allocation_getattr_callback(
 
     cur_size = attr->va_size;
 
-    request->set_info.vfs_attrs.va_req_mask = CHIMERA_VFS_ATTR_SIZE;
-    request->set_info.vfs_attrs.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+    /* The allocation becomes the request rounded to whole clusters (MS-FSA
+    * 2.1.5.15.1); the backend keeps the part past EOF as a reservation. */
+    request->set_info.vfs_attrs.va_req_mask   = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE;
+    request->set_info.vfs_attrs.va_set_mask   = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE;
+    request->set_info.vfs_attrs.va_alloc_size = chimera_smb_round_cluster(alloc_size);
 
     if (alloc_size < cur_size) {
         request->set_info.vfs_attrs.va_size = alloc_size;

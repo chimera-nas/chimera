@@ -2113,12 +2113,14 @@ cairn_map_attrs(
          * materialize it, matching memfs. */
         attr->va_space_used = inode->space_used > inode->alloc_size ?
             inode->space_used : inode->alloc_size;
-        attr->va_atime = inode->atime;
-        attr->va_mtime = inode->mtime;
-        attr->va_ctime = inode->ctime;
-        attr->va_ino   = inode->inum;
-        attr->va_dev   = (42ULL << 32) | 42;
-        attr->va_rdev  = inode->rdev;
+        attr->va_alloc_size = inode->alloc_size;
+        attr->va_set_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
+        attr->va_atime      = inode->atime;
+        attr->va_mtime      = inode->mtime;
+        attr->va_ctime      = inode->ctime;
+        attr->va_ino        = inode->inum;
+        attr->va_dev        = (42ULL << 32) | 42;
+        attr->va_rdev       = inode->rdev;
 
         /* cairn persists DOS attributes natively, so report them alongside
          * stat (matching memfs). */
@@ -2274,11 +2276,16 @@ cairn_apply_attrs(
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        uint64_t old_size = inode->size;
+
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
         /* A reservation only holds while it exceeds the live data; once EOF is
-         * set at/above it the reservation is subsumed and no longer separate. */
-        if (inode->alloc_size <= inode->size) {
+         * set at/above it the reservation is subsumed and no longer separate.
+         * A truncation releases it too, as it releases the clusters past the
+         * new EOF on NTFS (MS-FSA 2.1.5.15.5); an AllocationSize set in the
+         * same call is applied after this. */
+        if (inode->alloc_size <= inode->size || inode->size < old_size) {
             inode->alloc_size = 0;
         }
     }
