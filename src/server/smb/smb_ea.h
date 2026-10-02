@@ -205,7 +205,7 @@ chimera_smb_ea_get_parse_one(
 
 /*
  * Encode one FILE_FULL_EA_INFORMATION entry into dst (caller guarantees room),
- * with the given client-facing name and value.  is_last controls NextEntryOffset
+ * with the given client-facing name (emitted upper-cased) and value.  is_last controls NextEntryOffset
  * (0 if last, else the 4-byte-aligned entry size).  Returns the aligned number
  * of bytes consumed.  dst==NULL measures only.
  */
@@ -228,7 +228,15 @@ chimera_smb_ea_full_emit_one(
         dst[5] = name_len;
         dst[6] = (uint8_t) (value_len & 0xff);
         dst[7] = (uint8_t) (value_len >> 8);
-        memcpy(dst + 8, name, name_len);
+        /* EA names are case-insensitive OS/2 ASCII, and Windows file systems
+         * return them upper-cased whatever case they were set in (NTFS does;
+         * IFSTest's EaInformation group checks it).  The stored case is kept
+         * for the backend and only the reply is folded. */
+        for (uint8_t i = 0; i < name_len; i++) {
+            char ch = name[i];
+
+            dst[8 + i] = (ch >= 'a' && ch <= 'z') ? (uint8_t) (ch - 'a' + 'A') : (uint8_t) ch;
+        }
         dst[8 + name_len] = '\0';
         if (value_len) {
             memcpy(dst + 8 + name_len + 1, value, value_len);
