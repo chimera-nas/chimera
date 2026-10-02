@@ -716,6 +716,141 @@ probe_agreement(struct smb2_conn *c)
 
 /* ---- SET_INFO round trips ----------------------------------------------- */
 
+/* ---- NTFS file semantics IFSTest checks ---------------------------------
+ *
+ * Behaviours a Windows client sees from NTFS that a POSIX backend does not give
+ * for free: AllocationSize in whole clusters following the MS-FSA allocation
+ * rules, DeletePending as a property of the file, ARCHIVE set by a write, and a
+ * rename that never replaces a directory. */
+static uint64_t
+std_alloc(
+    struct smb2_conn *c,
+    const uint8_t     file_id[16],
+    uint64_t         *eof)
+{
+    uint8_t out[64];
+
+    if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, file_id,
+                  out, sizeof(out), "StandardInformation")) {
+        *eof = 0;
+        return 0;
+    }
+    *eof = g64(out, 8);
+    return g64(out, 0);
+} /* std_alloc */
+
+static uint32_t
+set_alloc(
+    struct smb2_conn *c,
+    const uint8_t     file_id[16],
+    uint64_t          alloc)
+{
+    uint8_t buf[8];
+
+    p64(buf, 0, alloc);
+    return smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_ALLOCATION_INFO_T,
+                         file_id, buf, sizeof(buf));
+} /* set_alloc */
+
+static void
+probe_ntfs_semantics(struct smb2_conn *c)
+{
+    static uint8_t         payload[60000];
+    struct smb2_create_out a, b, d1, d2;
+    uint8_t                out[64], basic[40];
+    uint64_t               alloc, eof;
+    uint32_t               st, count = 0;
+
+    printf("# --- NTFS file semantics ---\n");
+
+    /* AllocationSize (MS-FSA 2.1.5.15.1 / 2.1.5.15.5): the end of file in
+     * whole 4 KiB clusters whatever the backend allocates, an AllocationSize
+     * set below EOF truncates to it, one above EOF is kept as a reservation,
+     * and a truncation of the end of file releases it. */
+    st = smb2_create(c, "alloc.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &a);
+    CHECK(st == ST_SUCCESS, "setup: CREATE alloc.bin -> 0x%08x", st);
+    st = smb2_write(c, a.file_id, 0, payload, sizeof(payload), &count);
+    CHECK(st == ST_SUCCESS, "setup: WRITE 60000 bytes -> 0x%08x", st);
+    alloc = std_alloc(c, a.file_id, &eof);
+    CHECK(alloc == 0xF000, "60000 bytes are allocated in clusters (0x%llx, "
+          "want 0xF000)", (unsigned long long) alloc);
+    st    = set_alloc(c, a.file_id, 0x2000);
+    alloc = std_alloc(c, a.file_id, &eof);
+    CHECK(st == ST_SUCCESS && alloc == 0x2000 && eof == 0x2000,
+          "AllocationSize below EOF truncates to it (0x%08x, alloc 0x%llx, "
+          "eof 0x%llx)", st, (unsigned long long) alloc,
+          (unsigned long long) eof);
+    st    = set_alloc(c, a.file_id, 0x11001);
+    alloc = std_alloc(c, a.file_id, &eof);
+    CHECK(st == ST_SUCCESS && alloc == 0x12000 && eof == 0x2000,
+          "AllocationSize above EOF reserves whole clusters (0x%08x, alloc "
+          "0x%llx, eof 0x%llx)", st, (unsigned long long) alloc,
+          (unsigned long long) eof);
+    st    = smb2_set_eof(c, a.file_id, 0x11800);
+    alloc = std_alloc(c, a.file_id, &eof);
+    CHECK(st == ST_SUCCESS && alloc == 0x12000,
+          "an EOF inside the reservation keeps it (alloc 0x%llx)",
+          (unsigned long long) alloc);
+    st    = smb2_set_eof(c, a.file_id, 0x800);
+    alloc = std_alloc(c, a.file_id, &eof);
+    CHECK(st == ST_SUCCESS && alloc == 0x1000,
+          "truncating the EOF releases the reservation (alloc 0x%llx)",
+          (unsigned long long) alloc);
+
+    /* DeletePending is the file's (MS-FSA Open.Link.IsDeleted): a disposition
+     * set through one handle shows through another. */
+    st = smb2_create(c, "alloc.bin", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &b);
+    CHECK(st == ST_SUCCESS, "setup: second open of alloc.bin -> 0x%08x", st);
+    st = smb2_set_disposition(c, a.file_id, 1);
+    CHECK(st == ST_SUCCESS, "SET disposition on the first handle -> 0x%08x",
+          st);
+    if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, b.file_id,
+                 out, sizeof(out), "StandardInformation (second handle)")) {
+        CHECK(out[20] == 1, "  ... the second handle reports DeletePending "
+              "(%u)", out[20]);
+    }
+    smb2_close(c, a.file_id);
+    smb2_close(c, b.file_id);
+
+    /* A write marks a data file ARCHIVE (MS-FSA 2.1.4.17), even after the
+     * client cleared it. */
+    st = smb2_create(c, "archive.bin", MBT_FILE_OVERWRITE_IF,
+                     MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &a);
+    CHECK(st == ST_SUCCESS, "setup: CREATE archive.bin -> 0x%08x", st);
+    memset(basic, 0, sizeof(basic));
+    p32(basic, 32, 0x2);               /* HIDDEN, ARCHIVE clear */
+    st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, a.file_id,
+                       basic, sizeof(basic));
+    CHECK(st == ST_SUCCESS, "SET attributes HIDDEN only -> 0x%08x", st);
+    st = smb2_write(c, a.file_id, 0, payload, 16, &count);
+    CHECK(st == ST_SUCCESS, "setup: WRITE 16 bytes -> 0x%08x", st);
+    if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, a.file_id,
+                 out, sizeof(out), "BasicInformation")) {
+        CHECK(g32(out, 32) == 0x22, "a write sets ARCHIVE (attributes 0x%x, "
+              "want 0x22)", g32(out, 32));
+    }
+    smb2_close(c, a.file_id);
+
+    /* A rename never replaces a directory, even with ReplaceIfExists
+     * (MS-FSA 2.1.5.15.12). */
+    st = smb2_create_opts(c, "rendir1", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &d1);
+    CHECK(st == ST_SUCCESS, "setup: CREATE rendir1 -> 0x%08x", st);
+    st = smb2_create_opts(c, "rendir2", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &d2);
+    CHECK(st == ST_SUCCESS, "setup: CREATE rendir2 -> 0x%08x", st);
+    smb2_close(c, d2.file_id);
+    st = smb2_rename(c, d1.file_id, "rendir2", 0);
+    CHECK(st == ST_OBJECT_NAME_COLLISION, "a directory renamed onto another "
+          "without ReplaceIfExists -> OBJECT_NAME_COLLISION (0x%08x)", st);
+    st = smb2_rename(c, d1.file_id, "rendir2", 1);
+    CHECK(st == ST_ACCESS_DENIED, "  ... and with it -> ACCESS_DENIED "
+          "(0x%08x)", st);
+    smb2_close(c, d1.file_id);
+} /* probe_ntfs_semantics */
+
 static void
 probe_set_info(struct smb2_conn *c)
 {
@@ -1750,6 +1885,7 @@ main(
 
     probe_agreement(c);
     probe_set_info(c);
+    probe_ntfs_semantics(c);
     probe_ea(c);
     probe_streams(c);
     probe_link(c);
