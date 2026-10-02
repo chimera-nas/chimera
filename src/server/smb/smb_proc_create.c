@@ -220,7 +220,10 @@ chimera_smb_create_error_status(enum chimera_vfs_error error_code)
         case CHIMERA_VFS_EPERM:        return SMB2_STATUS_ACCESS_DENIED;
         case CHIMERA_VFS_ENOSPC:
         case CHIMERA_VFS_EDQUOT:       return SMB2_STATUS_DISK_FULL;
-        case CHIMERA_VFS_ENAMETOOLONG: return SMB2_STATUS_NAME_TOO_LONG;
+        /* A name component longer than the file system allows is an invalid
+         * name to Windows (NTFS answers STATUS_OBJECT_NAME_INVALID; IFSTest
+         * OpenCreateGeneral:FileNameLengthTest), not NAME_TOO_LONG. */
+        case CHIMERA_VFS_ENAMETOOLONG: return SMB2_STATUS_OBJECT_NAME_INVALID;
         case CHIMERA_VFS_EROFS:        return SMB2_STATUS_MEDIA_WRITE_PROTECTED;
         case CHIMERA_VFS_ELOOP:        return SMB2_STATUS_STOPPED_ON_SYMLINK;
         default:                       return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
@@ -2218,7 +2221,7 @@ chimera_smb_create_truncate_cb(
             request->create.r_attrs.smb_alloc_size <
             request->create.alsi_alloc_size) {
             request->create.r_attrs.smb_alloc_size =
-                request->create.alsi_alloc_size;
+                chimera_smb_round_cluster(request->create.alsi_alloc_size);
         }
     }
 
@@ -3321,7 +3324,8 @@ chimera_smb_create_open_at_callback(
     if (request->create.alsi_alloc_size > 0 &&
         !request->create.r_is_directory && alsi_applies &&
         request->create.r_attrs.smb_alloc_size < request->create.alsi_alloc_size) {
-        request->create.r_attrs.smb_alloc_size = request->create.alsi_alloc_size;
+        request->create.r_attrs.smb_alloc_size =
+            chimera_smb_round_cluster(request->create.alsi_alloc_size);
     }
 
     /* Activate the park-on-conflict-break path: if gen_open_file parks on a
@@ -5895,6 +5899,16 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
+        /* MS-FSA 2.1.5.1 Phase 1: a directory cannot be temporary, so
+         * FILE_DIRECTORY_FILE with FILE_ATTRIBUTE_TEMPORARY is
+         * STATUS_INVALID_PARAMETER (IFSTEST OpenCreateGeneral:
+         * DirectoryFullPathCreationTest). */
+        if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
+            (request->create.file_attributes & SMB2_FILE_ATTRIBUTE_TEMPORARY)) {
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+
         /* MS-FSA 2.1.5.1 Phase 1 (MS-FSA_R2374 / R2376): a CreateOptions of
          * FILE_DIRECTORY_FILE combined with a destructive CreateDisposition is
          * a contradiction -- SUPERSEDE/OVERWRITE/OVERWRITE_IF replace the data
@@ -5917,6 +5931,23 @@ chimera_smb_create(struct chimera_smb_request *request)
         * FILE_ATTRIBUTE_DEVICE (0x40) -- is rejected with INVALID_PARAMETER. */
         if (request->create.file_attributes & ~SMB2_CREATE_FILE_ATTR_VALID_MASK) {
             chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+
+        /* A read-only file cannot be deleted, so a create that would make a
+         * new READONLY file and mark it delete-on-close is refused before
+         * anything is created: STATUS_CANNOT_DELETE (MS-FSA 2.1.5.1.1; IFSTest
+         * OpenCreateParameters:ReadOnlyAttributeTest).  Only the dispositions
+         * that apply this request's FileAttributes to a new instance; opening
+         * an existing read-only file with delete-on-close is fenced later,
+         * against the file's stored attributes. */
+        if ((request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) &&
+            (request->create.file_attributes & SMB2_FILE_ATTRIBUTE_READONLY) &&
+            (request->create.create_disposition == SMB2_FILE_CREATE ||
+             request->create.create_disposition == SMB2_FILE_SUPERSEDE ||
+             request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+             request->create.create_disposition == SMB2_FILE_OVERWRITE_IF)) {
+            chimera_smb_complete_request(request, SMB2_STATUS_CANNOT_DELETE);
             return;
         }
 
