@@ -6654,7 +6654,7 @@ memfs_set_xattr(
     void                       *private_data)
 {
     struct memfs_inode *inode;
-    struct memfs_xattr *xattr;
+    struct memfs_xattr *xattr, **tail;
     struct timespec     now;
     void               *value;
 
@@ -6699,8 +6699,12 @@ memfs_set_xattr(
         xattr->value_len = request->set_xattr.value_len;
         xattr->value     = malloc(request->set_xattr.value_len);
         memcpy(xattr->value, request->set_xattr.value, request->set_xattr.value_len);
-        xattr->next   = inode->xattrs;
-        inode->xattrs = xattr;
+        /* Append, so the xattrs list in the order they were set, as NTFS
+         * returns EAs (an SMB FileFullEaInformation scan walks this order). */
+        xattr->next = NULL;
+        for (tail = &inode->xattrs; *tail; tail = &(*tail)->next) {
+        }
+        *tail = xattr;
     }
 
     chimera_vfs_realtime(&now);

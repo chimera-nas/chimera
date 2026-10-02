@@ -47,6 +47,13 @@ struct info_case {
     uint32_t    size;      /* expected OutputBufferLength, 0 = variable */
 };
 
+#define ST_NO_MORE_EAS           0x80000012u
+#define ST_NONEXISTENT_EA_ENTRY  0xC0000051u
+#define ST_NO_EAS_ON_FILE        0xC0000052u
+#define SL_RESTART_SCAN_T        0x00000001u
+#define SL_RETURN_SINGLE_ENTRY_T 0x00000002u
+#define SL_INDEX_SPECIFIED_T     0x00000004u
+
 /* *INDENT-OFF* */
 static const struct info_case file_classes[] = {
     { "FileBasicInformation",         SMB2_FILE_BASIC_INFO_T,        40 },
@@ -128,12 +135,16 @@ probe_query_sweep(
             CHECK(st == ST_SUCCESS && len == ic->size,
                   "%s: %s -> 0x%08x (%u bytes, want %u)", what, ic->name, st,
                   len, ic->size);
+        } else if (ic->cls == SMB2_FILE_FULL_EA_INFO_T) {
+            /* An object with no EAs answers STATUS_NO_EAS_ON_FILE, as NTFS
+             * does (MS-FSA 2.1.5.12.12); the EA section below reads a list. */
+            CHECK(st == ST_NO_EAS_ON_FILE, "%s: %s -> 0x%08x (want "
+                  "NO_EAS_ON_FILE)", what, ic->name, st);
         } else {
             /* A variable-length class may legitimately answer with nothing --
-             * an empty EA list, or a directory's (absent) data stream -- so
-             * the sweep only requires that the class is answered.  The EA and
-             * stream sections below check non-empty results with real
-             * content. */
+             * a directory's (absent) data stream -- so the sweep only requires
+             * that the class is answered.  The stream section below checks
+             * non-empty results with real content. */
             CHECK(st == ST_SUCCESS, "%s: %s -> 0x%08x (%u bytes)", what,
                   ic->name, st, len);
         }
@@ -278,6 +289,198 @@ ea_put(
     return off + (last ? need : adv);
 } /* ea_put */
 
+/* A FileFullEaInformation query with the scan flags, EaIndex, and EA list the
+ * generic helper leaves at zero.  Unlike it, this one returns the data that
+ * came back with a BUFFER_OVERFLOW, since a partial EA list is the point. */
+static uint32_t
+query_ea(
+    struct smb2_conn *c,
+    const uint8_t     file_id[16],
+    uint32_t          flags,
+    uint32_t          index,
+    const uint8_t    *list,
+    uint32_t          list_len,
+    uint32_t          out_buf_len,
+    uint8_t          *out,
+    uint32_t          out_cap,
+    uint32_t         *out_len)
+{
+    int      b    = smb2c_begin(c, SMB2_QUERY_INFO, 0);
+    uint8_t *body = c->sbuf + b;
+    uint32_t st;
+
+    p16(body, 0, 41);
+    body[2] = SMB2_INFO_FILE_T;
+    body[3] = SMB2_FILE_FULL_EA_INFO_T;
+    p32(body, 4, out_buf_len);
+    p16(body, 8, list_len ? (uint16_t) (SMB2_HDR_SIZE + 40) : 0);
+    p16(body, 10, 0);
+    p32(body, 12, list_len);
+    p32(body, 16, index);              /* AdditionalInformation = EaIndex */
+    p32(body, 20, flags);
+    memcpy(body + 24, file_id, 16);
+    if (list_len) {
+        memcpy(body + 40, list, list_len);
+    }
+
+    st       = smb2c_xfer(c, 40 + (int) list_len);
+    *out_len = 0;
+    if (st == ST_SUCCESS || st == ST_BUFFER_OVERFLOW) {
+        const uint8_t *rb   = c->rbuf + 4 + SMB2_HDR_SIZE;
+        uint16_t       doff = g16(rb, 2);
+        uint32_t       dlen = g32(rb, 4);
+
+        if (dlen > out_cap) {
+            dlen = out_cap;
+        }
+        memcpy(out, c->rbuf + 4 + doff, dlen);
+        *out_len = dlen;
+    }
+    return st;
+} /* query_ea */
+
+/* Count the entries of a FILE_FULL_EA_INFORMATION chain and copy out the name
+ * and value length of the one at position want (0-based). */
+static int
+ea_walk(
+    const uint8_t *out,
+    uint32_t       len,
+    int            want,
+    char          *name,
+    uint32_t      *vlen)
+{
+    uint32_t off = 0;
+    int      n   = 0;
+
+    name[0] = '\0';
+    while (off + 8 <= len) {
+        uint32_t next = g32(out, (int) off);
+        uint8_t  nlen = out[off + 5];
+
+        if (off + 8 + nlen + 1 > len) {
+            break;
+        }
+        if (n == want) {
+            memcpy(name, out + off + 8, nlen);
+            name[nlen] = '\0';
+            *vlen      = g16(out, (int) off + 6);
+        }
+        n++;
+        if (next == 0) {
+            break;
+        }
+        off += next;
+    }
+    return n;
+} /* ea_walk */
+
+/* The scan state MS-FSA keeps per open (Open.NextEaEntry), the client's EaIndex
+ * and EA list, and the overflow rules -- the parts of NtQueryEaFile IFSTest's
+ * EaInformation group drives.  The file holds USER.ONE and USER.TWO on entry;
+ * a third EA is set in lower case to see it come back upper-cased. */
+static void
+probe_ea_scan(
+    struct smb2_conn *c,
+    const uint8_t     file_id[16])
+{
+    uint8_t  in[128], out[1024];
+    char     name[64], first[64], second[64];
+    uint32_t st, len, vlen = 0;
+    int      n;
+
+    n  = ea_put(in, 0, "lower.three", "3", 1);
+    st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
+                       file_id, in, (uint32_t) n);
+    CHECK(st == ST_SUCCESS, "SET a lower-case EA name -> 0x%08x", st);
+
+    st = query_ea(c, file_id, SL_RESTART_SCAN_T, 0, NULL, 0, sizeof(out),
+                  out, sizeof(out), &len);
+    n = ea_walk(out, len, 2, name, &vlen);
+    CHECK(st == ST_SUCCESS && n == 3, "a restarted scan returns all three "
+          "EAs (0x%08x, %d entries)", st, n);
+    CHECK(strcmp(name, "LOWER.THREE") == 0, "  ... in the order set, and "
+          "upper-cased as NTFS returns them (3rd is \"%s\")", name);
+
+    /* With every entry returned, the scan has nothing left. */
+    st = query_ea(c, file_id, 0, 0, NULL, 0, sizeof(out), out, sizeof(out),
+                  &len);
+    CHECK(st == ST_NO_MORE_EAS, "a scan continued past the end -> "
+          "NO_MORE_EAS (0x%08x)", st);
+
+    /* One entry at a time, each query resuming where the last stopped. */
+    st = query_ea(c, file_id, SL_RESTART_SCAN_T | SL_RETURN_SINGLE_ENTRY_T, 0,
+                  NULL, 0, sizeof(out), out, sizeof(out), &len);
+    n = ea_walk(out, len, 0, first, &vlen);
+    CHECK(st == ST_SUCCESS && n == 1, "SL_RETURN_SINGLE_ENTRY returns one "
+          "entry (0x%08x, %d)", st, n);
+    st = query_ea(c, file_id, SL_RETURN_SINGLE_ENTRY_T, 0, NULL, 0,
+                  sizeof(out), out, sizeof(out), &len);
+    n = ea_walk(out, len, 0, second, &vlen);
+    CHECK(st == ST_SUCCESS && n == 1 && strcmp(first, second) != 0,
+          "  ... and the next query resumes at the next one (\"%s\" then "
+          "\"%s\")", first, second);
+
+    /* EaIndex is 1-based, the end is one past the last, and beyond that the
+     * entry does not exist. */
+    st = query_ea(c, file_id, SL_INDEX_SPECIFIED_T | SL_RETURN_SINGLE_ENTRY_T,
+                  2, NULL, 0, sizeof(out), out, sizeof(out), &len);
+    n = ea_walk(out, len, 0, name, &vlen);
+    CHECK(st == ST_SUCCESS && n == 1 && strcmp(name, second) == 0,
+          "EaIndex 2 returns the second entry (0x%08x, \"%s\")", st, name);
+    st = query_ea(c, file_id, SL_INDEX_SPECIFIED_T, 4, NULL, 0, sizeof(out),
+                  out, sizeof(out), &len);
+    CHECK(st == ST_NO_MORE_EAS, "EaIndex one past the last -> NO_MORE_EAS "
+          "(0x%08x)", st);
+    st = query_ea(c, file_id, SL_INDEX_SPECIFIED_T, 5, NULL, 0, sizeof(out),
+                  out, sizeof(out), &len);
+    CHECK(st == ST_NONEXISTENT_EA_ENTRY, "EaIndex beyond that -> "
+          "NONEXISTENT_EA_ENTRY (0x%08x)", st);
+    st = query_ea(c, file_id, SL_INDEX_SPECIFIED_T, 0, NULL, 0, sizeof(out),
+                  out, sizeof(out), &len);
+    CHECK(st == ST_NONEXISTENT_EA_ENTRY, "EaIndex 0 -> NONEXISTENT_EA_ENTRY "
+          "(0x%08x)", st);
+
+    /* A buffer that holds the first entry but not the rest gets that entry
+     * and BUFFER_OVERFLOW; one too small for any entry, BUFFER_TOO_SMALL. */
+    st = query_ea(c, file_id, SL_RESTART_SCAN_T, 0, NULL, 0, 28, out,
+                  sizeof(out), &len);
+    n = ea_walk(out, len, 0, name, &vlen);
+    CHECK(st == ST_BUFFER_OVERFLOW && n == 1, "a buffer with room for one "
+          "entry -> BUFFER_OVERFLOW with that entry (0x%08x, %d entries, %u "
+          "bytes)", st, n, len);
+    st = query_ea(c, file_id, SL_RESTART_SCAN_T, 0, NULL, 0, 12, out,
+                  sizeof(out), &len);
+    CHECK(st == ST_BUFFER_TOO_SMALL, "a buffer with room for no entry -> "
+          "BUFFER_TOO_SMALL (0x%08x)", st);
+
+    /* An EA list names the entries to return, in its own order, matched
+     * without regard to case; one the file lacks comes back empty. */
+    memset(in, 0, sizeof(in));
+    n = 0;
+    p32(in, 0, 16);                    /* FILE_GET_EA_INFORMATION: next */
+    in[4] = 8;
+    memcpy(in + 5, "user.two", 9);
+    p32(in, 16, 0);
+    in[20] = 7;
+    memcpy(in + 21, "MISSING", 8);
+    n  = 29;
+    st = query_ea(c, file_id, 0, 0, in, (uint32_t) n, sizeof(out), out,
+                  sizeof(out), &len);
+    CHECK(st == ST_SUCCESS && ea_walk(out, len, 0, name, &vlen) == 2 &&
+          strcmp(name, "USER.TWO") == 0 && vlen == 6,
+          "an EA list returns the named EA first (0x%08x, \"%s\", %u bytes)",
+          st, name, vlen);
+    ea_walk(out, len, 1, name, &vlen);
+    CHECK(strcmp(name, "MISSING") == 0 && vlen == 0,
+          "  ... and an absent one with no value (\"%s\", %u bytes)", name,
+          vlen);
+
+    n  = ea_put(in, 0, "lower.three", "", 1);
+    st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
+                       file_id, in, (uint32_t) n);
+    CHECK(st == ST_SUCCESS, "cleanup: delete the lower-case EA -> 0x%08x", st);
+} /* probe_ea_scan */
+
 static void
 probe_ea(struct smb2_conn *c)
 {
@@ -293,12 +496,12 @@ probe_ea(struct smb2_conn *c)
                      MBT_FILE_SHARE_RWD, NULL, &co);
     CHECK(st == ST_SUCCESS, "setup: CREATE ea.bin -> 0x%08x", st);
 
-    /* An empty EA list is the honest starting state. */
+    /* A fresh file has no EAs, which NTFS reports as STATUS_NO_EAS_ON_FILE
+     * rather than as an empty list. */
     st = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
                          co.file_id, 0, out, sizeof(out), &len);
-    CHECK(st == ST_SUCCESS && len == 0,
-          "FullEaInformation on a fresh file is empty (0x%08x, %u bytes)", st,
-          len);
+    CHECK(st == ST_NO_EAS_ON_FILE,
+          "FullEaInformation on a fresh file -> NO_EAS_ON_FILE (0x%08x)", st);
 
     /* Two EAs in one SET, which is what exercises the chaining. */
     memset(in, 0, sizeof(in));
@@ -356,6 +559,8 @@ probe_ea(struct smb2_conn *c)
     }
     CHECK(found_one, "  ... USER.ONE round-trips with its value");
     CHECK(found_two, "  ... USER.TWO round-trips with its value");
+
+    probe_ea_scan(c, co.file_id);
 
     /* An EA name carrying reserved punctuation is refused (Samba's
      * is_invalid_windows_ea_name rule). */

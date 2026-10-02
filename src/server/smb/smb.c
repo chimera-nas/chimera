@@ -58,6 +58,16 @@ chimera_smb_is_error_status(unsigned int status)
            status != SMB2_STATUS_NOTIFY_ENUM_DIR;
 } /* chimera_smb_is_error_status */
 
+static inline int
+chimera_smb_query_ea_partial(const struct chimera_smb_request *request)
+{
+    return request->smb2_hdr.command == SMB2_QUERY_INFO &&
+           request->status == SMB2_STATUS_BUFFER_OVERFLOW &&
+           request->query_info.info_type == SMB2_INFO_FILE &&
+           request->query_info.info_class == SMB2_FILE_FULL_EA_INFO &&
+           request->query_info.ea_out_len > 0;
+} /* chimera_smb_query_ea_partial */
+
 /*
  * Establish the server's ServerGuid (MS-SMB2 2.2.4 / 3.3.5.4).  The ServerGuid
  * must uniquely identify this server AND stay stable across restarts so that
@@ -639,11 +649,16 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * MaxOutputResponse (chimera_smb_qar_finalize does exactly that for
          * FSCTL_QUERY_ALLOCATED_RANGES) has that work silently discarded.
          *
+         * A FileFullEaInformation query that filled the buffer before running
+         * out of EAs is the same again: the entries that fit are returned with
+         * BUFFER_OVERFLOW and the client resumes from the next one.
+         *
          * All other errors get the generic SMB2 ERROR Response. */
         if (chimera_smb_is_error_status(request->status) &&
             !(request->smb2_hdr.command == SMB2_IOCTL &&
               (request->ioctl.cc_limit_response ||
-               request->status == SMB2_STATUS_BUFFER_OVERFLOW))) {
+               request->status == SMB2_STATUS_BUFFER_OVERFLOW)) &&
+            !chimera_smb_query_ea_partial(request)) {
             if (request->status == SMB2_STATUS_BUFFER_TOO_SMALL &&
                 request->smb2_hdr.command == SMB2_QUERY_INFO) {
                 /* MS-SMB2 2.2.2 / 3.3.4.4: a QUERY_INFO that fails

@@ -1104,6 +1104,21 @@ struct chimera_smb_request {
             uint32_t                        ea_out_cap;
             uint32_t                        ea_last_off;
             const char                     *ea_cursor;
+            /* The client's FILE_GET_EA_INFORMATION list (InputBuffer), when it
+             * names the EAs to return; ea_in_off walks it.  Without a list the
+             * user.* names are scanned from index ea_start (0-based), ea_index
+             * counting the names passed so far; ea_single stops after one entry
+             * (SL_RETURN_SINGLE_ENTRY) and ea_returned counts entries emitted. */
+            uint8_t                         ea_in[4096];
+            uint32_t                        ea_in_len;
+            uint32_t                        ea_in_off;
+            uint32_t                        ea_start;
+            uint32_t                        ea_index;
+            uint32_t                        ea_returned;
+            uint8_t                         ea_single;
+            /* The client-facing name of the entry whose value is being fetched. */
+            const char                     *ea_name;
+            uint32_t                        ea_name_len;
         } query_info;
 
         struct {

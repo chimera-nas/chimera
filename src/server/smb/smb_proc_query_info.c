@@ -354,7 +354,16 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
 } /* chimera_smb_query_stream_info */
 
 /* ---- FILE_FULL_EA_INFORMATION query: enumerate the object's user.* xattrs and
- * build the wire EA list, fetching each value with its own get_xattr. ---- */
+ * build the wire EA list, fetching each value with its own get_xattr.
+ *
+ * Without an EA list the entries come out in the backend's xattr order starting
+ * at Open.NextEaEntry (MS-FSA 2.1.5.12.12), or at the 1-based EaIndex the client
+ * passes in AdditionalInformation with SL_INDEX_SPECIFIED, or at the first with
+ * SL_RESTART_SCAN; SL_RETURN_SINGLE_ENTRY stops after one.  With an EA list the
+ * named EAs come out in the list's order, an absent one as an empty value, as
+ * NTFS and FastFat answer.  Names go out upper-cased, as Windows file systems
+ * return them.  As many entries as fit are returned; if some remain the status
+ * is BUFFER_OVERFLOW, and if not even the first fits, BUFFER_TOO_SMALL. ---- */
 
 #define CHIMERA_SMB_EA_QUERY_CAP_MAX (1u << 20)
 
@@ -372,15 +381,132 @@ chimera_smb_query_ea_finish(
         chimera_vfs_release(vfs_thread, request->query_info.stream_base_handle);
         request->query_info.stream_base_handle = NULL;
     }
-    /* On success the reply emitter owns ea_out (frees it after emitting); on
-     * error free it here. */
-    if (status != SMB2_STATUS_SUCCESS && request->query_info.ea_out) {
+    /* The reply emitter owns ea_out (frees it after emitting) on success and on
+     * a partial BUFFER_OVERFLOW reply; on any other status free it here. */
+    if (!(status == SMB2_STATUS_SUCCESS ||
+          (status == SMB2_STATUS_BUFFER_OVERFLOW && request->query_info.ea_out_len > 0))) {
         free(request->query_info.ea_out);
-        request->query_info.ea_out = NULL;
+        request->query_info.ea_out     = NULL;
+        request->query_info.ea_out_len = 0;
     }
     chimera_smb_open_file_release(request, request->query_info.open_file);
     chimera_smb_complete_request(request, status);
 } /* chimera_smb_query_ea_finish */
+
+/* The enumeration stopped with entries emitted: terminate the chain, remember
+ * where a later scan resumes, and reply. */
+static void
+chimera_smb_query_ea_done(
+    struct chimera_smb_request *request,
+    uint32_t                    status)
+{
+    if (request->query_info.ea_out_len > 0) {
+        uint8_t *last = request->query_info.ea_out + request->query_info.ea_last_off;
+        uint32_t zero = 0;
+
+        /* The last entry carries no NextEntryOffset and no alignment padding. */
+        memcpy(last, &zero, 4);
+        request->query_info.ea_out_len = request->query_info.ea_last_off +
+            8 + last[5] + 1 + (last[6] | (last[7] << 8));
+    }
+    if (!request->query_info.ea_in_len) {
+        request->query_info.open_file->next_ea_index = request->query_info.ea_index;
+    }
+    request->query_info.output_length = request->query_info.ea_out_len;
+    chimera_smb_query_ea_finish(request, status);
+} /* chimera_smb_query_ea_done */
+
+/* No room for the next entry: a partial reply if any entry went out. */
+static void
+chimera_smb_query_ea_full(
+    struct chimera_smb_request *request,
+    uint32_t                    need)
+{
+    if (request->query_info.ea_returned) {
+        chimera_smb_query_ea_done(request, SMB2_STATUS_BUFFER_OVERFLOW);
+    } else {
+        request->query_info.output_length = need;
+        chimera_smb_query_ea_finish(request, SMB2_STATUS_BUFFER_TOO_SMALL);
+    }
+} /* chimera_smb_query_ea_full */
+
+/* Write the header and upper-cased name of an entry whose value_len-byte value
+ * is already in place behind them, and account for it. */
+static void
+chimera_smb_query_ea_put(
+    struct chimera_smb_request *request,
+    uint32_t                    value_len)
+{
+    const char *name    = request->query_info.ea_name;
+    uint32_t    namelen = request->query_info.ea_name_len;
+    uint8_t    *out     = request->query_info.ea_out;
+    uint32_t    start   = request->query_info.ea_out_len;
+    uint32_t    entry_size, aligned, i;
+
+    entry_size = 8 + namelen + 1 + value_len;
+    aligned    = (entry_size + 3) & ~3u;
+
+    memcpy(out + start, &aligned, 4);     /* the last entry is patched to 0 later */
+    out[start + 4] = 0;                   /* Flags (we do not surface NEED_EA) */
+    out[start + 5] = (uint8_t) namelen;
+    out[start + 6] = (uint8_t) (value_len & 0xff);
+    out[start + 7] = (uint8_t) (value_len >> 8);
+    for (i = 0; i < namelen; i++) {
+        out[start + 8 + i] = (uint8_t) toupper((unsigned char) name[i]);
+    }
+    out[start + 8 + namelen] = '\0';
+    /* Zero the alignment tail, which may run past the end of the buffer for
+     * the last entry; it is only sent when another entry follows it. */
+    for (i = entry_size; i < aligned && start + i < request->query_info.ea_out_cap; i++) {
+        out[start + i] = 0;
+    }
+
+    request->query_info.ea_last_off = start;
+    request->query_info.ea_out_len  = start + aligned;
+    request->query_info.ea_returned++;
+} /* chimera_smb_query_ea_put */
+
+/* The next user.* xattr name at or after cur in the listed names, or NULL. */
+static const char *
+chimera_smb_query_ea_next_user(
+    struct chimera_smb_request *request,
+    const char                 *cur)
+{
+    const char *names_end = (const char *) request->query_info.stream_records +
+        request->query_info.stream_record_len;
+    uint32_t    flen;
+
+    while (cur < names_end) {
+        flen = strlen(cur);
+        if (chimera_vfs_xattr_is_user(cur, flen)) {
+            return cur;
+        }
+        cur += flen + 1;
+    }
+    return NULL;
+} /* chimera_smb_query_ea_next_user */
+
+/* The stored user.* xattr whose client-facing name matches name, or NULL. */
+static const char *
+chimera_smb_query_ea_lookup(
+    struct chimera_smb_request *request,
+    const char                 *name,
+    uint32_t                    namelen)
+{
+    const char *cur = (const char *) request->query_info.stream_records;
+    uint32_t    flen;
+
+    while ((cur = chimera_smb_query_ea_next_user(request, cur)) != NULL) {
+        flen = strlen(cur);
+        if (chimera_smb_ea_name_eq(cur + CHIMERA_VFS_XATTR_USER_PREFIX_LEN,
+                                   flen - CHIMERA_VFS_XATTR_USER_PREFIX_LEN,
+                                   name, namelen)) {
+            return cur;
+        }
+        cur += flen + 1;
+    }
+    return NULL;
+} /* chimera_smb_query_ea_lookup */
 
 static void
 chimera_smb_query_ea_get_cb(
@@ -388,105 +514,106 @@ chimera_smb_query_ea_get_cb(
     uint32_t               value_len,
     void                  *private_data)
 {
-    struct chimera_smb_request *request  = private_data;
-    const char                 *fullname = request->query_info.ea_cursor;
-    uint32_t                    flen     = strlen(fullname);
-    uint32_t                    cnamelen = flen - CHIMERA_VFS_XATTR_USER_PREFIX_LEN;
-    const char                 *cname    = fullname + CHIMERA_VFS_XATTR_USER_PREFIX_LEN;
-    uint8_t                    *out      = request->query_info.ea_out;
-    uint32_t                    start    = request->query_info.ea_out_len;
-    uint32_t                    entry_size, aligned, next, pz;
+    struct chimera_smb_request *request = private_data;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        /* EA removed between list and get -> skip; value too big -> EA_TOO_LARGE. */
-        if (error_code == CHIMERA_VFS_ENODATA) {
-            request->query_info.ea_cursor = fullname + flen + 1;
+    if (error_code == CHIMERA_VFS_ENODATA) {
+        /* Removed between list and get: an EA-list entry still goes out, empty;
+         * a scanned one is skipped. */
+        if (!request->query_info.ea_in_len) {
+            request->query_info.ea_index++;
             chimera_smb_query_ea_next(request);
             return;
         }
+        value_len = 0;
+    } else if (error_code == CHIMERA_VFS_ERANGE) {
+        /* The value does not fit in what is left of the reply. */
+        chimera_smb_query_ea_full(request,
+                                  8 + request->query_info.ea_name_len + 1 + CHIMERA_SMB_EA_VALUE_MAX);
+        return;
+    } else if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_query_ea_finish(request, chimera_smb_ea_status(error_code));
         return;
     }
 
-    /* The value is already in place at start + 8 + cnamelen + 1; fill the
-     * header + name in front of it. */
-    entry_size = 8 + cnamelen + 1 + value_len;
-    aligned    = (entry_size + 3) & ~3u;
-    next       = aligned;                 /* the last entry is patched to 0 later */
-
-    memcpy(out + start, &next, 4);
-    out[start + 4] = 0;                   /* Flags (we do not surface NEED_EA) */
-    out[start + 5] = (uint8_t) cnamelen;
-    out[start + 6] = (uint8_t) (value_len & 0xff);
-    out[start + 7] = (uint8_t) (value_len >> 8);
-    memcpy(out + start + 8, cname, cnamelen);
-    out[start + 8 + cnamelen] = '\0';
-    for (pz = entry_size; pz < aligned; pz++) {
-        out[start + pz] = 0;
-    }
-
-    request->query_info.ea_last_off = start;
-    request->query_info.ea_out_len  = start + aligned;
-    request->query_info.ea_cursor   = fullname + flen + 1;
+    chimera_smb_query_ea_put(request, value_len);
+    request->query_info.ea_index++;
     chimera_smb_query_ea_next(request);
 } /* chimera_smb_query_ea_get_cb */
 
 static void
 chimera_smb_query_ea_next(struct chimera_smb_request *request)
 {
-    struct chimera_server_smb_thread *thread    = request->compound->thread;
-    const char                       *names_end =
-        (const char *) request->query_info.stream_records +
-        request->query_info.stream_record_len;
-    const char                       *cur;
-    const char                       *fullname;
-    uint32_t                          flen, cnamelen, start, vpos, cap, vmax;
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    const char                       *fullname, *name;
+    uint32_t                          namelen, start, vpos, cap, vmax;
 
-    /* Advance to the next user.* name. */
-    cur = request->query_info.ea_cursor;
-    while (cur < names_end) {
-        flen = strlen(cur);
-        if (chimera_vfs_xattr_is_user(cur, flen)) {
-            break;
+    for (;;) {
+        if (request->query_info.ea_single && request->query_info.ea_returned) {
+            chimera_smb_query_ea_done(request, SMB2_STATUS_SUCCESS);
+            return;
         }
-        cur += flen + 1;
-    }
 
-    if (cur >= names_end) {
-        /* Done: terminate the chain (NextEntryOffset 0 on the last entry). */
-        if (request->query_info.ea_out_len > 0) {
-            uint32_t zero = 0;
-            memcpy(request->query_info.ea_out + request->query_info.ea_last_off,
-                   &zero, 4);
+        if (request->query_info.ea_in_len) {
+            /* The next name in the client's list. */
+            if (request->query_info.ea_in_off >= request->query_info.ea_in_len) {
+                chimera_smb_query_ea_done(request, SMB2_STATUS_SUCCESS);
+                return;
+            }
+            if (chimera_smb_ea_get_parse_one(request->query_info.ea_in,
+                                             request->query_info.ea_in_len,
+                                             &request->query_info.ea_in_off,
+                                             &name, &namelen) != 0 || namelen == 0) {
+                chimera_smb_query_ea_finish(request, SMB2_STATUS_EA_LIST_INCONSISTENT);
+                return;
+            }
+            fullname = chimera_smb_query_ea_lookup(request, name, namelen);
+        } else {
+            /* The next stored user.* name, passing over those before the
+             * starting index. */
+            fullname = chimera_smb_query_ea_next_user(request, request->query_info.ea_cursor);
+            if (!fullname) {
+                chimera_smb_query_ea_done(request, SMB2_STATUS_SUCCESS);
+                return;
+            }
+            request->query_info.ea_cursor = fullname + strlen(fullname) + 1;
+            if (request->query_info.ea_index < request->query_info.ea_start) {
+                request->query_info.ea_index++;
+                continue;
+            }
+            name    = fullname + CHIMERA_VFS_XATTR_USER_PREFIX_LEN;
+            namelen = strlen(fullname) - CHIMERA_VFS_XATTR_USER_PREFIX_LEN;
         }
-        request->query_info.output_length = request->query_info.ea_out_len;
-        chimera_smb_query_ea_finish(request, SMB2_STATUS_SUCCESS);
+
+        request->query_info.ea_name     = name;
+        request->query_info.ea_name_len = namelen;
+
+        start = request->query_info.ea_out_len;
+        vpos  = start + 8 + namelen + 1;
+        cap   = request->query_info.ea_out_cap;
+        if (vpos > cap) {
+            chimera_smb_query_ea_full(request, 8 + namelen + 1);
+            return;
+        }
+
+        if (!fullname) {
+            /* A listed EA the file does not have: an entry with no value. */
+            chimera_smb_query_ea_put(request, 0);
+            continue;
+        }
+
+        vmax = cap - vpos;
+        if (vmax > 65535) {
+            vmax = 65535;         /* EaValueLength is a uint16 */
+        }
+
+        chimera_vfs_get_xattr(thread->vfs_thread,
+                              &request->session_handle->session->cred,
+                              request->query_info.stream_base_handle,
+                              fullname, strlen(fullname),
+                              request->query_info.ea_out + vpos, vmax,
+                              chimera_smb_query_ea_get_cb, request);
         return;
     }
-
-    request->query_info.ea_cursor = cur;
-    fullname                      = cur;
-    flen                          = strlen(fullname);
-    cnamelen                      = flen - CHIMERA_VFS_XATTR_USER_PREFIX_LEN;
-    start                         = request->query_info.ea_out_len;
-    vpos                          = start + 8 + cnamelen + 1;
-    cap                           = request->query_info.ea_out_cap;
-
-    if (vpos >= cap) {
-        chimera_smb_query_ea_finish(request, SMB2_STATUS_BUFFER_OVERFLOW);
-        return;
-    }
-    vmax = cap - vpos;
-    if (vmax > 65535) {
-        vmax = 65535;             /* EaValueLength is a uint16 */
-    }
-
-    chimera_vfs_get_xattr(thread->vfs_thread,
-                          &request->session_handle->session->cred,
-                          request->query_info.stream_base_handle,
-                          fullname, flen,
-                          request->query_info.ea_out + vpos, vmax,
-                          chimera_smb_query_ea_get_cb, request);
 } /* chimera_smb_query_ea_next */
 
 static void
@@ -500,6 +627,8 @@ chimera_smb_query_ea_list_cb(
     void                  *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    const char                 *cur;
+    uint32_t                    total = 0, index;
 
     (void) names;       /* == request->query_info.stream_records */
     (void) count;
@@ -517,6 +646,40 @@ chimera_smb_query_ea_list_cb(
     request->query_info.stream_record_len = names_len;
     request->query_info.ea_cursor         =
         (const char *) request->query_info.stream_records;
+
+    if (!request->query_info.ea_in_len) {
+        cur = request->query_info.ea_cursor;
+        while ((cur = chimera_smb_query_ea_next_user(request, cur)) != NULL) {
+            total++;
+            cur += strlen(cur) + 1;
+        }
+
+        if (total == 0) {
+            chimera_smb_query_ea_finish(request, SMB2_STATUS_NO_EAS_ON_FILE);
+            return;
+        }
+
+        if (request->query_info.flags & SL_INDEX_SPECIFIED) {
+            /* EaIndex is 1-based; one past the last is the end of the scan,
+             * anything further does not exist (FastFat's FatQueryEaIndexSpecified). */
+            index = request->query_info.addl_info;
+            if (index == 0 || index > total + 1) {
+                chimera_smb_query_ea_finish(request, SMB2_STATUS_NONEXISTENT_EA_ENTRY);
+                return;
+            }
+            request->query_info.ea_start = index - 1;
+        } else if (request->query_info.flags & SL_RESTART_SCAN) {
+            request->query_info.ea_start = 0;
+        } else {
+            request->query_info.ea_start = request->query_info.open_file->next_ea_index;
+        }
+
+        if (request->query_info.ea_start >= total) {
+            chimera_smb_query_ea_finish(request, SMB2_STATUS_NO_MORE_EAS);
+            return;
+        }
+    }
+
     chimera_smb_query_ea_next(request);
 } /* chimera_smb_query_ea_list_cb */
 
@@ -571,17 +734,19 @@ chimera_smb_query_full_ea_info(struct chimera_smb_request *request)
     }
 
     cap = request->query_info.max_response_size;
-    if (cap < 64) {
-        cap = 64;
-    }
     if (cap > CHIMERA_SMB_EA_QUERY_CAP_MAX) {
         cap = CHIMERA_SMB_EA_QUERY_CAP_MAX;
     }
 
-    request->query_info.ea_out             = malloc(cap);
+    request->query_info.ea_out             = malloc(cap > 64 ? cap : 64);
     request->query_info.ea_out_len         = 0;
     request->query_info.ea_out_cap         = cap;
     request->query_info.ea_last_off        = 0;
+    request->query_info.ea_in_off          = 0;
+    request->query_info.ea_start           = 0;
+    request->query_info.ea_index           = 0;
+    request->query_info.ea_returned        = 0;
+    request->query_info.ea_single          = !!(request->query_info.flags & SL_RETURN_SINGLE_ENTRY);
     request->query_info.stream_base_handle = NULL;
 
     chimera_vfs_open_fh(
@@ -1196,6 +1361,23 @@ chimera_smb_parse_query_info(
     if (unlikely(prc)) {
         chimera_smb_error("Received SMB2 QUERY_INFO request truncated in fixed body");
         return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
+
+    /* FileFullEaInformation carries the EA names to return, if any, as a
+     * FILE_GET_EA_INFORMATION list in the input buffer (MS-SMB2 2.2.37). */
+    request->query_info.ea_in_len  = 0;
+    request->query_info.ea_out_len = 0;
+    if (request->query_info.info_type == SMB2_INFO_FILE &&
+        request->query_info.info_class == SMB2_FILE_FULL_EA_INFO &&
+        input_size) {
+        if (unlikely(input_size > sizeof(request->query_info.ea_in) ||
+                     smb_cursor_seek_to(request_cursor, input_offset) != 0 ||
+                     evpl_iovec_cursor_try_copy(request_cursor, request->query_info.ea_in,
+                                                input_size) != 0)) {
+            chimera_smb_error("Received SMB2 QUERY_INFO with EA list out of range");
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+        }
+        request->query_info.ea_in_len = input_size;
     }
 
     return 0;
