@@ -3751,6 +3751,7 @@ memfs_open_at(
         inode->atime = now;
         inode->mtime = now;
         inode->ctime = now;
+        inode->btime = now;
         inode->change++;
         inode->file.blocks     = NULL;
         inode->file.max_blocks = 0;
@@ -3938,6 +3939,7 @@ memfs_create_unlinked(
     inode->atime      = now;
     inode->mtime      = now;
     inode->ctime      = now;
+    inode->btime      = now;
     inode->change++;
     inode->file.blocks     = NULL;
     inode->file.max_blocks = 0;
