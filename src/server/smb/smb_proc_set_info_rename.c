@@ -654,14 +654,41 @@ chimera_smb_set_info_rename_check_dest_callback(
          * whatever it is: MS-FSA 2.1.5.14.11 answers OBJECT_NAME_COLLISION for
          * a directory destination too (IFSTest FileInformation:
          * ConflictingRenameInformationTest; renaming a directory onto an empty
-         * one used to replace it silently).  POSIX rename always sets the flag,
-         * so with it set a directory destination is still left to rename_at,
-         * which enforces rename(2): replace an empty directory,
-         * DIRECTORY_NOT_EMPTY otherwise, and FILE_IS_A_DIRECTORY when the
-         * source is not itself a directory.  (The SMB "rename a file INTO a
-         * directory" shell behaviour is not rename(2) and is deliberately not
-         * applied here.) */
-        if (!rename_info->replace_if_exist) {
+         * one used to replace it silently).  With the flag, a file destination
+         * is left to rename_at to replace; a directory one is refused below
+         * unless the server runs POSIX rename semantics, where rename_at
+         * enforces rename(2): replace an empty directory, DIRECTORY_NOT_EMPTY
+         * otherwise, and FILE_IS_A_DIRECTORY when the source is not itself a
+         * directory.  (The SMB "rename a file INTO a directory" shell
+         * behaviour is not rename(2) and is deliberately not applied here.) */
+        uint32_t status = SMB2_STATUS_SUCCESS;
+
+        /* A destination that is another link to the source itself (a rename
+         * that only changes case) is not a conflict (MS-FSA
+         * TargetExistsSameFile). */
+        int      same_file = request->set_info.open_file->handle &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) &&
+            attr->va_fh_len == request->set_info.open_file->handle->fh_len &&
+            memcmp(attr->va_fh, request->set_info.open_file->handle->fh,
+                   attr->va_fh_len) == 0;
+
+        if (same_file) {
+            status = SMB2_STATUS_SUCCESS;
+        } else if (!rename_info->replace_if_exist) {
+            status = SMB2_STATUS_OBJECT_NAME_COLLISION;
+        } else if (!request->compound->thread->shared->config.posix_rename &&
+                   (S_ISDIR(attr->va_mode) ||
+                    ((attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+                     (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY)))) {
+            /* Even with ReplaceIfExists, Windows never replaces a directory
+             * or a read-only file (MS-FSA 2.1.5.15.12; IFSTest
+             * ConflictingRenameInformationTest).  POSIX rename(2) would
+             * replace an empty directory, so the POSIX rename mode keeps
+             * that. */
+            status = SMB2_STATUS_ACCESS_DENIED;
+        }
+
+        if (status != SMB2_STATUS_SUCCESS) {
             if (rename_info->new_parent_handle) {
                 chimera_vfs_release(request->compound->thread->vfs_thread,
                                     rename_info->new_parent_handle);
@@ -671,7 +698,7 @@ chimera_smb_set_info_rename_check_dest_callback(
                                     request->set_info.parent_handle);
             }
             chimera_smb_open_file_release(request, request->set_info.open_file);
-            chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_COLLISION);
+            chimera_smb_complete_request(request, status);
             return;
         }
         /* Fall through: rename_at replaces the destination per POSIX. */
@@ -714,7 +741,7 @@ chimera_smb_set_info_rename_open_dest_parent_callback(
         oh,
         dest_name,
         dest_name_len,
-        CHIMERA_VFS_ATTR_MODE,
+        CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
         0,
         chimera_smb_set_info_rename_check_dest_callback,
         request);
@@ -772,7 +799,7 @@ chimera_smb_set_info_rename_open_callback(
         oh,
         dest_name,
         dest_name_len,
-        CHIMERA_VFS_ATTR_MODE,
+        CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
         0,
         chimera_smb_set_info_rename_check_dest_callback,
         request);
