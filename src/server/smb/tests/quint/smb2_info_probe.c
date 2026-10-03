@@ -758,7 +758,7 @@ probe_ntfs_semantics(struct smb2_conn *c)
     static uint8_t         payload[60000];
     struct smb2_create_out a, b, d1, d2;
     uint8_t                out[64], basic[40];
-    uint64_t               alloc, eof;
+    uint64_t               alloc, eof, mtime;
     uint32_t               st, count = 0;
 
     printf("# --- NTFS file semantics ---\n");
@@ -766,7 +766,8 @@ probe_ntfs_semantics(struct smb2_conn *c)
     /* AllocationSize (MS-FSA 2.1.5.15.1 / 2.1.5.15.5): the end of file in
      * whole 4 KiB clusters whatever the backend allocates, an AllocationSize
      * set below EOF truncates to it, one above EOF is kept as a reservation,
-     * and a truncation of the end of file releases it. */
+     * and a truncation of the end of file gives clusters back only when the
+     * handle closes. */
     st = smb2_create(c, "alloc.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
                      MBT_FILE_SHARE_RWD, NULL, &a);
     CHECK(st == ST_SUCCESS, "setup: CREATE alloc.bin -> 0x%08x", st);
@@ -792,15 +793,18 @@ probe_ntfs_semantics(struct smb2_conn *c)
     CHECK(st == ST_SUCCESS && alloc == 0x12000,
           "an EOF inside the reservation keeps it (alloc 0x%llx)",
           (unsigned long long) alloc);
-    st    = smb2_set_eof(c, a.file_id, 0x11000);
-    alloc = std_alloc(c, a.file_id, &eof);
-    CHECK(st == ST_SUCCESS && alloc == 0x12000,
-          "a truncation within the last cluster keeps it (alloc 0x%llx)",
-          (unsigned long long) alloc);
     st    = smb2_set_eof(c, a.file_id, 0x800);
     alloc = std_alloc(c, a.file_id, &eof);
-    CHECK(st == ST_SUCCESS && alloc == 0x1000,
-          "truncating the EOF releases the reservation (alloc 0x%llx)",
+    CHECK(st == ST_SUCCESS && alloc == 0x12000 && eof == 0x800,
+          "a truncation keeps the clusters while the handle is open, as NTFS "
+          "frees them at cleanup (alloc 0x%llx, eof 0x%llx)",
+          (unsigned long long) alloc, (unsigned long long) eof);
+    smb2_close(c, a.file_id);
+    st = smb2_create(c, "alloc.bin", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &a);
+    CHECK(st == ST_SUCCESS, "setup: reopen alloc.bin -> 0x%08x", st);
+    alloc = std_alloc(c, a.file_id, &eof);
+    CHECK(alloc == 0x1000, "  ... and the close gives them back (alloc 0x%llx)",
           (unsigned long long) alloc);
 
     /* DeletePending is the file's (MS-FSA Open.Link.IsDeleted): a disposition
@@ -829,14 +833,56 @@ probe_ntfs_semantics(struct smb2_conn *c)
     st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, a.file_id,
                        basic, sizeof(basic));
     CHECK(st == ST_SUCCESS, "SET attributes HIDDEN only -> 0x%08x", st);
+    mtime = query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, a.file_id,
+                     out, sizeof(out), "BasicInformation") ? g64(out, 16) : 0;
     st = smb2_write(c, a.file_id, 0, payload, 16, &count);
     CHECK(st == ST_SUCCESS, "setup: WRITE 16 bytes -> 0x%08x", st);
     if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, a.file_id,
                  out, sizeof(out), "BasicInformation")) {
         CHECK(g32(out, 32) == 0x22, "a write sets ARCHIVE (attributes 0x%x, "
               "want 0x22)", g32(out, 32));
+        /* Setting only the attributes does not take control of the write
+         * time: the write still advances it. */
+        CHECK(g64(out, 16) > mtime, "  ... and advances the write time after "
+              "an attributes-only set");
     }
+
+    /* An access time set explicitly through a handle survives reads through
+     * it (MS-FSA Open.UserSetAccessTime). */
+    memset(basic, 0, sizeof(basic));
+    p64(basic, 8, 100000000);          /* LastAccessTime: 10s after 1601 */
+    st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, a.file_id,
+                       basic, sizeof(basic));
+    CHECK(st == ST_SUCCESS, "SET an old LastAccessTime -> 0x%08x", st);
+    st = smb2_read(c, a.file_id, 0, 16, out, &count);
+    CHECK(st == ST_SUCCESS, "setup: READ 16 bytes -> 0x%08x", st);
+    if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, a.file_id,
+                 out, sizeof(out), "BasicInformation")) {
+        CHECK(g64(out, 8) == 100000000, "  ... a read keeps it (0x%llx)",
+              (unsigned long long) g64(out, 8));
+    }
+
+    /* A read-only file can be superseded, though not overwritten. */
+    memset(basic, 0, sizeof(basic));
+    p32(basic, 32, MBT_FILE_ATTRIBUTE_READONLY);
+    st = smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, a.file_id,
+                       basic, sizeof(basic));
+    CHECK(st == ST_SUCCESS, "SET READONLY -> 0x%08x", st);
     smb2_close(c, a.file_id);
+    st = smb2_create(c, "archive.bin", MBT_FILE_OVERWRITE, MBT_FILE_READ_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &a);
+    CHECK(st == ST_ACCESS_DENIED, "OVERWRITE of a read-only file -> "
+          "ACCESS_DENIED (0x%08x)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, a.file_id);
+    }
+    st = smb2_create(c, "archive.bin", MBT_FILE_SUPERSEDE, MBT_FILE_READ_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &a);
+    CHECK(st == ST_SUCCESS, "SUPERSEDE of a read-only file -> SUCCESS "
+          "(0x%08x)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, a.file_id);
+    }
 
     /* A rename never replaces a directory, even with ReplaceIfExists
      * (MS-FSA 2.1.5.15.12). */
@@ -1402,6 +1448,28 @@ probe_security_sids(struct smb2_conn *c)
                   d.group);
         } else {
             CHECK(0, "  ... QUERY after the dacl-only SET -> 0x%08x", st);
+        }
+    }
+
+    /* A BUILTIN alias has no gid, but Windows keeps it as a file's group when
+     * given it (IFSTest SetGroupSecurityTest sets BUILTIN\Administrators), so
+     * it is kept as the group's native SID; the gid is untouched. */
+    nlen = smb2_sd_build(built, sizeof(built), NULL, "S-1-5-32-544", NULL, 0);
+
+    if (nlen > 0) {
+        st = smb2_set_info_addl(c, SMB2_INFO_SECURITY_T, 0, co.file_id,
+                                SEC_GROUP, built, (uint32_t) nlen);
+        CHECK(st == ST_SUCCESS, "SET SECURITY(group BUILTIN\\Administrators) "
+              "-> 0x%08x", st);
+
+        st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, co.file_id,
+                             SEC_OWNER | SEC_GROUP, sd, sizeof(sd), &len);
+
+        if (st == ST_SUCCESS && smb2_sd_parse(sd, len, &d) == 0) {
+            CHECK(strcmp(d.group, "S-1-5-32-544") == 0,
+                  "  ... the BUILTIN group is kept (%s)", d.group);
+        } else {
+            CHECK(0, "  ... QUERY after the group SET -> 0x%08x", st);
         }
     }
 
