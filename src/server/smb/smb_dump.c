@@ -714,9 +714,10 @@ _smb_dump_request(
                     request->read.offset, request->read.length);
             break;
         case SMB2_IOCTL:
-            sprintf(argstr, " file_id %" PRIx64 ".%" PRIx64 " ctl_code %s count %u",
+            sprintf(argstr, " file_id %" PRIx64 ".%" PRIx64 " ctl_code %s (0x%08x) count %u",
                     request->ioctl.file_id.pid, request->ioctl.file_id.vid,
                     smb_ioctl_ctl_code_name(request->ioctl.ctl_code),
+                    request->ioctl.ctl_code,
                     request->ioctl.input_count);
             break;
         case SMB2_SET_INFO:
