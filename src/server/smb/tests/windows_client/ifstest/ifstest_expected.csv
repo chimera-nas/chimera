@@ -1,0 +1,94 @@
+# Tests IFSTest is known not to pass, per backend ("*" for every backend).
+# ifstest_check.py fails the run on any other test that does not pass.
+#
+# fails-over-windows-smb  also fails (or never runs) over Windows' own SMB
+#                         server: volume-level features (change journal,
+#                         quotas, defrag, mount points, EFS) and checks IFSTest
+#                         makes only of a local volume
+# allocation-accounting   allocation not reported at NTFS cluster granularity
+#                         after zeroing a range
+# delete-pending-client-cache  the client answers DeletePending from its own
+#                         cache; the server reports it correctly
+# disk-ioctl              IOCTL_DISK_GET_DRIVE_GEOMETRY is not answered
+# no-compression          chimera has no file compression
+# no-privilege-model      no SeSecurityPrivilege, so SACL access is refused
+# ntfs-lazy-dirent-times  NTFS updates a directory entry's times only at close
+# open-by-file-id         the client does not send FILE_OPEN_BY_FILE_ID
+# reparse-delete-validation  DELETE_REPARSE_POINT parameter checks differ
+# section-sharing         an open while a mapped section is still alive
+# sparse-attribute        FILE_ATTRIBUTE_SPARSE_FILE on the unnamed stream
+# stream-notify           FILE_NOTIFY_CHANGE_STREAM_NAME on stream delete
+# time-semantics          last-access time after a directory query
+# volume-handle           opening the volume itself
+test,backends,reason
+ChangeJournal:ChangeJournalTest,*,fails-over-windows-smb
+ChangeJournal:ChangeJournalTrimTest,*,fails-over-windows-smb
+ChangeJournal:CreateChangeJournalTest,*,fails-over-windows-smb
+ChangeJournal:DeleteChangeJournalTest,*,fails-over-windows-smb
+ChangeJournal:QueryChangeJournalTest,*,fails-over-windows-smb
+ChangeJournal:ReadChangeJournalTest,*,fails-over-windows-smb
+ChangeJournal:ReadFileChangeJournalTest,*,fails-over-windows-smb
+ChangeJournal:WriteCloseRecordTest,*,fails-over-windows-smb
+CloseCleanupDelete:TunnelingTest,*,fails-over-windows-smb
+CloseCleanupDelete:UpdateOnCloseDirTest,*,ntfs-lazy-dirent-times
+CloseCleanupDelete:UpdateOnCloseTest,*,ntfs-lazy-dirent-times
+DefragEnhancements:MoveDirTest,*,fails-over-windows-smb
+DefragEnhancements:MoveViewTest,*,fails-over-windows-smb
+DeviceControl:DeviceIoControlTest,*,disk-ioctl
+DirectoryInformation:FileDirectoryInformationTest,*,time-semantics
+Encryption:CreateEncryptedFileTest,*,fails-over-windows-smb
+Encryption:DirectoryEncryptedNewFileTest,*,fails-over-windows-smb
+Encryption:EncryptDecryptFileTest,*,fails-over-windows-smb
+Encryption:EncryptionAttributeTest,*,fails-over-windows-smb
+Encryption:ReadWriteRawEncryptedTest,*,fails-over-windows-smb
+Encryption:SuperOverEncryptedTest,*,fails-over-windows-smb
+FileInformation:AlternateNameInformationTest,*,fails-over-windows-smb
+FileInformation:DispositionInformationTest,*,delete-pending-client-cache
+FileInformation:StatInformationTest,*,fails-over-windows-smb
+FileInformation:TimeStampTest,*,fails-over-windows-smb
+FileSystemControlGeneral:SetCompressionTest,*,no-compression
+FileSystemControlVolume:MountedDirtyTest,*,fails-over-windows-smb
+MountPoints:CreateDirectoryExDirectoryTest,*,fails-over-windows-smb
+MountPoints:CreateDirectoryExVolumeTest,*,fails-over-windows-smb
+MountPoints:DirectoryGraftTest,*,fails-over-windows-smb
+MountPoints:LocalMountPointTest,*,fails-over-windows-smb
+ObjectId:EnumObjectIDTest,*,fails-over-windows-smb
+ObjectId:NotificationObjectIDAddedTest,*,fails-over-windows-smb
+ObjectId:NotificationObjectIDDeletedTest,*,fails-over-windows-smb
+ObjectId:NotificationObjectIDNotTunnelledTest,*,fails-over-windows-smb
+ObjectId:NotificationObjectIDRemovedTest,*,fails-over-windows-smb
+ObjectId:NotificationObjectIDTunnelledCollisionTest,*,fails-over-windows-smb
+ObjectId:SetObjectIDVolumeTest,*,volume-handle
+ObjectId:TunnelObjectIDTest,*,fails-over-windows-smb
+OpLocks:BatchOplocksTest,*,fails-over-windows-smb
+OpLocks:BreakNotifyTest,*,fails-over-windows-smb
+OpLocks:CompleteImmediatelyTest,*,fails-over-windows-smb
+OpLocks:LockOplockBreakTest,*,fails-over-windows-smb
+OpLocks:OplockBreakIItoNoneTest,*,fails-over-windows-smb
+OpLocks:OplockBreakIandIIOnCloseTest,*,fails-over-windows-smb
+OpLocks:OplockBreakItoIITest,*,fails-over-windows-smb
+OpLocks:OplockIIWriteBreakingTest,*,fails-over-windows-smb
+OpLocks:OplockSetInfoBreakTest,*,fails-over-windows-smb
+OpenCreateGeneral:FileOpenByIDTest,*,open-by-file-id
+OpenCreateGeneral:OpenVolumeTest,*,volume-handle
+OpenCreateGeneral:ShareAccessTest,*,fails-over-windows-smb
+OpenCreateGeneral:ShortFileNameTest,*,fails-over-windows-smb
+Quotas:QuerySetQueryQuotaTest,*,fails-over-windows-smb
+Quotas:VolumeQuotaEnforceTest,*,fails-over-windows-smb
+Quotas:VolumeQuotaLimitTest,*,fails-over-windows-smb
+Quotas:VolumeQuotaNoneTest,*,fails-over-windows-smb
+Quotas:VolumeQuotaThresholdTest,*,fails-over-windows-smb
+Quotas:VolumeQuotaTrackTest,*,fails-over-windows-smb
+Quotas:VolumeQuotaUserLimitTest,*,fails-over-windows-smb
+Quotas:VolumeQuotaUserThresholdTest,*,fails-over-windows-smb
+ReparsePoints:ChangeNotificationReparseTest,*,fails-over-windows-smb
+ReparsePoints:DelPointInvalidBufferSizeTest,*,reparse-delete-validation
+ReparsePoints:DelPointInvalidParmTest,*,reparse-delete-validation
+ReparsePoints:GetPointInvalidUserBufferTest,*,fails-over-windows-smb
+ReparsePoints:SetPointExAttributeConflictTest,*,fails-over-windows-smb
+SectionsCaching:MaintainSectionMappingTest,*,section-sharing
+Security:SetSaclSecurityTest,*,no-privilege-model
+SparseFiles:FileInformationSparseAttrTest,*,sparse-attribute
+SparseFiles:SparseStreamDirTest,diskfs memfs,allocation-accounting
+SparseFiles:SparseUserMapZeroTest,*,fails-over-windows-smb
+StreamEnhancements:StreamNotifyNameTest,*,stream-notify
