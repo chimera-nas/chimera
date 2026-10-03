@@ -93,6 +93,14 @@ struct chimera_smb_file_id {
  * 2.1.4.17: modifying a data file sets FILE_ATTRIBUTE_ARCHIVE), so its later
  * writes need not ask the backend for the DOS attributes again. */
 #define CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED        0x00001000
+/* The client explicitly set the LastAccessTime on this handle; reads through
+ * it must not advance it (MS-FSA Open.UserSetAccessTime).  The value set is
+ * kept in sticky_atime and put back after a read the backend stamped. */
+#define CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY   0x00002000
+/* An EndOfFile set through this handle truncated the file and left its old
+ * allocation reserved; the close releases it (NTFS frees truncated clusters at
+ * cleanup). */
+#define CHIMERA_SMB_OPEN_FILE_TRUNCATED            0x00004000
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases
@@ -174,6 +182,9 @@ struct chimera_smb_open_file {
     /* Open.NextEaEntry (MS-FSA 2.1.5.12.12): the user.* EA index, 0-based, a
      * FileFullEaInformation scan without SL_RESTART_SCAN resumes from. */
     uint32_t                         next_ea_index;
+    /* The LastAccessTime last set explicitly through this handle (valid while
+     * CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY is set). */
+    struct timespec                  sticky_atime;
     uint32_t                         parent_fh_len;
     uint32_t                         refcnt;
     /* MS-SMB2 §3.3.5.2.10 channel-sequence tracking.  channel_sequence holds

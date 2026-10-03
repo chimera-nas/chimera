@@ -44,6 +44,31 @@ chimera_smb_rdma_write_callback(
     }
 } /* chimera_smb_rdma_write_callback */
 
+static void chimera_smb_read_send(
+    struct chimera_smb_request *request);
+
+/* Completion for putting a handle's explicitly set LastAccessTime back after
+ * the backend stamped it on a read.  The read itself succeeded; a failed
+ * restore leaves the access time advanced but is not worth failing it over. */
+static void
+chimera_smb_read_sticky_restore_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    (void) error_code;
+    (void) pre_attr;
+    (void) set_attr;
+    (void) post_attr;
+
+    chimera_smb_open_file_release(request, request->read.open_file);
+    chimera_smb_read_send(request);
+} /* chimera_smb_read_sticky_restore_callback */
+
 static void
 chimera_smb_read_callback(
     enum chimera_vfs_error    error_code,
@@ -54,34 +79,35 @@ chimera_smb_read_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_smb_request       *request = private_data;
-    struct chimera_server_smb_thread *thread  = request->compound->thread;
-    struct evpl                      *evpl    = thread->evpl;
-    struct evpl_iovec_cursor          cursor;
-    struct evpl_iovec                *chunk_iov = request->read.chunk_iov;
-    int                               chunk_niov;
-    int                               i;
+    struct chimera_smb_request       *request   = private_data;
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct evpl                      *evpl      = thread->evpl;
+    struct chimera_smb_open_file     *open_file = request->read.open_file;
 
     if (!error_code) {
-        request->read.open_file->position = request->read.offset + count;
+        open_file->position = request->read.offset + count;
     }
-
-    chimera_smb_open_file_release(request, request->read.open_file);
 
     request->read.niov     = niov;
     request->read.r_length = count;
+
+    (void) eof;
+    (void) iov;
+    (void) attr;
 
     /* The data iovecs the VFS filled into request->read.iov are injected into
      * the reply (and so released) only on the SUCCESS path below.  Any path
      * that completes with an error status emits a bare SMB2 error response
      * instead, so those iovecs must be released here to avoid a leak. */
     if (error_code) {
+        chimera_smb_open_file_release(request, open_file);
         evpl_iovecs_release(evpl, request->read.iov, niov);
         chimera_smb_complete_request(private_data, SMB2_STATUS_INTERNAL_ERROR);
         return;
     }
 
     if (count == 0 && request->read.length > 0) {
+        chimera_smb_open_file_release(request, open_file);
         evpl_iovecs_release(evpl, request->read.iov, niov);
         chimera_smb_complete_request(private_data, SMB2_STATUS_END_OF_FILE);
         return;
@@ -90,10 +116,48 @@ chimera_smb_read_callback(
     /* MS-SMB2 §3.3.5.12: if MinimumCount is set and the actual bytes read
      * is less than MinimumCount, return STATUS_END_OF_FILE. */
     if (request->read.minimum > 0 && count < request->read.minimum) {
+        chimera_smb_open_file_release(request, open_file);
         evpl_iovecs_release(evpl, request->read.iov, niov);
         chimera_smb_complete_request(private_data, SMB2_STATUS_END_OF_FILE);
         return;
     }
+
+    /* A handle that explicitly set its access time keeps it: the backend
+     * stamped atime on this read, so put the set value back before replying
+     * (MS-FSA Open.UserSetAccessTime; IFSTest FileDirectoryInformationTest). */
+    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY) {
+        request->read.restore_attrs.va_req_mask = 0;
+        request->read.restore_attrs.va_set_mask = CHIMERA_VFS_ATTR_ATIME;
+        request->read.restore_attrs.va_atime    = open_file->sticky_atime;
+
+        chimera_vfs_setattr(thread->vfs_thread,
+                            &request->session_handle->session->cred,
+                            open_file->handle,
+                            &request->read.restore_attrs,
+                            0,
+                            0,
+                            chimera_smb_read_sticky_restore_callback,
+                            request);
+        return;
+    }
+
+    chimera_smb_open_file_release(request, open_file);
+    chimera_smb_read_send(request);
+} /* chimera_smb_read_callback */
+
+/* Send a successful read's data: by RDMA Write when the client gave buffer
+ * descriptors, otherwise in the READ response. */
+static void
+chimera_smb_read_send(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    struct evpl                      *evpl   = thread->evpl;
+    struct evpl_iovec_cursor          cursor;
+    struct evpl_iovec                *chunk_iov = request->read.chunk_iov;
+    struct evpl_iovec                *iov       = request->read.iov;
+    int                               niov      = request->read.niov;
+    int                               chunk_niov;
+    int                               i;
 
     if (request->read.channel == SMB2_CHANNEL_RDMA_V1 &&
         request->read.num_rdma_elements > 0) {
@@ -131,8 +195,8 @@ chimera_smb_read_callback(
         return;
     }
 
-    chimera_smb_complete_request(private_data, SMB2_STATUS_SUCCESS);
-} /* chimera_smb_read_callback */
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_read_send */
 
 /*
  * DCE/RPC over a named pipe (ncacn_np), SMB2 READ leg: drain the response PDU a
