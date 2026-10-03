@@ -637,7 +637,7 @@ diskfs_list_streams_base_cb(
         diskfs_list_streams_emit(request, base->size,
                                  base->space_used > base->alloc_size ?
                                  base->space_used : base->alloc_size,
-                                 NULL, 0, request->fh,
+                                 "", 0, request->fh,
                                  request->list_streams.want_fh ? request->fh_len : 0)) {
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ERANGE);
         return;

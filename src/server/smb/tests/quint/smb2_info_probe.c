@@ -459,7 +459,6 @@ probe_ea_scan(
     /* An EA list names the entries to return, in its own order, matched
      * without regard to case; one the file lacks comes back empty. */
     memset(in, 0, sizeof(in));
-    n = 0;
     p32(in, 0, 16);                    /* FILE_GET_EA_INFORMATION: next */
     in[4] = 8;
     memcpy(in + 5, "user.two", 9);
