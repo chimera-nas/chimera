@@ -178,6 +178,18 @@ diskfs_dispatch(
         case CHIMERA_VFS_OP_GET_LAYOUT:
             diskfs_get_layout(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_OPEN_STREAM:
+            diskfs_open_stream(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_LIST_STREAMS:
+            diskfs_list_streams(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_REMOVE_STREAM:
+            diskfs_remove_stream(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_RENAME_STREAM:
+            diskfs_rename_stream(thread, shared, request, private_data);
+            break;
         default:
             chimera_diskfs_error("diskfs_dispatch: unknown operation %d",
                                  request->opcode);
@@ -197,6 +209,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
         CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
         CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME |
         CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_SPARSE |
+        CHIMERA_VFS_CAP_NAMED_STREAMS |
         /* diskfs persists the canonical ACL (DISKFS_REC_ACL) and the native
          * owner/group SIDs (DISKFS_REC_SID); advertise it like memfs/cairn. */
         CHIMERA_VFS_CAP_ACL_NATIVE,
