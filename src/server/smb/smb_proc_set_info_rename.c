@@ -3,7 +3,11 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdlib.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
 #include <strings.h>
+#endif /* ifdef _WIN32 */
 
 #include "smb_internal.h"
 #include "smb_procs.h"
