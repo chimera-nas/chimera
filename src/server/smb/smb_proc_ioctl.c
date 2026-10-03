@@ -413,6 +413,23 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
             break;
 
+        case SMB2_FSCTL_GET_COMPRESSION:
+        case SMB2_FSCTL_SET_COMPRESSION:
+            /* MS-FSA 2.1.5.10.7 / 2.1.5.10.36: an object store without
+             * compression (chimera advertises no FILE_FILE_COMPRESSION) fails
+             * both with STATUS_INVALID_DEVICE_REQUEST (IFSTest SetCompressionTest,
+             * SparseCompressedStreamTest). */
+            open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+
+            if (unlikely(!open_file)) {
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+                return;
+            }
+
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_DEVICE_REQUEST);
+            break;
+
         default:
             /* MS-SMB2 3.3.5.15: an FSCTL the server does not implement is
              * rejected with STATUS_NOT_SUPPORTED. */
