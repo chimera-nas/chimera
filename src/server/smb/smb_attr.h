@@ -144,7 +144,8 @@ chimera_smb_named_streams_enabled(
  *
  * FILE_NAMED_STREAMS follows chimera_smb_named_streams_enabled, the gate
  * FileStreamInformation applies, so the client is never told about streams
- * the server would then refuse.
+ * the server would then refuse.  FILE_SUPPORTS_OBJECT_IDS follows
+ * CHIMERA_VFS_CAP_XATTR, where object IDs are kept.
  *
  * FILE_PERSISTENT_ACLS gates on CHIMERA_VFS_CAP_ACL_NATIVE, which means
  * lossless ACL storage, so a mode-only backend such as the linux passthrough
@@ -180,6 +181,11 @@ chimera_smb_fs_attributes(
 
     if (chimera_smb_named_streams_enabled(capabilities, named_streams)) {
         attrs |= SMB2_FS_ATTR_NAMED_STREAMS;
+    }
+
+    /* Object IDs are kept as xattrs (smb_proc_object_id.c). */
+    if (capabilities & CHIMERA_VFS_CAP_XATTR) {
+        attrs |= SMB2_FS_ATTR_SUPPORTS_OBJECT_IDS;
     }
 
     return attrs;

@@ -185,17 +185,20 @@ probe_query_sweep(
 #define FSA_PERSISTENT_ACLS            0x00000008
 #define FSA_SUPPORTS_SPARSE_FILES      0x00000040
 #define FSA_SUPPORTS_REPARSE_POINTS    0x00000080
+#define FSA_SUPPORTS_OBJECT_IDS        0x00010000
 #define FSA_NAMED_STREAMS              0x00040000
 #define FSA_SUPPORTS_BLOCK_REFCOUNTING 0x08000000
 
-/* memfs stores rich ACLs, punches holes, reflinks and keeps named streams, so
- * with the knob on it advertises everything chimera can derive. */
+/* memfs stores rich ACLs, punches holes, reflinks, keeps xattrs (where object
+ * IDs live) and named streams, so with the knob on it advertises everything
+ * chimera can derive. */
 #define FSA_MEMFS_STREAMS_ON           (FSA_CASE_SENSITIVE_SEARCH |      \
                                         FSA_CASE_PRESERVED_NAMES |       \
                                         FSA_UNICODE_ON_DISK |            \
                                         FSA_PERSISTENT_ACLS |            \
                                         FSA_SUPPORTS_SPARSE_FILES |      \
                                         FSA_SUPPORTS_REPARSE_POINTS |    \
+                                        FSA_SUPPORTS_OBJECT_IDS |        \
                                         FSA_NAMED_STREAMS |              \
                                         FSA_SUPPORTS_BLOCK_REFCOUNTING)
 
