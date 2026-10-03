@@ -1814,6 +1814,12 @@ memfs_map_attrs_fork(
         return;
     }
 
+    /* A named stream is a data fork whatever its base object is -- a
+     * directory's stream is read and written like a file's. */
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        attr->va_mode = S_IFREG | (attr->va_mode & 07777);
+    }
+
     if (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_size       = stream->size;
         attr->va_space_used = stream->space_used;
