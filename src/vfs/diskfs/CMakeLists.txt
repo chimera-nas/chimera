@@ -18,6 +18,7 @@ add_library(chimera_vfs_diskfs_objs OBJECT
     diskfs_mount.c
     diskfs_namespace.c
     diskfs_reclaim.c
+    diskfs_stream.c
     space_map.c
 )
 
