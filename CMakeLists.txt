@@ -604,8 +604,64 @@ endif()
 # what is left on macOS -- or on a Linux host without libaio.  A diskfs device
 # is therefore available everywhere chimera builds, which is why the diskfs
 # test variants are no longer gated on HAVE_LIBAIO.
-if (HAVE_LIBAIO)
+#
+# Linking libaio is not enough: libaio >= 0.3.113 implements io_getevents()
+# with the io_pgetevents syscall, which the default seccomp profile of
+# podman/docker denies (ENOSYS).  libevpl's libaio poller reads that as "no
+# completions yet", so every diskfs I/O waits forever.  Probe the call this
+# configure environment will test in, and fall back to pread when it fails.
+if (HAVE_LIBAIO AND NOT CMAKE_CROSSCOMPILING)
+    set(_aio_probe_src "${CMAKE_BINARY_DIR}/CMakeFiles/libaio_probe.c")
+    file(WRITE "${_aio_probe_src}" [=[
+#include <libaio.h>
+#include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
+/* Reap a real completion: with an empty ring and a zero timeout libaio
+ * answers from userspace and never makes the syscall that seccomp denies. */
+int main(void)
+{
+    io_context_t    ctx = 0;
+    struct iocb     cb, *cbs[1] = { &cb };
+    struct io_event ev;
+    struct timespec ts = { 5, 0 };
+    char            buf[512];
+    int             fd, n;
+
+    fd = open("/proc/self/exe", O_RDONLY);
+    if (fd < 0 || io_setup(1, &ctx) < 0) {
+        return 2;
+    }
+    io_prep_pread(&cb, fd, buf, sizeof(buf), 0);
+    if (io_submit(ctx, 1, cbs) != 1) {
+        return 3;
+    }
+    n = io_getevents(ctx, 1, 1, &ev, &ts);
+    io_destroy(ctx);
+    close(fd);
+    return n == 1 ? 0 : 1;
+}
+]=])
+    unset(LIBAIO_PROBE_RUN CACHE)
+    unset(LIBAIO_PROBE_COMPILE CACHE)
+    try_run(LIBAIO_PROBE_RUN LIBAIO_PROBE_COMPILE
+            "${CMAKE_BINARY_DIR}/CMakeFiles/libaio_probe" "${_aio_probe_src}"
+            LINK_LIBRARIES ${AIO_LIB})
+    if (NOT LIBAIO_PROBE_COMPILE OR NOT LIBAIO_PROBE_RUN EQUAL 0)
+        set(HAVE_LIBAIO_USABLE FALSE)
+    else()
+        set(HAVE_LIBAIO_USABLE TRUE)
+    endif()
+else()
+    set(HAVE_LIBAIO_USABLE ${HAVE_LIBAIO})
+endif()
+
+if (HAVE_LIBAIO_USABLE)
     set(CHIMERA_DISKFS_DEVICE_TYPE "libaio")
+elseif (HAVE_LIBAIO)
+    set(CHIMERA_DISKFS_DEVICE_TYPE "pread")
+    message(STATUS "libaio is linked but unusable here (io_setup/io_getevents "
+        "failed; e.g. io_pgetevents denied by container seccomp); diskfs tests use pread")
 else()
     set(CHIMERA_DISKFS_DEVICE_TYPE "pread")
 endif()
