@@ -8,6 +8,7 @@ One daemon serves every backend as its own share (see run_all in the Windows
 SMB client test for why), and IFSTest runs against each mapped drive in turn.
 """
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -30,7 +31,10 @@ config["server"]["smb_named_streams"] = True
 (scratch / "config.json").write_text(json.dumps(config))
 daemon_log = logdir / "daemon.log"
 log = daemon_log.open("w+b")
-proc = subprocess.Popen([chimera, "-c", str(scratch / "config.json")], stdout=log, stderr=log,
+# IFSTEST_CHIMERA_DEBUG=1 runs the daemon with -d, which dumps every SMB
+# request and reply into daemon.log.
+debug = ["-d"] if os.environ.get("IFSTEST_CHIMERA_DEBUG") == "1" else []
+proc = subprocess.Popen([chimera, *debug, "-c", str(scratch / "config.json")], stdout=log, stderr=log,
                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
 drives = []
 try:

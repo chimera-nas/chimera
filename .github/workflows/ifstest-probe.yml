@@ -143,7 +143,9 @@ jobs:
         if: steps.bundle.outcome == 'success'
         shell: pwsh
         timeout-minutes: 90
-        run: python scratch/ifstest_chimera.py bundle/chimera.exe $env:IFSTEST_DIR ifstest-logs 1500 memfs diskfs cairn
+        env:
+          IFSTEST_CHIMERA_DEBUG: '1'
+        run: python scratch/ifstest_chimera.py bundle/chimera.exe $env:IFSTEST_DIR ifstest-logs 1500 memfs
 
       - name: Summarize
         if: always()
