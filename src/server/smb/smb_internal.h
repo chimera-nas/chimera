@@ -47,8 +47,15 @@
 #include "vfs/vfs_notify.h"
 #include "vfs/sdk/vfs_xattr_name.h"
 
-#define SMB2_MAX_DIALECTS           16
-#define SMB2_MAX_NEGOTIATE_CONTEXTS 16
+#define SMB2_MAX_DIALECTS             16
+#define SMB2_MAX_NEGOTIATE_CONTEXTS   16
+
+/* A reparse point chimera keeps verbatim: the file's whole
+ * REPARSE_[GUID_]DATA_BUFFER (see smb_proc_reparse.c). */
+#define CHIMERA_SMB_REPARSE_XATTR     "chimera.reparse"
+#define CHIMERA_SMB_REPARSE_XATTR_LEN (sizeof(CHIMERA_SMB_REPARSE_XATTR) - 1)
+/* Room for the largest reparse buffer a SET accepts. */
+#define CHIMERA_SMB_REPARSE_READ_MAX  (16384 + 64)
 
 #define chimera_smb_debug(...) chimera_debug("smb", \
                                              __FILE__, \
@@ -963,6 +970,19 @@ struct chimera_smb_request {
              * names, each up to the full UTF-16 target). */
             uint8_t                         rp_response[20 + (CHIMERA_VFS_PATH_MAX - 1) * 2 * 2];
             int                             rp_response_len;
+            /* A reparse point of any other tag is kept verbatim (the whole
+             * REPARSE_[GUID_]DATA_BUFFER, staged in rp_response by the parser)
+             * as the file's chimera.reparse xattr.  rp_existing holds the one
+             * already on the file while a SET/DELETE checks it; rp_dos and
+             * rp_isdir carry the file's state between the async steps. */
+            uint8_t                         rp_generic;
+            uint32_t                        rp_generic_len;
+            uint8_t                         rp_guid[16];
+            uint16_t                        rp_data_len;
+            uint8_t                        *rp_existing;
+            uint32_t                        rp_dos;
+            uint8_t                         rp_isdir;
+            uint8_t                         rp_dir_nonempty;
             /* SET_SPARSE / SET_ZERO_DATA / QUERY_ALLOCATED_RANGES fields */
             struct chimera_smb_open_file   *sp_open_file;
             uint8_t                         sp_set_sparse;
@@ -1012,6 +1032,13 @@ struct chimera_smb_request {
              * FILE_OBJECTID_BUFFER, type 1): ObjectId(16) + BirthVolumeId(16)
              * + BirthObjectId(16) + DomainId(16) = 64 bytes. */
             uint8_t                         oid_buffer[64];
+            /* SET_OBJECT_ID / SET_OBJECT_ID_EXTENDED input (64 / 48 bytes), the
+             * file's open handle and the share root's (which indexes the
+             * volume's object IDs) while the request runs. */
+            uint8_t                         oid_in[64];
+            struct chimera_smb_open_file   *oid_open_file;
+            struct chimera_vfs_open_handle *oid_root;
+            char                            oid_index_name[48];
             /* FSCTL_LMR_REQUEST_RESILIENCY (NETWORK_RESILIENCY_REQUEST,
              * MS-SMB2 2.2.31.3): requested resiliency Timeout in milliseconds. */
             uint32_t                        rr_timeout_ms;

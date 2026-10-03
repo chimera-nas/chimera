@@ -226,6 +226,31 @@ chimera_smb_set_info_link_process(struct chimera_smb_request *request)
     }
 } /* chimera_smb_set_info_link_process */
 
+/* Merge a FileBasicInformation attribute change into the stored DOS set. */
+static void
+chimera_smb_set_info_basic_getattr_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    if (!error_code && (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES)) {
+        request->set_info.vfs_attrs.va_dos_attributes |=
+            attr->va_dos_attributes & ~(SMB_DOS_ATTR_SETTABLE | SMB2_FILE_ATTRIBUTE_NORMAL);
+    }
+
+    chimera_vfs_setattr(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred,
+        request->set_info.open_file->handle,
+        &request->set_info.vfs_attrs,
+        0,
+        0,
+        chimera_smb_set_info_callback,
+        request);
+} /* chimera_smb_set_info_basic_getattr_callback */
+
 /* An EndOfFile set that truncates a data file leaves its AllocationSize where
  * it was until the handle closes: NTFS gives back the clusters past the new EOF
  * at cleanup, not at the set (IFSTest EndOfFileInformationTest reads the old
@@ -646,6 +671,20 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     } else if (!chimera_smb_time_is_omit(request->set_info.attrs.smb_atime)) {
                         request->set_info.open_file->flags       |= CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY;
                         request->set_info.open_file->sticky_atime = request->set_info.vfs_attrs.va_atime;
+                    }
+
+                    /* New attributes replace only the bits a client may set:
+                     * read the stored set first so SPARSE and REPARSE_POINT,
+                     * which the FSCTLs own, survive. */
+                    if (request->set_info.vfs_attrs.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) {
+                        chimera_vfs_getattr(
+                            request->compound->thread->vfs_thread,
+                            &request->session_handle->session->cred,
+                            request->set_info.open_file->handle,
+                            CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
+                            chimera_smb_set_info_basic_getattr_callback,
+                            request);
+                        break;
                     }
 
                     chimera_vfs_setattr(

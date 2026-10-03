@@ -78,6 +78,10 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
      * check, and release -- the per-FSCTL handlers re-resolve as needed. */
     switch (request->ioctl.ctl_code) {
         case SMB2_FSCTL_SET_REPARSE_POINT:
+        case SMB2_FSCTL_DELETE_REPARSE_POINT:
+        case SMB2_FSCTL_SET_OBJECT_ID:
+        case SMB2_FSCTL_SET_OBJECT_ID_EXTENDED:
+        case SMB2_FSCTL_DELETE_OBJECT_ID:
         case SMB2_FSCTL_SET_SPARSE:
         case SMB2_FSCTL_SET_ZERO_DATA:
         case SMB2_FSCTL_SRV_COPYCHUNK:
@@ -193,6 +197,17 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_ioctl_get_reparse(request);
             break;
 
+        case SMB2_FSCTL_DELETE_REPARSE_POINT:
+            chimera_smb_ioctl_delete_reparse(request);
+            break;
+
+        case SMB2_FSCTL_GET_OBJECT_ID:
+        case SMB2_FSCTL_SET_OBJECT_ID:
+        case SMB2_FSCTL_SET_OBJECT_ID_EXTENDED:
+        case SMB2_FSCTL_DELETE_OBJECT_ID:
+            chimera_smb_ioctl_object_id(request);
+            break;
+
         case SMB2_FSCTL_SET_SPARSE:
             chimera_smb_ioctl_set_sparse(request);
             break;
@@ -284,56 +299,24 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             break;
 
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
-            /* MS-FSCC 2.3.7: returns FILE_OBJECTID_BUFFER (64 bytes).  We
-             * don't persist object IDs, but the value is documented as
-             * stable per file for the volume's lifetime — so synthesize it
-             * deterministically from the open handle's file-handle bytes
-             * (fh_hash) and the server-instance GUID.  That is enough for
-             * clients that just want a stable, opaque per-file token. */
+            /* MS-SMB2 §3.3.5.2.10: IOCTL is in the channel-sequence-checked set;
+             * a stale sequence is rejected with FILE_NOT_AVAILABLE. */
             open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
-
             if (unlikely(!open_file)) {
                 chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
                 return;
             }
-
-            /* MS-SMB2 §3.3.5.2.10: IOCTL is in the channel-sequence-checked set;
-             * a stale sequence is rejected with FILE_NOT_AVAILABLE. */
             if (chimera_smb_channel_sequence_stale(open_file,
                                                    request->channel_sequence, 1)) {
                 chimera_smb_open_file_release(request, open_file);
                 chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
                 return;
             }
-
-            if (request->ioctl.max_output_response < 64) {
-                chimera_smb_open_file_release(request, open_file);
-                chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_TOO_SMALL);
-                return;
-            }
-
-            memset(request->ioctl.oid_buffer, 0, 64);
-
-            if (open_file->handle) {
-                /* ObjectId: derive from the VFS file-handle hash so each open
-                 * of the same file yields the same ID across the session. */
-                memcpy(request->ioctl.oid_buffer, &open_file->handle->fh_hash, 8);
-                /* Mirror the hash into the upper half so a 16-byte compare
-                 * is meaningful even if the lower 8 collide. */
-                memcpy(request->ioctl.oid_buffer + 8, &open_file->handle->fh_hash, 8);
-                request->ioctl.oid_buffer[8] ^= 0xa5;
-                /* BirthVolumeId: server-instance GUID stands in for a volume
-                 * GUID. */
-                memcpy(request->ioctl.oid_buffer + 16, shared->guid, 16);
-                /* BirthObjectId: same as ObjectId since we don't track
-                 * creation-time renames. */
-                memcpy(request->ioctl.oid_buffer + 32,
-                       request->ioctl.oid_buffer, 16);
-                /* DomainId: zeroed (MS-FSCC: zero indicates no domain). */
-            }
-
             chimera_smb_open_file_release(request, open_file);
-            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+
+            /* The file's stored ID, or a new one stored for it (see
+             * smb_proc_object_id.c). */
+            chimera_smb_ioctl_object_id(request);
             break;
 
         case SMB2_FSCTL_LMR_REQUEST_RESILIENCY:
@@ -478,6 +461,7 @@ chimera_smb_ioctl_reply(
             output_length = SMB2_FSCTL_OFFLOAD_WRITE_OUTPUT_SIZE; /* Size+Flags+LengthWritten */
             break;
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
+        case SMB2_FSCTL_GET_OBJECT_ID:
             output_length = 64; /* FILE_OBJECTID_BUFFER (type 1) */
             break;
         case SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS:
@@ -627,6 +611,7 @@ chimera_smb_ioctl_reply(
             evpl_iovec_cursor_append_uint64(reply_cursor, request->ioctl.od_copy_length);       /* LengthWritten */
             break;
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
+        case SMB2_FSCTL_GET_OBJECT_ID:
             evpl_iovec_cursor_append_blob(reply_cursor, request->ioctl.oid_buffer, 64);
             break;
         case SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS:
@@ -752,6 +737,8 @@ chimera_smb_parse_ioctl(
             {
                 uint16_t reparse_data_len;
                 uint16_t reserved;
+
+                request->ioctl.rp_generic = 0;
 
                 if (request->ioctl.input_count < 8) {
                     chimera_smb_error("SET_REPARSE_POINT input too small (%u < 8)",
@@ -921,10 +908,68 @@ chimera_smb_parse_ioctl(
                     request->ioctl.rp_nfs_type = SMB2_NFS_SPECFILE_LNK;
 
                 } else {
-                    chimera_smb_info("SET_REPARSE_POINT: unsupported tag 0x%08x",
-                                     request->ioctl.rp_reparse_tag);
-                    /* Mark tag as 0 so handler knows to skip */
-                    request->ioctl.rp_reparse_tag = 0;
+                    /* Any other tag is a reparse point chimera keeps verbatim
+                    * for the file (MS-FSA 2.1.5.10.37): stage the whole buffer,
+                    * header included, in rp_response.  A Microsoft tag has the
+                    * 8-byte header, any other the 24-byte one with a GUID. */
+                    uint32_t tag    = request->ioctl.rp_reparse_tag;
+                    uint32_t n      = request->ioctl.input_count;
+                    uint32_t header = SMB2_IO_REPARSE_TAG_IS_MICROSOFT(tag) ?
+                        SMB2_REPARSE_DATA_HEADER_SIZE : SMB2_REPARSE_GUID_DATA_HEADER_SIZE;
+
+                    if (tag == 0 || tag == 1) {
+                        return chimera_smb_parse_reject(request, SMB2_STATUS_IO_REPARSE_TAG_INVALID);
+                    }
+                    if (n > SMB2_REPARSE_BUFFER_MAX || n != (uint32_t) reparse_data_len + header ||
+                        n > sizeof(request->ioctl.rp_response)) {
+                        return chimera_smb_parse_reject(request, SMB2_STATUS_IO_REPARSE_DATA_INVALID);
+                    }
+
+                    memcpy(request->ioctl.rp_response, &tag, 4);
+                    memcpy(request->ioctl.rp_response + 4, &reparse_data_len, 2);
+                    memset(request->ioctl.rp_response + 6, 0, 2);
+                    if (unlikely(evpl_iovec_cursor_try_copy(request_cursor,
+                                                            request->ioctl.rp_response + 8,
+                                                            n - 8) != 0)) {
+                        return chimera_smb_parse_reject(request, SMB2_STATUS_IO_REPARSE_DATA_INVALID);
+                    }
+                    request->ioctl.rp_generic     = 1;
+                    request->ioctl.rp_generic_len = n;
+                    request->ioctl.rp_data_len    = reparse_data_len;
+                }
+                break;
+            }
+            case SMB2_FSCTL_DELETE_REPARSE_POINT:
+            {
+                /* A bare REPARSE_[GUID_]DATA_BUFFER header naming the reparse
+                 * point to remove (MS-FSA 2.1.5.10.3). */
+                uint16_t reserved;
+
+                if (request->ioctl.input_count < SMB2_REPARSE_DATA_HEADER_SIZE) {
+                    return chimera_smb_parse_reject(request, SMB2_STATUS_IO_REPARSE_DATA_INVALID);
+                }
+                evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.rp_reparse_tag);
+                evpl_iovec_cursor_get_uint16(request_cursor, &request->ioctl.rp_data_len);
+                evpl_iovec_cursor_get_uint16(request_cursor, &reserved);
+                memset(request->ioctl.rp_guid, 0, sizeof(request->ioctl.rp_guid));
+                if (request->ioctl.input_count >= SMB2_REPARSE_GUID_DATA_HEADER_SIZE &&
+                    unlikely(evpl_iovec_cursor_try_copy(request_cursor, request->ioctl.rp_guid,
+                                                        sizeof(request->ioctl.rp_guid)) != 0)) {
+                    return chimera_smb_parse_reject(request, SMB2_STATUS_IO_REPARSE_DATA_INVALID);
+                }
+                break;
+            }
+            case SMB2_FSCTL_SET_OBJECT_ID:
+            case SMB2_FSCTL_SET_OBJECT_ID_EXTENDED:
+            {
+                /* A whole FILE_OBJECTID_BUFFER (64 bytes) for SET, just its
+                 * 48-byte extended part for SET_EXTENDED; anything else is
+                 * INVALID_PARAMETER (MS-FSA 2.1.5.10.35 / .36). */
+                uint32_t want = request->ioctl.ctl_code == SMB2_FSCTL_SET_OBJECT_ID ? 64 : 48;
+
+                if (request->ioctl.input_count != want ||
+                    evpl_iovec_cursor_try_copy(request_cursor, request->ioctl.oid_in, want) != 0) {
+                    return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
                 }
                 break;
             }

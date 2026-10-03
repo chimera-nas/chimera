@@ -41,11 +41,12 @@
                                      SMB2_FILE_ATTRIBUTE_SYSTEM |   \
                                      SMB2_FILE_ATTRIBUTE_ARCHIVE)
 
-/* Persisted DOS bits reported back to clients.  SPARSE is reportable but is
- * excluded from SMB_DOS_ATTR_SETTABLE because it is managed via
- * FSCTL_SET_SPARSE, not FileBasicInformation. */
+/* Persisted DOS bits reported back to clients.  SPARSE and REPARSE_POINT are
+* reportable but excluded from SMB_DOS_ATTR_SETTABLE: they are managed through
+* FSCTL_SET_SPARSE and the reparse-point FSCTLs, not FileBasicInformation. */
 #define SMB_DOS_ATTR_REPORTABLE     (SMB_DOS_ATTR_SETTABLE | \
-                                     SMB2_FILE_ATTRIBUTE_SPARSE_FILE)
+                                     SMB2_FILE_ATTRIBUTE_SPARSE_FILE | \
+                                     SMB2_FILE_ATTRIBUTE_REPARSE_POINT)
 
 /* Masks for each information class */
 #define SMB_ATTR_MASK_BASIC         ( \
