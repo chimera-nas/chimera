@@ -415,3 +415,53 @@ jobs:
           path: ctest-results/
           if-no-files-found: warn
           retention-days: 30
+
+  # Microsoft's IFSTest (from the Windows HLK) through the Windows SMB client
+  # against the same Release daemon, on Server 2025 for the reason the
+  # smb-client job gives.  The kit is fetched from Microsoft on every run (see
+  # fetch_kit.ps1) and a pass takes about 25 minutes per backend, so it runs
+  # only at the extended tier.  Tests known not to pass are listed, with the
+  # reason, in ifstest_expected.csv; anything else that fails, fails the job.
+  # See src/server/smb/tests/windows_client/ifstest/.
+  ifstest:
+    name: IFSTest Server 2025 x64
+    needs: test
+    if: ${{ !cancelled() && inputs.test_tier == 'extended' }}
+    runs-on: windows-2025
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
+        with:
+          name: windows-smb-client-bundle-x64
+          path: bundle
+      - name: Fetch IFSTest from Microsoft
+        shell: pwsh
+        run: |
+          $dir = & src/server/smb/tests/windows_client/ifstest/fetch_kit.ps1
+          "IFSTEST_DIR=$dir" >> $env:GITHUB_ENV
+      - name: Run IFSTest against memfs, diskfs and cairn
+        shell: pwsh
+        timeout-minutes: 100
+        run: python src/server/smb/tests/windows_client/ifstest/ifstest_chimera.py bundle/chimera.exe $env:IFSTEST_DIR ifstest-logs 1500 memfs diskfs cairn
+      - name: Check the results against the known failures
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ctest-results | Out-Null
+          python src/server/smb/tests/windows_client/ifstest/ifstest_check.py ifstest-logs src/server/smb/tests/windows_client/ifstest/ifstest_expected.csv --junit ctest-results/results.xml memfs diskfs cairn
+      - name: Upload IFSTest logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ifstest-logs
+          path: ifstest-logs/
+          retention-days: 30
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ctest-junit-windows-ifstest-server2025-x64
+          path: ctest-results/
+          if-no-files-found: warn
+          retention-days: 30

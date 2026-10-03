@@ -155,6 +155,30 @@ from the Windows SDK before killing it. CI runs it in the `smb-client` job of
 the Windows workflow against the Release build: on Server 2025 for x64 and on
 Windows 11 for ARM64.
 
+### IFSTest
+
+`src/server/smb/tests/windows_client/ifstest/` runs Microsoft's IFS test
+(IFSTest, from the Windows HLK) through the same client against each backend.
+`fetch_kit.ps1` downloads the IFSTest packages from Microsoft and prints the
+directory holding `ifstest.exe`; nothing from the HLK is kept in the
+repository or in CI caches. `ifstest_chimera.py` maps each backend and runs
+IFSTest against it, writing one log per backend, and `ifstest_check.py`
+judges those logs against `ifstest_expected.csv`, the tests known not to pass
+on each backend and why. A failure not listed there fails the check; a listed
+test that starts passing is reported so it can be taken off the list.
+
+```powershell
+$kit = & src/server/smb/tests/windows_client/ifstest/fetch_kit.ps1
+python src/server/smb/tests/windows_client/ifstest/ifstest_chimera.py `
+  build/bin/chimera.exe $kit ifstest-logs 1500 memfs diskfs cairn
+python src/server/smb/tests/windows_client/ifstest/ifstest_check.py `
+  ifstest-logs src/server/smb/tests/windows_client/ifstest/ifstest_expected.csv `
+  memfs diskfs cairn
+```
+
+A run takes about 25 minutes per backend, so CI runs it only at the extended
+tier, in the `ifstest` job of the Windows workflow (Server 2025, x64).
+
 ## Platform choices
 
 * Native threads, synchronization, scalar atomics, timers and secure randomness
