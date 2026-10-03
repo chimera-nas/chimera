@@ -375,6 +375,37 @@ linux_get_fh(
     return 0;
 } /* linux_get_fh */
 
+/*
+ * Confirm this process can open_by_handle_at on dirfd.  name_to_handle_at
+ * works unprivileged on ext4/xfs/btrfs; open_by_handle_at needs
+ * CAP_DAC_READ_SEARCH.  A mount that can mint handles it cannot open is
+ * useless, so the caller fails the mount with the probe errno (EPERM when
+ * unprivileged; ENOTSUP when the filesystem cannot mint handles).
+ *
+ * Returns 0 on success.  On failure returns -1 with errno set.
+ */
+static inline int
+linux_probe_open_by_handle(int dirfd)
+{
+    uint8_t             buf[sizeof(struct file_handle) + MAX_HANDLE_SZ];
+    struct file_handle *handle = (struct file_handle *) buf;
+    int                 mount_id;
+    int                 fd;
+
+    handle->handle_bytes = MAX_HANDLE_SZ;
+    if (name_to_handle_at(dirfd, "", handle, &mount_id, AT_EMPTY_PATH) < 0) {
+        return -1;
+    }
+
+    fd = open_by_handle_at(dirfd, handle, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+} /* linux_probe_open_by_handle */
+
 static void
 linux_mount_table_destroy(struct chimera_linux_mount_table *mount_table)
 {
