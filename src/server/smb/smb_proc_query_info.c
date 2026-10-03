@@ -11,6 +11,26 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
+/* FileAttributeTagInformation of a reparse point chimera keeps verbatim: the
+ * tag is the first field of the stored buffer. */
+static void
+chimera_smb_query_info_reparse_tag_cb(
+    enum chimera_vfs_error error_code,
+    uint32_t               value_len,
+    void                  *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    if (error_code == CHIMERA_VFS_OK && value_len >= 4) {
+        memcpy(&request->query_info.r_attrs.smb_reparse_tag, request->query_info.ea_out, 4);
+    }
+    free(request->query_info.ea_out);
+    request->query_info.ea_out = NULL;
+
+    chimera_smb_open_file_release(request, request->query_info.open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_query_info_reparse_tag_cb */
+
 static void
 chimera_smb_query_info_getattr_callback(
     enum chimera_vfs_error    error_code,
@@ -43,6 +63,21 @@ chimera_smb_query_info_getattr_callback(
                     break;
                 case SMB2_FILE_ATTRIBUTE_TAG_INFO:
                     chimera_smb_marshal_attribute_tag_info(attr, &request->query_info.r_attrs);
+                    if (!error_code &&
+                        (request->query_info.r_attrs.smb_attributes & SMB2_FILE_ATTRIBUTE_REPARSE_POINT) &&
+                        request->query_info.r_attrs.smb_reparse_tag == 0) {
+                        request->query_info.ea_out = malloc(CHIMERA_SMB_REPARSE_READ_MAX);
+                        chimera_vfs_get_xattr(request->compound->thread->vfs_thread,
+                                              &request->session_handle->session->cred,
+                                              request->query_info.open_file->handle,
+                                              CHIMERA_SMB_REPARSE_XATTR,
+                                              CHIMERA_SMB_REPARSE_XATTR_LEN,
+                                              request->query_info.ea_out,
+                                              CHIMERA_SMB_REPARSE_READ_MAX,
+                                              chimera_smb_query_info_reparse_tag_cb,
+                                              request);
+                        return;
+                    }
                     break;
                 case SMB2_FILE_ALL_INFO:
                     /* For FileAllInformation, we need all attributes */

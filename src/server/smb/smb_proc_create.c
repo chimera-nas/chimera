@@ -3099,6 +3099,22 @@ chimera_smb_create_open_at_callback(
         return;
     }
 
+    /* A reparse point chimera keeps verbatim (FILE_ATTRIBUTE_REPARSE_POINT
+     * persisted on a file or directory) has no filter on the server to handle
+     * its tag: unless the caller opens the reparse point itself, Windows
+     * answers STATUS_IO_REPARSE_TAG_NOT_HANDLED (IFSTest OpenReparsePointTest,
+     * DeleteFileDirReparsePointTest). */
+    if (!oh->r_created &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+        (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_REPARSE_POINT) &&
+        !S_ISLNK(attr->va_mode) &&
+        !(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_IO_REPARSE_TAG_NOT_HANDLED);
+        return;
+    }
+
     /* Enforce the requested access against the object's ACL for every
      * disposition that can open an existing object.  Pure FILE_CREATE always
      * makes a new object (and fails with a collision otherwise), so the creator
