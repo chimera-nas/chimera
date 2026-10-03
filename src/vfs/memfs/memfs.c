@@ -1941,10 +1941,11 @@ memfs_apply_attrs(
         inode->size        = attr->va_size;
         /* A reservation only holds while it exceeds the live data; once EOF is
          * set at/above it the reservation is subsumed and no longer separate.
-         * A truncation releases it too, as it releases the clusters past the
-         * new EOF on NTFS (MS-FSA 2.1.5.15.5); an AllocationSize set in the
-         * same call is applied after this. */
-        if (inode->alloc_size <= inode->size || inode->size < old_size) {
+         * A truncation by more than a 4 KiB cluster releases it too, as NTFS
+         * releases the clusters past the new EOF (MS-FSA 2.1.5.15.5); an
+         * AllocationSize set in the same call is applied after this. */
+        if (inode->alloc_size <= inode->size ||
+            inode->size + 4096 < ((old_size + 4095) & ~4095ULL)) {
             inode->alloc_size = 0;
         }
     }
@@ -2340,9 +2341,11 @@ memfs_setattr(
      * SIZE bit off so memfs_apply_attrs only touches base-inode metadata. */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) && S_ISREG(inode->mode)) {
         /* The base fork's AllocationSize reservation goes once EOF reaches it
-         * or the file is truncated, as memfs_apply_attrs would do. */
+         * or the file is truncated by more than a cluster, as memfs_apply_attrs
+         * would do. */
         if (!stream &&
-            (inode->alloc_size <= attr->va_size || attr->va_size < *p_size)) {
+            (inode->alloc_size <= attr->va_size ||
+             attr->va_size + 4096 < ((*p_size + 4095) & ~4095ULL))) {
             inode->alloc_size = 0;
         }
         *p_size = attr->va_size;
