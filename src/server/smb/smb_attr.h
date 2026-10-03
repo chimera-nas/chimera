@@ -742,7 +742,7 @@ chimera_smb_append_standard_info(
                                    (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) ||
                                    (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) &&
                                     chimera_vfs_state_is_delete_pending(open_file->share_file_state)));
-    evpl_iovec_cursor_append_uint8(cursor, attrs->smb_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY);
+    evpl_iovec_cursor_append_uint8(cursor, !!(attrs->smb_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY));
     evpl_iovec_cursor_append_uint16(cursor, 0); /* Reserved */
 } /* chimera_smb_append_standard_info */
 
