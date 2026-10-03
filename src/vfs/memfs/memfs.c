@@ -7133,11 +7133,12 @@ memfs_rename_stream(
 
     pprev = &inode->streams;
     for (cur = inode->streams; cur; cur = cur->next) {
+        /* Stream names match without regard to case (memfs_stream_find_by_name). */
         if (cur->name_len == request->rename_stream.namelen &&
-            memcmp(cur->name, request->rename_stream.name, cur->name_len) == 0) {
+            strncasecmp(cur->name, request->rename_stream.name, cur->name_len) == 0) {
             stream = cur;
         } else if (cur->name_len == request->rename_stream.new_namelen &&
-                   memcmp(cur->name, request->rename_stream.new_name, cur->name_len) == 0) {
+                   strncasecmp(cur->name, request->rename_stream.new_name, cur->name_len) == 0) {
             target      = cur;
             target_prev = pprev;
         }
