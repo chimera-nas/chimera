@@ -324,6 +324,9 @@ void chimera_smb_ioctl_delete_reparse(
 void chimera_smb_ioctl_object_id(
     struct chimera_smb_request *request);
 
+void chimera_smb_ioctl_get_retrieval_pointers(
+    struct chimera_smb_request *request);
+
 void chimera_smb_ioctl_set_sparse(
     struct chimera_smb_request *request);
 
