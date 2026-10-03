@@ -365,12 +365,14 @@ rootfs_readdir(
         for (int i = (int) cookie; i < 2; i++) {
             attr.va_req_mask = request->readdir.attr_mask;
             rootfs_map_attrs(&attr, dots[i]);
+            /* A non-zero return stops after this entry, which the caller
+             * has taken. */
+            next = i + 1;
             if (request->readdir.callback(dots[i]->ino, i + 1, names[i], i + 1,
                                           &attr, request->proto_private_data)) {
                 eof = 0;
                 goto out;
             }
-            next = i + 1;
         }
     }
 
@@ -381,13 +383,13 @@ rootfs_readdir(
         attr.va_req_mask = request->readdir.attr_mask;
         rootfs_map_attrs(&attr, child);
 
+        next = ROOTFS_COOKIE_FIRST + i;
         if (request->readdir.callback(child->ino, ROOTFS_COOKIE_FIRST + i,
                                       child->name, child->namelen,
                                       &attr, request->proto_private_data)) {
             eof = 0;
             break;
         }
-        next = ROOTFS_COOKIE_FIRST + i;
     }
 
  out:
@@ -498,6 +500,7 @@ chimera_vfs_rootfs_mount(struct chimera_vfs *vfs)
     struct rootfs            *fs    = vfs->module_private[CHIMERA_VFS_FH_MAGIC_ROOT];
 
     mount->module       = &chimera_vfs_rootfs_module;
+    mount->builtin      = 1;
     mount->path         = strdup("");
     mount->module_path  = strdup("");
     mount->pathlen      = 0;

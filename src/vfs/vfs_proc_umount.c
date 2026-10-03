@@ -148,12 +148,6 @@ chimera_vfs_umount_dispatch(struct chimera_vfs_request *request)
     struct chimera_vfs        *vfs    = thread->vfs;
     struct chimera_vfs_mount  *mount  = request->umount.mount;
 
-    /* Unmounting "/" hands the namespace back to the built-in rootfs; put it
-     * in place before the outgoing root leaves so there is always a root. */
-    if (mount->pathlen == 0 && !mount->detached) {
-        chimera_vfs_rootfs_mount(vfs);
-    }
-
     chimera_vfs_mount_table_remove_mount(vfs->mount_table, mount);
 
     /* Rootfs directories exist only to hold mount points; drop the ones this
@@ -480,9 +474,8 @@ chimera_vfs_umount(
         return;
     }
 
-    /* The built-in rootfs is not a mount anyone placed; it leaves only when a
-     * mount at "/" replaces it. */
-    if (mount->module == &chimera_vfs_rootfs_module) {
+    /* The built-in rootfs is not a mount anyone placed, and stays. */
+    if (mount->builtin) {
         callback(thread, CHIMERA_VFS_EBUSY, private_data);
         return;
     }

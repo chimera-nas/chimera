@@ -27,8 +27,9 @@ typedef void (*chimera_vfs_mount_callback_t)(
 
 /*
  * Mount module_name's module_path at mount_path in the namespace, as on Linux:
- * "/" replaces the built-in rootfs (EBUSY once something else is mounted
- * there or on the rootfs's directories); any other path must name an existing
+ * "/" goes over the built-in rootfs, hiding it and anything mounted on its
+ * directories until unmounted (EBUSY once something is mounted there already);
+ * any other path must name an existing
  * directory, reached through whatever is already mounted, that is not itself
  * a mount point (EBUSY) and does not live on a path-only filesystem (ENOTSUP).
  * Where the path runs through the built-in rootfs, missing directories are

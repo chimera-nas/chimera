@@ -197,25 +197,13 @@ chimera_vfs_mount_fail(
     chimera_vfs_mount_ctx_free(ctx);
 } /* chimera_vfs_mount_fail */
 
-/* The mount on top of the built-in rootfs at "/", if the rootfs is still the
- * namespace root. */
-static struct chimera_vfs_mount *
-chimera_vfs_mount_find_rootfs(struct chimera_vfs *vfs)
-{
-    struct chimera_vfs_mount *mount;
-
-    mount = chimera_vfs_mount_table_find_exact(vfs->mount_table, "", 0);
-
-    return (mount && mount->module == &chimera_vfs_rootfs_module) ? mount : NULL;
-} /* chimera_vfs_mount_find_rootfs */
-
 static void
 chimera_vfs_mount_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread    *thread = request->thread;
     struct chimera_vfs           *vfs    = thread->vfs;
     struct chimera_vfs_mount_ctx *ctx    = request->proto_private_data;
-    struct chimera_vfs_mount     *mount, *rootfs = NULL;
+    struct chimera_vfs_mount     *mount;
 
     chimera_vfs_complete(request);
 
@@ -273,19 +261,7 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
                                                             ctx->namelen);
     }
 
-    if (!ctx->detached && ctx->pathlen == 0) {
-        rootfs = chimera_vfs_mount_find_rootfs(vfs);
-    }
-
     chimera_vfs_mount_table_insert(vfs->mount_table, mount);
-
-    /* A mount at "/" takes over the namespace from the built-in rootfs.  It
-     * was checked for submounts before the backend mounted; the new root is
-     * in the table before the rootfs leaves, so there is always a root. */
-    if (rootfs) {
-        chimera_vfs_mount_table_remove_mount(vfs->mount_table, rootfs);
-        chimera_vfs_mount_retire(vfs, rootfs);
-    }
 
     ctx->callback(thread, CHIMERA_VFS_OK, ctx->private_data);
     chimera_vfs_mount_ctx_free(ctx);
@@ -506,7 +482,7 @@ chimera_vfs_mount_start(
     struct chimera_vfs           *vfs    = thread->vfs;
     struct chimera_vfs_module    *module = NULL;
     struct chimera_vfs_mount_ctx *ctx;
-    struct chimera_vfs_mount     *rootfs;
+    struct chimera_vfs_mount     *root;
     uint32_t                      root_fh_len;
     int                           i;
 
@@ -553,12 +529,13 @@ chimera_vfs_mount_start(
     }
 
     if (ctx->pathlen == 0) {
-        /* A mount at "/" replaces the built-in rootfs, and only it: a mount
-         * someone placed at "/" must be unmounted first, and the rootfs can
-         * only go while nothing is mounted on its directories. */
-        rootfs = chimera_vfs_mount_find_rootfs(vfs);
+        /* A mount at "/" goes over the built-in rootfs, as a mount over any
+         * directory does on Linux: what the rootfs showed, mounts on its
+         * directories included, is hidden until it is unmounted.  One mount
+         * someone placed at "/" is the limit. */
+        root = chimera_vfs_mount_table_find_exact(vfs->mount_table, "", 0);
 
-        if (!rootfs || chimera_vfs_mount_table_has_submounts(vfs->mount_table, rootfs)) {
+        if (root && !root->builtin) {
             chimera_vfs_mount_fail(ctx, CHIMERA_VFS_EBUSY);
             return;
         }

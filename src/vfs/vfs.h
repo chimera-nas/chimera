@@ -114,6 +114,9 @@ struct chimera_vfs_mount {
      * mount and for a detached mount, which has no namespace position at all
      * and is reachable only by its handles. */
     int                            detached;
+    /* The built-in rootfs: always mounted at "/", beneath whatever is
+     * mounted over it (see vfs_rootfs.h). */
+    int                            builtin;
     uint8_t                        cover_parent_fh[CHIMERA_VFS_FH_SIZE];
     int                            cover_parent_fh_len;
     uint8_t                        cover_fh[CHIMERA_VFS_FH_SIZE];   /* the covered directory */
