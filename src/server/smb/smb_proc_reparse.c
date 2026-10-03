@@ -755,6 +755,10 @@ chimera_smb_ioctl_delete_reparse(struct chimera_smb_request *request)
     header = SMB2_IO_REPARSE_TAG_IS_MICROSOFT(tag) ?
         SMB2_REPARSE_DATA_HEADER_SIZE : SMB2_REPARSE_GUID_DATA_HEADER_SIZE;
     if (request->ioctl.rp_data_len != 0 || request->ioctl.input_count != header) {
+        chimera_smb_info("DELETE_REPARSE_POINT: malformed request tag 0x%08x data_len %u "
+                         "input %u max_output %u",
+                         tag, request->ioctl.rp_data_len, request->ioctl.input_count,
+                         request->ioctl.max_output_response);
         chimera_smb_reparse_finish(request, SMB2_STATUS_IO_REPARSE_DATA_INVALID);
         return;
     }
