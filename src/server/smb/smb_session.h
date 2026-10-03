@@ -102,6 +102,9 @@ struct chimera_smb_file_id {
  * allocation reserved; the close releases it (NTFS frees truncated clusters at
  * cleanup). */
 #define CHIMERA_SMB_OPEN_FILE_TRUNCATED            0x00004000
+/* Opened with FILE_OPEN_FOR_BACKUP_INTENT: the open may set and delete object
+ * IDs (MS-FSA Open.HasRestoreAccess). */
+#define CHIMERA_SMB_OPEN_FILE_BACKUP_INTENT        0x00008000
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases

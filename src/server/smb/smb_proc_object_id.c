@@ -423,8 +423,17 @@ chimera_smb_ioctl_object_id(struct chimera_smb_request *request)
         return;
     }
 
-    if ((ctl == SMB2_FSCTL_SET_OBJECT_ID_EXTENDED || ctl == SMB2_FSCTL_SET_OBJECT_ID) &&
+    if (ctl == SMB2_FSCTL_SET_OBJECT_ID_EXTENDED &&
         !(open_file->granted_access & (SMB2_FILE_WRITE_DATA | SMB2_FILE_WRITE_ATTRIBUTES))) {
+        chimera_smb_oid_finish(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
+    /* Setting or deleting an object ID takes restore access (MS-FSA
+     * Open.HasRestoreAccess): an open made with FILE_OPEN_FOR_BACKUP_INTENT.
+     * chimera has no privilege model to check beyond the intent. */
+    if ((ctl == SMB2_FSCTL_SET_OBJECT_ID || ctl == SMB2_FSCTL_DELETE_OBJECT_ID) &&
+        !(open_file->flags & CHIMERA_SMB_OPEN_FILE_BACKUP_INTENT)) {
         chimera_smb_oid_finish(request, SMB2_STATUS_ACCESS_DENIED);
         return;
     }
