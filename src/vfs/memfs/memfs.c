@@ -6845,7 +6845,7 @@ memfs_open_stream(
     void                       *private_data)
 {
     struct memfs_inode        *inode;
-    struct memfs_named_stream *stream;
+    struct memfs_named_stream *stream, **tail;
     struct memfs_stream_open  *so;
     unsigned int               flags = request->open_stream.flags;
     struct timespec            now;
@@ -6889,10 +6889,14 @@ memfs_open_stream(
         stream->name_len = request->open_stream.namelen;
         stream->id       = ++inode->next_stream_id;
         stream->linked   = 1;
-        stream->next     = inode->streams;
-        inode->streams   = stream;
-        inode->mtime     = now;
-        inode->ctime     = now;
+        /* Append, so streams list in the order they were created, as NTFS
+         * returns them (IFSTest StreamInformationTest checks by position). */
+        stream->next = NULL;
+        for (tail = &inode->streams; *tail; tail = &(*tail)->next) {
+        }
+        *tail        = stream;
+        inode->mtime = now;
+        inode->ctime = now;
         inode->change++;
         request->open_stream.r_created = 1;
     } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
