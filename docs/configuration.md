@@ -262,14 +262,15 @@ exports, shares or buckets over a missing root.
   grafted into another's tree.
 - Mounts are made in the order the file lists them, as `/etc/fstab`'s are: a
   mount inside another comes after it, and a mount at `"/"` covers what was
-  mounted before it.
+  mounted before it -- which is how an overlay's layers are hidden beneath it
+  (see [`overlay`](#overlay-union-of-two-mounts)).
 - As on Linux, `..` from a mount's root leads to the directory holding its
   mount point, and a mount point cannot be removed or renamed, nor its
   filesystem unmounted while other mounts sit inside it.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `module` | string | required | VFS module name (`memfs`, `linux`, `diskfs`, `cairn`, `io_uring`, `nfs`, ...). |
+| `module` | string | required | VFS module name (`memfs`, `linux`, `diskfs`, `cairn`, `io_uring`, `nfs`, `overlay`, ...). |
 | `path` | string | required | Backend-specific root. For passthrough modules (`linux`, `io_uring`) this is a host path; for `nfs` it's the upstream export; for `memfs`, `diskfs` and `cairn` it's the name of a filesystem declared under [`filesystems`](#filesystems), optionally followed by a path inside it (`fs0/projects`). The path must already exist unless `create` is set. |
 | `create` | bool or object | `false` | Create `path`, and any missing parents, before mounting. `true` uses mode `0755`; `{ "mode": "0750" }` sets the mode as an octal string. The directories are owned by the server identity. A path that cannot be created stops startup. |
 | `options` | string | - | Module-specific mount options (e.g. `"vers=4.1,rdma,port=20049"` for the `nfs` module). |
@@ -662,6 +663,34 @@ Each entry of `devices`:
 | `deviceid` | string | - | 16-byte hex device ID (remote devices). |
 | `signature` | object | - | SIMPLE-volume signature: `{ "offset": int, "bytes": "<hex>" }` (block layout). |
 | `scsi` | object | - | SCSI designator: `{ "designator_type": "naa"\|"eui64"\|"t10", "code_set": "binary"\|"ascii", "id": "<hex>", "pr_key": int }` (SCSI layout). |
+
+### `overlay` (union of two mounts)
+
+An overlay is configured entirely through mount `options`; it takes no
+`config` object and ignores `path`.
+
+| Option | Description |
+|---|---|
+| `lowerdir=<path>` | Required. Namespace path of the lower layer, which the overlay never modifies. |
+| `upperdir=<path>` | Namespace path of the upper layer, which receives every change. Without one the overlay is read-only. |
+
+The layers are ordinary mounts, placed first (for example at `/.lower` and
+`/.upper`); mounting the overlay at `"/"` then hides them. Names resolve in the
+upper layer first; a directory in both layers is merged; changing something
+only the lower layer has copies it up; removing a lower name leaves a whiteout
+file (`.wh.<name>`) in the upper layer, and a directory made over one is
+opaque (`.wh..wh..opq`). Names beginning `.wh.` are reserved. A directory the
+lower layer provides cannot be renamed (`EXDEV`), and file handles do not
+survive remounting the overlay.
+
+```json
+"mounts": {
+    ".lower": { "module": "memfs",   "path": "base" },
+    ".upper": { "module": "memfs",   "path": "changes" },
+    "/":      { "module": "overlay", "path": "",
+                "options": "lowerdir=/.lower,upperdir=/.upper" }
+}
+```
 
 The `nfs` module takes no `config` object; it is configured through mount
 `options` instead.

@@ -101,6 +101,7 @@ endfunction()
 set(CHIMERA_VFS_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
 add_subdirectory(memfs)
+add_subdirectory(overlay)
 add_subdirectory(memkv)
 
 # The linux passthrough backend is built on Linux-only interfaces (openat2,

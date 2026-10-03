@@ -22,7 +22,7 @@
 set -u
 cd "$(dirname "$0")/.."
 
-MODULES="memfs linux io_uring cairn diskfs smb memkv sqlite"
+MODULES="memfs linux io_uring cairn diskfs smb memkv sqlite overlay"
 
 # Allowed include prefixes/paths for module code, beyond headers in the
 # module's own directory (includes with no directory component):

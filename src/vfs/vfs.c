@@ -599,7 +599,7 @@ chimera_vfs_load_module(
     const char *module_path)
 {
     extern struct chimera_vfs_module vfs_memfs, vfs_memkv;
-    extern struct chimera_vfs_module vfs_nfs, vfs_smb, vfs_diskfs;
+    extern struct chimera_vfs_module vfs_nfs, vfs_smb, vfs_diskfs, vfs_overlay;
 
 #ifdef HAVE_CAIRN
     extern struct chimera_vfs_module vfs_cairn;
@@ -613,6 +613,7 @@ chimera_vfs_load_module(
         &vfs_nfs,
         &vfs_smb,
         &vfs_diskfs,
+        &vfs_overlay,
 #ifdef HAVE_CAIRN
         &vfs_cairn,
 #endif /* ifdef HAVE_CAIRN */
