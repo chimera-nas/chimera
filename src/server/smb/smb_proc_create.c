@@ -4721,7 +4721,7 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
 } /* chimera_smb_create_issue_open */
 
 /* MS-FSA create with an overwriting disposition: before replacing an
- * existing file, reject the request when the target is READONLY, or when
+ * existing file, reject an overwrite when the target is READONLY, or when
  * it is HIDDEN/SYSTEM and the request does not also carry that bit (which
  * would otherwise silently clear it).  Run a getattr first so the check
  * happens before any attribute change. */
@@ -4757,7 +4757,10 @@ chimera_smb_create_overwrite_check_callback(
                 ? attr->va_dos_attributes : 0;
     requested = request->create.file_attributes;
 
-    if ((existing & SMB2_FILE_ATTRIBUTE_READONLY) ||
+    /* A supersede replaces the file outright, READONLY or not: NTFS refuses
+     * only an overwrite of a read-only file (IFSTest SupersedeFileAttrTest). */
+    if (((existing & SMB2_FILE_ATTRIBUTE_READONLY) &&
+         request->create.create_disposition != SMB2_FILE_SUPERSEDE) ||
         ((existing & SMB2_FILE_ATTRIBUTE_HIDDEN) &&
          !(requested & SMB2_FILE_ATTRIBUTE_HIDDEN)) ||
         ((existing & SMB2_FILE_ATTRIBUTE_SYSTEM) &&

@@ -811,6 +811,8 @@ struct chimera_smb_request {
             struct chimera_vfs_open_handle *parent_handle;
             struct chimera_vfs_doc_info     doc_info;
             struct chimera_smb_attrs        r_attrs;
+            /* Releases the clusters a truncating handle kept reserved. */
+            struct chimera_vfs_attrs        trim_attrs;
         } close;
 
         struct {
@@ -850,6 +852,8 @@ struct chimera_smb_request {
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
             struct chimera_smb_rdma_element rdma_elements[8];
+            /* Puts back an explicitly set access time after the read. */
+            struct chimera_vfs_attrs        restore_attrs;
             struct evpl_iovec               iov[256];
             struct evpl_iovec               chunk_iov[256];
         } read;
