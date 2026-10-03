@@ -247,6 +247,12 @@ struct diskfs_request_private {
      * insert-completion can update the inode's cached ea_size/ea_count delta. */
     uint64_t                    ea_old_size;  /* FEALIST size of the replaced EA, 0 if new */
     int                         ea_replace;   /* set: replacing an existing EA */
+    /* xattr creation sequence: the one set_xattr stamps on the record it
+     * writes (kept from a replaced record), and list_xattrs' per-name
+     * sequences, gathered to order the listing. */
+    uint64_t                    xattr_seq;
+    uint64_t                   *xattr_seqs;
+    uint32_t                    xattr_seq_cap;
     uint32_t                    read_prefix;
     uint32_t                    read_suffix;
     struct diskfs_thread       *thread;  // Thread for tracking pending I/O
@@ -1131,6 +1137,24 @@ struct diskfs_xattr_rec {
     char     data[];
 };
 #pragma pack(pop)
+
+/* A record may carry, after its name and value, the uint64 creation sequence
+ * (CLOCK_REALTIME ns when the name was first set) that list_xattrs orders names
+ * by.  A record written without one (before the sequence existed, or one too
+ * large to take it) reads as sequence 0. */
+static inline uint64_t
+diskfs_xattr_rec_seq(
+    const struct diskfs_xattr_rec *rec,
+    uint32_t                       rec_len)
+{
+    uint32_t base = sizeof(*rec) + rec->name_len + rec->value_len;
+    uint64_t seq  = 0;
+
+    if (rec_len >= base + sizeof(seq)) {
+        memcpy(&seq, (const char *) rec + base, sizeof(seq));
+    }
+    return seq;
+} /* diskfs_xattr_rec_seq */
 
 
 #define DISKFS_DIRENT_REC_MAX (sizeof(struct diskfs_dirent_rec) + 256)
