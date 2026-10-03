@@ -7,11 +7,13 @@
 #include <stdlib.h>
 #include "common/thread.h"
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
 #else  /* ifdef _WIN32 */
 #include <unistd.h>
+#include <strings.h>
 #endif /* ifdef _WIN32 */
 #include <sys/stat.h>
 #ifdef _WIN32
@@ -61,6 +63,7 @@ void rocksdb_flush_wal(
 #define CAIRN_KEY_FS             8
 #define CAIRN_KEY_PNFS           9
 #define CAIRN_KEY_SID            10
+#define CAIRN_KEY_STREAM         11
 
 /*
  * Storage layout:
@@ -174,6 +177,30 @@ struct cairn_xattr_key {
     uint8_t  keytype;
     uint64_t inum;
     uint64_t hash;
+};
+#pragma pack(pop)
+
+/* Named streams (SMB alternate data streams).  Each stream is a regular-file
+ * inode of its own, linked from nowhere in the namespace; its base file names
+ * it with a { CAIRN_KEY_STREAM, base inum, hash(name) } record holding the
+ * stream's inum, a creation sequence (CLOCK_REALTIME ns) that orders listings,
+ * and the name.  A stream's file handle is the base file's followed by the
+ * stream inode's inum and generation: metadata operations decode only the
+ * base part and act on the base file, while data operations (read, write,
+ * allocate, seek, size changes) resolve the stream inode -- so a stream
+ * shares its file's metadata and owns its own data, as on NTFS. */
+#pragma pack(push, 1)
+struct cairn_stream_key {
+    uint8_t  keytype;
+    uint64_t inum;
+    uint64_t hash;
+};
+
+struct cairn_stream_value {
+    uint64_t inum;
+    uint64_t seq;
+    uint32_t name_len;
+    char     name[];
 };
 #pragma pack(pop)
 
@@ -823,6 +850,79 @@ cairn_inode_get_fh(
 
     return rc;
 } /* cairn_inode_get_fh */
+
+/* A stream handle: the base file's handle followed by the stream inode's
+ * inum and generation. */
+static inline uint32_t
+cairn_stream_to_fh(
+    struct cairn_fs *fs,
+    uint8_t         *fh,
+    uint64_t         base_inum,
+    uint32_t         base_gen,
+    uint64_t         stream_inum,
+    uint32_t         stream_gen)
+{
+    uint32_t n = cairn_inum_to_fh(fs, fh, base_inum, base_gen);
+
+    n += chimera_encode_uint64(stream_inum, fh + n);
+    n += chimera_encode_uint32(stream_gen, fh + n);
+    return n;
+} /* cairn_stream_to_fh */
+
+/* Returns 1 and the stream inode's inum and generation if fh names a stream. */
+static inline int
+cairn_fh_stream(
+    const uint8_t *fh,
+    int            fhlen,
+    uint64_t      *stream_inum,
+    uint32_t      *stream_gen)
+{
+    const uint8_t *ptr = fh + CHIMERA_VFS_MOUNT_ID_SIZE;
+    const uint8_t *end = fh + fhlen;
+    uint64_t       inum;
+    uint32_t       gen;
+
+    ptr += chimera_decode_uint64(ptr, &inum);
+    ptr += chimera_decode_uint32(ptr, &gen);
+    if (ptr >= end) {
+        return 0;
+    }
+    ptr += chimera_decode_uint64(ptr, stream_inum);
+    chimera_decode_uint32(ptr, stream_gen);
+    return 1;
+} /* cairn_fh_stream */
+
+/* The inode a data operation acts on: a stream handle's stream inode, any
+ * other handle's own inode. */
+static inline int
+cairn_inode_get_data_fh(
+    struct cairn_thread       *thread,
+    const uint8_t             *fh,
+    int                        fhlen,
+    struct cairn_inode_handle *ih)
+{
+    uint64_t sinum;
+    uint32_t sgen;
+    int      rc;
+
+    if (!cairn_fh_stream(fh, fhlen, &sinum, &sgen)) {
+        return cairn_inode_get_fh(thread, fh, fhlen, ih);
+    }
+
+    rc = cairn_inode_get_inum(thread, sinum, ih);
+    if (rc == 0 && ih->inode->gen != sgen) {
+        cairn_inode_handle_release(ih);
+        rc = -1;
+    }
+    return rc;
+} /* cairn_inode_get_data_fh */
+
+static void cairn_remove_streams(
+    struct cairn_thread *thread,
+    uint64_t             base_inum);
+static void cairn_remove_xattrs(
+    struct cairn_thread *thread,
+    uint64_t             inum);
 
 static inline void
 cairn_put_dirent(
@@ -2176,6 +2276,56 @@ cairn_map_attrs(
     }
 } /* cairn_map_attrs */
 
+/* A stream handle's attributes are its base file's with the stream's size,
+ * allocation and handle, and the mode of a data fork. */
+static inline void
+cairn_attrs_overlay_stream(
+    struct chimera_vfs_attrs *attr,
+    struct cairn_inode       *stream_inode,
+    const uint8_t            *fh,
+    int                       fhlen)
+{
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        attr->va_mode = S_IFREG | (attr->va_mode & 07777);
+    }
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        attr->va_size       = stream_inode->size;
+        attr->va_space_used = stream_inode->space_used > stream_inode->alloc_size ?
+            stream_inode->space_used : stream_inode->alloc_size;
+        attr->va_alloc_size = stream_inode->alloc_size;
+    }
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
+        memcpy(attr->va_fh, fh, fhlen);
+        attr->va_fh_len = fhlen;
+    }
+} /* cairn_attrs_overlay_stream */
+
+/* Attributes for an operation through fh on data_inode: the inode's own, or,
+ * through a stream handle, the base file's overlaid with the stream's. */
+static inline void
+cairn_map_attrs_data(
+    struct cairn_thread      *thread,
+    struct cairn_fs          *fs,
+    struct chimera_vfs_attrs *attr,
+    struct cairn_inode       *data_inode,
+    const uint8_t            *fh,
+    int                       fhlen)
+{
+    struct cairn_inode_handle bih;
+    uint64_t                  sinum;
+    uint32_t                  sgen;
+
+    if (!cairn_fh_stream(fh, fhlen, &sinum, &sgen) ||
+        cairn_inode_get_fh(thread, fh, fhlen, &bih) != 0) {
+        cairn_map_attrs(fs, attr, data_inode);
+        return;
+    }
+
+    cairn_map_attrs(fs, attr, bih.inode);
+    cairn_inode_handle_release(&bih);
+    cairn_attrs_overlay_stream(attr, data_inode, fh, fhlen);
+} /* cairn_map_attrs_data */
+
 /*
  * Compute the SMB/OS-2 EaSize (CHIMERA_VFS_ATTR_EA_SIZE) for an inode by range-
  * scanning its xattr records and summing the FEALIST contribution of each
@@ -2381,6 +2531,19 @@ cairn_getattr(
 
     cairn_inode_handle_release(&ih);
 
+    {
+        struct cairn_inode_handle sih;
+        uint64_t                  sinum;
+        uint32_t                  sgen;
+
+        if (cairn_fh_stream(request->fh, request->fh_len, &sinum, &sgen) &&
+            cairn_inode_get_data_fh(thread, request->fh, request->fh_len, &sih) == 0) {
+            cairn_attrs_overlay_stream(&request->getattr.r_attr, sih.inode,
+                                       request->fh, request->fh_len);
+            cairn_inode_handle_release(&sih);
+        }
+    }
+
     request->status = CHIMERA_VFS_OK;
 
     request->complete(request);
@@ -2393,9 +2556,11 @@ cairn_setattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct cairn_inode_handle ih;
+    struct cairn_inode_handle ih, sih;
     struct cairn_inode       *inode;
-    int                       rc;
+    int                       rc, is_stream = 0;
+    uint64_t                  stream_inum, stream_mask = 0, full_mask = 0;
+    uint32_t                  stream_gen;
 
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
@@ -2406,6 +2571,46 @@ cairn_setattr(
     }
 
     inode = ih.inode;
+
+    /* Through a stream handle the size (and AllocationSize) is the stream's;
+     * everything else is the base file's.  Apply the stream's part here and
+     * hide it from the base path below; the caller's mask is put back at the
+     * end, since a conflicting commit replays this request from it. */
+    if (cairn_fh_stream(request->fh, request->fh_len, &stream_inum, &stream_gen)) {
+        struct chimera_vfs_attrs *sa = request->setattr.set_attr;
+
+        stream_mask = sa->va_set_mask & (CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE);
+        full_mask   = sa->va_set_mask;
+        is_stream   = 1;
+
+        if (cairn_inode_get_data_fh(thread, request->fh, request->fh_len, &sih) != 0) {
+            cairn_inode_handle_release(&ih);
+            request->status = CHIMERA_VFS_ESTALE;
+            request->complete(request);
+            return;
+        }
+
+        cairn_map_attrs(fs, &request->setattr.r_pre_attr, inode);
+        cairn_attrs_overlay_stream(&request->setattr.r_pre_attr, sih.inode,
+                                   request->fh, request->fh_len);
+
+        if (stream_mask) {
+            struct chimera_vfs_attrs data;
+
+            if ((stream_mask & CHIMERA_VFS_ATTR_SIZE) && sa->va_size < sih.inode->size) {
+                cairn_punch_hole(thread, thread->shared, sih.inode, sa->va_size,
+                                 sih.inode->size - sa->va_size);
+            }
+            memset(&data, 0, sizeof(data));
+            data.va_req_mask   = stream_mask;
+            data.va_set_mask   = stream_mask;
+            data.va_size       = sa->va_size;
+            data.va_alloc_size = sa->va_alloc_size;
+            cairn_apply_attrs(sih.inode, &data);
+            cairn_put_inode(thread, sih.inode);
+        }
+        sa->va_set_mask &= ~stream_mask;
+    }
 
     if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
         !S_ISREG(inode->mode)) {
@@ -2418,7 +2623,9 @@ cairn_setattr(
         return;
     }
 
-    cairn_map_attrs(fs, &request->setattr.r_pre_attr, inode);
+    if (!is_stream) {
+        cairn_map_attrs(fs, &request->setattr.r_pre_attr, inode);
+    }
 
     /* Handle truncation: remove extents past new EOF when size decreases */
     if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
@@ -2556,6 +2763,13 @@ cairn_setattr(
 
     cairn_put_inode(thread, inode);
     cairn_inode_handle_release(&ih);
+
+    if (is_stream) {
+        cairn_attrs_overlay_stream(&request->setattr.r_post_attr, sih.inode,
+                                   request->fh, request->fh_len);
+        cairn_inode_handle_release(&sih);
+        request->setattr.set_attr->va_set_mask = full_mask;
+    }
 
     request->status = CHIMERA_VFS_OK;
 
@@ -2961,6 +3175,39 @@ cairn_rmfs_delete_inode(
         rocksdb_iter_next(iter);
     }
     rocksdb_iter_destroy(iter);
+
+    /* The file's named streams: their records, and their inodes, which no
+     * directory reaches. */
+    {
+        struct cairn_stream_key stream_start, *stream_key;
+        size_t                  vlen;
+
+        stream_start.keytype = CAIRN_KEY_STREAM;
+        stream_start.inum    = inum;
+        stream_start.hash    = 0;
+
+        iter = rocksdb_create_iterator(shared->meta_base_db, shared->read_options);
+        rocksdb_iter_seek(iter, (const char *) &stream_start, sizeof(stream_start));
+        while (rocksdb_iter_valid(iter)) {
+            const char *vp;
+
+            stream_key = (struct cairn_stream_key *) rocksdb_iter_key(iter, &klen);
+            if (klen != sizeof(*stream_key) ||
+                stream_key->keytype != CAIRN_KEY_STREAM ||
+                stream_key->inum != inum) {
+                break;
+            }
+            vp = rocksdb_iter_value(iter, &vlen);
+            if (vlen >= sizeof(struct cairn_stream_value)) {
+                cairn_rmfs_delete_inode(shared, meta_batch, data_batch,
+                                        ((const struct cairn_stream_value *) vp)->inum);
+            }
+            rocksdb_writebatch_delete(meta_batch,
+                                      (const char *) stream_key, sizeof(*stream_key));
+            rocksdb_iter_next(iter);
+        }
+        rocksdb_iter_destroy(iter);
+    }
 
     extent_start.keytype = CAIRN_KEY_EXTENT;
     extent_start.inum    = inum;
@@ -3672,6 +3919,8 @@ cairn_remove_at(
             cairn_remove_acl(thread, inode->inum);
             cairn_remove_pnfs(thread, inode->inum);
             cairn_remove_sids(thread, inode->inum);
+            cairn_remove_xattrs(thread, inode->inum);
+            cairn_remove_streams(thread, inode->inum);
         } else {
             cairn_put_inode(thread, inode);
         }
@@ -3926,6 +4175,23 @@ cairn_open_fh(
         request->status = e;
         request->complete(request);
         return;
+    }
+
+    /* A stream handle opens the stream inode, which carries its data and is
+     * what the close releases. */
+    {
+        uint64_t sinum;
+        uint32_t sgen;
+
+        if (cairn_fh_stream(request->fh, request->fh_len, &sinum, &sgen)) {
+            cairn_inode_handle_release(&ih);
+            if (cairn_inode_get_data_fh(thread, request->fh, request->fh_len, &ih) != 0) {
+                request->status = CHIMERA_VFS_ESTALE;
+                request->complete(request);
+                return;
+            }
+            inode = ih.inode;
+        }
     }
 
     inode->refcnt++;
@@ -4292,6 +4558,8 @@ cairn_close(
         cairn_remove_acl(thread, inode->inum);
         cairn_remove_pnfs(thread, inode->inum);
         cairn_remove_sids(thread, inode->inum);
+        cairn_remove_xattrs(thread, inode->inum);
+        cairn_remove_streams(thread, inode->inum);
     } else {
         cairn_put_inode(thread, inode);
     }
@@ -4345,7 +4613,7 @@ cairn_read(
      */
     cairn_read_begin(thread, 1);
 
-    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
+    rc = cairn_inode_get_data_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         cairn_read_end(thread);
@@ -4381,7 +4649,8 @@ cairn_read(
         chimera_vfs_relatime_needs_update(&inode->atime, &inode->mtime, &inode->ctime, &now);
 
     if (offset >= inode->size) {
-        cairn_map_attrs(fs, &request->read.r_attr, inode);
+        cairn_map_attrs_data(thread, fs, &request->read.r_attr, inode,
+                             request->fh, request->fh_len);
         cairn_inode_handle_release(&ih);
         cairn_read_end(thread);
         request->status        = CHIMERA_VFS_OK;
@@ -4491,7 +4760,8 @@ cairn_read(
 
     rocksdb_iter_destroy(iter);
 
-    cairn_map_attrs(fs, &request->read.r_attr, inode);
+    cairn_map_attrs_data(thread, fs, &request->read.r_attr, inode,
+                         request->fh, request->fh_len);
 
     cairn_inode_handle_release(&ih);
 
@@ -4654,7 +4924,7 @@ cairn_write(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
+    rc = cairn_inode_get_data_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         /* Note: Write iovecs are NOT released here. They were allocated on the
@@ -4668,10 +4938,12 @@ cairn_write(
 
     inode = ih.inode;
 
-    cairn_map_attrs(fs, &request->write.r_pre_attr, inode);
+    cairn_map_attrs_data(thread, fs, &request->write.r_pre_attr, inode,
+                         request->fh, request->fh_len);
 
     if (request->write.length == 0) {
-        cairn_map_attrs(fs, &request->write.r_post_attr, inode);
+        cairn_map_attrs_data(thread, fs, &request->write.r_post_attr, inode,
+                             request->fh, request->fh_len);
         cairn_inode_handle_release(&ih);
 
         request->status         = CHIMERA_VFS_OK;
@@ -4724,9 +4996,28 @@ cairn_write(
      * set-user-ID bit and the set-group-ID bit (when group-executable). */
     inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
 
-    cairn_map_attrs(fs, &request->write.r_post_attr, inode);
-
     cairn_put_inode(thread, inode);
+
+    /* Writing a stream modifies its file: stamp the base inode, whose
+     * timestamps the stream reports. */
+    {
+        struct cairn_inode_handle bih;
+        uint64_t                  sinum;
+        uint32_t                  sgen;
+
+        if (cairn_fh_stream(request->fh, request->fh_len, &sinum, &sgen) &&
+            cairn_inode_get_fh(thread, request->fh, request->fh_len, &bih) == 0) {
+            bih.inode->mtime = now;
+            bih.inode->ctime = now;
+            bih.inode->change++;
+            cairn_put_inode(thread, bih.inode);
+            cairn_inode_handle_release(&bih);
+        }
+    }
+
+    cairn_map_attrs_data(thread, fs, &request->write.r_post_attr, inode,
+                         request->fh, request->fh_len);
+
     cairn_inode_handle_release(&ih);
 
     request->status         = CHIMERA_VFS_OK;
@@ -4756,7 +5047,7 @@ cairn_allocate(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
+    rc = cairn_inode_get_data_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -4766,7 +5057,8 @@ cairn_allocate(
 
     inode = ih.inode;
 
-    cairn_map_attrs(fs, &request->allocate.r_pre_attr, inode);
+    cairn_map_attrs_data(thread, fs, &request->allocate.r_pre_attr, inode,
+                         request->fh, request->fh_len);
 
     if (request->allocate.flags & CHIMERA_VFS_ALLOCATE_DEALLOCATE) {
         /* DEALLOCATE: punch hole in [offset, offset+length) */
@@ -4790,7 +5082,8 @@ cairn_allocate(
     inode->ctime = now;
     inode->change++;
 
-    cairn_map_attrs(fs, &request->allocate.r_post_attr, inode);
+    cairn_map_attrs_data(thread, fs, &request->allocate.r_post_attr, inode,
+                         request->fh, request->fh_len);
 
     cairn_put_inode(thread, inode);
     cairn_inode_handle_release(&ih);
@@ -4815,7 +5108,7 @@ cairn_seek(
     int                       rc;
     size_t                    klen;
 
-    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
+    rc = cairn_inode_get_data_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -5460,6 +5753,8 @@ cairn_rename_at(
                     cairn_remove_acl(thread, existing_inode->inum);
                     cairn_remove_pnfs(thread, existing_inode->inum);
                     cairn_remove_sids(thread, existing_inode->inum);
+                    cairn_remove_xattrs(thread, existing_inode->inum);
+                    cairn_remove_streams(thread, existing_inode->inum);
                 } else {
                     cairn_put_inode(thread, existing_inode);
                 }
@@ -6258,6 +6553,737 @@ cairn_remove_xattr(
     cairn_queue_request(thread, request);
 } /* cairn_remove_xattr */
 
+
+/* ------------------------------------------------------------------ */
+/* Named streams                                                      */
+/* ------------------------------------------------------------------ */
+
+/* Stream names match without regard to case, as on Windows (smb2.streams.
+ * names3), so a stream is keyed by the hash of its folded name and keeps the
+ * case it was created with. */
+static uint64_t
+cairn_stream_name_hash(
+    const char *name,
+    uint32_t    namelen)
+{
+    char     folded[256];
+    uint32_t i, n = namelen < sizeof(folded) ? namelen : sizeof(folded);
+
+    for (i = 0; i < n; i++) {
+        folded[i] = (char) tolower((unsigned char) name[i]);
+    }
+    return chimera_vfs_hash(folded, n);
+} /* cairn_stream_name_hash */
+
+/* Move a file's data extents to another inode (a rename between the unnamed
+ * data stream and a named one). */
+static void
+cairn_move_extents(
+    struct cairn_thread *thread,
+    uint64_t             from_inum,
+    uint64_t             to_inum)
+{
+    rocksdb_writebatch_t   *batch = cairn_get_data_batch(thread);
+    rocksdb_iterator_t     *iter;
+    struct cairn_extent_key start, *key, moved;
+    const char             *vp;
+    size_t                  klen, vlen;
+
+    start.keytype = CAIRN_KEY_EXTENT;
+    start.inum    = from_inum;
+    start.offset  = htobe64(0);
+
+    iter = cairn_data_iterator(thread);
+    rocksdb_iter_seek(iter, (const char *) &start, sizeof(start));
+    while (rocksdb_iter_valid(iter)) {
+        key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
+        if (klen != sizeof(*key) || key->keytype != CAIRN_KEY_EXTENT || key->inum != from_inum) {
+            break;
+        }
+        vp         = rocksdb_iter_value(iter, &vlen);
+        moved      = *key;
+        moved.inum = to_inum;
+        rocksdb_writebatch_put(batch, (const char *) &moved, sizeof(moved), vp, vlen);
+        rocksdb_writebatch_delete(batch, (const char *) key, sizeof(*key));
+        rocksdb_iter_next(iter);
+    }
+    rocksdb_iter_destroy(iter);
+} /* cairn_move_extents */
+
+/* Look up the stream of `name` on base_inum.  Returns 0 and its record (the
+ * slice is the caller's to destroy), -1 if there is none. */
+static int
+cairn_stream_lookup(
+    struct cairn_thread              *thread,
+    uint64_t                          base_inum,
+    const char                       *name,
+    uint32_t                          namelen,
+    struct cairn_stream_key          *key,
+    rocksdb_pinnableslice_t         **slice,
+    const struct cairn_stream_value **value)
+{
+    char       *err = NULL;
+    const char *vp;
+    size_t      vlen;
+
+    key->keytype = CAIRN_KEY_STREAM;
+    key->inum    = base_inum;
+    key->hash    = cairn_stream_name_hash(name, namelen);
+
+    *slice = cairn_meta_get_pinned(thread, key, sizeof(*key), &err);
+    chimera_cairn_abort_if(err, "Error getting stream: %s\n", err);
+    if (!*slice) {
+        return -1;
+    }
+    vp     = rocksdb_pinnableslice_value(*slice, &vlen);
+    *value = (const struct cairn_stream_value *) vp;
+    if (vlen < sizeof(**value) || (*value)->name_len != namelen ||
+        vlen < sizeof(**value) + namelen ||
+        strncasecmp((*value)->name, name, namelen) != 0) {
+        rocksdb_pinnableslice_destroy(*slice);
+        *slice = NULL;
+        return -1;
+    }
+    return 0;
+} /* cairn_stream_lookup */
+
+static void
+cairn_stream_put(
+    struct cairn_thread           *thread,
+    const struct cairn_stream_key *key,
+    uint64_t                       stream_inum,
+    uint64_t                       seq,
+    const char                    *name,
+    uint32_t                       namelen)
+{
+    struct cairn_stream_value *v;
+    char                      *err = NULL;
+    uint32_t                   len = sizeof(*v) + namelen;
+
+    v           = malloc(len);
+    v->inum     = stream_inum;
+    v->seq      = seq;
+    v->name_len = namelen;
+    memcpy(v->name, name, namelen);
+    rocksdb_transaction_put(cairn_get_meta_txn(thread), (const char *) key, sizeof(*key),
+                            (const char *) v, len, &err);
+    free(v);
+    chimera_cairn_abort_if(err, "Error putting stream: %s\n", err);
+} /* cairn_stream_put */
+
+/* Drop a stream inode: unlinked now, its records gone once nothing has it
+ * open (cairn_close finishes a still-open one). */
+static void
+cairn_stream_unlink_inode(
+    struct cairn_thread *thread,
+    uint64_t             stream_inum)
+{
+    struct cairn_inode_handle sih;
+
+    if (cairn_inode_get_inum(thread, stream_inum, &sih) != 0) {
+        return;
+    }
+    sih.inode->nlink = 0;
+    if (sih.inode->refcnt == 0) {
+        cairn_remove_file_extents(thread, sih.inode->inum);
+        cairn_remove_inode(thread, sih.inode);
+    } else {
+        cairn_put_inode(thread, sih.inode);
+    }
+    cairn_inode_handle_release(&sih);
+} /* cairn_stream_unlink_inode */
+
+/* The base file is being removed: so are its streams. */
+static void
+cairn_remove_streams(
+    struct cairn_thread *thread,
+    uint64_t             base_inum)
+{
+    rocksdb_iterator_t     *iter;
+    struct cairn_stream_key start, *key;
+    const char             *vp;
+    size_t                  klen, vlen;
+    char                   *err = NULL;
+
+    start.keytype = CAIRN_KEY_STREAM;
+    start.inum    = base_inum;
+    start.hash    = 0;
+
+    iter = cairn_meta_iterator(thread);
+    rocksdb_iter_seek(iter, (const char *) &start, sizeof(start));
+    while (rocksdb_iter_valid(iter)) {
+        key = (struct cairn_stream_key *) rocksdb_iter_key(iter, &klen);
+        if (klen != sizeof(*key) || key->keytype != CAIRN_KEY_STREAM ||
+            key->inum != base_inum) {
+            break;
+        }
+        vp = rocksdb_iter_value(iter, &vlen);
+        if (vlen >= sizeof(struct cairn_stream_value)) {
+            cairn_stream_unlink_inode(thread, ((const struct cairn_stream_value *) vp)->inum);
+        }
+        rocksdb_transaction_delete(cairn_get_meta_txn(thread), (const char *) key,
+                                   sizeof(*key), &err);
+        chimera_cairn_abort_if(err, "Error deleting stream: %s\n", err);
+        rocksdb_iter_next(iter);
+    }
+    rocksdb_iter_destroy(iter);
+} /* cairn_remove_streams */
+
+/* The base file's extended attributes go with it. */
+static void
+cairn_remove_xattrs(
+    struct cairn_thread *thread,
+    uint64_t             inum)
+{
+    rocksdb_iterator_t    *iter;
+    struct cairn_xattr_key start, *key;
+    size_t                 klen;
+    char                  *err = NULL;
+
+    start.keytype = CAIRN_KEY_XATTR;
+    start.inum    = inum;
+    start.hash    = 0;
+
+    iter = cairn_meta_iterator(thread);
+    rocksdb_iter_seek(iter, (const char *) &start, sizeof(start));
+    while (rocksdb_iter_valid(iter)) {
+        key = (struct cairn_xattr_key *) rocksdb_iter_key(iter, &klen);
+        if (klen != sizeof(*key) || key->keytype != CAIRN_KEY_XATTR || key->inum != inum) {
+            break;
+        }
+        rocksdb_transaction_delete(cairn_get_meta_txn(thread), (const char *) key,
+                                   sizeof(*key), &err);
+        chimera_cairn_abort_if(err, "Error deleting xattr: %s\n", err);
+        rocksdb_iter_next(iter);
+    }
+    rocksdb_iter_destroy(iter);
+} /* cairn_remove_xattrs */
+
+static void
+cairn_open_stream(
+    struct cairn_thread        *thread,
+    struct cairn_fs            *fs,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct cairn_inode_handle        ih, sih;
+    struct cairn_inode              *base, *stream, new_stream;
+    struct cairn_stream_key          key;
+    rocksdb_pinnableslice_t         *slice;
+    const struct cairn_stream_value *value;
+    unsigned int                     flags = request->open_stream.flags;
+    struct timespec                  now;
+    uint8_t                          sfh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                         sfh_len;
+    int                              created = 0;
+
+    (void) private_data;
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    if (cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih) != 0) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+    base = ih.inode;
+
+    /* Files and directories carry streams; links and special files do not. */
+    if (!S_ISREG(base->mode) && !S_ISDIR(base->mode)) {
+        cairn_inode_handle_release(&ih);
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    if (cairn_stream_lookup(thread, base->inum, request->open_stream.name,
+                            request->open_stream.namelen, &key, &slice, &value) != 0) {
+        if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
+            cairn_inode_handle_release(&ih);
+            request->status = CHIMERA_VFS_ENOENT;
+            cairn_queue_request(thread, request);
+            return;
+        }
+
+        memset(&new_stream, 0, sizeof(new_stream));
+        cairn_alloc_inum(thread, &new_stream);
+        new_stream.parent_inum    = base->inum;
+        new_stream.mode           = S_IFREG | (base->mode & 07777);
+        new_stream.nlink          = 1;
+        new_stream.uid            = base->uid;
+        new_stream.gid            = base->gid;
+        new_stream.atime          = now;
+        new_stream.mtime          = now;
+        new_stream.ctime          = now;
+        new_stream.btime          = now;
+        new_stream.dos_attributes = 0;
+        new_stream.refcnt         = 0;
+        stream                    = &new_stream;
+
+        cairn_stream_put(thread, &key, new_stream.inum,
+                         (uint64_t) now.tv_sec * 1000000000ULL + (uint64_t) now.tv_nsec,
+                         request->open_stream.name, request->open_stream.namelen);
+
+        base->mtime = now;
+        base->ctime = now;
+        base->change++;
+        created                        = 1;
+        request->open_stream.r_created = 1;
+    } else {
+        uint64_t sinum = value->inum;
+
+        rocksdb_pinnableslice_destroy(slice);
+
+        if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+            cairn_inode_handle_release(&ih);
+            request->status = CHIMERA_VFS_EEXIST;
+            cairn_queue_request(thread, request);
+            return;
+        }
+        if (cairn_inode_get_inum(thread, sinum, &sih) != 0) {
+            cairn_inode_handle_release(&ih);
+            request->status = CHIMERA_VFS_ESTALE;
+            cairn_queue_request(thread, request);
+            return;
+        }
+        stream = sih.inode;
+
+        if (flags & CHIMERA_VFS_OPEN_TRUNCATE) {
+            if (stream->size) {
+                cairn_punch_hole(thread, thread->shared, stream, 0, stream->size);
+            }
+            stream->size       = 0;
+            stream->space_used = 0;
+            stream->alloc_size = 0;
+            base->mtime        = now;
+            base->ctime        = now;
+            base->change++;
+        }
+    }
+
+    /* A stream shares its file's metadata: attributes requested by a create
+     * or overwrite of the stream land on the base file, as a regular create
+     * stamps them (smb2.streams.attributes2). */
+    if (request->open_stream.set_attr &&
+        (created || (flags & CHIMERA_VFS_OPEN_TRUNCATE))) {
+        cairn_apply_attrs(base, request->open_stream.set_attr);
+    }
+
+    stream->refcnt++;
+    request->open_stream.r_vfs_private = stream->inum;
+
+    sfh_len = cairn_stream_to_fh(fs, sfh, base->inum, base->gen, stream->inum, stream->gen);
+    cairn_map_attrs(fs, &request->open_stream.r_attr, base);
+    cairn_attrs_overlay_stream(&request->open_stream.r_attr, stream, sfh, sfh_len);
+
+    cairn_put_inode(thread, stream);
+    cairn_put_inode(thread, base);
+    if (!created) {
+        cairn_inode_handle_release(&sih);
+    }
+    cairn_inode_handle_release(&ih);
+
+    request->status = CHIMERA_VFS_OK;
+    cairn_queue_request(thread, request);
+} /* cairn_open_stream */
+
+struct cairn_stream_listing {
+    uint64_t seq;
+    uint64_t inum;
+    uint32_t name_len;
+    char     name[256];
+};
+
+static int
+cairn_stream_listing_cmp(
+    const void *a,
+    const void *b)
+{
+    const struct cairn_stream_listing *x = a, *y = b;
+
+    return x->seq < y->seq ? -1 : x->seq > y->seq ? 1 : 0;
+} /* cairn_stream_listing_cmp */
+
+static void
+cairn_list_streams(
+    struct cairn_thread        *thread,
+    struct cairn_fs            *fs,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct cairn_inode_handle       ih, sih;
+    struct cairn_inode             *base;
+    uint8_t                        *buf     = request->list_streams.buffer;
+    uint32_t                        max     = request->list_streams.max_bytes;
+    int                             want_fh = request->list_streams.want_fh;
+    uint32_t                        offset  = 0, count = 0, rec, fh_len, n = 0, cap = 0, i;
+    struct chimera_vfs_stream_entry entry;
+    uint8_t                         fhbuf[CHIMERA_VFS_FH_SIZE];
+    struct cairn_stream_listing    *list = NULL;
+    rocksdb_iterator_t             *iter;
+    struct cairn_stream_key         start, *key;
+    size_t                          klen, vlen;
+    const char                     *vp;
+
+    (void) private_data;
+
+    if (cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih) != 0) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+    base = ih.inode;
+
+    /* The unnamed data fork first, for a file; a directory has none. */
+    if (S_ISREG(base->mode)) {
+        fh_len = want_fh ? request->fh_len : 0;
+        rec    = sizeof(entry) + fh_len;
+        if (offset + rec > max) {
+            cairn_inode_handle_release(&ih);
+            request->status = CHIMERA_VFS_ERANGE;
+            request->complete(request);
+            return;
+        }
+        entry.size     = base->size;
+        entry.alloc    = base->space_used > base->alloc_size ? base->space_used : base->alloc_size;
+        entry.name_len = 0;
+        entry.fh_len   = fh_len;
+        memcpy(buf + offset, &entry, sizeof(entry));
+        memcpy(buf + offset + sizeof(entry), request->fh, fh_len);
+        offset = (offset + rec + 7) & ~7u;
+        count++;
+    }
+
+    /* Named streams, in the order they were created. */
+    start.keytype = CAIRN_KEY_STREAM;
+    start.inum    = base->inum;
+    start.hash    = 0;
+    iter          = cairn_meta_iterator(thread);
+    rocksdb_iter_seek(iter, (const char *) &start, sizeof(start));
+    while (rocksdb_iter_valid(iter)) {
+        const struct cairn_stream_value *v;
+
+        key = (struct cairn_stream_key *) rocksdb_iter_key(iter, &klen);
+        if (klen != sizeof(*key) || key->keytype != CAIRN_KEY_STREAM ||
+            key->inum != base->inum) {
+            break;
+        }
+        vp = rocksdb_iter_value(iter, &vlen);
+        v  = (const struct cairn_stream_value *) vp;
+        if (vlen >= sizeof(*v) && v->name_len <= 255 && vlen >= sizeof(*v) + v->name_len) {
+            if (n == cap) {
+                cap  = cap ? cap * 2 : 8;
+                list = realloc(list, cap * sizeof(*list));
+            }
+            list[n].seq      = v->seq;
+            list[n].inum     = v->inum;
+            list[n].name_len = v->name_len;
+            memcpy(list[n].name, v->name, v->name_len);
+            n++;
+        }
+        rocksdb_iter_next(iter);
+    }
+    rocksdb_iter_destroy(iter);
+    if (n > 1) {
+        qsort(list, n, sizeof(*list), cairn_stream_listing_cmp);
+    }
+
+    for (i = 0; i < n; i++) {
+        if (cairn_inode_get_inum(thread, list[i].inum, &sih) != 0) {
+            continue;
+        }
+        fh_len = want_fh ? cairn_stream_to_fh(fs, fhbuf, base->inum, base->gen,
+                                              sih.inode->inum, sih.inode->gen) : 0;
+        rec = sizeof(entry) + list[i].name_len + fh_len;
+        if (offset + rec > max) {
+            cairn_inode_handle_release(&sih);
+            cairn_inode_handle_release(&ih);
+            free(list);
+            request->status = CHIMERA_VFS_ERANGE;
+            request->complete(request);
+            return;
+        }
+        entry.size  = sih.inode->size;
+        entry.alloc = sih.inode->space_used > sih.inode->alloc_size ?
+            sih.inode->space_used : sih.inode->alloc_size;
+        entry.name_len = list[i].name_len;
+        entry.fh_len   = fh_len;
+        memcpy(buf + offset, &entry, sizeof(entry));
+        memcpy(buf + offset + sizeof(entry), list[i].name, list[i].name_len);
+        memcpy(buf + offset + sizeof(entry) + list[i].name_len, fhbuf, fh_len);
+        offset = (offset + rec + 7) & ~7u;
+        count++;
+        cairn_inode_handle_release(&sih);
+    }
+
+    free(list);
+    cairn_inode_handle_release(&ih);
+
+    request->list_streams.r_len    = offset;
+    request->list_streams.r_count  = count;
+    request->list_streams.r_eof    = 1;
+    request->list_streams.r_cookie = 0;
+    request->status                = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* cairn_list_streams */
+
+static void
+cairn_remove_stream(
+    struct cairn_thread        *thread,
+    struct cairn_fs            *fs,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct cairn_inode_handle        ih;
+    struct cairn_stream_key          key;
+    rocksdb_pinnableslice_t         *slice;
+    const struct cairn_stream_value *value;
+    uint64_t                         sinum;
+    char                            *err = NULL;
+
+    (void) private_data;
+
+    if (cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih) != 0) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+    cairn_map_attrs(fs, &request->remove_stream.r_pre_attr, ih.inode);
+
+    if (cairn_stream_lookup(thread, ih.inode->inum, request->remove_stream.name,
+                            request->remove_stream.namelen, &key, &slice, &value) != 0) {
+        cairn_inode_handle_release(&ih);
+        request->status = CHIMERA_VFS_ENOENT;
+        cairn_queue_request(thread, request);
+        return;
+    }
+    sinum = value->inum;
+    rocksdb_pinnableslice_destroy(slice);
+
+    rocksdb_transaction_delete(cairn_get_meta_txn(thread), (const char *) &key,
+                               sizeof(key), &err);
+    chimera_cairn_abort_if(err, "Error deleting stream: %s\n", err);
+    cairn_stream_unlink_inode(thread, sinum);
+
+    clock_gettime(CLOCK_REALTIME, &ih.inode->ctime);
+    ih.inode->change++;
+    cairn_put_inode(thread, ih.inode);
+    cairn_map_attrs(fs, &request->remove_stream.r_post_attr, ih.inode);
+    cairn_inode_handle_release(&ih);
+
+    request->status = CHIMERA_VFS_OK;
+    cairn_queue_request(thread, request);
+} /* cairn_remove_stream */
+
+/* A rename between the unnamed data stream and a named one (MS-FSA
+ * 2.1.5.15.12.1): the data moves between the base inode and the stream's.
+ * Renaming the unnamed stream leaves the file an empty one; a named stream can
+ * only become the unnamed one while that is empty. */
+static void
+cairn_rename_stream_default(
+    struct cairn_thread        *thread,
+    struct cairn_fs            *fs,
+    struct chimera_vfs_request *request,
+    struct cairn_inode_handle  *ih)
+{
+    struct cairn_inode              *base = ih->inode, *stream, new_stream;
+    struct cairn_inode_handle        sih;
+    struct cairn_stream_key          key;
+    rocksdb_pinnableslice_t         *slice;
+    const struct cairn_stream_value *value;
+    struct timespec                  now;
+    int                              replace = !!(request->rename_stream.flags &
+                                                  CHIMERA_VFS_RENAME_STREAM_REPLACE);
+    enum chimera_vfs_error           status = CHIMERA_VFS_OK;
+    char                            *err    = NULL;
+    uint64_t                         sinum;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    if (!S_ISREG(base->mode) ||
+        (request->rename_stream.namelen == 0 && request->rename_stream.new_namelen == 0)) {
+        status = CHIMERA_VFS_EINVAL;
+        goto out;
+    }
+
+    if (request->rename_stream.namelen == 0) {
+        /* Unnamed -> named. */
+        if (cairn_stream_lookup(thread, base->inum, request->rename_stream.new_name,
+                                request->rename_stream.new_namelen, &key, &slice, &value) == 0) {
+            uint64_t tinum = value->inum;
+
+            rocksdb_pinnableslice_destroy(slice);
+            if (!replace) {
+                status = CHIMERA_VFS_EEXIST;
+                goto out;
+            }
+            if (cairn_inode_get_inum(thread, tinum, &sih) != 0) {
+                status = CHIMERA_VFS_ESTALE;
+                goto out;
+            }
+            if (sih.inode->size) {
+                cairn_inode_handle_release(&sih);
+                status = CHIMERA_VFS_EINVAL;
+                goto out;
+            }
+            stream = sih.inode;
+        } else {
+            memset(&new_stream, 0, sizeof(new_stream));
+            cairn_alloc_inum(thread, &new_stream);
+            new_stream.parent_inum = base->inum;
+            new_stream.mode        = S_IFREG | (base->mode & 07777);
+            new_stream.nlink       = 1;
+            new_stream.uid         = base->uid;
+            new_stream.gid         = base->gid;
+            new_stream.atime       = now;
+            new_stream.mtime       = now;
+            new_stream.ctime       = now;
+            new_stream.btime       = now;
+            stream                 = &new_stream;
+            cairn_stream_put(thread, &key, new_stream.inum,
+                             (uint64_t) now.tv_sec * 1000000000ULL + (uint64_t) now.tv_nsec,
+                             request->rename_stream.new_name,
+                             request->rename_stream.new_namelen);
+        }
+
+        cairn_move_extents(thread, base->inum, stream->inum);
+        stream->size       = base->size;
+        stream->space_used = base->space_used;
+        base->size         = 0;
+        base->space_used   = 0;
+        base->alloc_size   = 0;
+        cairn_put_inode(thread, stream);
+        if (stream != &new_stream) {
+            cairn_inode_handle_release(&sih);
+        }
+    } else {
+        /* Named -> unnamed, which must be empty. */
+        if (base->size) {
+            status = replace ? CHIMERA_VFS_EINVAL : CHIMERA_VFS_EEXIST;
+            goto out;
+        }
+        if (cairn_stream_lookup(thread, base->inum, request->rename_stream.name,
+                                request->rename_stream.namelen, &key, &slice, &value) != 0) {
+            status = CHIMERA_VFS_ENOENT;
+            goto out;
+        }
+        sinum = value->inum;
+        rocksdb_pinnableslice_destroy(slice);
+        if (cairn_inode_get_inum(thread, sinum, &sih) != 0) {
+            status = CHIMERA_VFS_ESTALE;
+            goto out;
+        }
+        cairn_move_extents(thread, sih.inode->inum, base->inum);
+        base->size            = sih.inode->size;
+        base->space_used      = sih.inode->space_used;
+        sih.inode->size       = 0;
+        sih.inode->space_used = 0;
+        cairn_put_inode(thread, sih.inode);
+        cairn_inode_handle_release(&sih);
+
+        rocksdb_transaction_delete(cairn_get_meta_txn(thread), (const char *) &key,
+                                   sizeof(key), &err);
+        chimera_cairn_abort_if(err, "Error deleting stream: %s\n", err);
+        cairn_stream_unlink_inode(thread, sinum);
+    }
+
+    base->mtime = now;
+    base->ctime = now;
+    base->change++;
+    cairn_put_inode(thread, base);
+    cairn_map_attrs(fs, &request->rename_stream.r_post_attr, base);
+
+ out:
+    cairn_inode_handle_release(ih);
+    request->status = status;
+    cairn_queue_request(thread, request);
+} /* cairn_rename_stream_default */
+
+/* Rename a named stream of the file (MS-FSA 2.1.5.15.12.1): its record moves
+ * to the new name, so open handles to it -- which name its inode -- stay
+ * valid.  An existing stream of the new name is replaced only when asked and
+ * only while empty.  Renames to or from the unnamed data stream move the data
+ * (cairn_rename_stream_default). */
+static void
+cairn_rename_stream(
+    struct cairn_thread        *thread,
+    struct cairn_fs            *fs,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct cairn_inode_handle        ih, tih;
+    struct cairn_stream_key          key, new_key;
+    rocksdb_pinnableslice_t         *slice, *new_slice;
+    const struct cairn_stream_value *value, *new_value;
+    uint64_t                         sinum, seq;
+    char                            *err = NULL;
+
+    (void) private_data;
+
+    if (cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih) != 0) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+    cairn_map_attrs(fs, &request->rename_stream.r_pre_attr, ih.inode);
+
+    if (request->rename_stream.namelen == 0 || request->rename_stream.new_namelen == 0) {
+        cairn_rename_stream_default(thread, fs, request, &ih);
+        return;
+    }
+
+    if (cairn_stream_lookup(thread, ih.inode->inum, request->rename_stream.name,
+                            request->rename_stream.namelen, &key, &slice, &value) != 0) {
+        cairn_inode_handle_release(&ih);
+        request->status = CHIMERA_VFS_ENOENT;
+        cairn_queue_request(thread, request);
+        return;
+    }
+    sinum = value->inum;
+    seq   = value->seq;
+    rocksdb_pinnableslice_destroy(slice);
+
+    if (cairn_stream_lookup(thread, ih.inode->inum, request->rename_stream.new_name,
+                            request->rename_stream.new_namelen, &new_key, &new_slice,
+                            &new_value) == 0) {
+        uint64_t tinum = new_value->inum;
+
+        rocksdb_pinnableslice_destroy(new_slice);
+        if (!(request->rename_stream.flags & CHIMERA_VFS_RENAME_STREAM_REPLACE)) {
+            cairn_inode_handle_release(&ih);
+            request->status = CHIMERA_VFS_EEXIST;
+            cairn_queue_request(thread, request);
+            return;
+        }
+        if (cairn_inode_get_inum(thread, tinum, &tih) == 0) {
+            uint64_t tsize = tih.inode->size;
+
+            cairn_inode_handle_release(&tih);
+            if (tsize) {
+                cairn_inode_handle_release(&ih);
+                request->status = CHIMERA_VFS_EINVAL;
+                cairn_queue_request(thread, request);
+                return;
+            }
+        }
+        cairn_stream_unlink_inode(thread, tinum);
+    }
+
+    rocksdb_transaction_delete(cairn_get_meta_txn(thread), (const char *) &key,
+                               sizeof(key), &err);
+    chimera_cairn_abort_if(err, "Error deleting stream: %s\n", err);
+    cairn_stream_put(thread, &new_key, sinum, seq, request->rename_stream.new_name,
+                     request->rename_stream.new_namelen);
+
+    clock_gettime(CLOCK_REALTIME, &ih.inode->ctime);
+    ih.inode->change++;
+    cairn_put_inode(thread, ih.inode);
+    cairn_map_attrs(fs, &request->rename_stream.r_post_attr, ih.inode);
+    cairn_inode_handle_release(&ih);
+
+    request->status = CHIMERA_VFS_OK;
+    cairn_queue_request(thread, request);
+} /* cairn_rename_stream */
+
 static void
 cairn_dispatch(
     struct chimera_vfs_request *request,
@@ -6427,6 +7453,18 @@ cairn_dispatch(
         case CHIMERA_VFS_OP_REMOVE_XATTR:
             cairn_remove_xattr(thread, fs, request, private_data);
             break;
+        case CHIMERA_VFS_OP_OPEN_STREAM:
+            cairn_open_stream(thread, fs, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_LIST_STREAMS:
+            cairn_list_streams(thread, fs, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_REMOVE_STREAM:
+            cairn_remove_stream(thread, fs, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_RENAME_STREAM:
+            cairn_rename_stream(thread, fs, request, private_data);
+            break;
         default:
             chimera_cairn_error("cairn_dispatch: unknown operation %d",
                                 request->opcode);
@@ -6468,7 +7506,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
         CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
         CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
         CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
-        CHIMERA_VFS_CAP_LAYOUT | CHIMERA_VFS_CAP_SPARSE,
+        CHIMERA_VFS_CAP_LAYOUT | CHIMERA_VFS_CAP_SPARSE |
+        CHIMERA_VFS_CAP_NAMED_STREAMS,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,
