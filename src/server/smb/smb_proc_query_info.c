@@ -151,7 +151,10 @@ chimera_smb_emit_stream_info(
             evpl_iovec_cursor_append_uint32(cursor, next);
             evpl_iovec_cursor_append_uint32(cursor, (uint32_t) name16_len);
             evpl_iovec_cursor_append_uint64(cursor, entry.size);
-            evpl_iovec_cursor_append_uint64(cursor, entry.alloc);
+            /* The backend reports what the stream consumes (memfs in 64 KiB
+             * chunks); report it in whole clusters through its end, as
+             * chimera_smb_alloc_size does for the file. */
+            evpl_iovec_cursor_append_uint64(cursor, chimera_smb_round_cluster(entry.size));
             if (name16_len > 0) {
                 evpl_iovec_cursor_append_blob_unaligned(cursor, name16, name16_len);
             }
