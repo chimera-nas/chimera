@@ -1540,7 +1540,21 @@ posix_env_setup(
                         "SKIP: %s backend needs a name_to_handle_at-capable "
                         "scratch fs; %s is not one (set CHIMERA_MBT_SCRATCH)\n",
                         module, dir);
-                exit(77);
+                _exit(77);
+            }
+            if (mrc == CHIMERA_VFS_EPERM) {
+                fprintf(stderr,
+                        "SKIP: %s backend needs CAP_DAC_READ_SEARCH "
+                        "(open_by_handle_at); this process is unprivileged\n",
+                        module);
+                _exit(77);
+            }
+            if (mrc == CHIMERA_VFS_ENXIO) {
+                fprintf(stderr,
+                        "SKIP: %s backend unavailable in this process "
+                        "(module init failed, e.g. io_uring_setup ENOSYS)\n",
+                        module);
+                _exit(77);
             }
             if (mrc != 0) {
                 fprintf(stderr, "posix_driver: share mount %s failed: %d\n",
@@ -1654,7 +1668,21 @@ posix_env_setup(
                             "SKIP: %s backend needs a name_to_handle_at-capable "
                             "scratch fs; %s is not one (set CHIMERA_MBT_SCRATCH)\n",
                             module, dir);
-                    exit(77);
+                    _exit(77);
+                }
+                if (errno == EPERM) {
+                    fprintf(stderr,
+                            "SKIP: %s backend needs CAP_DAC_READ_SEARCH "
+                            "(open_by_handle_at); this process is unprivileged\n",
+                            module);
+                    _exit(77);
+                }
+                if (errno == ENXIO) {
+                    fprintf(stderr,
+                            "SKIP: %s backend unavailable in this process "
+                            "(module init failed, e.g. io_uring_setup ENOSYS)\n",
+                            module);
+                    _exit(77);
                 }
                 fprintf(stderr, "posix_driver: %s mount failed: %s\n",
                         backend, strerror(errno));

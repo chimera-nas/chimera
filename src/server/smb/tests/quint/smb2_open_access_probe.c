@@ -1756,6 +1756,14 @@ oa_passthrough_setup(
         chimera_test_remove_tree(dir);
         _exit(77);
     }
+    if (rc == CHIMERA_VFS_EPERM || rc == CHIMERA_VFS_ENXIO) {
+        /* EPERM: open_by_handle_at needs CAP_DAC_READ_SEARCH.  ENXIO: the
+         * backend module failed to init (e.g. io_uring_setup ENOSYS). */
+        fprintf(stderr, "SKIP: %s backend unavailable to this process "
+                "(status %d)\n", module, rc);
+        chimera_test_remove_tree(dir);
+        _exit(77);
+    }
     if (rc != 0) {
         fprintf(stderr, "mount %s at %s failed: status=%d\n", module, dir, rc);
         _exit(1);
