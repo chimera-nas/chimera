@@ -67,3 +67,4 @@
 #include "vfs_acl_serialize.h"
 #include "vfs_access.h"
 #include "vfs_xattr_name.h"
+#include "vfs_stack.h"

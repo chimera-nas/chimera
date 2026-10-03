@@ -337,6 +337,21 @@ set_tests_properties(chimera/posix/mbt/batch_memfs PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
 
+# The memfs-profile corpus through an overlay: memfs lower and upper layers
+# with the overlay mounted over "/" (posix_overlay_mount).  The lower layer is
+# empty, so every operation the model makes passes through the overlay to its
+# upper layer -- the overlay module's whole operation surface against the
+# model, which it must match exactly as memfs does.
+add_test(NAME chimera/posix/mbt/batch_overlay
+    COMMAND $<TARGET_FILE:posix_mbt_replay>
+            --backend overlay
+            --trace-dir ${posix_memfs_traces})
+set_tests_properties(chimera/posix/mbt/batch_overlay PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_overlay"
+    LABELS "quint;posix_mbt;overlay"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 300)
+
 # The memfs-profile corpus against diskfs: a chimera-native backend
 # (model-conformant DAC, no host-kernel deviations), so it replays the memfs
 # cell rather than the disk one, and the per-trace newfs recycle mkfs-cycles it
@@ -517,6 +532,7 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 # name -> (strict trace dir, replay backend, config)
 foreach(cell "memfs|${posix_memfs_strict}|memfs"
+             "overlay|${posix_memfs_strict}|overlay"
              "disk|${posix_disk_strict}|cairn"
              "nfs3|${posix_nfs3_strict}|nfs3_memfs"
              "nfs4|${posix_nfs4_strict}|nfs4_memfs"

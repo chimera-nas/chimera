@@ -204,3 +204,12 @@ chimera_vfs_open_at_redirect(
                                   CHIMERA_VFS_OPEN_TRUNCATE),
                         chimera_vfs_cross_open_at_open_cb, ctx);
 } /* chimera_vfs_open_at_redirect */
+
+SYMBOL_EXPORT void
+chimera_vfs_stack_root_fh(
+    struct chimera_vfs_thread *thread,
+    uint8_t                   *fh,
+    uint32_t                  *fh_len)
+{
+    chimera_vfs_get_root_fh(thread->vfs, fh, fh_len);
+} /* chimera_vfs_stack_root_fh */

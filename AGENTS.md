@@ -129,6 +129,7 @@ test.
    - `diskfs`: Demo/test filesystem
    - `cairn`: Custom persistent filesystem
    - `io_uring`: io_uring-based async filesystem
+   - `overlay`: union of two mounted filesystems (a stacking module)
 
    Mounts go on directories, Linux-style (a mount at `/` is the namespace
    root; with none, the core's built-in rootfs holds the mount points).

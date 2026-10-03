@@ -148,6 +148,79 @@ posix_module_is_passthrough(const char *module)
     return strcmp(module, "linux") == 0 || strcmp(module, "io_uring") == 0;
 } /* posix_module_is_passthrough */
 
+/*
+ * The overlay backend: an overlay filesystem over two memfs layers.  The
+ * layers are mounted under the built-in rootfs and the overlay over "/",
+ * which hides them, so the filesystem under test is the overlay alone.  The
+ * lower layer is empty: every operation passes through the overlay to the
+ * upper layer.  Filesystem generation n uses layers ovl_l<n> and ovl_u<n>.
+ */
+static int
+posix_overlay_mount(int n)
+{
+    char lower[32], upper[32], lpath[40], upath[40], opts[128];
+
+    snprintf(lower, sizeof(lower), "ovl_l%d", n);
+    snprintf(upper, sizeof(upper), "ovl_u%d", n);
+    snprintf(lpath, sizeof(lpath), "/.%s", lower);
+    snprintf(upath, sizeof(upath), "/.%s", upper);
+    snprintf(opts, sizeof(opts), "lowerdir=%s,upperdir=%s", lpath, upath);
+
+    if (chimera_posix_mkfs("memfs", lower, NULL) != 0 ||
+        chimera_posix_mkfs("memfs", upper, NULL) != 0 ||
+        chimera_posix_mount(lpath, "memfs", lower) != 0 ||
+        chimera_posix_mount(upath, "memfs", upper) != 0 ||
+        chimera_posix_mount_with_options(POSIX_DRIVER_MOUNT, "overlay", "", opts) != 0) {
+        return -1;
+    }
+    return 0;
+} /* posix_overlay_mount */
+
+/* Retry an unmount or rmfs through the async handle sweep's EBUSY window. */
+static int
+posix_retry_busy(
+    int ( *fn )(const char *, const char *),
+    const char *a,
+    const char *b)
+{
+    for (int tries = 0; fn(a, b) != 0; tries++) {
+        if (errno != EBUSY || tries >= 5000) {
+            return -1;
+        }
+        usleep(1000);
+    }
+    return 0;
+} /* posix_retry_busy */
+
+static int
+posix_umount_one(
+    const char *path,
+    const char *unused)
+{
+    (void) unused;
+    return chimera_posix_umount(path);
+} /* posix_umount_one */
+
+/* Take down generation n's layers (the overlay itself is already unmounted). */
+static int
+posix_overlay_teardown_layers(int n)
+{
+    char lower[32], upper[32], lpath[40], upath[40];
+
+    snprintf(lower, sizeof(lower), "ovl_l%d", n);
+    snprintf(upper, sizeof(upper), "ovl_u%d", n);
+    snprintf(lpath, sizeof(lpath), "/.%s", lower);
+    snprintf(upath, sizeof(upath), "/.%s", upper);
+
+    if (posix_retry_busy(posix_umount_one, upath, NULL) != 0 ||
+        posix_retry_busy(posix_umount_one, lpath, NULL) != 0 ||
+        posix_retry_busy(chimera_posix_rmfs, "memfs", upper) != 0 ||
+        posix_retry_busy(chimera_posix_rmfs, "memfs", lower) != 0) {
+        return -1;
+    }
+    return 0;
+} /* posix_overlay_teardown_layers */
+
 /* Backends that record where a file's data actually lives, and so answer
  * SEEK_DATA/SEEK_HOLE from a real extent map: the passthroughs (whose host
  * filesystem tracks holes) and cairn (whose extents are its own RocksDB
@@ -1212,6 +1285,20 @@ handle(json_t *req)
             }
             usleep(1000);
         }
+        if (strcmp(g_module, "overlay") == 0) {
+            if (posix_overlay_teardown_layers(g_fs_counter) != 0 ||
+                posix_overlay_mount(++g_fs_counter) != 0) {
+                fprintf(stderr, "posix_driver: newfs overlay recycle failed: %s\n",
+                        strerror(errno));
+                return res_int(-1, errno);
+            }
+            if (normalize_root() != 0) {
+                fprintf(stderr, "posix_driver: newfs normalize failed: %s\n",
+                        strerror(errno));
+                return res_int(-1, errno);
+            }
+            return res_int(0, 0);
+        }
         if (posix_module_is_passthrough(g_module)) {
             /* Passthrough recycle: a fresh uniquely-named backing directory is
              * the fresh filesystem.  Remove the old tree (scratch space is a
@@ -1445,6 +1532,10 @@ posix_env_setup(
                     strerror(errno));
             return 1;
         }
+    } else if (strcmp(module, "overlay") == 0) {
+        /* The overlay takes no configuration; its layers are memfs
+         * filesystems (posix_overlay_mount), whose block size is aligned as
+         * for the memfs backend. */
     } else {
         fprintf(stderr, "posix_driver: unknown backend %s\n", backend);
         return 1;
@@ -1611,13 +1702,18 @@ posix_env_setup(
             }
         }
     } else {
-        if (strcmp(module, "memfs") == 0) {
+        if (strcmp(module, "memfs") == 0 || strcmp(module, "overlay") == 0) {
+            /* memfs is in the default client module set; configure it there
+             * (the overlay's layers are memfs filesystems). */
             for (int i = 0; i < config->num_modules; i++) {
                 if (strcmp(config->modules[i].module_name, "memfs") == 0) {
                     snprintf(config->modules[i].config_data,
                              sizeof(config->modules[i].config_data),
-                             "%s", module_cfg);
+                             "{\"block_size\": %d}", DRIVER_BLOCK_SIZE);
                 }
+            }
+            if (strcmp(module, "overlay") == 0) {
+                chimera_client_config_add_module(config, "overlay", "", "");
             }
         } else if (!posix_module_is_passthrough(module)) {
             /* linux/io_uring are already in the default client module set
@@ -1658,6 +1754,12 @@ posix_env_setup(
                 }
                 fprintf(stderr, "posix_driver: %s mount failed: %s\n",
                         backend, strerror(errno));
+                return 1;
+            }
+        } else if (strcmp(module, "overlay") == 0) {
+            if (posix_overlay_mount(g_fs_counter) != 0) {
+                fprintf(stderr, "posix_driver: overlay mount failed: %s\n",
+                        strerror(errno));
                 return 1;
             }
         } else {
