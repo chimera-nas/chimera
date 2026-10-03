@@ -532,6 +532,7 @@ probe_duplicate_extents(struct smb2_conn *c)
 #define SMB2_FSCTL_DELETE_REPARSE_POINT   0x000900ACu
 #endif /* ifndef SMB2_FSCTL_DELETE_REPARSE_POINT */
 #define SMB2_FSCTL_SET_OBJECT_ID          0x00090098u
+#define OID_BACKUP_INTENT                 0x00004000u /* FILE_OPEN_FOR_BACKUP_INTENT */
 #define SMB2_FSCTL_GET_RETRIEVAL_POINTERS 0x00090073u
 #define SMB2_FSCTL_GET_OBJECT_ID          0x0009009Cu
 #define SMB2_FSCTL_DELETE_OBJECT_ID       0x000900A0u
@@ -800,8 +801,19 @@ probe_object_id(struct smb2_conn *c)
     }
     memset(ext, 0x07, sizeof(ext));
 
-    make_file(c, "oid_a.bin", 0, 0, &a);
-    make_file(c, "oid_b.bin", 0, 0, &b);
+    /* Setting and deleting an ID takes restore access: open for backup. */
+    make_file(c, "oid_c.bin", 0, 0, &a);
+    st = smb2_ioctl(c, SMB2_FSCTL_SET_OBJECT_ID, a.file_id, oid, sizeof(oid));
+    CHECK(st == ST_ACCESS_DENIED, "SET_OBJECT_ID without backup intent -> "
+          "ACCESS_DENIED (0x%08x)", st);
+    smb2_close(c, a.file_id);
+
+    st = smb2_create_opts(c, "oid_a.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, OID_BACKUP_INTENT, NULL, &a);
+    CHECK(st == ST_SUCCESS, "setup: CREATE oid_a.bin for backup -> 0x%08x", st);
+    st = smb2_create_opts(c, "oid_b.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, OID_BACKUP_INTENT, NULL, &b);
+    CHECK(st == ST_SUCCESS, "setup: CREATE oid_b.bin for backup -> 0x%08x", st);
 
     (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_OBJECT_ID, a.file_id, NULL, 0, 64,
                           &st, &out_len);
