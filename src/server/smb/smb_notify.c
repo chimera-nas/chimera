@@ -230,10 +230,20 @@ chimera_smb_notify_write_record(
 static uint32_t
 chimera_smb_notify_file_action(uint32_t a)
 {
-    if (a & (CHIMERA_VFS_NOTIFY_FILE_ADDED | CHIMERA_VFS_NOTIFY_DIR_ADDED)) {
+    if (a & CHIMERA_VFS_NOTIFY_STREAM_ADDED) {
+        return FILE_ACTION_ADDED_STREAM;
+    } else if (a & CHIMERA_VFS_NOTIFY_STREAM_REMOVED) {
+        return FILE_ACTION_REMOVED_STREAM;
+    } else if (a & (CHIMERA_VFS_NOTIFY_FILE_ADDED | CHIMERA_VFS_NOTIFY_DIR_ADDED)) {
         return FILE_ACTION_ADDED;
     } else if (a & (CHIMERA_VFS_NOTIFY_FILE_REMOVED | CHIMERA_VFS_NOTIFY_DIR_REMOVED)) {
         return FILE_ACTION_REMOVED;
+    } else if ((a & (CHIMERA_VFS_NOTIFY_STREAM_NAME | CHIMERA_VFS_NOTIFY_STREAM_SIZE |
+                     CHIMERA_VFS_NOTIFY_STREAM_WRITE)) &&
+               !(a & (CHIMERA_VFS_NOTIFY_FILE_MODIFIED | CHIMERA_VFS_NOTIFY_SIZE_CHANGED |
+                      CHIMERA_VFS_NOTIFY_ATTRS_CHANGED))) {
+        /* A change to a named stream alone (MS-FSCC 2.7.1). */
+        return FILE_ACTION_MODIFIED_STREAM;
     }
     return FILE_ACTION_MODIFIED;
 } /* chimera_smb_notify_file_action */

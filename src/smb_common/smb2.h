@@ -843,6 +843,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define FILE_ACTION_MODIFIED                        0x00000003
 #define FILE_ACTION_RENAMED_OLD_NAME                0x00000004
 #define FILE_ACTION_RENAMED_NEW_NAME                0x00000005
+#define FILE_ACTION_ADDED_STREAM                    0x00000006
+#define FILE_ACTION_REMOVED_STREAM                  0x00000007
+#define FILE_ACTION_MODIFIED_STREAM                 0x00000008
 
 /* Notify-related status */
 #define SMB2_STATUS_NOTIFY_CLEANUP                  0x0000010B
@@ -1057,6 +1060,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FSCTL_SET_REPARSE_POINT                0x000900A4
 #define SMB2_FSCTL_GET_REPARSE_POINT                0x000900A8
 #define SMB2_FSCTL_DELETE_REPARSE_POINT             0x000900AC
+#define SMB2_FSCTL_GET_RETRIEVAL_POINTERS           0x00090073
 #define SMB2_FSCTL_SET_OBJECT_ID                    0x00090098
 #define SMB2_FSCTL_GET_OBJECT_ID                    0x0009009C
 #define SMB2_FSCTL_DELETE_OBJECT_ID                 0x000900A0

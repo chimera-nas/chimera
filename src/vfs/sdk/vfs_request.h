@@ -118,7 +118,8 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_CLAIM_RELEASE            43
 #define CHIMERA_VFS_OP_READ_PLUS                44
 #define CHIMERA_VFS_OP_WRITE_SAME               45
-#define CHIMERA_VFS_OP_NUM                      46
+#define CHIMERA_VFS_OP_RENAME_STREAM            46
+#define CHIMERA_VFS_OP_NUM                      47
 
 #define CHIMERA_VFS_OPEN_CREATE                 (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH                   (1U << 1)
@@ -1467,6 +1468,17 @@ struct chimera_vfs_request {
             struct chimera_vfs_attrs        r_pre_attr;
             struct chimera_vfs_attrs        r_post_attr;
         } remove_stream;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;       /* base file handle */
+            const char                     *name;         /* current stream name */
+            uint32_t                        namelen;
+            const char                     *new_name;     /* name it takes */
+            uint32_t                        new_namelen;
+            uint32_t                        flags;        /* CHIMERA_VFS_RENAME_STREAM_* */
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } rename_stream;
 
         /* pNFS: a layout-sourcing backend (CHIMERA_VFS_CAP_LAYOUT_SOURCE)
          * describes where the file's data physically lives.  The NFS server

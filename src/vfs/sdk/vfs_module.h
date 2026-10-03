@@ -189,6 +189,9 @@ struct chimera_vfs_handle_state {
 #define CHIMERA_VFS_XATTR_CREATE              1 /* must not already exist */
 #define CHIMERA_VFS_XATTR_REPLACE             2 /* must already exist */
 
+/* rename_stream flags */
+#define CHIMERA_VFS_RENAME_STREAM_REPLACE     0x1 /* replace an empty stream */
+
 /* Module persists the opaque CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute, so the NFS
  * server can store per-file pNFS layout state on it and hand out pNFS layouts.
  * This is the "orchestrated" model: the module is a passive vessel and the NFS
