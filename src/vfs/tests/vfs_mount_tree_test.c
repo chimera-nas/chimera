@@ -530,10 +530,18 @@ test_rootfs(void)
     assert(do_umount(&ctx, "/x") == CHIMERA_VFS_OK);
     TEST_PASS("nested: mount on a directory inside a mount, unmount innermost first");
 
-    /* The rootfs cannot be unmounted, and a mount at "/" cannot replace it
-     * while mounts sit on its directories. */
+    /* The rootfs cannot be unmounted.  A mount at "/" goes over it, hiding
+     * the mounts on its directories until it is unmounted, as an overmount
+     * does on Linux. */
     assert(do_umount(&ctx, "/") == CHIMERA_VFS_EBUSY);
-    assert(do_mount(&ctx, "/", "fs4") == CHIMERA_VFS_EBUSY);
+    assert(do_mount(&ctx, "/", "fs4") == CHIMERA_VFS_OK);
+    assert(do_lookup(&ctx, "a", NULL) == CHIMERA_VFS_ENOENT);
+    assert(do_mount(&ctx, "/", "fs5") == CHIMERA_VFS_EBUSY);
+    assert(do_umount(&ctx, "/") == CHIMERA_VFS_OK);
+    chimera_vfs_get_root_fh(ctx.vfs, fh.fh, &fh.len);
+    assert(fh_eq(&fh, &root));
+    assert(do_lookup(&ctx, "a/b", &fh) == CHIMERA_VFS_OK && fh_eq(&fh, &b_root));
+    TEST_PASS("rootfs: a mount over / hides the rootfs and its mounts until unmounted");
 
     /* The rootfs holds only what mount points need: unmounting drops the
      * directories no remaining mount uses. */

@@ -470,9 +470,9 @@ chimera_vfs_mount_table_has_submounts(
 } /* chimera_vfs_mount_table_has_submounts */
 
 /*
- * Copy out the root handle of the mount at "/" -- the namespace root.
- * Returns 0, or -1 if nothing is mounted at "/" (only transiently, while a
- * mount at "/" replaces the built-in root).
+ * Copy out the root handle of the namespace root: the mount at "/" over the
+ * built-in rootfs, or the rootfs when there is none.  Returns 0, or -1 if
+ * nothing at all is at "/" (only before the rootfs is mounted).
  */
 static inline int
 chimera_vfs_mount_table_namespace_root(
@@ -486,14 +486,17 @@ chimera_vfs_mount_table_namespace_root(
 
     chimera_rcu_read_lock(&table->rcu);
 
-    for (i = 0; i < table->num_buckets && rc != 0; i++) {
+    for (i = 0; i < table->num_buckets; i++) {
         for (entry = chimera_rcu_deref(table->buckets[i]); entry;
              entry = chimera_rcu_deref(entry->next)) {
-            if (!entry->mount->detached && entry->mount->pathlen == 0) {
+            if (!entry->mount->detached && entry->mount->pathlen == 0 &&
+                (rc != 0 || !entry->mount->builtin)) {
                 memcpy(r_root_fh, entry->mount->root_fh, entry->mount->root_fh_len);
                 *r_root_fh_len = entry->mount->root_fh_len;
                 rc             = 0;
-                break;
+                if (!entry->mount->builtin) {
+                    break;
+                }
             }
         }
     }
@@ -719,7 +722,8 @@ chimera_vfs_mount_table_find_by_path_protected(
                 (mount->pathlen == 0 ||
                  mount->pathlen == (uint32_t) pathlen ||
                  path[mount->pathlen] == '/') &&
-                (!found || mount->pathlen > found->pathlen)) {
+                (!found || mount->pathlen > found->pathlen ||
+                 (mount->pathlen == found->pathlen && found->builtin))) {
                 found = mount;
             }
             entry = chimera_rcu_deref(entry->next);
@@ -859,12 +863,13 @@ chimera_vfs_mount_table_find_exact(
 
     evpl_mutex_lock(&table->lock);
 
-    for (i = 0; i < table->num_buckets && !found; i++) {
+    /* "" names both the rootfs and anything mounted over it: the latter. */
+    for (i = 0; i < table->num_buckets; i++) {
         for (entry = table->buckets[i]; entry; entry = entry->next) {
             if (entry->mount->pathlen == (uint32_t) pathlen &&
-                memcmp(entry->mount->path, path, pathlen) == 0) {
+                memcmp(entry->mount->path, path, pathlen) == 0 &&
+                (!found || found->builtin)) {
                 found = entry->mount;
-                break;
             }
         }
     }

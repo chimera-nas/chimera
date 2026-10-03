@@ -12,10 +12,11 @@ struct chimera_vfs_module;
 /*
  * The built-in root filesystem.
  *
- * When no mount is placed at "/", the VFS core puts this one there, the way
- * Linux boots with an in-memory rootfs: an empty, read-only directory tree in
- * which the core creates the mount points the configured mounts need, and
- * nothing else.  It is part of the VFS core, not a backend module: it is not
+ * The VFS core mounts this at "/" at start, the way Linux boots with an
+ * in-memory rootfs: an empty, read-only directory tree in which the core
+ * creates the mount points the configured mounts need, and nothing else.  It
+ * is the namespace root until a filesystem is mounted over it at "/", and
+ * again once that is unmounted.  It is part of the VFS core, not a backend module: it is not
  * loadable, has no configuration, and knows nothing of the mount table -- the
  * core's ordinary mount point crossing makes its directories lead into the
  * filesystems mounted on them.
@@ -23,8 +24,8 @@ struct chimera_vfs_module;
 
 extern struct chimera_vfs_module chimera_vfs_rootfs_module;
 
-/* Insert the rootfs as the mount at "/".  The rootfs module must already be
- * registered. */
+/* Insert the rootfs as the mount at "/", once, at VFS init.  The rootfs module
+ * must already be registered. */
 void
 chimera_vfs_rootfs_mount(
     struct chimera_vfs *vfs);

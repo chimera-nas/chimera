@@ -3273,7 +3273,7 @@ chimera_server_iterate_mounts(
 
             /* The built-in rootfs and detached mounts are VFS-internal: no
              * one configured them and there is nothing to manage. */
-            if (mount->detached || !strcmp(mount->module->name, "rootfs")) {
+            if (mount->detached || mount->builtin) {
                 continue;
             }
 
