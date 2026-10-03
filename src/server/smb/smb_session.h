@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <string.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include "common/thread.h"
@@ -317,6 +318,27 @@ struct chimera_smb_open_file {
     uint16_t                         integrity_algo;
     uint32_t                         integrity_flags;
 };
+
+#define CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX (2 * SMB_FILENAME_MAX + 2)
+
+/* The name a change notification reports for an event on this open: the
+ * file's own, or "<file>:<stream>" for a named stream, as NTFS reports it.
+ * Returns its length; buf holds at least CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX. */
+static inline uint32_t
+chimera_smb_open_file_notify_name(
+    const struct chimera_smb_open_file *open_file,
+    char                               *buf)
+{
+    uint32_t n = open_file->name_len;
+
+    memcpy(buf, open_file->name, n);
+    if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) && open_file->stream_name_len) {
+        buf[n++] = ':';
+        memcpy(buf + n, open_file->stream_name, open_file->stream_name_len);
+        n += open_file->stream_name_len;
+    }
+    return n;
+} /* chimera_smb_open_file_notify_name */
 
 #define CHIMERA_SMB_OPEN_FILE_BUCKETS     256
 #define CHIMERA_SMB_OPEN_FILE_BUCKET_MASK (CHIMERA_SMB_OPEN_FILE_BUCKETS - 1)

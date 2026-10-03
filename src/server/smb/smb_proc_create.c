@@ -2689,13 +2689,18 @@ chimera_smb_create_open_stream_finish(
         uint64_t skip_lo, skip_hi;
         bool     has_skip = chimera_smb_parent_lease_skip(
             open_file->parent_lease_key, &skip_lo, &skip_hi);
+        char     nname[CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX];
+        uint32_t nlen = chimera_smb_open_file_notify_name(open_file, nname);
 
+        /* FILE_ACTION_ADDED_STREAM, named "<file>:<stream>" (IFSTest
+         * StreamNotifyNameTest). */
         chimera_vfs_notify_emit_lease(request->compound->thread->shared->vfs->vfs_notify,
                                       request->create.parent_handle->fh,
                                       request->create.parent_handle->fh_len,
-                                      CHIMERA_VFS_NOTIFY_STREAM_NAME,
-                                      request->create.name,
-                                      request->create.name_len,
+                                      CHIMERA_VFS_NOTIFY_STREAM_NAME |
+                                      CHIMERA_VFS_NOTIFY_STREAM_ADDED,
+                                      nname,
+                                      nlen,
                                       NULL, 0,
                                       skip_lo, skip_hi, has_skip);
     }

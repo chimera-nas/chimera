@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdlib.h>
+#include <strings.h>
 
 #include "smb_internal.h"
 #include "smb_procs.h"
@@ -11,6 +12,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_notify.h"
 
 /* Forward declaration */
 static void chimera_smb_set_info_rename_check_dest_callback(
@@ -806,6 +808,192 @@ chimera_smb_set_info_rename_open_callback(
 
 } /* chimera_smb_set_info_rename_open_callback */
 
+/* ---- stream rename (MS-FSA 2.1.5.15.12.1) ----
+ *
+ * A rename target beginning with ':' names a stream of the same file, not a new
+ * path for the file: "<:stream>[:$DATA]".  It renames the stream in place on the
+ * base file, which keeps every open of it valid. */
+
+static void
+chimera_smb_set_info_rename_stream_done(
+    enum chimera_vfs_error          error_code,
+    const struct chimera_vfs_attrs *pre_attr,
+    const struct chimera_vfs_attrs *post_attr,
+    void                           *private_data)
+{
+    struct chimera_smb_request     *request     = private_data;
+    struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
+    struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
+    uint32_t                        status;
+
+    (void) pre_attr;
+    (void) post_attr;
+
+    chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
+    request->set_info.parent_handle = NULL;
+
+    switch (error_code) {
+        case CHIMERA_VFS_OK:
+            status = SMB2_STATUS_SUCCESS;
+            break;
+        case CHIMERA_VFS_EEXIST:
+            status = SMB2_STATUS_OBJECT_NAME_COLLISION;
+            break;
+        case CHIMERA_VFS_EINVAL:
+            status = SMB2_STATUS_INVALID_PARAMETER;
+            break;
+        case CHIMERA_VFS_ENOENT:
+            status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+            break;
+        default:
+            status = SMB2_STATUS_INTERNAL_ERROR;
+            break;
+    } /* switch */
+
+    if (status == SMB2_STATUS_SUCCESS) {
+        char     nname[CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX];
+        uint32_t nlen;
+
+        if (open_file->parent_fh_len > 0) {
+            nlen = chimera_smb_open_file_notify_name(open_file, nname);
+            chimera_vfs_notify_emit(request->compound->thread->shared->vfs->vfs_notify,
+                                    open_file->parent_fh, open_file->parent_fh_len,
+                                    CHIMERA_VFS_NOTIFY_STREAM_NAME |
+                                    CHIMERA_VFS_NOTIFY_STREAM_REMOVED,
+                                    nname, nlen, NULL, 0);
+        }
+        /* A stream handle follows its stream; a handle on the file stays on
+         * its (new, empty) unnamed data stream. */
+        if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
+            memcpy(open_file->stream_name, rename_info->new_name + 1, rename_info->new_name_len - 1);
+            open_file->stream_name_len = rename_info->new_name_len - 1;
+        }
+        if (open_file->parent_fh_len > 0) {
+            nlen = chimera_smb_open_file_notify_name(open_file, nname);
+            chimera_vfs_notify_emit(request->compound->thread->shared->vfs->vfs_notify,
+                                    open_file->parent_fh, open_file->parent_fh_len,
+                                    CHIMERA_VFS_NOTIFY_STREAM_NAME |
+                                    CHIMERA_VFS_NOTIFY_STREAM_ADDED,
+                                    nname, nlen, NULL, 0);
+        }
+    }
+
+    chimera_smb_open_file_release(request, open_file);
+    chimera_smb_complete_request(request, status);
+} /* chimera_smb_set_info_rename_stream_done */
+
+static void
+chimera_smb_set_info_rename_stream_base_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request     *request     = private_data;
+    struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
+    struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+    request->set_info.parent_handle = oh;
+
+    chimera_vfs_rename_stream(request->compound->thread->vfs_thread,
+                              &request->session_handle->session->cred,
+                              oh,
+                              open_file->stream_name, open_file->stream_name_len,
+                              rename_info->new_name + 1, rename_info->new_name_len - 1,
+                              rename_info->replace_if_exist ?
+                              CHIMERA_VFS_RENAME_STREAM_REPLACE : 0,
+                              chimera_smb_set_info_rename_stream_done,
+                              request);
+} /* chimera_smb_set_info_rename_stream_base_cb */
+
+/* Returns 1 if the rename was a stream rename (and has been dispatched or
+ * answered), 0 if it is an ordinary rename. */
+static int
+chimera_smb_set_info_rename_stream(struct chimera_smb_request *request)
+{
+    struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
+    struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
+    char                           *name        = rename_info->new_name;
+    uint32_t                        len         = rename_info->new_name_len;
+    uint32_t                        status      = SMB2_STATUS_SUCCESS;
+    char                           *type;
+
+    if (rename_info->new_parent_len || len == 0 || name[0] != ':') {
+        return 0;
+    }
+
+    /* ":<stream>[:<type>]": only a data stream can be renamed. */
+    type = memchr(name + 1, ':', len - 1);
+    if (type) {
+        uint32_t type_len = len - (uint32_t) (type - name) - 1;
+
+        if (type_len == 0 || memchr(type + 1, ':', type_len)) {
+            status = SMB2_STATUS_INVALID_PARAMETER;
+        } else if (type_len != 5 || strncasecmp(type + 1, "$DATA", 5) != 0) {
+            status = SMB2_STATUS_OBJECT_TYPE_MISMATCH;
+        }
+        len = (uint32_t) (type - name);
+    }
+
+    /* ":" alone names nothing; "::$DATA" is the file's unnamed data stream,
+     * which a directory does not have. */
+    if (status == SMB2_STATUS_SUCCESS &&
+        ((len < 2 && !type) || len - 1 > 255 ||
+         (len < 2 && (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY)))) {
+        status = SMB2_STATUS_INVALID_PARAMETER;
+    }
+    /* A directory has no data stream of its own to rename. */
+    if (status == SMB2_STATUS_SUCCESS &&
+        (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) &&
+        !(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+        status = SMB2_STATUS_INVALID_PARAMETER;
+    }
+    /* The unnamed data stream cannot be renamed onto itself. */
+    if (status == SMB2_STATUS_SUCCESS && len < 2 &&
+        !(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return 1;
+    }
+    if (status != SMB2_STATUS_SUCCESS) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, status);
+        return 1;
+    }
+
+    rename_info->new_name_len = len;
+
+    /* The same stream (names compare without case): nothing to do. */
+    if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) &&
+        open_file->stream_name_len == len - 1 &&
+        strncasecmp(open_file->stream_name, name + 1, len - 1) == 0) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return 1;
+    }
+
+    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
+        chimera_vfs_open_fh(request->compound->thread->vfs_thread,
+                            &request->session_handle->session->cred,
+                            open_file->base_fh, open_file->base_fh_len,
+                            CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
+                            chimera_smb_set_info_rename_stream_base_cb,
+                            request);
+    } else {
+        chimera_vfs_open_fh(request->compound->thread->vfs_thread,
+                            &request->session_handle->session->cred,
+                            open_file->handle->fh, open_file->handle->fh_len,
+                            CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
+                            chimera_smb_set_info_rename_stream_base_cb,
+                            request);
+    }
+    return 1;
+} /* chimera_smb_set_info_rename_stream */
+
 void
 chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
 {
@@ -823,6 +1011,10 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
     if (!(open_file->granted_access & SMB2_DELETE)) {
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
+    if (chimera_smb_set_info_rename_stream(request)) {
         return;
     }
 

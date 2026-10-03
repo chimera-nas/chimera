@@ -34,12 +34,22 @@ chimera_smb_set_info_callback(
         bool                              has_skip = chimera_smb_parent_lease_skip(
             request->set_info.open_file->parent_lease_key, &skip_lo, &skip_hi);
 
+        char                              nname[CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX];
+        uint32_t                          nlen = chimera_smb_open_file_notify_name(
+            request->set_info.open_file, nname);
+
+        /* A size change on a named stream changes that stream only. */
+        if ((request->set_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) &&
+            (mask & CHIMERA_VFS_NOTIFY_STREAM_SIZE)) {
+            mask = CHIMERA_VFS_NOTIFY_STREAM_SIZE;
+        }
+
         chimera_vfs_notify_emit_lease(thread->shared->vfs->vfs_notify,
                                       request->set_info.open_file->parent_fh,
                                       request->set_info.open_file->parent_fh_len,
                                       mask,
-                                      request->set_info.open_file->name,
-                                      request->set_info.open_file->name_len,
+                                      nname,
+                                      nlen,
                                       NULL, 0,
                                       skip_lo, skip_hi, has_skip);
     }

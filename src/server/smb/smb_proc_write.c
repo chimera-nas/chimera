@@ -79,14 +79,21 @@ chimera_smb_write_callback(
          * dir-lease content break is deferred to close (the open is flagged
          * MODIFIED for chimera_smb_close to emit it).  MS-SMB2;
          * dirlease.v2_request. */
+        /* A write to a named stream changes that stream only:
+        * FILE_ACTION_MODIFIED_STREAM on "<file>:<stream>". */
+        char     nname[CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX];
+        uint32_t nlen   = chimera_smb_open_file_notify_name(request->write.open_file, nname);
+        uint32_t action = CHIMERA_VFS_NOTIFY_STREAM_WRITE | CHIMERA_VFS_NOTIFY_STREAM_SIZE;
+
+        if (!(request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+            action |= CHIMERA_VFS_NOTIFY_FILE_MODIFIED;
+        }
         chimera_vfs_notify_emit_nobreak(thread->shared->vfs->vfs_notify,
                                         request->write.open_file->parent_fh,
                                         request->write.open_file->parent_fh_len,
-                                        CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
-                                        CHIMERA_VFS_NOTIFY_STREAM_WRITE |
-                                        CHIMERA_VFS_NOTIFY_STREAM_SIZE,
-                                        request->write.open_file->name,
-                                        request->write.open_file->name_len,
+                                        action,
+                                        nname,
+                                        nlen,
                                         NULL, 0);
         request->write.open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_MODIFIED;
     }
