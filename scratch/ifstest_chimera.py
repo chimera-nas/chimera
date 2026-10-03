@@ -28,6 +28,18 @@ port, metrics = t.free_ports(2)
 config = t.daemon_config(backends, scratch, port, metrics)
 # IFSTest's stream tests need named streams, which the daemon leaves off.
 config["server"]["smb_named_streams"] = True
+# Windows Server's NTFS leaves last-access times alone on read
+# (NtfsDisableLastAccessUpdate), which is what IFSTest's NTFS baseline runs
+# with; run the backends the same way rather than with relatime.
+for backend in backends:
+    module = config["server"].setdefault("vfs", {}).setdefault(backend, {"path": None})
+    if not isinstance(module.get("config"), dict):
+        module["config"] = {}
+    module["config"]["noatime"] = True
+# memfs allocates in 64 KiB blocks by default; NTFS in 4 KiB clusters, which
+# IFSTest's allocation-size checks are written against.
+if "memfs" in backends:
+    config["server"]["vfs"]["memfs"]["config"]["block_size"] = 4096
 (scratch / "config.json").write_text(json.dumps(config))
 daemon_log = logdir / "daemon.log"
 log = daemon_log.open("w+b")
