@@ -216,6 +216,10 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_ioctl_set_zero_data(request);
             break;
 
+        case SMB2_FSCTL_GET_RETRIEVAL_POINTERS:
+            chimera_smb_ioctl_get_retrieval_pointers(request);
+            break;
+
         case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
             chimera_smb_ioctl_query_allocated_ranges(request);
             break;
@@ -447,6 +451,9 @@ chimera_smb_ioctl_reply(
         case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
             output_length = request->ioctl.sp_qar_count * 16;
             break;
+        case SMB2_FSCTL_GET_RETRIEVAL_POINTERS:
+            output_length = sizeof(request->ioctl.rpt_out);
+            break;
         case SMB2_FSCTL_SRV_REQUEST_RESUME_KEY:
             output_length = 32; /* ResumeKey(24) + ContextLength(4) + Context(pad 4) */
             break;
@@ -574,6 +581,10 @@ chimera_smb_ioctl_reply(
             evpl_iovec_cursor_append_blob(reply_cursor,
                                           request->ioctl.rp_response,
                                           request->ioctl.rp_response_len);
+            break;
+        case SMB2_FSCTL_GET_RETRIEVAL_POINTERS:
+            evpl_iovec_cursor_append_blob(reply_cursor, request->ioctl.rpt_out,
+                                          sizeof(request->ioctl.rpt_out));
             break;
         case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
             for (uint32_t qi = 0; qi < request->ioctl.sp_qar_count; qi++) {
@@ -986,6 +997,13 @@ chimera_smb_parse_ioctl(
                 }
                 evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.sp_zero_offset);
                 evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.sp_zero_beyond);
+                break;
+            case SMB2_FSCTL_GET_RETRIEVAL_POINTERS:
+                /* STARTING_VCN_INPUT_BUFFER: int64 StartingVcn. */
+                if (request->ioctl.input_count < 8) {
+                    return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+                }
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.rpt_vcn);
                 break;
             case SMB2_FSCTL_QUERY_ALLOCATED_RANGES:
                 /* FILE_ALLOCATED_RANGE_BUFFER: int64 FileOffset, int64 Length. */

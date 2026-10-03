@@ -63,8 +63,11 @@ chimera_smb_set_sparse_getattr_cb(
     }
 
     /* The sparse attribute applies only to data streams: FSCTL_SET_SPARSE on a
-     * directory is STATUS_INVALID_PARAMETER (smb2.ioctl.sparse_dir_flag). */
-    if (S_ISDIR(attr->va_mode)) {
+     * directory is STATUS_INVALID_PARAMETER (smb2.ioctl.sparse_dir_flag).  A
+     * named stream of a directory is a data stream, though its attributes carry
+     * the directory's mode (IFSTest SparseStreamDirTest). */
+    if (S_ISDIR(attr->va_mode) &&
+        !(request->ioctl.sp_open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
         chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
@@ -72,7 +75,8 @@ chimera_smb_set_sparse_getattr_cb(
 
     /* Read-modify-write so the SPARSE toggle preserves the settable DOS bits
      * (READONLY/HIDDEN/SYSTEM/ARCHIVE). */
-    dos = attr->va_dos_attributes & ~SMB2_FILE_ATTRIBUTE_SPARSE_FILE;
+    dos = (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) ?
+        attr->va_dos_attributes & ~SMB2_FILE_ATTRIBUTE_SPARSE_FILE : 0;
     if (request->ioctl.sp_set_sparse) {
         dos |= SMB2_FILE_ATTRIBUTE_SPARSE_FILE;
     }
@@ -123,7 +127,7 @@ chimera_smb_ioctl_set_sparse(struct chimera_smb_request *request)
         vfs_thread,
         &request->session_handle->session->cred,
         open_file->handle,
-        CHIMERA_VFS_ATTR_MASK_STAT,
+        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
         chimera_smb_set_sparse_getattr_cb,
         request);
 } /* chimera_smb_ioctl_set_sparse */
@@ -396,3 +400,79 @@ chimera_smb_ioctl_query_allocated_ranges(struct chimera_smb_request *request)
 
     chimera_smb_qar_seek_data(request);
 } /* chimera_smb_ioctl_query_allocated_ranges */
+
+/* ------------------------------------------------------------------ */
+/* FSCTL_GET_RETRIEVAL_POINTERS (MS-FSA 2.1.5.10.15)                   */
+/* ------------------------------------------------------------------ */
+
+/* chimera has no volume cluster map to report, so a stream is described as one
+ * contiguous run over its allocation, placed at a cluster number derived from
+ * the file's inode so it is stable and distinct per file.  That is the shape
+ * defragmenters and backup tools read, and they cannot act on the LCNs of a
+ * network file system anyway. */
+static void
+chimera_smb_get_retrieval_pointers_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+    uint64_t                    clusters, lcn, start = 0;
+    uint32_t                    count = 1;
+    uint8_t                    *out   = request->ioctl.rpt_out;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
+        chimera_smb_complete_request(request, chimera_smb_sparse_status(error_code));
+        return;
+    }
+
+    clusters = chimera_smb_alloc_size(attr) / CHIMERA_SMB_CLUSTER_SIZE;
+    if ((int64_t) request->ioctl.rpt_vcn < 0) {
+        chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+    if (request->ioctl.rpt_vcn >= clusters) {
+        chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_END_OF_FILE);
+        return;
+    }
+
+    lcn = ((attr->va_ino & 0xffffffffULL) << 20);
+
+    memset(out, 0, sizeof(request->ioctl.rpt_out));
+    memcpy(out, &count, 4);             /* ExtentCount */
+    memcpy(out + 8, &start, 8);         /* StartingVcn */
+    memcpy(out + 16, &clusters, 8);     /* Extents[0].NextVcn */
+    memcpy(out + 24, &lcn, 8);          /* Extents[0].Lcn */
+
+    chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_get_retrieval_pointers_cb */
+
+void
+chimera_smb_ioctl_get_retrieval_pointers(struct chimera_smb_request *request)
+{
+    struct chimera_smb_open_file *open_file;
+
+    if (request->ioctl.max_output_response < sizeof(request->ioctl.rpt_out)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_TOO_SMALL);
+        return;
+    }
+
+    open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+    if (unlikely(!open_file)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+    request->ioctl.sp_open_file = open_file;
+
+    chimera_vfs_getattr(request->compound->thread->vfs_thread,
+                        &request->session_handle->session->cred,
+                        open_file->handle,
+                        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES |
+                        CHIMERA_VFS_ATTR_ALLOC_SIZE,
+                        chimera_smb_get_retrieval_pointers_cb,
+                        request);
+} /* chimera_smb_ioctl_get_retrieval_pointers */

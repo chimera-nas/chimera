@@ -1035,6 +1035,10 @@ struct chimera_smb_request {
             /* SET_OBJECT_ID / SET_OBJECT_ID_EXTENDED input (64 / 48 bytes), the
              * file's open handle and the share root's (which indexes the
              * volume's object IDs) while the request runs. */
+            /* FSCTL_GET_RETRIEVAL_POINTERS: STARTING_VCN_INPUT_BUFFER and the
+             * RETRIEVAL_POINTERS_BUFFER answer (one extent). */
+            uint64_t                        rpt_vcn;
+            uint8_t                         rpt_out[32];
             uint8_t                         oid_in[64];
             struct chimera_smb_open_file   *oid_open_file;
             struct chimera_vfs_open_handle *oid_root;
