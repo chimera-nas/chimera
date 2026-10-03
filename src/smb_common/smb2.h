@@ -555,6 +555,12 @@
 #define SMB2_STATUS_FILE_IS_OFFLINE                   0xC0000267
 #define SMB2_STATUS_VOLUME_DISMOUNTED                 0xC000026E
 #define SMB2_STATUS_NOT_A_REPARSE_POINT               0xC0000275
+#define SMB2_STATUS_IO_REPARSE_TAG_INVALID            0xC0000276
+#define SMB2_STATUS_IO_REPARSE_TAG_MISMATCH           0xC0000277
+#define SMB2_STATUS_IO_REPARSE_DATA_INVALID           0xC0000278
+#define SMB2_STATUS_IO_REPARSE_TAG_NOT_HANDLED        0xC0000279
+#define SMB2_STATUS_REPARSE_ATTRIBUTE_CONFLICT        0xC00002B2
+#define SMB2_STATUS_OBJECTID_NOT_FOUND                0xC00002F0
 #define SMB2_STATUS_SERVER_UNAVAILABLE                0xC0000466
 #define SMB2_STATUS_FILE_NOT_AVAILABLE                0xC0000467
 
@@ -1050,6 +1056,11 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FSCTL_DFS_GET_REFERRALS                0x00060194
 #define SMB2_FSCTL_SET_REPARSE_POINT                0x000900A4
 #define SMB2_FSCTL_GET_REPARSE_POINT                0x000900A8
+#define SMB2_FSCTL_DELETE_REPARSE_POINT             0x000900AC
+#define SMB2_FSCTL_SET_OBJECT_ID                    0x00090098
+#define SMB2_FSCTL_GET_OBJECT_ID                    0x0009009C
+#define SMB2_FSCTL_DELETE_OBJECT_ID                 0x000900A0
+#define SMB2_FSCTL_SET_OBJECT_ID_EXTENDED           0x000900BC
 #define SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO          0x00140204
 #define SMB2_FSCTL_TRANSCEIVE_PIPE                  0x0011C017
 #define SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO     0x001401FC
@@ -1095,6 +1106,14 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 
 #define SMB2_IO_REPARSE_TAG_NFS                     0x80000014
 #define SMB2_IO_REPARSE_TAG_SYMLINK                 0xA000000C
+#define SMB2_IO_REPARSE_TAG_MOUNT_POINT             0xA0000003
+/* Bit 31 marks a Microsoft tag (MS-FSCC 2.1.2.1); any other tag carries a GUID
+ * in a 24-byte REPARSE_GUID_DATA_BUFFER header rather than the 8-byte
+ * REPARSE_DATA_BUFFER header. */
+#define SMB2_IO_REPARSE_TAG_IS_MICROSOFT(tag) (((tag) & 0x80000000u) != 0)
+#define SMB2_REPARSE_DATA_HEADER_SIZE               8
+#define SMB2_REPARSE_GUID_DATA_HEADER_SIZE          24
+#define SMB2_REPARSE_BUFFER_MAX                     16384
 /* SymbolicLinkErrorResponse SymLinkErrorTag (MS-SMB2 2.2.2.2.1): 'SYML'. */
 #define SMB2_SYMLINK_ERROR_TAG                      0x4C4D5953
 /* SYMBOLIC_LINK_REPARSE_BUFFER Flags (MS-FSCC 2.1.2.4). */
