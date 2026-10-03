@@ -528,7 +528,20 @@ probe_duplicate_extents(struct smb2_conn *c)
  * target back as a REPARSE_DATA_BUFFER.  The round trip is the check: the
  * target that comes back must be the one that went in.
  */
-#define SMB2_FILE_OPEN_REPARSE_POINT 0x00200000u
+#ifndef SMB2_FSCTL_DELETE_REPARSE_POINT
+#define SMB2_FSCTL_DELETE_REPARSE_POINT   0x000900ACu
+#endif /* ifndef SMB2_FSCTL_DELETE_REPARSE_POINT */
+#define SMB2_FSCTL_SET_OBJECT_ID          0x00090098u
+#define SMB2_FSCTL_GET_OBJECT_ID          0x0009009Cu
+#define SMB2_FSCTL_DELETE_OBJECT_ID       0x000900A0u
+#define SMB2_FSCTL_SET_OBJECT_ID_EXTENDED 0x000900BCu
+#define ST_NOT_A_DIRECTORY                0xC0000103u
+#define ST_IO_REPARSE_TAG_MISMATCH        0xC0000277u
+#define ST_IO_REPARSE_TAG_NOT_HANDLED     0xC0000279u
+#define ST_REPARSE_ATTRIBUTE_CONFLICT     0xC00002B2u
+#define ST_OBJECTID_NOT_FOUND             0xC00002F0u
+#define ST_DUPLICATE_NAME                 0xC00000BDu
+#define SMB2_FILE_OPEN_REPARSE_POINT      0x00200000u
 
 /* Build a symlink REPARSE_DATA_BUFFER (MS-FSCC 2.1.2.4) for `target`.
  * Returns the total length. */
@@ -560,6 +573,9 @@ build_symlink_reparse(
     (void) i;
     return 20 + 2 * nlen;
 } /* build_symlink_reparse */
+
+static void probe_reparse_generic(
+    struct smb2_conn *c);
 
 static void
 probe_reparse(struct smb2_conn *c)
@@ -663,17 +679,160 @@ probe_reparse(struct smb2_conn *c)
         smb2_close(c, ro.file_id);
     }
 
-    /* An unsupported reparse tag is accepted and ignored (the parser clears it
-     * so the handler skips), not treated as a malformed request. */
+    /* A mount point can only be set on a directory (MS-FSA 2.1.5.10.37). */
     make_file(c, "rp_other.bin", 0, 0, &co);
     memset(in, 0, sizeof(in));
     p32(in, 0, 0xA0000003u);          /* IO_REPARSE_TAG_MOUNT_POINT */
     p16(in, 4, 12);
     st = smb2_ioctl(c, SMB2_FSCTL_SET_REPARSE_POINT, co.file_id, in, 20);
-    CHECK(st == ST_SUCCESS,
-          "SET_REPARSE_POINT with an unsupported tag is accepted (0x%08x)", st);
+    CHECK(st == ST_NOT_A_DIRECTORY,
+          "SET_REPARSE_POINT(mount point) on a file -> NOT_A_DIRECTORY (0x%08x)",
+          st);
     smb2_close(c, co.file_id);
+
+    probe_reparse_generic(c);
 } /* probe_reparse */
+
+/* A tag chimera does not turn into a special file is kept verbatim: the
+ * buffer round-trips, the file reports FILE_ATTRIBUTE_REPARSE_POINT, a plain
+ * open is refused because no filter handles the tag, and a SET or DELETE has
+ * to name the same tag and GUID (MS-FSA 2.1.5.10.3 / .14 / .37). */
+static int
+build_guid_reparse(
+    uint8_t    *buf,
+    uint32_t    tag,
+    uint8_t     guid_seed,
+    const char *data)
+{
+    int n = (int) strlen(data);
+    int i;
+
+    p32(buf, 0, tag);
+    p16(buf, 4, (uint16_t) n);
+    p16(buf, 6, 0);
+    for (i = 0; i < 16; i++) {
+        buf[8 + i] = (uint8_t) (guid_seed + i);
+    }
+    memcpy(buf + 24, data, n);
+    return 24 + n;
+} /* build_guid_reparse */
+
+static void
+probe_reparse_generic(struct smb2_conn *c)
+{
+    struct smb2_create_out co, ro;
+    uint8_t                in[128];
+    const uint8_t         *out;
+    uint32_t               st, out_len = 0;
+    int                    n;
+
+    printf("# --- reparse points of any other tag ---\n");
+
+    make_file(c, "rp_generic.bin", 0, 0, &co);
+    n  = build_guid_reparse(in, 0x00000123u, 0x10, "chimera");
+    st = smb2_ioctl(c, SMB2_FSCTL_SET_REPARSE_POINT, co.file_id, in, (uint32_t) n);
+    CHECK(st == ST_SUCCESS, "SET_REPARSE_POINT(tag 0x123) -> 0x%08x", st);
+
+    out = smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, co.file_id, NULL, 0,
+                         4096, &st, &out_len);
+    CHECK(out && out_len == (uint32_t) n && memcmp(out, in, n) == 0,
+          "  ... GET_REPARSE_POINT returns the buffer as set (0x%08x, %u bytes)",
+          st, out_len);
+    (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, co.file_id, NULL, 0,
+                          16, &st, &out_len);
+    CHECK(st == ST_BUFFER_TOO_SMALL, "  ... and into a buffer smaller than its "
+          "24-byte header -> BUFFER_TOO_SMALL (0x%08x)", st);
+
+    n  = build_guid_reparse(in, 0x00000456u, 0x10, "x");
+    st = smb2_ioctl(c, SMB2_FSCTL_SET_REPARSE_POINT, co.file_id, in, (uint32_t) n);
+    CHECK(st == ST_IO_REPARSE_TAG_MISMATCH, "  ... a SET with another tag -> "
+          "IO_REPARSE_TAG_MISMATCH (0x%08x)", st);
+    n  = build_guid_reparse(in, 0x00000123u, 0x40, "x");
+    st = smb2_ioctl(c, SMB2_FSCTL_SET_REPARSE_POINT, co.file_id, in, (uint32_t) n);
+    CHECK(st == ST_REPARSE_ATTRIBUTE_CONFLICT, "  ... with another GUID -> "
+          "REPARSE_ATTRIBUTE_CONFLICT (0x%08x)", st);
+    smb2_close(c, co.file_id);
+
+    st = smb2_create(c, "rp_generic.bin", MBT_FILE_OPEN, MBT_FILE_READ_ATTRIBUTES,
+                     MBT_FILE_SHARE_RWD, NULL, &ro);
+    CHECK(st == ST_IO_REPARSE_TAG_NOT_HANDLED, "  ... a plain open -> "
+          "IO_REPARSE_TAG_NOT_HANDLED (0x%08x)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, ro.file_id);
+    }
+
+    st = smb2_create_opts(c, "rp_generic.bin", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, SMB2_FILE_OPEN_REPARSE_POINT,
+                          NULL, &ro);
+    CHECK(st == ST_SUCCESS, "  ... opening the reparse point itself -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    n  = build_guid_reparse(in, 0x00000123u, 0x10, "");
+    st = smb2_ioctl(c, SMB2_FSCTL_DELETE_REPARSE_POINT, ro.file_id, in, (uint32_t) n);
+    CHECK(st == ST_SUCCESS, "  ... DELETE_REPARSE_POINT -> 0x%08x", st);
+    (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, ro.file_id, NULL, 0,
+                          4096, &st, &out_len);
+    CHECK(st == ST_NOT_A_REPARSE_POINT, "  ... after which GET_REPARSE_POINT -> "
+          "NOT_A_REPARSE_POINT (0x%08x)", st);
+    st = smb2_ioctl(c, SMB2_FSCTL_DELETE_REPARSE_POINT, ro.file_id, in, (uint32_t) n);
+    CHECK(st == ST_NOT_A_REPARSE_POINT, "  ... as does a second DELETE (0x%08x)",
+          st);
+    smb2_close(c, ro.file_id);
+} /* probe_reparse_generic */
+
+/* Object IDs (MS-FSA 2.1.5.10.1/.2/.13/.35/.36): stored per file, unique on
+ * the volume. */
+static void
+probe_object_id(struct smb2_conn *c)
+{
+    struct smb2_create_out a, b;
+    uint8_t                oid[64], ext[48];
+    const uint8_t         *out;
+    uint32_t               st, out_len = 0;
+    int                    i;
+
+    printf("# --- object IDs ---\n");
+
+    for (i = 0; i < 64; i++) {
+        oid[i] = (uint8_t) (0x80 + i);
+    }
+    memset(ext, 0x07, sizeof(ext));
+
+    make_file(c, "oid_a.bin", 0, 0, &a);
+    make_file(c, "oid_b.bin", 0, 0, &b);
+
+    (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_OBJECT_ID, a.file_id, NULL, 0, 64,
+                          &st, &out_len);
+    CHECK(st == ST_OBJECTID_NOT_FOUND, "GET_OBJECT_ID on a file with none -> "
+          "OBJECTID_NOT_FOUND (0x%08x)", st);
+    st = smb2_ioctl(c, SMB2_FSCTL_SET_OBJECT_ID, a.file_id, oid, sizeof(oid));
+    CHECK(st == ST_SUCCESS, "SET_OBJECT_ID -> 0x%08x", st);
+    st = smb2_ioctl(c, SMB2_FSCTL_SET_OBJECT_ID, a.file_id, oid, sizeof(oid));
+    CHECK(st == ST_OBJECT_NAME_COLLISION, "  ... again on the same file -> "
+          "OBJECT_NAME_COLLISION (0x%08x)", st);
+    st = smb2_ioctl(c, SMB2_FSCTL_SET_OBJECT_ID, b.file_id, oid, sizeof(oid));
+    CHECK(st == ST_DUPLICATE_NAME, "  ... the same ID on another file -> "
+          "DUPLICATE_NAME (0x%08x)", st);
+
+    st = smb2_ioctl(c, SMB2_FSCTL_SET_OBJECT_ID_EXTENDED, a.file_id, ext, sizeof(ext));
+    CHECK(st == ST_SUCCESS, "SET_OBJECT_ID_EXTENDED -> 0x%08x", st);
+    out = smb2_ioctl_out(c, SMB2_FSCTL_GET_OBJECT_ID, a.file_id, NULL, 0, 64,
+                         &st, &out_len);
+    CHECK(out && out_len == 64 && memcmp(out, oid, 16) == 0 &&
+          memcmp(out + 16, ext, 48) == 0,
+          "  ... GET_OBJECT_ID returns the ID with the new extended part "
+          "(0x%08x, %u bytes)", st, out_len);
+
+    st = smb2_ioctl(c, SMB2_FSCTL_DELETE_OBJECT_ID, a.file_id, NULL, 0);
+    CHECK(st == ST_SUCCESS, "DELETE_OBJECT_ID -> 0x%08x", st);
+    st = smb2_ioctl(c, SMB2_FSCTL_SET_OBJECT_ID, b.file_id, oid, sizeof(oid));
+    CHECK(st == ST_SUCCESS, "  ... after which the ID is free for another file "
+          "(0x%08x)", st);
+
+    smb2_close(c, a.file_id);
+    smb2_close(c, b.file_id);
+} /* probe_object_id */
 
 int
 main(
@@ -697,6 +856,7 @@ main(
     probe_copyoffload(c);
     probe_duplicate_extents(c);
     probe_reparse(c);
+    probe_object_id(c);
 
     smb2_env_stop(&env);
 
