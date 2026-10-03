@@ -546,6 +546,26 @@ diskfs_inherit_acl_async(
 
 
 static void
+diskfs_getattr_stream_cb(
+    struct diskfs_inode *stream,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    diskfs_stream_overlay_attrs(&request->getattr.r_attr, stream,
+                                request->fh, request->fh_len);
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_getattr_stream_cb */
+
+
+static void
 diskfs_getattr_inode_cb(
     struct diskfs_inode *inode,
     int                  status,
@@ -560,6 +580,19 @@ diskfs_getattr_inode_cb(
     }
 
     diskfs_map_attrs(p->thread, &request->getattr.r_attr, inode);
+
+    /* Through a stream handle: the file's attributes, with the stream's size
+     * and allocation laid over them. */
+    {
+        uint64_t sinum;
+        uint32_t sgen;
+
+        if (diskfs_fh_stream(request->fh, request->fh_len, &sinum, &sgen)) {
+            diskfs_inode_get_inum_async(p->thread, p->txn, p->fs, sinum, sgen,
+                                        diskfs_getattr_stream_cb, request);
+            return;
+        }
+    }
 
     diskfs_op_ok(request, p->txn);
 } /* diskfs_getattr_inode_cb */
@@ -799,6 +832,21 @@ static void
 diskfs_setattr_finish(struct chimera_vfs_request *request)
 {
     struct diskfs_request_private *p = request->plugin_data;
+
+    if (p->stream_base) {
+        struct chimera_vfs_attrs attrs = *request->setattr.set_attr;
+
+        /* The stream took its size; the rest is its file's. */
+        attrs.va_set_mask = p->stream_base_mask;
+        diskfs_apply_attrs(p->stream_base, &attrs);
+        request->setattr.set_attr->va_set_mask |= attrs.va_set_mask;
+
+        diskfs_map_attrs(p->thread, &request->setattr.r_post_attr, p->stream_base);
+        diskfs_stream_overlay_attrs(&request->setattr.r_post_attr, p->inode_stash[0],
+                                    request->fh, request->fh_len);
+        diskfs_op_ok(request, p->txn);
+        return;
+    }
 
     diskfs_map_attrs(p->thread, &request->setattr.r_post_attr,
                      p->inode_stash[0]);
@@ -1343,6 +1391,27 @@ diskfs_setattr_inode_cb(
 } /* diskfs_setattr_inode_cb */
 
 
+static void
+diskfs_setattr_stream_base_cb(
+    struct diskfs_inode *base,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    p->stream_base = base;
+    diskfs_inode_get_data_fh_async(p->thread, p->txn, p->fs,
+                                   request->fh, request->fh_len,
+                                   diskfs_setattr_inode_cb, request);
+} /* diskfs_setattr_stream_base_cb */
+
+
 void
 diskfs_setattr(
     struct diskfs_thread       *thread,
@@ -1351,12 +1420,33 @@ diskfs_setattr(
     void                       *private_data)
 {
     struct diskfs_request_private *p = request->plugin_data;
+    uint64_t                       sinum;
+    uint32_t                       sgen;
 
     (void) shared;
     (void) private_data;
 
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+
+    p->stream_base = NULL;
+
+    /* Through a stream handle, a size or allocation change is the stream's;
+     * every other attribute is its file's (diskfs_setattr_finish applies
+     * those).  The file is locked first, then the stream. */
+    if ((request->setattr.set_attr->va_set_mask &
+         (CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE)) &&
+        diskfs_fh_stream(request->fh, request->fh_len, &sinum, &sgen)) {
+        p->stream_base_mask = request->setattr.set_attr->va_set_mask &
+            (CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME |
+             CHIMERA_VFS_ATTR_CTIME | CHIMERA_VFS_ATTR_BTIME |
+             CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
+        request->setattr.set_attr->va_set_mask &= ~p->stream_base_mask;
+        diskfs_inode_get_fh_async(thread, p->txn, p->fs,
+                                  request->fh, request->fh_len,
+                                  diskfs_setattr_stream_base_cb, request);
+        return;
+    }
 
     diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,

@@ -562,8 +562,11 @@ diskfs_drain_looked_cb(
     }
 
     /* A dirent in a drained directory (only RMFS orphans whole trees; rmdir
-     * requires empty): recursively orphan the child, then drop the dirent. */
-    if (d->found_key.type == DISKFS_REC_DIRENT) {
+     * requires empty), or a dead file's named stream: recursively orphan the
+     * child, then drop the record.  A stream record leads with inum and gen
+     * just as a dirent does. */
+    if (d->found_key.type == DISKFS_REC_DIRENT ||
+        d->found_key.type == DISKFS_REC_STREAM) {
         struct diskfs_dirent_rec *rec = (struct diskfs_dirent_rec *) d->recbuf;
 
         d->child_inum = rec->inum;

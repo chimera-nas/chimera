@@ -243,6 +243,22 @@ struct diskfs_request_private {
      * by name, umount by mount_private, KV ops are pool-level). */
     struct diskfs_fs           *fs;
 
+    /* Named-stream ops: the stream record being worked on (its inode, the
+     * creation sequence it keeps across a rename, the key of its name and of
+     * the name it is renamed to), and list_streams' collected records. */
+    uint64_t                    stream_inum;
+    uint32_t                    stream_gen;
+    uint64_t                    stream_seq;
+    uint64_t                    stream_hash;
+    uint64_t                    stream_new_hash;
+    struct diskfs_stream_list  *stream_list;
+    uint32_t                    stream_count;
+    uint32_t                    stream_cap;
+    /* setattr through a stream handle: the stream's file, which takes the
+     * attributes other than size and allocation (stream_base_mask). */
+    struct diskfs_inode        *stream_base;
+    uint64_t                    stream_base_mask;
+
     /* xattr EaSize maintenance: captured in set_xattr's lookup callback so the
      * insert-completion can update the inode's cached ea_size/ea_count delta. */
     uint64_t                    ea_old_size;  /* FEALIST size of the replaced EA, 0 if new */
@@ -1046,6 +1062,8 @@ enum diskfs_bt_rectype {
     DISKFS_REC_REFCOUNT = 8,  /* refcount inode only: subkey = device offset of a
                                * reflink-shared extent; payload = share count */
     DISKFS_REC_SID      = 9,  /* single record: native owner/group SIDs (subkey 0) */
+    DISKFS_REC_STREAM   = 10, /* named data stream: subkey = hash of the case-folded
+                               * name; payload = diskfs_stream_rec */
 };
 
 
@@ -1094,6 +1112,21 @@ struct diskfs_dirent_rec {
     uint64_t inum;
     uint32_t gen;
     uint16_t name_len;
+    char     name[];
+};
+#pragma pack(pop)
+
+/* A named stream's record in its file's b+tree: the hidden inode that holds
+ * the stream's data, the name as created, and the creation sequence streams
+ * are listed in.  It leads with inum and gen, as a dirent does, so the reclaim
+ * drain orphans a dead file's streams exactly as it does a directory's
+ * children. */
+#pragma pack(push, 1)
+struct diskfs_stream_rec {
+    uint64_t inum;
+    uint32_t gen;
+    uint16_t name_len;
+    uint64_t seq;
     char     name[];
 };
 #pragma pack(pop)
@@ -3499,6 +3532,34 @@ diskfs_get_xattr(
     void                       *private_data);
 
 void
+diskfs_open_stream(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data);
+
+void
+diskfs_list_streams(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data);
+
+void
+diskfs_remove_stream(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data);
+
+void
+diskfs_rename_stream(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data);
+
+void
 diskfs_set_xattr(
     struct diskfs_thread       *thread,
     struct diskfs_shared       *shared,
@@ -4171,6 +4232,51 @@ diskfs_fh_to_inum(
 } /* diskfs_fh_to_inum */
 
 
+/* A stream handle: the base file's handle followed by the stream inode's inum
+ * and generation.  Everything that decodes a handle's inum sees the base file,
+ * so metadata operations through a stream handle act on the file; the data
+ * operations resolve the stream inode (diskfs_inode_get_data_fh_async). */
+static inline uint32_t
+diskfs_stream_to_fh(
+    struct diskfs_fs *fs,
+    uint8_t          *fh,
+    uint64_t          base_inum,
+    uint32_t          base_gen,
+    uint64_t          stream_inum,
+    uint32_t          stream_gen)
+{
+    uint32_t n = diskfs_inum_to_fh(fs, fh, base_inum, base_gen);
+
+    n += chimera_encode_uint64(stream_inum, fh + n);
+    n += chimera_encode_uint32(stream_gen, fh + n);
+    return n;
+} /* diskfs_stream_to_fh */
+
+
+/* Returns 1 and the stream inode's inum and generation if fh names a stream. */
+static inline int
+diskfs_fh_stream(
+    const uint8_t *fh,
+    int            fhlen,
+    uint64_t      *stream_inum,
+    uint32_t      *stream_gen)
+{
+    const uint8_t *ptr = fh + CHIMERA_VFS_MOUNT_ID_SIZE;
+    const uint8_t *end = fh + fhlen;
+    uint64_t       inum;
+    uint32_t       gen;
+
+    ptr += chimera_decode_uint64(ptr, &inum);
+    ptr += chimera_decode_uint32(ptr, &gen);
+    if (ptr >= end) {
+        return 0;
+    }
+    ptr += chimera_decode_uint64(ptr, stream_inum);
+    chimera_decode_uint32(ptr, stream_gen);
+    return 1;
+} /* diskfs_fh_stream */
+
+
 /*
  * Mix the inum before selecting the shard.  inums are
  * (disk<<56 | ag<<32 | block_idx) where block_idx is a small, often dense or
@@ -4449,6 +4555,28 @@ diskfs_inode_get_fh_async(
     diskfs_fh_to_inum(&inum, &gen, fh, fhlen);
     diskfs_inode_get_inum_async(thread, txn, fs, inum, gen, cb, private_data);
 } /* diskfs_inode_get_fh_async */
+
+
+/* The inode a data operation acts on: a stream handle's stream inode, any
+ * other handle's own inode. */
+static inline void
+diskfs_inode_get_data_fh_async(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_fs     *fs,
+    const uint8_t        *fh,
+    int                   fhlen,
+    diskfs_inode_cb_t     cb,
+    void                 *private_data)
+{
+    uint64_t inum;
+    uint32_t gen;
+
+    if (!diskfs_fh_stream(fh, fhlen, &inum, &gen)) {
+        diskfs_fh_to_inum(&inum, &gen, fh, fhlen);
+    }
+    diskfs_inode_get_inum_async(thread, txn, fs, inum, gen, cb, private_data);
+} /* diskfs_inode_get_data_fh_async */
 
 
 /* ------------------------------------------------------------------ */
@@ -5504,6 +5632,64 @@ diskfs_map_attrs(
     }
 
 } /* diskfs_map_attrs */
+
+
+/* A stream handle's attributes are its file's with the stream's size,
+ * allocation and handle, and the mode of a data fork. */
+static inline void
+diskfs_stream_overlay_attrs(
+    struct chimera_vfs_attrs *attr,
+    struct diskfs_inode      *stream,
+    const uint8_t            *fh,
+    int                       fhlen)
+{
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        attr->va_mode = S_IFREG | (attr->va_mode & 07777);
+    }
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        attr->va_size       = stream->size;
+        attr->va_space_used = stream->space_used > stream->alloc_size ?
+            stream->space_used : stream->alloc_size;
+        attr->va_alloc_size = stream->alloc_size;
+    }
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
+        memcpy(attr->va_fh, fh, fhlen);
+        attr->va_fh_len = fhlen;
+    }
+} /* diskfs_stream_overlay_attrs */
+
+
+/* Attributes for a data operation through fh on inode.  Through a stream
+ * handle the inode is the stream's, whose times and DOS attributes are not the
+ * file's: report the stream's size with the file's identity and handle, and
+ * leave the file's metadata out rather than misreport it. */
+static inline void
+diskfs_map_attrs_data(
+    struct diskfs_thread     *thread,
+    struct chimera_vfs_attrs *attr,
+    struct diskfs_inode      *inode,
+    const uint8_t            *fh,
+    int                       fhlen)
+{
+    uint64_t sinum, base_inum;
+    uint32_t sgen, base_gen;
+
+    diskfs_map_attrs(thread, attr, inode);
+
+    if (!fh || !diskfs_fh_stream(fh, fhlen, &sinum, &sgen)) {
+        return;
+    }
+
+    diskfs_fh_to_inum(&base_inum, &base_gen, fh, fhlen);
+    attr->va_set_mask &= ~(CHIMERA_VFS_ATTR_DOS_ATTRIBUTES | CHIMERA_VFS_ATTR_ATIME |
+                           CHIMERA_VFS_ATTR_MTIME | CHIMERA_VFS_ATTR_CTIME |
+                           CHIMERA_VFS_ATTR_BTIME | CHIMERA_VFS_ATTR_CHANGE);
+    attr->va_ino = base_inum;
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
+        memcpy(attr->va_fh, fh, fhlen);
+        attr->va_fh_len = fhlen;
+    }
+} /* diskfs_map_attrs_data */
 
 
 static inline void

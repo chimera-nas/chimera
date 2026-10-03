@@ -1794,9 +1794,11 @@ diskfs_open_fh(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
-                              request->fh, request->fh_len,
-                              diskfs_open_fh_inode_cb, request);
+    /* A stream handle opens (and pins) the stream's own inode, as
+     * diskfs_open_stream does. */
+    diskfs_inode_get_data_fh_async(thread, p->txn, p->fs,
+                                   request->fh, request->fh_len,
+                                   diskfs_open_fh_inode_cb, request);
 } /* diskfs_open_fh */
 
 

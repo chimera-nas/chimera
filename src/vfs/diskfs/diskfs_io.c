@@ -1171,7 +1171,8 @@ diskfs_read_finish(struct chimera_vfs_request *request)
         evpl_iovec_cursor_zero(&p->rd_cursor, p->loop_left);
     }
 
-    diskfs_map_attrs(thread, &request->read.r_attr, inode);
+    diskfs_map_attrs_data(thread, &request->read.r_attr, inode,
+                          request->fh, request->fh_len);
 
     /* The extent walk is complete; a now-or-later finalize is safe. */
     p->io_reading = 0;
@@ -1401,7 +1402,8 @@ diskfs_read_inode_cb(
     }
 
     if (unlikely(length == 0)) {
-        diskfs_map_attrs(thread, &request->read.r_attr, inode);
+        diskfs_map_attrs_data(thread, &request->read.r_attr, inode,
+                              request->fh, request->fh_len);
         request->read.r_niov   = 0;
         request->read.r_length = 0;
         request->read.r_eof    = eof;
@@ -1454,10 +1456,10 @@ diskfs_read_inode_cb(
                                             DISKFS_INODE_MODE_FOR_TXN(diskfs_private->txn),
                                             diskfs_read_inode_cb, request);
             } else {
-                diskfs_inode_get_fh_async(thread, diskfs_private->txn,
-                                          diskfs_private->fs,
-                                          request->fh, request->fh_len,
-                                          diskfs_read_inode_cb, request);
+                diskfs_inode_get_data_fh_async(thread, diskfs_private->txn,
+                                               diskfs_private->fs,
+                                               request->fh, request->fh_len,
+                                               diskfs_read_inode_cb, request);
             }
             return;
         }
@@ -1534,9 +1536,9 @@ diskfs_read(
                                     DISKFS_INODE_MODE_FOR_TXN(p->txn),
                                     diskfs_read_inode_cb, request);
     } else {
-        diskfs_inode_get_fh_async(thread, p->txn, p->fs,
-                                  request->fh, request->fh_len,
-                                  diskfs_read_inode_cb, request);
+        diskfs_inode_get_data_fh_async(thread, p->txn, p->fs,
+                                       request->fh, request->fh_len,
+                                       diskfs_read_inode_cb, request);
     }
 } /* diskfs_read */
 
@@ -1947,7 +1949,8 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
     int      killpriv = (new_mode != inode->mode);
     inode->mode = new_mode;
 
-    diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
+    diskfs_map_attrs_data(thread, &request->write.r_post_attr, inode,
+                          request->fh, request->fh_len);
 
     request->write.r_length = request->write.length;
 
@@ -2721,10 +2724,12 @@ diskfs_write_inode_cb(
         return;
     }
 
-    diskfs_map_attrs(thread, &request->write.r_pre_attr, inode);
+    diskfs_map_attrs_data(thread, &request->write.r_pre_attr, inode,
+                          request->fh, request->fh_len);
 
     if (request->write.length == 0) {
-        diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
+        diskfs_map_attrs_data(thread, &request->write.r_post_attr, inode,
+                              request->fh, request->fh_len);
 
         request->write.r_length = 0;
         request->write.r_sync   = diskfs_write_reported_sync(thread->shared, request);
@@ -3138,9 +3143,9 @@ diskfs_write(
                                     DISKFS_INODE_MODE_FOR_TXN(p->txn),
                                     diskfs_write_inode_cb, request);
     } else {
-        diskfs_inode_get_fh_async(thread, p->txn, p->fs,
-                                  request->fh, request->fh_len,
-                                  diskfs_write_inode_cb, request);
+        diskfs_inode_get_data_fh_async(thread, p->txn, p->fs,
+                                       request->fh, request->fh_len,
+                                       diskfs_write_inode_cb, request);
     }
 } /* diskfs_write */
 
@@ -3171,7 +3176,8 @@ diskfs_allocate_finalize(struct chimera_vfs_request *request)
      * own write.) */
     inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
 
-    diskfs_map_attrs(thread, &request->allocate.r_post_attr, inode);
+    diskfs_map_attrs_data(thread, &request->allocate.r_post_attr, inode,
+                          request->fh, request->fh_len);
     diskfs_op_ok(request, p->txn);
 } /* diskfs_allocate_finalize */
 
@@ -3899,7 +3905,8 @@ diskfs_allocate_inode_cb(
         return;
     }
 
-    diskfs_map_attrs(thread, &request->allocate.r_pre_attr, inode);
+    diskfs_map_attrs_data(thread, &request->allocate.r_pre_attr, inode,
+                          request->fh, request->fh_len);
     p->inode_stash[0] = inode;
 
     if (request->allocate.flags & CHIMERA_VFS_ALLOCATE_DEALLOCATE) {
@@ -3968,9 +3975,9 @@ diskfs_allocate(
     p->ws_active = 0;      /* not a WRITE_SAME-borrowed punch */
     p->txn       = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
-                              request->fh, request->fh_len,
-                              diskfs_allocate_inode_cb, request);
+    diskfs_inode_get_data_fh_async(thread, p->txn, p->fs,
+                                   request->fh, request->fh_len,
+                                   diskfs_allocate_inode_cb, request);
 } /* diskfs_allocate */
 
 
@@ -4149,9 +4156,9 @@ diskfs_seek(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
-                              request->fh, request->fh_len,
-                              diskfs_seek_inode_cb, request);
+    diskfs_inode_get_data_fh_async(thread, p->txn, p->fs,
+                                   request->fh, request->fh_len,
+                                   diskfs_seek_inode_cb, request);
 } /* diskfs_seek */
 
 
@@ -4318,9 +4325,9 @@ diskfs_read_plus(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
-                              request->fh, request->fh_len,
-                              diskfs_read_plus_inode_cb, request);
+    diskfs_inode_get_data_fh_async(thread, p->txn, p->fs,
+                                   request->fh, request->fh_len,
+                                   diskfs_read_plus_inode_cb, request);
 } /* diskfs_read_plus */
 
 
@@ -4411,7 +4418,8 @@ diskfs_write_same_finalize(struct chimera_vfs_request *request)
 
     request->write_same.r_count = total;
     request->write_same.r_sync  = CHIMERA_VFS_WRITE_FILESYNC;
-    diskfs_map_attrs(thread, &request->write_same.r_post_attr, inode);
+    diskfs_map_attrs_data(thread, &request->write_same.r_post_attr, inode,
+                          request->fh, request->fh_len);
     diskfs_op_ok(request, p->txn);
 } /* diskfs_write_same_finalize */
 
@@ -4632,13 +4640,15 @@ diskfs_write_same_inode_cb(
         return;
     }
 
-    diskfs_map_attrs(thread, &request->write_same.r_pre_attr, inode);
+    diskfs_map_attrs_data(thread, &request->write_same.r_pre_attr, inode,
+                          request->fh, request->fh_len);
 
     total = (uint64_t) bs * request->write_same.block_count;
     if (total == 0) {
         request->write_same.r_count = 0;
         request->write_same.r_sync  = CHIMERA_VFS_WRITE_FILESYNC;
-        diskfs_map_attrs(thread, &request->write_same.r_post_attr, inode);
+        diskfs_map_attrs_data(thread, &request->write_same.r_post_attr, inode,
+                              request->fh, request->fh_len);
         diskfs_op_ok(request, p->txn);
         return;
     }
@@ -4703,9 +4713,9 @@ diskfs_write_same(
     p->ws_tmpl   = NULL;
     p->txn       = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
-                              request->fh, request->fh_len,
-                              diskfs_write_same_inode_cb, request);
+    diskfs_inode_get_data_fh_async(thread, p->txn, p->fs,
+                                   request->fh, request->fh_len,
+                                   diskfs_write_same_inode_cb, request);
 } /* diskfs_write_same */
 
 

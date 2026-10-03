@@ -14,6 +14,7 @@ add_library(chimera_vfs_diskfs ${CHIMERA_LIBRARY_TYPE}
     diskfs_mount.c
     diskfs_namespace.c
     diskfs_reclaim.c
+    diskfs_stream.c
     space_map.c
 )
 
