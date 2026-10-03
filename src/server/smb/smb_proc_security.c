@@ -325,9 +325,20 @@ chimera_smb_sd_to_acl(
                     attrs->va_group_sid = group_sid_out;
                     attrs->va_set_mask |= CHIMERA_VFS_ATTR_GROUP_SID;
                 }
-            } else {
+            } else if (unres) {
                 /* Real SID not yet cached: record it for async resolution. */
                 smb_unres_record(unres, sidstr);
+            } else if (group_sid_out &&
+                       strncmp(sidstr, "S-1-5-32-", 9) == 0 &&
+                       chimera_sid_from_bin(group_sid_out, sd_buf + offset_group,
+                                            sd_len - offset_group) > 0) {
+                /* A BUILTIN alias (BUILTIN\Administrators, say) has no gid
+                 * but exists on every Windows machine, which keeps it as the
+                 * group when given it: keep it as the group's native SID and
+                 * leave the gid alone (IFSTest SetGroupSecurityTest).  Any
+                 * other SID that resolves to nothing is still not adopted. */
+                attrs->va_group_sid = group_sid_out;
+                attrs->va_set_mask |= CHIMERA_VFS_ATTR_GROUP_SID;
             }
         }
     }

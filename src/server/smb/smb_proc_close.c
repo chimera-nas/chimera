@@ -535,6 +535,27 @@ chimera_smb_close_getattr_callback(
 } /* chimera_smb_close_getattr_callback */
 
 
+static void chimera_smb_close_finish(
+    struct chimera_smb_request *request);
+
+/* The close released a truncating handle's reserved clusters; a failure only
+ * leaves the allocation reported larger, so the close goes on regardless. */
+static void
+chimera_smb_close_trim_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    (void) error_code;
+    (void) pre_attr;
+    (void) set_attr;
+    (void) post_attr;
+
+    chimera_smb_close_finish(private_data);
+} /* chimera_smb_close_trim_callback */
+
 void
 chimera_smb_close(struct chimera_smb_request *request)
 {
@@ -614,6 +635,33 @@ chimera_smb_close(struct chimera_smb_request *request)
                                   chimera_smb_close_durable_delete_callback, NULL);
     }
 
+    /* A handle that truncated the file kept its old clusters reserved; give
+     * them back now, before any post-query reads the allocation. */
+    if ((request->close.open_file->flags & CHIMERA_SMB_OPEN_FILE_TRUNCATED) &&
+        request->close.open_file->handle) {
+        request->close.open_file->flags        &= ~CHIMERA_SMB_OPEN_FILE_TRUNCATED;
+        request->close.trim_attrs.va_req_mask   = CHIMERA_VFS_ATTR_ALLOC_SIZE;
+        request->close.trim_attrs.va_set_mask   = CHIMERA_VFS_ATTR_ALLOC_SIZE;
+        request->close.trim_attrs.va_alloc_size = 0;
+        chimera_vfs_setattr(thread->vfs_thread,
+                            &request->session_handle->session->cred,
+                            request->close.open_file->handle,
+                            &request->close.trim_attrs,
+                            0,
+                            0,
+                            chimera_smb_close_trim_callback,
+                            request);
+        return;
+    }
+
+    chimera_smb_close_finish(request);
+} /* chimera_smb_close */
+
+static void
+chimera_smb_close_finish(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+
     if ((request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) &&
         request->close.open_file->handle) {
 
@@ -633,8 +681,7 @@ chimera_smb_close(struct chimera_smb_request *request)
         memset(&request->close.r_attrs, 0, sizeof(request->close.r_attrs));
         chimera_smb_close_release(request);
     }
-
-} /* chimera_smb_close */
+} /* chimera_smb_close_finish */
 
 void
 chimera_smb_close_reply(
