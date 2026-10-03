@@ -57,6 +57,7 @@ xxhash comes from the system (`libxxhash-dev` / `xxhash`).
 | `vfs_access.h` | Access-mask evaluation, so `ACCESS` answers agree across backends |
 | `vfs_xattr_name.h` | The protocol-exported `user.` xattr keyspace NFS and SMB both normalize into |
 | `vfs_tcp_flavor.h` | `enum chimera_tcp_flavor`, the value `chimera_vfs_request_tcp_flavor` returns |
+| `vfs_stack.h` | **Stacking**: the VFS operations a module may issue against other mounted filesystems (see below) |
 
 ## The file-handle contract
 
@@ -162,6 +163,24 @@ See `examples/vfs_module/vfs_example.c` for the skeleton.  In short:
    `server.vfs` in the daemon config).  The loader dlopens the object,
    resolves `vfs_<name>`, and validates `sdk_version` -- the same path
    every in-tree backend takes, since none is linked into chimera.
+
+## Stacking modules
+
+A module can serve its filesystem by operating on others mounted in the same
+VFS -- `src/vfs/overlay` does, over its lower and upper layers.  `vfs_stack.h`
+carries the calls for that: open a handle (`chimera_vfs_open_fh`, released
+with `chimera_vfs_release_handle`), resolve a namespace path from
+`chimera_vfs_stack_root_fh`, and issue lookups, attribute, directory, data and
+namespace operations on those handles.  They are the entry points the protocol
+servers use, so a layer behaves exactly as it does for any client.
+
+Issue them on the thread the module's request arrived on
+(`request->thread`); each completes through its callback, possibly before the
+call returns, and the module completes its own request from those callbacks.
+The credential passed decides what the layer permits and whose identity new
+objects take.  A module whose operations can arrive on handles it never opened
+(an inferred path open never reaches the module) should find its object from
+the file handle, as overlay does, rather than from `vfs_private`.
 
 Pointer-valued result attributes must remain valid until the consumer callback
 finishes. For deferred replies or blocking modules, `request->complete()` can
