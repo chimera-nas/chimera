@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -113,3 +114,66 @@ chimera_vfs_xattr_ea_entry_size(
 {
     return 4 + (uint64_t) client_name_len + 1 + value_len;
 } /* chimera_vfs_xattr_ea_entry_size */
+
+/*
+ * Order a list_xattrs buffer (NUL-terminated names packed back to back) by a
+ * per-name creation sequence, oldest first, keeping the given order among
+ * equal sequences.  Backends that key xattrs by a name hash use this so names
+ * list in the order they were first set, the order NTFS returns EAs in (an SMB
+ * FileFullEaInformation scan and IFSTest's EaInformation group depend on it).
+ * seq[i] belongs to the i-th name.  Returns 0, or -1 if out of memory (the
+ * buffer is then left in its original order).
+ */
+static inline int
+chimera_vfs_xattr_sort_by_seq(
+    uint8_t        *buf,
+    uint32_t        len,
+    const uint64_t *seq,
+    uint32_t        count)
+{
+    uint32_t *off, *idx;
+    uint8_t  *tmp;
+    uint32_t  i, j, pos, n;
+
+    if (count < 2) {
+        return 0;
+    }
+
+    off = malloc(count * sizeof(*off));
+    idx = malloc(count * sizeof(*idx));
+    tmp = malloc(len);
+    if (!off || !idx || !tmp) {
+        free(off);
+        free(idx);
+        free(tmp);
+        return -1;
+    }
+
+    for (i = 0, pos = 0; i < count && pos < len; i++) {
+        off[i] = pos;
+        pos   += (uint32_t) strnlen((const char *) buf + pos, len - pos) + 1;
+    }
+    count = i;
+
+    /* Insertion sort: stable, and an object rarely has many xattrs. */
+    for (i = 0; i < count; i++) {
+        uint32_t cur = i;
+
+        for (j = i; j > 0 && seq[idx[j - 1]] > seq[cur]; j--) {
+            idx[j] = idx[j - 1];
+        }
+        idx[j] = cur;
+    }
+
+    for (i = 0, pos = 0; i < count; i++) {
+        n = (uint32_t) strnlen((const char *) buf + off[idx[i]], len - off[idx[i]]) + 1;
+        memcpy(tmp + pos, buf + off[idx[i]], n);
+        pos += n;
+    }
+    memcpy(buf, tmp, pos);
+
+    free(off);
+    free(idx);
+    free(tmp);
+    return 0;
+} /* chimera_vfs_xattr_sort_by_seq */

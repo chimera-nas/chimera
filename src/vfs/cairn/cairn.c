@@ -224,6 +224,23 @@ struct cairn_xattr_value {
 };
 #pragma pack(pop)
 
+/* An xattr record may carry, after its name and value, the uint64 creation
+ * sequence (CLOCK_REALTIME ns when the name was first set) that list_xattrs
+ * orders names by.  A record written without one reads as sequence 0. */
+static inline uint64_t
+cairn_xattr_value_seq(
+    const struct cairn_xattr_value *xv,
+    size_t                          vlen)
+{
+    size_t   base = sizeof(*xv) + xv->name_len + xv->value_len;
+    uint64_t seq  = 0;
+
+    if (vlen >= base + sizeof(seq)) {
+        memcpy(&seq, (const char *) xv + base, sizeof(seq));
+    }
+    return seq;
+} /* cairn_xattr_value_seq */
+
 struct cairn_inode {
     uint64_t        inum;
     uint64_t        parent_inum; /* Parent directory for ".." lookup */
@@ -5996,6 +6013,7 @@ cairn_set_xattr(
     char                     *err = NULL;
     const char               *vp;
     size_t                    vlen;
+    uint64_t                  seq = 0;
 
     (void) private_data;
 
@@ -6027,6 +6045,8 @@ cairn_set_xattr(
             cairn_queue_request(thread, request);
             return;
         }
+        /* A replaced value keeps its place in the listing order. */
+        seq = cairn_xattr_value_seq((const struct cairn_xattr_value *) vp, vlen);
         rocksdb_pinnableslice_destroy(slice);
         if (request->set_xattr.option == CHIMERA_VFS_XATTR_CREATE) {
             cairn_inode_handle_release(&ih);
@@ -6041,14 +6061,23 @@ cairn_set_xattr(
         return;
     }
 
+    if (!seq) {
+        struct timespec now;
+
+        clock_gettime(CLOCK_REALTIME, &now);
+        seq = (uint64_t) now.tv_sec * 1000000000ULL + (uint64_t) now.tv_nsec;
+    }
+
     xv_len = sizeof(*xv) + request->set_xattr.namelen +
-        request->set_xattr.value_len;
+        request->set_xattr.value_len + sizeof(seq);
     xv            = malloc(xv_len);
     xv->name_len  = request->set_xattr.namelen;
     xv->value_len = request->set_xattr.value_len;
     memcpy(xv->data, request->set_xattr.name, request->set_xattr.namelen);
     memcpy(xv->data + request->set_xattr.namelen,
            request->set_xattr.value, request->set_xattr.value_len);
+    memcpy(xv->data + request->set_xattr.namelen + request->set_xattr.value_len,
+           &seq, sizeof(seq));
 
     txn = cairn_get_meta_txn(thread);
     rocksdb_transaction_put(txn, (const char *) &key, sizeof(key),
@@ -6078,7 +6107,8 @@ cairn_list_xattrs(
     const char               *value;
     size_t                    klen, vlen;
     uint8_t                  *buf = request->list_xattrs.buffer;
-    uint32_t                  offset = 0, count = 0;
+    uint32_t                  offset = 0, count = 0, seq_cap = 0;
+    uint64_t                 *seqs = NULL;
 
     (void) fs;
     (void) private_data;
@@ -6108,6 +6138,7 @@ cairn_list_xattrs(
         value = rocksdb_iter_value(iter, &vlen);
         if (vlen < sizeof(struct cairn_xattr_value)) {
             rocksdb_iter_destroy(iter);
+            free(seqs);
             request->status = CHIMERA_VFS_EIO;
             request->complete(request);
             return;
@@ -6117,16 +6148,27 @@ cairn_list_xattrs(
                 (const struct cairn_xattr_value *) value;
             if (vlen < sizeof(*xv) + xv->name_len + xv->value_len) {
                 rocksdb_iter_destroy(iter);
+                free(seqs);
                 request->status = CHIMERA_VFS_EIO;
                 request->complete(request);
                 return;
             }
             if (offset + xv->name_len + 1 > request->list_xattrs.max_bytes) {
                 rocksdb_iter_destroy(iter);
+                free(seqs);
                 request->status = CHIMERA_VFS_ERANGE;
                 request->complete(request);
                 return;
             }
+            if (count == seq_cap) {
+                uint64_t *grown;
+
+                seq_cap = seq_cap ? seq_cap * 2 : 16;
+                grown   = realloc(seqs, seq_cap * sizeof(*seqs));
+                chimera_cairn_abort_if(!grown, "Out of memory listing xattrs\n");
+                seqs = grown;
+            }
+            seqs[count] = cairn_xattr_value_seq(xv, vlen);
             memcpy(buf + offset, xv->data, xv->name_len);
             offset       += xv->name_len;
             buf[offset++] = '\0';
@@ -6137,6 +6179,10 @@ cairn_list_xattrs(
     }
 
     rocksdb_iter_destroy(iter);
+    /* Names come out of the store in hash order; list them in the order
+     * they were first set. */
+    chimera_vfs_xattr_sort_by_seq(buf, offset, seqs, count);
+    free(seqs);
     request->list_xattrs.r_len    = offset;
     request->list_xattrs.r_count  = count;
     request->list_xattrs.r_eof    = 1;
