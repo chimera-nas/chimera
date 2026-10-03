@@ -3734,6 +3734,30 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.winattr2
     # smb2.zero-data-ioctl
     smb2.zero-data-ioctl
+    # named streams (cairn keeps each stream as an inode of its own)
+    smb2.fileid.fileid
+    smb2.ioctl-on-stream
+    smb2.kernel-oplocks.kernel_oplocks2
+    smb2.kernel-oplocks.kernel_oplocks4
+    smb2.kernel-oplocks.kernel_oplocks6
+    smb2.stream-inherit-perms
+    smb2.streams.attributes1
+    smb2.streams.attributes2
+    smb2.streams.basefile-rename-with-open-stream
+    smb2.streams.create-disposition
+    smb2.streams.delete
+    smb2.streams.dir
+    smb2.streams.io
+    smb2.streams.names
+    smb2.streams.names2
+    # smb2.streams.names3 opens the base file by a re-cased path; cairn
+    # has no case-insensitive name lookup (memfs_dirent_find_ci) yet
+    smb2.streams.rename
+    smb2.streams.rename2
+    smb2.streams.sharemodes
+    smb2.streams.zero-byte
+    smb2.oplock.batch26
+    smb2.lease.request
 )
 
 set(SMBTORTURE_ENABLED_diskfs_io_uring
