@@ -532,6 +532,7 @@ probe_duplicate_extents(struct smb2_conn *c)
 #define SMB2_FSCTL_DELETE_REPARSE_POINT   0x000900ACu
 #endif /* ifndef SMB2_FSCTL_DELETE_REPARSE_POINT */
 #define SMB2_FSCTL_SET_OBJECT_ID          0x00090098u
+#define SMB2_FSCTL_GET_RETRIEVAL_POINTERS 0x00090073u
 #define SMB2_FSCTL_GET_OBJECT_ID          0x0009009Cu
 #define SMB2_FSCTL_DELETE_OBJECT_ID       0x000900A0u
 #define SMB2_FSCTL_SET_OBJECT_ID_EXTENDED 0x000900BCu
@@ -834,6 +835,32 @@ probe_object_id(struct smb2_conn *c)
     smb2_close(c, b.file_id);
 } /* probe_object_id */
 
+/* FSCTL_GET_RETRIEVAL_POINTERS (MS-FSA 2.1.5.10.15): one run over the
+ * stream's allocation; a VCN at or past its end is END_OF_FILE. */
+static void
+probe_retrieval_pointers(struct smb2_conn *c)
+{
+    struct smb2_create_out co;
+    uint8_t                vcn[8];
+    const uint8_t         *out;
+    uint32_t               st, out_len = 0;
+
+    printf("# --- retrieval pointers ---\n");
+
+    make_file(c, "rptr.bin", 10000, 3, &co);
+    memset(vcn, 0, sizeof(vcn));
+    out = smb2_ioctl_out(c, SMB2_FSCTL_GET_RETRIEVAL_POINTERS, co.file_id, vcn,
+                         sizeof(vcn), 64, &st, &out_len);
+    CHECK(out && out_len == 32 && g32(out, 0) == 1 && g64(out, 16) == 3,
+          "GET_RETRIEVAL_POINTERS of a 10000-byte file -> one 3-cluster run "
+          "(0x%08x, %u bytes)", st, out_len);
+    p64(vcn, 0, 3);
+    (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_RETRIEVAL_POINTERS, co.file_id, vcn,
+                          sizeof(vcn), 64, &st, &out_len);
+    CHECK(st == ST_END_OF_FILE, "  ... from VCN 3 -> END_OF_FILE (0x%08x)", st);
+    smb2_close(c, co.file_id);
+} /* probe_retrieval_pointers */
+
 int
 main(
     int   argc,
@@ -857,6 +884,7 @@ main(
     probe_duplicate_extents(c);
     probe_reparse(c);
     probe_object_id(c);
+    probe_retrieval_pointers(c);
 
     smb2_env_stop(&env);
 
