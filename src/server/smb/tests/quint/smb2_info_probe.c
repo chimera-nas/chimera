@@ -792,6 +792,11 @@ probe_ntfs_semantics(struct smb2_conn *c)
     CHECK(st == ST_SUCCESS && alloc == 0x12000,
           "an EOF inside the reservation keeps it (alloc 0x%llx)",
           (unsigned long long) alloc);
+    st    = smb2_set_eof(c, a.file_id, 0x11000);
+    alloc = std_alloc(c, a.file_id, &eof);
+    CHECK(st == ST_SUCCESS && alloc == 0x12000,
+          "a truncation within the last cluster keeps it (alloc 0x%llx)",
+          (unsigned long long) alloc);
     st    = smb2_set_eof(c, a.file_id, 0x800);
     alloc = std_alloc(c, a.file_id, &eof);
     CHECK(st == ST_SUCCESS && alloc == 0x1000,

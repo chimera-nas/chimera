@@ -5537,10 +5537,11 @@ diskfs_apply_attrs(
         inode->size        = attr->va_size;
         /* A reservation only holds while it exceeds the live data; once EOF is
          * set at/above it the reservation is subsumed and no longer separate.
-         * A truncation releases it too, as it releases the clusters past the
-         * new EOF on NTFS (MS-FSA 2.1.5.15.5); an AllocationSize set in the
-         * same call is applied after this. */
-        if (inode->alloc_size <= inode->size || inode->size < old_size) {
+         * A truncation by more than a 4 KiB cluster releases it too, as NTFS
+         * releases the clusters past the new EOF (MS-FSA 2.1.5.15.5); an
+         * AllocationSize set in the same call is applied after this. */
+        if (inode->alloc_size <= inode->size ||
+            inode->size + 4096 < ((old_size + 4095) & ~4095ULL)) {
             inode->alloc_size = 0;
         }
     }
