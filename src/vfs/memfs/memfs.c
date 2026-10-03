@@ -7101,6 +7101,190 @@ memfs_remove_stream(
     request->complete(request);
 } /* memfs_remove_stream */
 
+static void
+memfs_rename_stream(
+    struct memfs_thread        *thread,
+    struct memfs_fs            *fs,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct memfs_inode        *inode;
+    struct memfs_named_stream *stream = NULL, *target = NULL, *cur, **pprev, **target_prev = NULL;
+    struct timespec            now;
+    char                      *name;
+
+    chimera_vfs_realtime(&now);
+
+    inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
+
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    memfs_map_pre_attr(fs, &request->rename_stream.r_pre_attr, inode, request->fh);
+
+    pprev = &inode->streams;
+    for (cur = inode->streams; cur; cur = cur->next) {
+        if (cur->name_len == request->rename_stream.namelen &&
+            memcmp(cur->name, request->rename_stream.name, cur->name_len) == 0) {
+            stream = cur;
+        } else if (cur->name_len == request->rename_stream.new_namelen &&
+                   memcmp(cur->name, request->rename_stream.new_name, cur->name_len) == 0) {
+            target      = cur;
+            target_prev = pprev;
+        }
+        pprev = &cur->next;
+    }
+
+    if (request->rename_stream.namelen == 0) {
+        /* Renaming the unnamed data stream: its data becomes a named stream
+         * and the file is left a new, empty unnamed one (MS-FSA
+         * 2.1.5.15.12.1). */
+        if (!S_ISREG(inode->mode) || request->rename_stream.new_namelen == 0) {
+            evpl_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+        if (target) {
+            if (!(request->rename_stream.flags & CHIMERA_VFS_RENAME_STREAM_REPLACE) ||
+                target->size) {
+                evpl_mutex_unlock(&inode->lock);
+                request->status = (request->rename_stream.flags & CHIMERA_VFS_RENAME_STREAM_REPLACE) ?
+                    CHIMERA_VFS_EINVAL : CHIMERA_VFS_EEXIST;
+                request->complete(request);
+                return;
+            }
+            stream = target;
+        } else {
+            stream       = calloc(1, sizeof(*stream));
+            stream->name = malloc(request->rename_stream.new_namelen);
+            memcpy(stream->name, request->rename_stream.new_name, request->rename_stream.new_namelen);
+            stream->name_len = request->rename_stream.new_namelen;
+            stream->id       = ++inode->next_stream_id;
+            stream->linked   = 1;
+            for (pprev = &inode->streams; *pprev; pprev = &(*pprev)->next) {
+            }
+            *pprev = stream;
+        }
+
+        {
+            struct memfs_fork fork = stream->fork;
+
+            stream->fork       = inode->file;
+            inode->file        = fork;
+            stream->size       = inode->size;
+            stream->space_used = inode->space_used;
+            inode->size        = 0;
+            inode->space_used  = 0;
+        }
+
+        inode->mtime = now;
+        inode->ctime = now;
+        inode->change++;
+        memfs_map_post_attr(fs, &request->rename_stream.r_post_attr, inode, request->fh);
+        evpl_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    if (!stream) {
+        evpl_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    if (request->rename_stream.new_namelen == 0) {
+        struct memfs_fork fork;
+
+        /* Renaming to the unnamed data stream: the stream's data becomes the
+         * file's, which must be empty (MS-FSA 2.1.5.15.12.1), and the named
+         * stream is gone. */
+        if (!S_ISREG(inode->mode) || inode->size) {
+            evpl_mutex_unlock(&inode->lock);
+            request->status = (!S_ISREG(inode->mode) ||
+                               (request->rename_stream.flags & CHIMERA_VFS_RENAME_STREAM_REPLACE)) ?
+                CHIMERA_VFS_EINVAL : CHIMERA_VFS_EEXIST;
+            request->complete(request);
+            return;
+        }
+
+        fork               = inode->file;
+        inode->file        = stream->fork;
+        stream->fork       = fork;
+        inode->size        = stream->size;
+        inode->space_used  = stream->space_used;
+        stream->size       = 0;
+        stream->space_used = 0;
+
+        for (pprev = &inode->streams; *pprev != stream; pprev = &(*pprev)->next) {
+        }
+        *pprev         = stream->next;
+        stream->linked = 0;
+        if (stream->refcnt == 0) {
+            memfs_stream_node_free(thread, inode->fs, stream);
+        } else {
+            stream->next        = inode->dead_streams;
+            inode->dead_streams = stream;
+        }
+
+        inode->mtime = now;
+        inode->ctime = now;
+        inode->change++;
+        memfs_map_post_attr(fs, &request->rename_stream.r_post_attr, inode, request->fh);
+        evpl_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    if (target) {
+        /* Only an empty stream may be replaced (MS-FSA 2.1.5.15.12.1). */
+        if (!(request->rename_stream.flags & CHIMERA_VFS_RENAME_STREAM_REPLACE)) {
+            evpl_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_EEXIST;
+            request->complete(request);
+            return;
+        }
+        if (target->size) {
+            evpl_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+        /* Unlinked as remove_stream does: a handle still holding it (the
+         * VFS keeps recently closed handles) keeps it until its last close. */
+        *target_prev   = target->next;
+        target->linked = 0;
+        if (target->refcnt == 0) {
+            memfs_stream_node_free(thread, inode->fs, target);
+        } else {
+            target->next        = inode->dead_streams;
+            inode->dead_streams = target;
+        }
+    }
+
+    name = malloc(request->rename_stream.new_namelen);
+    memcpy(name, request->rename_stream.new_name, request->rename_stream.new_namelen);
+    free(stream->name);
+    stream->name     = name;
+    stream->name_len = request->rename_stream.new_namelen;
+
+    inode->ctime = now;
+    inode->change++;
+
+    memfs_map_post_attr(fs, &request->rename_stream.r_post_attr, inode, request->fh);
+
+    evpl_mutex_unlock(&inode->lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_rename_stream */
+
 
 /* ------------------------------------------------------------------ */
 /* CAP_LEASE arbiter implementation                                   */
@@ -7616,6 +7800,9 @@ memfs_dispatch(
             break;
         case CHIMERA_VFS_OP_REMOVE_STREAM:
             memfs_remove_stream(thread, fs, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_RENAME_STREAM:
+            memfs_rename_stream(thread, fs, request, private_data);
             break;
         case CHIMERA_VFS_OP_CLAIM_ACQUIRE:
             memfs_claim_acquire(thread, fs, shared, request);

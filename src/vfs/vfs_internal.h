@@ -667,6 +667,7 @@ chimera_vfs_op_is_mutating(const struct chimera_vfs_request *request)
         case CHIMERA_VFS_OP_SET_XATTR:
         case CHIMERA_VFS_OP_REMOVE_XATTR:
         case CHIMERA_VFS_OP_REMOVE_STREAM:
+        case CHIMERA_VFS_OP_RENAME_STREAM:
         case CHIMERA_VFS_OP_COPY_RANGE:
         case CHIMERA_VFS_OP_CLONE_RANGE:
         case CHIMERA_VFS_OP_MOVE_RANGE:

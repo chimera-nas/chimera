@@ -311,6 +311,17 @@ chimera_smb_close_stream_remove_callback(
     if (error_code) {
         chimera_smb_debug("stream delete-on-close: remove_stream failed (error %d)",
                           error_code);
+    } else if (request->close.open_file->parent_fh_len > 0) {
+        char     nname[CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX];
+        uint32_t nlen = chimera_smb_open_file_notify_name(request->close.open_file, nname);
+
+        /* FILE_ACTION_REMOVED_STREAM, named "<file>:<stream>". */
+        chimera_vfs_notify_emit(request->compound->thread->shared->vfs->vfs_notify,
+                                request->close.open_file->parent_fh,
+                                request->close.open_file->parent_fh_len,
+                                CHIMERA_VFS_NOTIFY_STREAM_NAME |
+                                CHIMERA_VFS_NOTIFY_STREAM_REMOVED,
+                                nname, nlen, NULL, 0);
     }
 
     chimera_vfs_release(vfs_thread, request->close.parent_handle);

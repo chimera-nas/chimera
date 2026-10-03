@@ -1245,6 +1245,29 @@ chimera_vfs_list_streams(
     chimera_vfs_list_streams_callback_t callback,
     void                               *private_data);
 
+/* Rename a named stream of the base file referenced by `handle` (MS-FSA
+ * 2.1.5.15.12.1).  An existing stream of the new name is replaced only with
+ * CHIMERA_VFS_RENAME_STREAM_REPLACE (EEXIST otherwise), and only while it is
+ * empty (EINVAL otherwise).  Open handles to the renamed stream stay valid. */
+typedef void (*chimera_vfs_rename_stream_callback_t)(
+    enum chimera_vfs_error          error_code,
+    const struct chimera_vfs_attrs *pre_attr,
+    const struct chimera_vfs_attrs *post_attr,
+    void                           *private_data);
+
+void
+chimera_vfs_rename_stream(
+    struct chimera_vfs_thread           *thread,
+    const struct chimera_vfs_cred       *cred,
+    struct chimera_vfs_open_handle      *handle,
+    const char                          *name,
+    uint32_t                             namelen,
+    const char                          *new_name,
+    uint32_t                             new_namelen,
+    uint32_t                             flags,
+    chimera_vfs_rename_stream_callback_t callback,
+    void                                *private_data);
+
 /* Remove a single named stream from the base file referenced by `handle`. */
 typedef void (*chimera_vfs_remove_stream_callback_t)(
     enum chimera_vfs_error          error_code,
