@@ -236,10 +236,27 @@ key, so give them different names here.
 
 ### `mounts`
 
-An object keyed by mount name. Each mount instantiates a VFS backend that
-becomes visible in the Chimera namespace at `/<name>`. A mount that fails stops
-the daemon at startup. It does not come up with exports, shares or buckets over
-a missing root.
+An object keyed by mount path. Each mount instantiates a VFS backend and
+places it in the Chimera namespace at that path, the way `mount(8)` does on
+Linux. A mount that fails stops the daemon at startup. It does not come up with
+exports, shares or buckets over a missing root.
+
+- A key without slashes (`"data"`) is the path `/data`; a key may also be a
+  nested path (`"/projects/archive"`) or `"/"` itself.
+- A mount at `"/"` is the namespace root. Without one, Chimera provides an
+  empty, read-only root that holds only the directories the configured mount
+  paths need, creating them as mounts are made and removing them as mounts go.
+- Any other mount goes on a directory that must already exist -- in the root
+  filesystem, or inside another mount -- except where its path runs through
+  that built-in root, whose directories are made for it. A mount inside
+  another mount (`"/data"` and `"/data/scratch"`) is how a filesystem is
+  grafted into another's tree.
+- Mounts are made in the order the file lists them, as `/etc/fstab`'s are: a
+  mount inside another comes after it, and a mount at `"/"` covers what was
+  mounted before it.
+- As on Linux, `..` from a mount's root leads to the directory holding its
+  mount point, and a mount point cannot be removed or renamed, nor its
+  filesystem unmounted while other mounts sit inside it.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -637,8 +654,8 @@ Each entry of `devices`:
 | `signature` | object | - | SIMPLE-volume signature: `{ "offset": int, "bytes": "<hex>" }` (block layout). |
 | `scsi` | object | - | SCSI designator: `{ "designator_type": "naa"\|"eui64"\|"t10", "code_set": "binary"\|"ascii", "id": "<hex>", "pr_key": int }` (SCSI layout). |
 
-The `nfs` and `root` modules take no `config` object; the `nfs` module is
-configured through mount `options` instead.
+The `nfs` module takes no `config` object; it is configured through mount
+`options` instead.
 
 ---
 

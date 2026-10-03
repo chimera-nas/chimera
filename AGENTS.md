@@ -130,6 +130,9 @@ test.
    - `cairn`: Custom persistent filesystem
    - `io_uring`: io_uring-based async filesystem
 
+   Mounts go on directories, Linux-style (a mount at `/` is the namespace
+   root; with none, the core's built-in rootfs holds the mount points).
+
 2. **Protocol Servers** (`src/server/`):
    - `nfs`: NFSv3 and NFSv4 implementation
    - `smb`: SMB2 protocol server
