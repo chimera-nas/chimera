@@ -1210,6 +1210,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS        0x00000080
 /* MS-FSCC calls this one FILE_NAMED_STREAMS -- no SUPPORTS infix, unlike its
  * neighbours. */
+#define SMB2_FS_ATTR_SUPPORTS_OBJECT_IDS            0x00010000
 #define SMB2_FS_ATTR_NAMED_STREAMS                  0x00040000
 #define SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING     0x08000000
 

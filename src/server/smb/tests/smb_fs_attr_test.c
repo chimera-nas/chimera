@@ -56,6 +56,9 @@ test_each_cap_alone(void)
           (BASE | SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING));
     CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_ACL_NATIVE, 0) ==
           (BASE | SMB2_FS_ATTR_PERSISTENT_ACLS));
+    /* Object IDs are kept as xattrs. */
+    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_XATTR, 0) ==
+          (BASE | SMB2_FS_ATTR_SUPPORTS_OBJECT_IDS));
     return 0;
 } /* test_each_cap_alone */
 
@@ -83,7 +86,8 @@ test_mode_only_backend(void)
 
     CHECK(chimera_smb_fs_attributes(caps, 1) ==
           (BASE | SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES |
-           SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING));
+           SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING |
+           SMB2_FS_ATTR_SUPPORTS_OBJECT_IDS));
     return 0;
 } /* test_mode_only_backend */
 
@@ -92,7 +96,7 @@ static int
 test_unrelated_caps_ignored(void)
 {
     uint64_t caps = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
-        CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
+        CHIMERA_VFS_CAP_LAYOUT |
         CHIMERA_VFS_CAP_MKFS | CHIMERA_VFS_CAP_CHANGE |
         CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE;
