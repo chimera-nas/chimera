@@ -857,6 +857,9 @@ chimera_smb_create_gen_open_file(
     if (is_directory) {
         open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY;
     }
+    if (request->create.create_options & SMB2_FILE_OPEN_FOR_BACKUP_INTENT) {
+        open_file->flags |= CHIMERA_SMB_OPEN_FILE_BACKUP_INTENT;
+    }
     open_file->position        = 0;
     open_file->next_ea_index   = 0;
     open_file->pipe_transceive = transceive;
