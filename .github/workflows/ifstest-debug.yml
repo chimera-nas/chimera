@@ -43,8 +43,14 @@ jobs:
           New-SmbShare -Name ifsbase -Path T:\smbshare -FullAccess Everyone | Out-Null
           $relay = Start-Process python -ArgumentList @('scratch/tcp_relay.py', '4450', '127.0.0.1', '445', "$pwd\ifstest-logs\winsmb-relay.bin") -PassThru -NoNewWindow
           Start-Sleep 3
-          net use W: \\localhost\ifsbase /TCPPORT:4450 /persistent:no
-          if ($LASTEXITCODE -ne 0) { throw "net use failed" }
+          # By address: localhost may resolve to ::1, where the relay is not listening.
+          $mapped = $false
+          foreach ($i in 1..5) {
+            net use W: \\127.0.0.1\ifsbase /TCPPORT:4450 /persistent:no
+            if ($LASTEXITCODE -eq 0) { $mapped = $true; break }
+            Start-Sleep 2
+          }
+          if (-not $mapped) { Get-SmbConnection | Format-Table -AutoSize | Out-String -Width 200; throw "net use failed" }
           python src/server/smb/tests/windows_client/ifstest/ifstest_run.py $env:IFSTEST_DIR W: "$pwd\ifstest-logs\ifstest-winsmb.log" 1500
           net use W: /delete /y
           Stop-Process -Id $relay.Id -Force
