@@ -40,8 +40,15 @@ async def pump(reader, writer, cid, direction):
 async def handle(creader, cwriter):
     conns[0] += 1
     cid = conns[0]
-    sreader, swriter = await asyncio.open_connection(host, port)
+    print(f"connection {cid} from {cwriter.get_extra_info('peername')}", flush=True)
+    try:
+        sreader, swriter = await asyncio.open_connection(host, port)
+    except OSError as e:
+        print(f"connection {cid}: cannot reach {host}:{port}: {e}", flush=True)
+        cwriter.close()
+        return
     await asyncio.gather(pump(creader, swriter, cid, 0), pump(sreader, cwriter, cid, 1))
+    print(f"connection {cid} closed", flush=True)
 
 
 async def main():

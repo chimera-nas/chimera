@@ -42,7 +42,11 @@ jobs:
           New-Item -ItemType Directory -Force T:\smbshare, ifstest-logs | Out-Null
           New-SmbShare -Name ifsbase -Path T:\smbshare -FullAccess Everyone | Out-Null
           $relay = Start-Process python -ArgumentList @('scratch/tcp_relay.py', '4450', '127.0.0.1', '445', "$pwd\ifstest-logs\winsmb-relay.bin") -PassThru -NoNewWindow
-          Start-Sleep 3
+          Start-Sleep 5
+          Get-NetTCPConnection -State Listen -LocalPort 445,4450 -ErrorAction SilentlyContinue | Format-Table LocalAddress, LocalPort, OwningProcess | Out-String
+          Test-NetConnection 127.0.0.1 -Port 4450 | Format-List RemoteAddress, RemotePort, TcpTestSucceeded | Out-String
+          Test-NetConnection 127.0.0.1 -Port 445 | Format-List RemoteAddress, RemotePort, TcpTestSucceeded | Out-String
+          Get-SmbServerConfiguration | Format-List RequireSecuritySignature, EnableSMB2Protocol | Out-String
           # By address: localhost may resolve to ::1, where the relay is not listening.
           $mapped = $false
           foreach ($i in 1..5) {
