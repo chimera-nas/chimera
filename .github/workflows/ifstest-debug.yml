@@ -30,37 +30,6 @@ jobs:
           $dir = & src/server/smb/tests/windows_client/ifstest/fetch_kit.ps1
           "IFSTEST_DIR=$dir" >> $env:GITHUB_ENV
 
-      - name: Windows' SMB server through a recording relay
-        shell: pwsh
-        timeout-minutes: 45
-        run: |
-          $vhd = "$env:RUNNER_TEMP\ntfs.vhdx"
-          New-VHD -Path $vhd -SizeBytes 4GB -Dynamic | Out-Null
-          Mount-VHD $vhd -Passthru | Initialize-Disk -PartitionStyle GPT -PassThru |
-            New-Partition -UseMaximumSize -DriveLetter T |
-            Format-Volume -FileSystem NTFS -NewFileSystemLabel IFSNTFS -Confirm:$false | Out-Null
-          New-Item -ItemType Directory -Force T:\smbshare, ifstest-logs | Out-Null
-          New-SmbShare -Name ifsbase -Path T:\smbshare -FullAccess Everyone | Out-Null
-          $relay = Start-Process python -ArgumentList @('scratch/tcp_relay.py', '4450', '127.0.0.1', '445', "$pwd\ifstest-logs\winsmb-relay.bin") -PassThru -NoNewWindow
-          Start-Sleep 5
-          Get-NetTCPConnection -State Listen -LocalPort 445,4450 -ErrorAction SilentlyContinue | Format-Table LocalAddress, LocalPort, OwningProcess | Out-String
-          Test-NetConnection 127.0.0.1 -Port 4450 | Format-List RemoteAddress, RemotePort, TcpTestSucceeded | Out-String
-          Test-NetConnection 127.0.0.1 -Port 445 | Format-List RemoteAddress, RemotePort, TcpTestSucceeded | Out-String
-          Get-SmbServerConfiguration | Format-List RequireSecuritySignature, EnableSMB2Protocol | Out-String
-          # By address: localhost may resolve to ::1, where the relay is not listening.
-          $mapped = $false
-          foreach ($i in 1..5) {
-            net use W: \\127.0.0.1\ifsbase /TCPPORT:4450 /persistent:no
-            if ($LASTEXITCODE -eq 0) { $mapped = $true; break }
-            Start-Sleep 2
-          }
-          if (-not $mapped) { Get-SmbConnection | Format-Table -AutoSize | Out-String -Width 200; throw "net use failed" }
-          python src/server/smb/tests/windows_client/ifstest/ifstest_run.py $env:IFSTEST_DIR W: "$pwd\ifstest-logs\ifstest-winsmb.log" 1500
-          net use W: /delete /y
-          Stop-Process -Id $relay.Id -Force
-          Get-Item ifstest-logs\winsmb-relay.bin | Format-Table Name, Length
-          exit 0
-
       - name: Fetch the chimera daemon
         id: bundle
         continue-on-error: true
@@ -71,12 +40,12 @@ jobs:
           run-id: 37216428570
           github-token: ${{ github.token }}
 
-      - name: IFSTest on chimera memfs, debug-logged
+      - name: IFSTest on chimera memfs through a recording relay
         if: steps.bundle.outcome == 'success'
         shell: pwsh
         timeout-minutes: 90
         env:
-          IFSTEST_CHIMERA_DEBUG: "1"
+          IFSTEST_RELAY: ${{ github.workspace }}\ifstest-logs\chimera-relay.bin
         run: python src/server/smb/tests/windows_client/ifstest/ifstest_chimera.py bundle/chimera.exe $env:IFSTEST_DIR ifstest-logs 2400 memfs
 
 

@@ -54,9 +54,18 @@ proc = subprocess.Popen([chimera, *debug, "-c", str(scratch / "config.json")], s
 drives = []
 try:
     t.wait_until_ready(proc, daemon_log)
+    # Scratch: map the shares through a recording relay (IFSTEST_RELAY names the
+    # recording), so the client's traffic can be compared with Windows' own.
+    map_port = port
+    if os.environ.get("IFSTEST_RELAY"):
+        map_port = t.free_ports(1)[0]
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve().parents[6] / "scratch/tcp_relay.py"),
+                          str(map_port), "127.0.0.1", str(port), os.environ["IFSTEST_RELAY"]])
+        import time
+        time.sleep(5)
     for backend in backends:
         drive = t.free_drive_letter()
-        t.net_use(drive, backend, port)
+        t.net_use(drive, backend, map_port)
         drives.append(drive)
         print(f"==== {backend}: mapped {drive}: to \\\\127.0.0.1\\{backend} on port {port}", flush=True)
         ifstest_run.run(kit, f"{drive}:", logdir / f"ifstest-chimera-{backend}.log", timeout)
