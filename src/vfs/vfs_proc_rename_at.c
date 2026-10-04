@@ -103,6 +103,20 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
                                       request->rename_at.new_name,
                                       request->rename_at.new_namelen);
 
+        /* ... and under the names they were stored by, when a
+         * case-insensitive caller matched other spellings. */
+        chimera_vfs_name_cache_remove_matched(name_cache,
+                                              request->fh_hash,
+                                              request->fh,
+                                              request->fh_len,
+                                              &request->r_matched[0]);
+
+        chimera_vfs_name_cache_remove_matched(name_cache,
+                                              request->rename_at.new_fh_hash,
+                                              request->rename_at.new_fh,
+                                              request->rename_at.new_fhlen,
+                                              &request->r_matched[1]);
+
         /* A rename mutates both parent directories' attributes (mtime/ctime,
          * and on a cross-directory directory move their link counts).  Refresh
          * the attr cache with the post-rename attributes the backend reported,

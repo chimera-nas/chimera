@@ -49,6 +49,22 @@ diskfs_dir_remove_async(
     struct diskfs_txn    *txn,
     struct diskfs_inode  *dir,
     uint64_t              hash,
+    const char           *name,
+    int                   namelen,
+    diskfs_bt_cb_t        cb,
+    void                 *private_data);
+
+static int
+diskfs_dir_lookup_ci_async(
+    struct diskfs_bt_op  *op,
+    struct diskfs_thread *thread,
+    struct diskfs_inode  *dir,
+    uint64_t              hash,
+    const char           *name,
+    int                   namelen,
+    int                   ci,
+    void                 *rec_out,
+    uint32_t              rec_cap,
     diskfs_bt_cb_t        cb,
     void                 *private_data);
 
@@ -530,6 +546,208 @@ diskfs_dir_next_async(
 } /* diskfs_dir_next_async */
 
 
+/* ---- the folded-name index (DISKFS_REC_DIRFOLD) ------------------------ */
+
+/* Windows matches names case-insensitively, so an SMB (AUTH_ATTR) caller's
+ * name matches an entry whose name differs only in case -- for opens, and for
+ * the collision checks of creates, links and renames.  NFS and POSIX callers
+ * keep exact matching. */
+static inline int
+diskfs_name_ci(const struct chimera_vfs_request *request)
+{
+    return request->cred && request->cred->flavor == CHIMERA_VFS_AUTH_ATTR;
+} /* diskfs_name_ci */
+
+
+static inline struct diskfs_bt_key
+diskfs_dirfold_key(uint64_t fold)
+{
+    struct diskfs_bt_key k = { .type = DISKFS_REC_DIRFOLD, .subkey = fold };
+
+    return k;
+} /* diskfs_dirfold_key */
+
+/* A fold record lists at most this many entries; names beyond it (more than
+ * this many spellings of one name, from a case-sensitive client) are still
+ * found exactly, just not case-insensitively. */
+#define DISKFS_DIRFOLD_MAX 127
+
+/* One directory-record change -- inserting or removing a dirent -- with the
+ * folded-name index brought in step first.  The fold record is read, rewritten
+ * with the dirent's hash added or dropped, and then the dirent itself is
+ * inserted or removed with the caller's op and callback.  The helpers keep the
+ * b+tree drivers' contract: they return 1 when everything completed
+ * synchronously (the caller then runs its callback), 0 when the callback will
+ * run later. */
+struct diskfs_dirent_change {
+    struct diskfs_thread *thread;
+    struct diskfs_txn    *txn;
+    struct diskfs_inode  *dir;
+    struct diskfs_bt_op  *op;         /* the caller's, for the dirent itself */
+    diskfs_bt_cb_t        cb;
+    void                 *private_data;
+    uint64_t              fold;
+    uint64_t              hash;
+    int                   insert;
+    int                   in_call;    /* still inside the helper's own call */
+    int                   issued;     /* the dirent op has been issued */
+    int                   rc;         /* its return, while in_call */
+    uint32_t              fold_len;   /* length of the existing fold record, 0 if none */
+    uint32_t              reclen;
+    char                  rec[DISKFS_DIRENT_REC_MAX];
+    uint8_t               fold_rec[sizeof(struct diskfs_dirfold_rec) +
+                                   DISKFS_DIRFOLD_MAX * sizeof(uint64_t)];
+};
+
+static void
+diskfs_dirent_change_issue(struct diskfs_dirent_change *c)
+{
+    struct diskfs_bt_key key = diskfs_dirent_key(c->hash);
+    int                  rc;
+
+    c->issued = 1;
+    if (c->insert) {
+        rc = diskfs_bt_insert_async(c->op, c->thread, c->txn, c->dir, &key,
+                                    c->rec, c->reclen, c->cb, c->private_data);
+    } else {
+        rc = diskfs_bt_remove_async(c->op, c->thread, c->txn, c->dir, &key,
+                                    c->cb, c->private_data);
+    }
+
+    if (c->in_call) {
+        c->rc = rc;     /* the helper returns it to its caller */
+        return;
+    }
+
+    /* The chain suspended earlier, so the caller is waiting on its callback. */
+    {
+        diskfs_bt_cb_t       cb   = c->cb;
+        struct diskfs_bt_op *op   = c->op;
+        void                *priv = c->private_data;
+
+        free(c);
+        if (rc) {
+            cb(op, op->result, priv);
+        }
+    }
+} /* diskfs_dirent_change_issue */
+
+static void
+diskfs_dirent_change_fold_written(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct diskfs_dirent_change *c = private_data;
+
+    (void) result;
+    diskfs_bt_op_free(c->thread, op);
+    diskfs_dirent_change_issue(c);
+} /* diskfs_dirent_change_fold_written */
+
+/* Write the fold record back (the old one, if any, already removed): with
+ * c->hash added, or without it; nothing when no entry remains. */
+static void
+diskfs_dirent_change_fold_rewrite(struct diskfs_dirent_change *c)
+{
+    struct diskfs_dirfold_rec *rec = (struct diskfs_dirfold_rec *) c->fold_rec;
+    struct diskfs_bt_key       key = diskfs_dirfold_key(c->fold);
+    struct diskfs_bt_op       *op;
+    uint32_t                   i, n = c->fold_len ? rec->count : 0;
+
+    if (c->insert) {
+        if (n < DISKFS_DIRFOLD_MAX) {
+            rec->hash[n++] = c->hash;
+        }
+    } else {
+        for (i = 0; i < n; i++) {
+            if (rec->hash[i] == c->hash) {
+                rec->hash[i] = rec->hash[--n];
+                break;
+            }
+        }
+    }
+    rec->count = n;
+
+    if (n == 0) {
+        diskfs_dirent_change_issue(c);
+        return;
+    }
+
+    op = diskfs_bt_op_alloc(c->thread);
+    if (diskfs_bt_insert_async(op, c->thread, c->txn, c->dir, &key, rec,
+                               sizeof(*rec) + n * sizeof(uint64_t),
+                               diskfs_dirent_change_fold_written, c)) {
+        diskfs_dirent_change_fold_written(op, op->result, c);
+    }
+} /* diskfs_dirent_change_fold_rewrite */
+
+static void
+diskfs_dirent_change_fold_removed(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct diskfs_dirent_change *c = private_data;
+
+    (void) result;
+    diskfs_bt_op_free(c->thread, op);
+    diskfs_dirent_change_fold_rewrite(c);
+} /* diskfs_dirent_change_fold_removed */
+
+static void
+diskfs_dirent_change_fold_looked(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct diskfs_dirent_change *c   = private_data;
+    struct diskfs_dirfold_rec   *rec = (struct diskfs_dirfold_rec *) c->fold_rec;
+    struct diskfs_bt_key         key = diskfs_dirfold_key(c->fold);
+
+    diskfs_bt_op_free(c->thread, op);
+
+    if (result < (int) sizeof(*rec) ||
+        result < (int) (sizeof(*rec) + rec->count * sizeof(uint64_t))) {
+        /* No fold record yet: start one. */
+        c->fold_len = 0;
+        diskfs_dirent_change_fold_rewrite(c);
+        return;
+    }
+
+    c->fold_len = (uint32_t) result;
+    op          = diskfs_bt_op_alloc(c->thread);
+    if (diskfs_bt_remove_async(op, c->thread, c->txn, c->dir, &key,
+                               diskfs_dirent_change_fold_removed, c)) {
+        diskfs_dirent_change_fold_removed(op, op->result, c);
+    }
+} /* diskfs_dirent_change_fold_looked */
+
+static int
+diskfs_dirent_change_start(struct diskfs_dirent_change *c)
+{
+    struct diskfs_bt_key key = diskfs_dirfold_key(c->fold);
+    struct diskfs_bt_op *op  = diskfs_bt_op_alloc(c->thread);
+    int                  rc;
+
+    c->in_call = 1;
+    if (diskfs_bt_lookup_async(op, c->thread, c->dir, DISKFS_BT_OP_LOOKUP_EXACT,
+                               &key, NULL, c->fold_rec, sizeof(c->fold_rec),
+                               diskfs_dirent_change_fold_looked, c)) {
+        diskfs_dirent_change_fold_looked(op, op->result, c);
+    }
+
+    if (!c->issued) {
+        c->in_call = 0;
+        return 0;       /* suspended; the chain finishes from its callbacks */
+    }
+
+    rc = c->rc;
+    free(c);
+    return rc;
+} /* diskfs_dirent_change_start */
+
+
 static int
 diskfs_dir_insert_async(
     struct diskfs_bt_op  *op,
@@ -544,17 +762,29 @@ diskfs_dir_insert_async(
     diskfs_bt_cb_t        cb,
     void                 *private_data)
 {
-    char                      buf[DISKFS_DIRENT_REC_MAX];
-    struct diskfs_dirent_rec *r   = (struct diskfs_dirent_rec *) buf;
-    struct diskfs_bt_key      key = diskfs_dirent_key(hash);
+    struct diskfs_dirent_change *c = calloc(1, sizeof(*c));
+    struct diskfs_dirent_rec    *r;
 
+    chimera_diskfs_abort_if(!c, "Out of memory changing a directory");
+
+    r           = (struct diskfs_dirent_rec *) c->rec;
     r->inum     = child_inum;
     r->gen      = child_gen;
     r->name_len = (uint16_t) namelen;
     memcpy(r->name, name, namelen);
 
-    return diskfs_bt_insert_async(op, thread, txn, dir, &key, buf,
-                                  sizeof(*r) + namelen, cb, private_data);
+    c->thread       = thread;
+    c->txn          = txn;
+    c->dir          = dir;
+    c->op           = op;
+    c->cb           = cb;
+    c->private_data = private_data;
+    c->fold         = chimera_vfs_casefold_hash(name, namelen);
+    c->hash         = hash;
+    c->insert       = 1;
+    c->reclen       = sizeof(*r) + namelen;
+
+    return diskfs_dirent_change_start(c);
 } /* diskfs_dir_insert_async */
 
 
@@ -565,13 +795,215 @@ diskfs_dir_remove_async(
     struct diskfs_txn    *txn,
     struct diskfs_inode  *dir,
     uint64_t              hash,
+    const char           *name,
+    int                   namelen,
     diskfs_bt_cb_t        cb,
     void                 *private_data)
 {
-    struct diskfs_bt_key key = diskfs_dirent_key(hash);
+    struct diskfs_dirent_change *c = calloc(1, sizeof(*c));
 
-    return diskfs_bt_remove_async(op, thread, txn, dir, &key, cb, private_data);
+    chimera_diskfs_abort_if(!c, "Out of memory changing a directory");
+
+    c->thread       = thread;
+    c->txn          = txn;
+    c->dir          = dir;
+    c->op           = op;
+    c->cb           = cb;
+    c->private_data = private_data;
+    c->fold         = chimera_vfs_casefold_hash(name, namelen);
+    c->hash         = hash;
+    c->insert       = 0;
+
+    return diskfs_dirent_change_start(c);
 } /* diskfs_dir_remove_async */
+
+
+/* Look up the entry of dir named name: the dirent at hash, or for a
+ * case-insensitive (SMB) caller, one whose name matches regardless of case,
+ * found through the folded-name index.  As with diskfs_dir_lookup_async the
+ * record lands in rec_out and the result is its length (< 0 if none), and a
+ * return of 1 means that is already known -- but a case-insensitive lookup
+ * always returns 0 and completes through cb, even when it finishes before
+ * returning.  The matched entry's own hash is chimera_vfs_hash of the
+ * record's name. */
+struct diskfs_dir_lookup_ci {
+    struct diskfs_thread *thread;
+    struct diskfs_inode  *dir;
+    struct diskfs_bt_op  *op;         /* the caller's: carries the result */
+    diskfs_bt_cb_t        cb;
+    void                 *private_data;
+    const char           *name;
+    int                   namelen;
+    void                 *rec_out;
+    uint32_t              rec_cap;
+    uint32_t              next;       /* next candidate in fold_rec */
+    uint8_t               fold_rec[sizeof(struct diskfs_dirfold_rec) +
+                                   DISKFS_DIRFOLD_MAX * sizeof(uint64_t)];
+};
+
+static void
+diskfs_dir_lookup_ci_finish(
+    struct diskfs_dir_lookup_ci *l,
+    int                          result)
+{
+    diskfs_bt_cb_t       cb   = l->cb;
+    struct diskfs_bt_op *op   = l->op;
+    void                *priv = l->private_data;
+
+    op->result = result;
+    free(l);
+    cb(op, result, priv);
+} /* diskfs_dir_lookup_ci_finish */
+
+static void diskfs_dir_lookup_ci_next(
+    struct diskfs_dir_lookup_ci *l);
+
+static void
+diskfs_dir_lookup_ci_candidate_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct diskfs_dir_lookup_ci *l   = private_data;
+    struct diskfs_dirent_rec    *rec = l->rec_out;
+
+    diskfs_bt_op_free(l->thread, op);
+
+    if (result >= (int) sizeof(*rec) &&
+        result >= (int) (sizeof(*rec) + rec->name_len) &&
+        chimera_vfs_name_equal_ci(rec->name, rec->name_len, l->name, l->namelen)) {
+        diskfs_dir_lookup_ci_finish(l, result);
+        return;
+    }
+
+    diskfs_dir_lookup_ci_next(l);
+} /* diskfs_dir_lookup_ci_candidate_cb */
+
+static void
+diskfs_dir_lookup_ci_next(struct diskfs_dir_lookup_ci *l)
+{
+    struct diskfs_dirfold_rec *rec = (struct diskfs_dirfold_rec *) l->fold_rec;
+    struct diskfs_bt_op       *op;
+
+    if (l->next >= rec->count) {
+        diskfs_dir_lookup_ci_finish(l, -1);
+        return;
+    }
+
+    op = diskfs_bt_op_alloc(l->thread);
+    if (diskfs_dir_lookup_async(op, l->thread, l->dir, rec->hash[l->next++],
+                                l->rec_out, l->rec_cap,
+                                diskfs_dir_lookup_ci_candidate_cb, l)) {
+        diskfs_dir_lookup_ci_candidate_cb(op, op->result, l);
+    }
+} /* diskfs_dir_lookup_ci_next */
+
+static void
+diskfs_dir_lookup_ci_fold_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct diskfs_dir_lookup_ci *l   = private_data;
+    struct diskfs_dirfold_rec   *rec = (struct diskfs_dirfold_rec *) l->fold_rec;
+
+    diskfs_bt_op_free(l->thread, op);
+
+    if (result < (int) sizeof(*rec) ||
+        result < (int) (sizeof(*rec) + rec->count * sizeof(uint64_t))) {
+        diskfs_dir_lookup_ci_finish(l, -1);
+        return;
+    }
+
+    l->next = 0;
+    diskfs_dir_lookup_ci_next(l);
+} /* diskfs_dir_lookup_ci_fold_cb */
+
+static void
+diskfs_dir_lookup_ci_exact_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct diskfs_dir_lookup_ci *l = private_data;
+    struct diskfs_bt_key         key;
+
+    diskfs_bt_op_free(l->thread, op);
+
+    if (result >= 0) {
+        diskfs_dir_lookup_ci_finish(l, result);
+        return;
+    }
+
+    key = diskfs_dirfold_key(chimera_vfs_casefold_hash(l->name, l->namelen));
+    op  = diskfs_bt_op_alloc(l->thread);
+    if (diskfs_bt_lookup_async(op, l->thread, l->dir, DISKFS_BT_OP_LOOKUP_EXACT,
+                               &key, NULL, l->fold_rec, sizeof(l->fold_rec),
+                               diskfs_dir_lookup_ci_fold_cb, l)) {
+        diskfs_dir_lookup_ci_fold_cb(op, op->result, l);
+    }
+} /* diskfs_dir_lookup_ci_exact_cb */
+
+/* Record, in p->matched[slot], the entry a name lookup found (rec). */
+static inline void
+diskfs_name_matched(
+    struct diskfs_request_private  *p,
+    int                             slot,
+    const struct diskfs_dirent_rec *rec)
+{
+    uint16_t len = rec->name_len < sizeof(p->matched[slot].name) ?
+        rec->name_len : sizeof(p->matched[slot].name);
+
+    memcpy(p->matched[slot].name, rec->name, len);
+    p->matched[slot].name_len = len;
+    p->matched[slot].hash     = chimera_vfs_hash(rec->name, len);
+} /* diskfs_name_matched */
+
+static int
+diskfs_dir_lookup_ci_async(
+    struct diskfs_bt_op  *op,
+    struct diskfs_thread *thread,
+    struct diskfs_inode  *dir,
+    uint64_t              hash,
+    const char           *name,
+    int                   namelen,
+    int                   ci,
+    void                 *rec_out,
+    uint32_t              rec_cap,
+    diskfs_bt_cb_t        cb,
+    void                 *private_data)
+{
+    struct diskfs_dir_lookup_ci *l;
+    struct diskfs_bt_op         *eop;
+
+    if (!ci) {
+        return diskfs_dir_lookup_async(op, thread, dir, hash, rec_out, rec_cap,
+                                       cb, private_data);
+    }
+
+    l = calloc(1, sizeof(*l));
+    chimera_diskfs_abort_if(!l, "Out of memory looking up a name");
+
+    l->thread       = thread;
+    l->dir          = dir;
+    l->op           = op;
+    l->cb           = cb;
+    l->private_data = private_data;
+    l->name         = name;
+    l->namelen      = namelen;
+    l->rec_out      = rec_out;
+    l->rec_cap      = rec_cap;
+
+    /* The chain always completes through cb -- possibly before this returns
+     * -- so it, not this call, owns l. */
+    eop = diskfs_bt_op_alloc(thread);
+    if (diskfs_dir_lookup_async(eop, thread, dir, hash, rec_out, rec_cap,
+                                diskfs_dir_lookup_ci_exact_cb, l)) {
+        diskfs_dir_lookup_ci_exact_cb(eop, eop->result, l);
+    }
+
+    return 0;
+} /* diskfs_dir_lookup_ci_async */
 
 
 static int
@@ -610,6 +1042,10 @@ diskfs_lookup_at_dirent_cb(
         return;
     }
 
+    chimera_vfs_request_matched(request, 0, request->lookup_at.component,
+                                request->lookup_at.component_len,
+                                rec->name, rec->name_len);
+
     diskfs_inode_get_inum_async(p->thread, p->txn, p->fs, rec->inum, rec->gen,
                                 diskfs_lookup_at_child_cb, request);
 } /* diskfs_lookup_at_dirent_cb */
@@ -627,7 +1063,6 @@ diskfs_lookup_at_parent_cb(
     const char                    *name    = request->lookup_at.component;
     uint32_t                       namelen = request->lookup_at.component_len;
     uint64_t                       hash    = request->lookup_at.component_hash;
-    struct diskfs_bt_key           key;
     struct diskfs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -670,11 +1105,11 @@ diskfs_lookup_at_parent_cb(
         return;
     }
 
-    key = diskfs_dirent_key(hash);
-    op  = diskfs_bt_op_alloc(thread);
-    if (diskfs_bt_lookup_async(op, thread, parent, DISKFS_BT_OP_LOOKUP_EXACT,
-                               &key, NULL, p->rec_scratch, sizeof(p->rec_scratch),
-                               diskfs_lookup_at_dirent_cb, request)) {
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, name, namelen,
+                                   diskfs_name_ci(request), p->rec_scratch,
+                                   sizeof(p->rec_scratch),
+                                   diskfs_lookup_at_dirent_cb, request)) {
         diskfs_lookup_at_dirent_cb(op, op->result, request);
     }
 } /* diskfs_lookup_at_parent_cb */
@@ -924,9 +1359,10 @@ diskfs_mkdir_at_parent_cb(
     p->inode_stash[0] = parent;
 
     op = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_lookup_async(op, thread, parent, hash, p->rec_scratch,
-                                sizeof(p->rec_scratch), diskfs_mkdir_at_check_cb,
-                                request)) {
+    if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->mkdir_at.name,
+                                   request->mkdir_at.name_len, diskfs_name_ci(request),
+                                   p->rec_scratch, sizeof(p->rec_scratch),
+                                   diskfs_mkdir_at_check_cb, request)) {
         diskfs_mkdir_at_check_cb(op, op->result, request);
     }
 } /* diskfs_mkdir_at_parent_cb */
@@ -1124,9 +1560,10 @@ diskfs_mknod_at_parent_cb(
     p->inode_stash[0] = parent;
 
     op = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_lookup_async(op, thread, parent, hash, p->rec_scratch,
-                                sizeof(p->rec_scratch), diskfs_mknod_at_check_cb,
-                                request)) {
+    if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->mknod_at.name,
+                                   request->mknod_at.name_len, diskfs_name_ci(request),
+                                   p->rec_scratch, sizeof(p->rec_scratch),
+                                   diskfs_mknod_at_check_cb, request)) {
         diskfs_mknod_at_check_cb(op, op->result, request);
     }
 } /* diskfs_mknod_at_parent_cb */
@@ -1261,7 +1698,6 @@ diskfs_remove_at_empty_cb(
     struct chimera_vfs_request    *request = private_data;
     struct diskfs_request_private *p       = request->plugin_data;
     struct diskfs_thread          *thread  = p->thread;
-    uint64_t                       hash    = request->remove_at.name_hash;
     int                            nonempty;
 
     nonempty = (result >= 0 && op->found_key.type == DISKFS_REC_DIRENT);
@@ -1273,7 +1709,9 @@ diskfs_remove_at_empty_cb(
     }
 
     op = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_remove_async(op, thread, p->txn, p->inode_stash[0], hash,
+    if (diskfs_dir_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                p->matched[0].hash, p->matched[0].name,
+                                p->matched[0].name_len,
                                 diskfs_remove_at_removed_cb, request)) {
         diskfs_remove_at_removed_cb(op, op->result, request);
     }
@@ -1289,7 +1727,6 @@ diskfs_remove_at_child_cb(
     struct chimera_vfs_request    *request = private_data;
     struct diskfs_request_private *p       = request->plugin_data;
     struct diskfs_thread          *thread  = p->thread;
-    uint64_t                       hash    = request->remove_at.name_hash;
     struct diskfs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
@@ -1322,7 +1759,9 @@ diskfs_remove_at_child_cb(
     }
 
     op = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_remove_async(op, thread, p->txn, p->inode_stash[0], hash,
+    if (diskfs_dir_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                p->matched[0].hash, p->matched[0].name,
+                                p->matched[0].name_len,
                                 diskfs_remove_at_removed_cb, request)) {
         diskfs_remove_at_removed_cb(op, op->result, request);
     }
@@ -1346,6 +1785,11 @@ diskfs_remove_at_lookup_cb(
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
+
+    diskfs_name_matched(p, 0, rec);
+    chimera_vfs_request_matched(request, 0, request->remove_at.name,
+                                request->remove_at.namelen,
+                                rec->name, rec->name_len);
 
     diskfs_inode_get_inum_async(thread, p->txn, p->fs, rec->inum, rec->gen,
                                 diskfs_remove_at_child_cb, request);
@@ -1389,9 +1833,10 @@ diskfs_remove_at_parent_cb(
     p->inode_stash[0] = parent;
 
     op = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_lookup_async(op, thread, parent, hash, p->rec_scratch,
-                                sizeof(p->rec_scratch), diskfs_remove_at_lookup_cb,
-                                request)) {
+    if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->remove_at.name,
+                                   request->remove_at.namelen, diskfs_name_ci(request),
+                                   p->rec_scratch, sizeof(p->rec_scratch),
+                                   diskfs_remove_at_lookup_cb, request)) {
         diskfs_remove_at_lookup_cb(op, op->result, request);
     }
 } /* diskfs_remove_at_parent_cb */
@@ -2042,8 +2487,15 @@ diskfs_open_at_check_cb(
     struct diskfs_request_private *p       = request->plugin_data;
     struct diskfs_thread          *thread  = p->thread;
     unsigned int                   flags   = request->open_at.flags;
+    struct diskfs_dirent_rec      *rec     = (struct diskfs_dirent_rec *) p->rec_scratch;
 
     diskfs_bt_op_free(thread, op);
+
+    if (result >= 0) {
+        chimera_vfs_request_matched(request, 0, request->open_at.name,
+                                    request->open_at.namelen,
+                                    rec->name, rec->name_len);
+    }
 
     /* POSIX path resolution (XBD 4.13): search (EXECUTE) permission on the
      * parent is what allows a name to be RESOLVED at all, so it is owed before
@@ -2099,12 +2551,8 @@ diskfs_open_at_check_cb(
         return;
     }
 
-    {
-        struct diskfs_dirent_rec *rec = (struct diskfs_dirent_rec *) p->rec_scratch;
-
-        diskfs_inode_get_inum_async(thread, p->txn, p->fs, rec->inum, rec->gen,
-                                    diskfs_open_at_existing_cb, request);
-    }
+    diskfs_inode_get_inum_async(thread, p->txn, p->fs, rec->inum, rec->gen,
+                                diskfs_open_at_existing_cb, request);
 } /* diskfs_open_at_check_cb */
 
 
@@ -2145,9 +2593,10 @@ diskfs_open_at_parent_cb(
     p->inode_stash[0] = parent;
 
     op = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_lookup_async(op, thread, parent, hash, p->rec_scratch,
-                                sizeof(p->rec_scratch), diskfs_open_at_check_cb,
-                                request)) {
+    if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->open_at.name,
+                                   request->open_at.namelen, diskfs_name_ci(request),
+                                   p->rec_scratch, sizeof(p->rec_scratch),
+                                   diskfs_open_at_check_cb, request)) {
         diskfs_open_at_check_cb(op, op->result, request);
     }
 } /* diskfs_open_at_parent_cb */
@@ -2510,9 +2959,10 @@ diskfs_symlink_at_parent_cb(
     p->inode_stash[0] = parent;
 
     op = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_lookup_async(op, thread, parent, hash, p->rec_scratch,
-                                sizeof(p->rec_scratch), diskfs_symlink_at_check_cb,
-                                request)) {
+    if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->symlink_at.name,
+                                   request->symlink_at.namelen, diskfs_name_ci(request),
+                                   p->rec_scratch, sizeof(p->rec_scratch),
+                                   diskfs_symlink_at_check_cb, request)) {
         diskfs_symlink_at_check_cb(op, op->result, request);
     }
 } /* diskfs_symlink_at_parent_cb */
@@ -2788,7 +3238,8 @@ diskfs_rename_at_perform_inserted_cb(
 
     bop = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_remove_async(bop, thread, p->txn, p->inode_stash[0],
-                                request->rename_at.name_hash,
+                                p->matched[0].hash, p->matched[0].name,
+                                p->matched[0].name_len,
                                 diskfs_rename_at_perform_final_cb, request)) {
         diskfs_rename_at_perform_final_cb(bop, bop->result, request);
     }
@@ -2867,7 +3318,8 @@ diskfs_rename_at_perform(struct chimera_vfs_request *request)
     if (existing_inode) {
         bop = diskfs_bt_op_alloc(thread);
         if (diskfs_dir_remove_async(bop, thread, p->txn, p->inode_stash[1],
-                                    request->rename_at.new_name_hash,
+                                    p->matched[1].hash, p->matched[1].name,
+                                    p->matched[1].name_len,
                                     diskfs_rename_at_perform_removed_cb, request)) {
             diskfs_rename_at_perform_removed_cb(bop, bop->result, request);
         }
@@ -2901,6 +3353,21 @@ diskfs_rename_at_dest_cb(
         diskfs_rename_at_perform(request);
         return;
     }
+
+    diskfs_name_matched(p, 1, rec);
+
+    /* For an SMB caller the target may be the source itself under another
+     * case: that is a rename to a new case, not onto another entry. */
+    if (op == np && p->matched[1].hash == p->matched[0].hash &&
+        request->rename_at.new_name_hash != p->matched[0].hash) {
+        p->inode_stash[3] = NULL;
+        diskfs_rename_at_perform(request);
+        return;
+    }
+
+    chimera_vfs_request_matched(request, 1, request->rename_at.new_name,
+                                request->rename_at.new_namelen,
+                                rec->name, rec->name_len);
 
     existing_inum = rec->inum;
     existing_gen  = rec->gen;
@@ -2968,9 +3435,12 @@ diskfs_rename_at_dest_lookup(struct chimera_vfs_request *request)
     struct diskfs_bt_op           *bop;
 
     bop = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_lookup_async(bop, thread, np, request->rename_at.new_name_hash,
-                                p->rec_scratch, sizeof(p->rec_scratch),
-                                diskfs_rename_at_dest_cb, request)) {
+    if (diskfs_dir_lookup_ci_async(bop, thread, np, request->rename_at.new_name_hash,
+                                   request->rename_at.new_name,
+                                   request->rename_at.new_namelen,
+                                   diskfs_name_ci(request), p->rec_scratch,
+                                   sizeof(p->rec_scratch),
+                                   diskfs_rename_at_dest_cb, request)) {
         diskfs_rename_at_dest_cb(bop, bop->result, request);
     }
 } /* diskfs_rename_at_dest_lookup */
@@ -3083,6 +3553,10 @@ diskfs_rename_at_source_cb(
         return;
     }
 
+    diskfs_name_matched(p, 0, rec);
+    chimera_vfs_request_matched(request, 0, request->rename_at.name,
+                                request->rename_at.namelen,
+                                rec->name, rec->name_len);
     p->rd_inum = rec->inum;
     p->rd_gen  = rec->gen;
 
@@ -3104,9 +3578,11 @@ diskfs_rename_at_have_parents(struct chimera_vfs_request *request)
     diskfs_map_attrs(thread, &request->rename_at.r_todir_pre_attr, np);
 
     bop = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_lookup_async(bop, thread, op, request->rename_at.name_hash,
-                                p->rec_scratch, sizeof(p->rec_scratch),
-                                diskfs_rename_at_source_cb, request)) {
+    if (diskfs_dir_lookup_ci_async(bop, thread, op, request->rename_at.name_hash,
+                                   request->rename_at.name, request->rename_at.namelen,
+                                   diskfs_name_ci(request), p->rec_scratch,
+                                   sizeof(p->rec_scratch),
+                                   diskfs_rename_at_source_cb, request)) {
         diskfs_rename_at_source_cb(bop, bop->result, request);
     }
 } /* diskfs_rename_at_have_parents */
@@ -3369,7 +3845,6 @@ diskfs_link_at_check_cb(
     struct diskfs_request_private *p       = request->plugin_data;
     struct diskfs_thread          *thread  = p->thread;
     struct diskfs_dirent_rec      *rec     = (struct diskfs_dirent_rec *) p->rec_scratch;
-    uint64_t                       hash    = request->link_at.name_hash;
 
     diskfs_bt_op_free(thread, op);
 
@@ -3377,9 +3852,15 @@ diskfs_link_at_check_cb(
         if (request->link_at.replace) {
             p->rd_inum = rec->inum;
             p->rd_gen  = rec->gen;
+            diskfs_name_matched(p, 1, rec);
+            chimera_vfs_request_matched(request, 1, request->link_at.name,
+                                        request->link_at.namelen,
+                                        rec->name, rec->name_len);
 
             op = diskfs_bt_op_alloc(thread);
-            if (diskfs_dir_remove_async(op, thread, p->txn, p->inode_stash[0], hash,
+            if (diskfs_dir_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                        p->matched[1].hash, p->matched[1].name,
+                                        p->matched[1].name_len,
                                         diskfs_link_at_removed_cb, request)) {
                 diskfs_link_at_removed_cb(op, op->result, request);
             }
@@ -3433,9 +3914,10 @@ diskfs_link_at_inode_cb(
     p->inode_stash[1] = inode;
 
     op = diskfs_bt_op_alloc(thread);
-    if (diskfs_dir_lookup_async(op, thread, parent, hash, p->rec_scratch,
-                                sizeof(p->rec_scratch), diskfs_link_at_check_cb,
-                                request)) {
+    if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->link_at.name,
+                                   request->link_at.namelen, diskfs_name_ci(request),
+                                   p->rec_scratch, sizeof(p->rec_scratch),
+                                   diskfs_link_at_check_cb, request)) {
         diskfs_link_at_check_cb(op, op->result, request);
     }
 } /* diskfs_link_at_inode_cb */

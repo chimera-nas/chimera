@@ -58,6 +58,14 @@ chimera_vfs_link_at_complete(struct chimera_vfs_request *request)
                                       request->fh,
                                       request->fh_len);
 
+        /* A replaced entry stored under another spelling (a case-insensitive
+         * caller) is gone. */
+        chimera_vfs_name_cache_remove_matched(name_cache,
+                                              request->link_at.dir_fh_hash,
+                                              request->link_at.dir_fh,
+                                              request->link_at.dir_fhlen,
+                                              &request->r_matched[1]);
+
         chimera_vfs_attr_cache_insert(thread, attr_cache,
                                       request->link_at.dir_fh_hash,
                                       request->link_at.dir_fh,

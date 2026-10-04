@@ -64,6 +64,7 @@ void rocksdb_flush_wal(
 #define CAIRN_KEY_PNFS           9
 #define CAIRN_KEY_SID            10
 #define CAIRN_KEY_STREAM         11
+#define CAIRN_KEY_DIRFOLD        12
 
 /*
  * Storage layout:
@@ -125,6 +126,20 @@ struct cairn_inode_key {
 struct cairn_dirent_key {
     uint8_t  keytype;
     uint64_t inum;
+    uint64_t hash;
+};
+#pragma pack(pop)
+
+/* The folded-name index: one key per entry, {directory, hash of the entry's
+ * case-folded name, the entry's own name hash}, with no value.  An SMB caller
+ * finds an entry whose name differs only in case by seeking to the first two
+ * fields (cairn_dirent_lookup).  Entries whose names fold alike -- created by
+ * a case-sensitive (NFS) client -- are distinct keys. */
+#pragma pack(push, 1)
+struct cairn_dirfold_key {
+    uint8_t  keytype;
+    uint64_t inum;
+    uint64_t fold;
     uint64_t hash;
 };
 #pragma pack(pop)
@@ -715,6 +730,76 @@ cairn_dirent_get(
     return 0;
 } /* cairn_dirent_get */
 
+static inline rocksdb_iterator_t *
+cairn_meta_iterator(
+    struct cairn_thread *thread);
+
+/* Windows matches names case-insensitively, so an SMB (AUTH_ATTR) caller's
+ * name matches an entry whose name differs only in case -- for opens, and for
+ * the collision checks of creates, links and renames.  NFS and POSIX callers
+ * keep exact matching. */
+static inline int
+cairn_name_ci(const struct chimera_vfs_request *request)
+{
+    return request->cred && request->cred->flavor == CHIMERA_VFS_AUTH_ATTR;
+} /* cairn_name_ci */
+
+/* Find the entry of directory key->inum named name: the one at key->hash (its
+ * exact hash), or for a case-insensitive caller one whose name matches
+ * regardless of case, through the folded-name index.  On success key->hash
+ * is the matched entry's hash and dh holds it. */
+static inline int
+cairn_dirent_lookup(
+    struct cairn_thread        *thread,
+    struct cairn_dirent_key    *key,
+    const char                 *name,
+    uint32_t                    name_len,
+    int                         ci,
+    struct cairn_dirent_handle *dh)
+{
+    rocksdb_iterator_t      *iter;
+    struct cairn_dirfold_key start, *fk;
+    uint64_t                 hash = key->hash;
+    size_t                   klen;
+
+    if (cairn_dirent_get(thread, key, dh) == 0 || !ci) {
+        return dh->dirent ? 0 : -1;
+    }
+
+    start.keytype = CAIRN_KEY_DIRFOLD;
+    start.inum    = key->inum;
+    start.fold    = chimera_vfs_casefold_hash(name, name_len);
+    start.hash    = 0;
+
+    iter = cairn_meta_iterator(thread);
+    rocksdb_iter_seek(iter, (const char *) &start, sizeof(start));
+
+    for (; rocksdb_iter_valid(iter); rocksdb_iter_next(iter)) {
+        fk = (struct cairn_dirfold_key *) rocksdb_iter_key(iter, &klen);
+
+        if (klen != sizeof(*fk) || fk->keytype != CAIRN_KEY_DIRFOLD ||
+            fk->inum != start.inum || fk->fold != start.fold) {
+            break;
+        }
+
+        key->hash = fk->hash;
+
+        if (cairn_dirent_get(thread, key, dh) == 0) {
+            if (chimera_vfs_name_equal_ci(dh->dirent->name, dh->dirent->name_len,
+                                          name, name_len)) {
+                rocksdb_iter_destroy(iter);
+                return 0;
+            }
+            cairn_dirent_handle_release(dh);
+        }
+    }
+
+    rocksdb_iter_destroy(iter);
+    key->hash  = hash;
+    dh->dirent = NULL;
+    return -1;
+} /* cairn_dirent_lookup */
+
 /*
  * Iterator over metadb that sees this transaction's pending mutations
  * merged with the on-disk state.  rocksdb_transaction_create_iterator does
@@ -930,9 +1015,10 @@ cairn_put_dirent(
     struct cairn_dirent_key   *key,
     struct cairn_dirent_value *value)
 {
-    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
-    char                  *err = NULL;
-    int                    len;
+    rocksdb_transaction_t   *txn = cairn_get_meta_txn(thread);
+    char                    *err = NULL;
+    struct cairn_dirfold_key fold;
+    int                      len;
 
     len = sizeof(value->inum) + sizeof(value->name_len) + value->name_len;
 
@@ -940,6 +1026,14 @@ cairn_put_dirent(
                             (const char *) key, sizeof(*key),
                             (const char *) value, len, &err);
     chimera_cairn_abort_if(err, "Error putting dirent: %s\n", err);
+
+    fold.keytype = CAIRN_KEY_DIRFOLD;
+    fold.inum    = key->inum;
+    fold.fold    = chimera_vfs_casefold_hash(value->name, value->name_len);
+    fold.hash    = key->hash;
+
+    rocksdb_transaction_put(txn, (const char *) &fold, sizeof(fold), "", 0, &err);
+    chimera_cairn_abort_if(err, "Error putting dirent fold key: %s\n", err);
 } /* cairn_put_dirent */
 
 static inline void
@@ -960,16 +1054,28 @@ cairn_put_inode(
     chimera_cairn_abort_if(err, "Error putting inode: %s\n", err);
 } /* cairn_put_inode */
 
+/* Remove the entry at key, whose name is name, and its folded-name key. */
 static inline void
 cairn_remove_dirent(
     struct cairn_thread     *thread,
-    struct cairn_dirent_key *key)
+    struct cairn_dirent_key *key,
+    const char              *name,
+    uint32_t                 name_len)
 {
-    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
-    char                  *err = NULL;
+    rocksdb_transaction_t   *txn = cairn_get_meta_txn(thread);
+    char                    *err = NULL;
+    struct cairn_dirfold_key fold;
 
     rocksdb_transaction_delete(txn, (const char *) key, sizeof(*key), &err);
     chimera_cairn_abort_if(err, "Error deleting dirent: %s\n", err);
+
+    fold.keytype = CAIRN_KEY_DIRFOLD;
+    fold.inum    = key->inum;
+    fold.fold    = chimera_vfs_casefold_hash(name, name_len);
+    fold.hash    = key->hash;
+
+    rocksdb_transaction_delete(txn, (const char *) &fold, sizeof(fold), &err);
+    chimera_cairn_abort_if(err, "Error deleting dirent fold key: %s\n", err);
 } /* cairn_remove_dirent */
 
 static inline void
@@ -1441,9 +1547,10 @@ cairn_remove_directory_contents(
     struct cairn_thread *thread,
     uint64_t             dir_inum)
 {
-    rocksdb_iterator_t     *iter;
-    struct cairn_dirent_key start_key, *dirent_key;
-    size_t                  klen;
+    rocksdb_iterator_t        *iter;
+    struct cairn_dirent_key    start_key, *dirent_key;
+    struct cairn_dirent_value *dirent_value;
+    size_t                     klen, vlen;
 
     start_key.keytype = CAIRN_KEY_DIRENT;
     start_key.inum    = dir_inum;
@@ -1461,7 +1568,8 @@ cairn_remove_directory_contents(
             break;
         }
 
-        cairn_remove_dirent(thread, dirent_key);
+        dirent_value = (struct cairn_dirent_value *) rocksdb_iter_value(iter, &vlen);
+        cairn_remove_dirent(thread, dirent_key, dirent_value->name, dirent_value->name_len);
         rocksdb_iter_next(iter);
     }
 
@@ -3176,6 +3284,31 @@ cairn_rmfs_delete_inode(
     }
     rocksdb_iter_destroy(iter);
 
+    /* A directory's folded-name index. */
+    {
+        struct cairn_dirfold_key fold_start, *fold_key;
+
+        fold_start.keytype = CAIRN_KEY_DIRFOLD;
+        fold_start.inum    = inum;
+        fold_start.fold    = 0;
+        fold_start.hash    = 0;
+
+        iter = rocksdb_create_iterator(shared->meta_base_db, shared->read_options);
+        rocksdb_iter_seek(iter, (const char *) &fold_start, sizeof(fold_start));
+        while (rocksdb_iter_valid(iter)) {
+            fold_key = (struct cairn_dirfold_key *) rocksdb_iter_key(iter, &klen);
+            if (klen != sizeof(*fold_key) ||
+                fold_key->keytype != CAIRN_KEY_DIRFOLD ||
+                fold_key->inum != inum) {
+                break;
+            }
+            rocksdb_writebatch_delete(meta_batch,
+                                      (const char *) fold_key, sizeof(*fold_key));
+            rocksdb_iter_next(iter);
+        }
+        rocksdb_iter_destroy(iter);
+    }
+
     /* The file's named streams: their records, and their inodes, which no
      * directory reaches. */
     {
@@ -3467,7 +3600,13 @@ cairn_lookup_at(
     dirent_key.inum    = inode->inum;
     dirent_key.hash    = request->lookup_at.component_hash;
 
-    rc = cairn_dirent_get(thread, &dirent_key, &dh);
+    rc = cairn_dirent_lookup(thread, &dirent_key, request->lookup_at.component,
+                             request->lookup_at.component_len, cairn_name_ci(request), &dh);
+
+    if (rc == 0) {
+        chimera_vfs_request_matched(request, 0, request->lookup_at.component, request->lookup_at.component_len,
+                                    dh.dirent->name, dh.dirent->name_len);
+    }
 
     if (rc) {
         cairn_inode_handle_release(&ih);
@@ -3556,7 +3695,8 @@ cairn_mkdir_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->mkdir_at.name_hash;
 
-    rc = cairn_dirent_get(thread, &dirent_key, &dh);
+    rc = cairn_dirent_lookup(thread, &dirent_key, request->mkdir_at.name,
+                             request->mkdir_at.name_len, cairn_name_ci(request), &dh);
 
     if (rc == 0) {
         cairn_map_attrs(fs, &request->mkdir_at.r_dir_pre_attr, parent_inode);
@@ -3693,7 +3833,8 @@ cairn_mknod_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->mknod_at.name_hash;
 
-    rc = cairn_dirent_get(thread, &dirent_key, &dh);
+    rc = cairn_dirent_lookup(thread, &dirent_key, request->mknod_at.name,
+                             request->mknod_at.name_len, cairn_name_ci(request), &dh);
 
     if (rc == 0) {
         cairn_map_attrs(fs, &request->mknod_at.r_dir_pre_attr, parent_inode);
@@ -3826,7 +3967,13 @@ cairn_remove_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->remove_at.name_hash;
 
-    rc = cairn_dirent_get(thread, &dirent_key, &dh);
+    rc = cairn_dirent_lookup(thread, &dirent_key, request->remove_at.name,
+                             request->remove_at.namelen, cairn_name_ci(request), &dh);
+
+    if (rc == 0) {
+        chimera_vfs_request_matched(request, 0, request->remove_at.name, request->remove_at.namelen,
+                                    dh.dirent->name, dh.dirent->name_len);
+    }
 
     if (rc) {
         cairn_inode_handle_release(&parent_ih);
@@ -3931,7 +4078,7 @@ cairn_remove_at(
 
     cairn_map_attrs(fs, &request->remove_at.r_dir_post_attr, parent_inode);
 
-    cairn_remove_dirent(thread, &dirent_key);
+    cairn_remove_dirent(thread, &dirent_key, dirent_value->name, dirent_value->name_len);
 
     cairn_put_inode(thread, parent_inode);
 
@@ -4308,7 +4455,13 @@ cairn_open_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->open_at.name_hash;
 
-    rc = cairn_dirent_get(thread, &dirent_key, &dh);
+    rc = cairn_dirent_lookup(thread, &dirent_key, request->open_at.name,
+                             request->open_at.namelen, cairn_name_ci(request), &dh);
+
+    if (rc == 0) {
+        chimera_vfs_request_matched(request, 0, request->open_at.name, request->open_at.namelen,
+                                    dh.dirent->name, dh.dirent->name_len);
+    }
 
     if (rc) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
@@ -5333,7 +5486,8 @@ cairn_symlink_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->symlink_at.name_hash;
 
-    rc = cairn_dirent_get(thread, &dirent_key, &dh);
+    rc = cairn_dirent_lookup(thread, &dirent_key, request->symlink_at.name,
+                             request->symlink_at.namelen, cairn_name_ci(request), &dh);
 
     if (rc == 0) {
         cairn_inode_handle_release(&parent_ih);
@@ -5597,7 +5751,13 @@ cairn_rename_at(
     old_dirent_key.inum    = old_parent_inode->inum;
     old_dirent_key.hash    = request->rename_at.name_hash;
 
-    rc = cairn_dirent_get(thread, &old_dirent_key, &old_dh);
+    rc = cairn_dirent_lookup(thread, &old_dirent_key, request->rename_at.name,
+                             request->rename_at.namelen, cairn_name_ci(request), &old_dh);
+
+    if (rc == 0) {
+        chimera_vfs_request_matched(request, 0, request->rename_at.name, request->rename_at.namelen,
+                                    old_dh.dirent->name, old_dh.dirent->name_len);
+    }
     if (rc) {
         cairn_inode_handle_release(&old_parent_ih);
 
@@ -5668,7 +5828,24 @@ cairn_rename_at(
     new_dirent_key.inum    = new_parent_inode->inum;
     new_dirent_key.hash    = request->rename_at.new_name_hash;
 
-    rc = cairn_dirent_get(thread, &new_dirent_key, &new_dh);
+    rc = cairn_dirent_lookup(thread, &new_dirent_key, request->rename_at.new_name,
+                             request->rename_at.new_namelen, cairn_name_ci(request), &new_dh);
+
+    /* For an SMB caller the target may be the source itself under another
+     * case: that is a rename to a new case, not onto another entry. */
+    if (rc == 0 && new_dirent_key.inum == old_dirent_key.inum &&
+        new_dirent_key.hash == old_dirent_key.hash &&
+        request->rename_at.new_name_hash != old_dirent_key.hash) {
+        cairn_dirent_handle_release(&new_dh);
+        new_dirent_key.hash = request->rename_at.new_name_hash;
+        rc                  = -1;
+    }
+
+    if (rc == 0) {
+        chimera_vfs_request_matched(request, 1, request->rename_at.new_name, request->rename_at.new_namelen,
+                                    new_dh.dirent->name, new_dh.dirent->name_len);
+    }
+
     if (rc == 0) {
         // Target exists
         // Per POSIX: if old and new refer to same file, return success with no action
@@ -5764,6 +5941,14 @@ cairn_rename_at(
 
             cairn_inode_handle_release(&existing_ih);
         }
+
+        /* A target matched under another case has its own key, which the new
+         * entry's put below would not overwrite: remove it. */
+        if (new_dirent_key.hash != request->rename_at.new_name_hash) {
+            cairn_remove_dirent(thread, &new_dirent_key, new_dh.dirent->name,
+                                new_dh.dirent->name_len);
+            new_dirent_key.hash = request->rename_at.new_name_hash;
+        }
         cairn_dirent_handle_release(&new_dh);
     }
 
@@ -5786,7 +5971,8 @@ cairn_rename_at(
     cairn_map_attrs(fs, &request->rename_at.r_todir_pre_attr, new_parent_inode);
 
     // Update directory entries and parent inodes
-    cairn_remove_dirent(thread, &old_dirent_key);
+    cairn_remove_dirent(thread, &old_dirent_key, old_dirent_value->name,
+                        old_dirent_value->name_len);
     cairn_put_dirent(thread, &new_dirent_key, &new_dirent_value);
 
     old_parent_inode->mtime = now;
@@ -5895,7 +6081,8 @@ cairn_link_at(
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->link_at.name_hash;
 
-    rc = cairn_dirent_get(thread, &dirent_key, &dh);
+    rc = cairn_dirent_lookup(thread, &dirent_key, request->link_at.name,
+                             request->link_at.namelen, cairn_name_ci(request), &dh);
 
     if (rc == 0) {
         cairn_inode_handle_release(&parent_ih);

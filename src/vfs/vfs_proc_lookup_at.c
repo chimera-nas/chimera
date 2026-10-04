@@ -36,13 +36,19 @@ chimera_vfs_lookup_at_complete(struct chimera_vfs_request *request)
          * memcpy as a size. */
         if ((request->lookup_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) &&
             request->lookup_at.r_attr.va_fh_len > 0) {
+            /* Cache the entry under the name it is stored by: a
+             * case-insensitive match must not teach exact-match callers that
+             * the spelling they were never given exists. */
+            const struct chimera_vfs_matched_name *m = &request->r_matched[0];
+
             chimera_vfs_name_cache_insert(thread, name_cache,
                                           request->lookup_at.handle->fh_hash,
                                           request->lookup_at.handle->fh,
                                           request->lookup_at.handle->fh_len,
+                                          m->len ? chimera_vfs_hash(m->name, m->len) :
                                           request->lookup_at.component_hash,
-                                          request->lookup_at.component,
-                                          request->lookup_at.component_len,
+                                          m->len ? m->name : request->lookup_at.component,
+                                          m->len ? m->len : request->lookup_at.component_len,
                                           request->lookup_at.r_attr.va_fh,
                                           request->lookup_at.r_attr.va_fh_len);
 
@@ -144,7 +150,8 @@ chimera_vfs_lookup_at_dispatch(
             cached_attr.va_fh,
             &cached_attr.va_fh_len);
 
-        if (rc == 0) {
+        if (rc == 0 && (cached_attr.va_fh_len > 0 ||
+                        chimera_vfs_name_cache_negative_ok(cred))) {
 
             if (cached_attr.va_fh_len == 0) {
 

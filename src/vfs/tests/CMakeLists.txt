@@ -175,6 +175,21 @@ if(CAIRN_ENABLED)
     add_test(NAME chimera/vfs/zerorange_cairn COMMAND vfs_zerorange_test cairn)
 endif()
 
+# Case-insensitive name resolution for SMB callers, and the name cache shared
+# with exact-match (NFS) callers, parameterized by backend.
+add_executable(vfs_case_test vfs_case_test.c)
+target_link_libraries(vfs_case_test chimera_vfs evpl)
+add_test(NAME chimera/vfs/case_memfs COMMAND vfs_case_test memfs)
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/vfs/case_diskfs_aio COMMAND vfs_case_test diskfs_aio)
+endif()
+if(CHIMERA_VFS_IO_URING)
+    add_test(NAME chimera/vfs/case_diskfs_io_uring COMMAND vfs_case_test diskfs_io_uring)
+endif()
+if(CAIRN_ENABLED)
+    add_test(NAME chimera/vfs/case_cairn COMMAND vfs_case_test cairn)
+endif()
+
 # xattr DAC regression, parameterized by passthrough backend: the linux and
 # io_uring modules must issue f*xattr(2) under the caller's credential, since
 # the kernel evaluates user.* xattr permission against the calling thread's

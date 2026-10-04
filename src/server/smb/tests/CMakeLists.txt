@@ -3750,8 +3750,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.streams.io
     smb2.streams.names
     smb2.streams.names2
-    # smb2.streams.names3 opens the base file by a re-cased path; cairn
-    # has no case-insensitive name lookup (memfs_dirent_find_ci) yet
+    smb2.streams.names3
     smb2.streams.rename
     smb2.streams.rename2
     smb2.streams.sharemodes
@@ -4375,8 +4374,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.streams.io
     smb2.streams.names
     smb2.streams.names2
-    # smb2.streams.names3 opens the base file by a re-cased path; diskfs
-    # has no case-insensitive name lookup (memfs_dirent_find_ci) yet
+    smb2.streams.names3
     smb2.streams.rename
     # smb2.streams.rename2 renames to and from the unnamed data stream, which
     # diskfs does not do
@@ -4998,8 +4996,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.streams.io
     smb2.streams.names
     smb2.streams.names2
-    # smb2.streams.names3 opens the base file by a re-cased path; diskfs
-    # has no case-insensitive name lookup (memfs_dirent_find_ci) yet
+    smb2.streams.names3
     smb2.streams.rename
     # smb2.streams.rename2 renames to and from the unnamed data stream, which
     # diskfs does not do
