@@ -632,50 +632,112 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
 
 #ifdef _WIN32
 
-/* The native Windows build links every library statically (see
- * cmake/Platform.cmake), so there is no shared VFS core for a plugin DLL to
- * bind to; the backends are linked into chimera_vfs there and resolved from
- * this table instead of being loaded. */
+/* Directory the VFS backend modules are loaded from when a module config
+ * names no explicit module_path: $CHIMERA_VFS_MODULE_DIR when set, otherwise
+ * the directory chimera_vfs.dll itself was loaded from, which is where the
+ * build and the install put the modules (see the Unix counterpart below). */
+static void
+chimera_vfs_module_dir(
+    char  *dir,
+    size_t dirlen)
+{
+    const char *env = getenv("CHIMERA_VFS_MODULE_DIR");
+    HMODULE     self;
+    DWORD       len;
+    char       *sep, *alt;
+
+    if (env && env[0] != '\0') {
+        snprintf(dir, dirlen, "%s", env);
+        return;
+    }
+
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR) (uintptr_t) chimera_vfs_module_dir, &self)) {
+        len = GetModuleFileNameA(self, dir, (DWORD) dirlen);
+        if (len > 0 && len < dirlen) {
+            sep = strrchr(dir, '\\');
+            alt = strrchr(dir, '/');
+            if (alt && (!sep || alt > sep)) {
+                sep = alt;
+            }
+            if (sep) {
+                *sep = '\0';
+                return;
+            }
+        }
+    }
+
+    snprintf(dir, dirlen, "%s", CHIMERA_VFS_MODULE_INSTALL_DIR);
+} /* chimera_vfs_module_dir */
+
+/* Resolve the module named module_name to its vfs_<name> descriptor, loading
+ * its DLL from module_path, or from the module directory when module_path is
+ * empty.  A module the executable itself exports (one a test binary embeds)
+ * is used as is, as dlsym(RTLD_DEFAULT) finds it on Unix; loading a DLL a
+ * second time returns the copy already loaded. */
 static struct chimera_vfs_module *
 chimera_vfs_load_module(
     const char *module_name,
     const char *module_path)
 {
-    extern struct chimera_vfs_module vfs_memfs, vfs_memkv;
-    extern struct chimera_vfs_module vfs_nfs, vfs_smb, vfs_diskfs;
+    struct chimera_vfs_module *module;
+    char                       modsym[80];
+    char                       dir[MAX_PATH];
+    char                       path[MAX_PATH + 128];
+    wchar_t                    wpath[MAX_PATH + 128];
+    wchar_t                    wfull[MAX_PATH + 128];
+    char                       err[256];
+    HMODULE                    handle;
+    DWORD                      rc;
 
-#ifdef HAVE_CAIRN
-    extern struct chimera_vfs_module vfs_cairn;
-#endif /* ifdef HAVE_CAIRN */
-#ifdef CHIMERA_HAVE_SQLITE_VFS
-    extern struct chimera_vfs_module vfs_sqlite;
-#endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
-    struct chimera_vfs_module       *builtins[] = {
-        &vfs_memfs,
-        &vfs_memkv,
-        &vfs_nfs,
-        &vfs_smb,
-        &vfs_diskfs,
-#ifdef HAVE_CAIRN
-        &vfs_cairn,
-#endif /* ifdef HAVE_CAIRN */
-#ifdef CHIMERA_HAVE_SQLITE_VFS
-        &vfs_sqlite,
-#endif /* ifdef CHIMERA_HAVE_SQLITE_VFS */
-    };
+    snprintf(modsym, sizeof(modsym), "vfs_%s", module_name);
 
-    for (size_t i = 0; i < sizeof(builtins) / sizeof(builtins[0]); i++) {
-        if (!strcmp(module_name, builtins[i]->name)) {
-            return builtins[i];
-        }
+    module = (struct chimera_vfs_module *) (uintptr_t)
+        GetProcAddress(GetModuleHandleW(NULL), modsym);
+
+    if (module) {
+        return module;
     }
 
-    chimera_vfs_abort_if(module_path && module_path[0] != '\0',
-                         "External VFS modules require a shared-library build: %s",
-                         module_path);
+    if (module_path && module_path[0] != '\0') {
+        snprintf(path, sizeof(path), "%s", module_path);
+    } else {
+        chimera_vfs_module_dir(dir, sizeof(dir));
+        snprintf(path, sizeof(path), "%s\\%s%s%s", dir,
+                 CHIMERA_VFS_MODULE_PREFIX, module_name, CHIMERA_VFS_MODULE_SUFFIX);
+    }
 
-    chimera_vfs_abort("VFS module %s is not built into this chimera", module_name);
-    return NULL;
+    /* The search flags below take an absolute path, and resolve the module's
+     * own dependencies (rocksdb.dll for cairn, say) from its directory. */
+    chimera_vfs_abort_if(!MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath,
+                                              (int) (sizeof(wpath) / sizeof(wpath[0]))),
+                         "VFS module path %s is not valid UTF-8 or is too long", path);
+    rc = GetFullPathNameW(wpath, (DWORD) (sizeof(wfull) / sizeof(wfull[0])), wfull, NULL);
+    chimera_vfs_abort_if(rc == 0 || rc >= sizeof(wfull) / sizeof(wfull[0]),
+                         "Cannot resolve VFS module path %s", path);
+
+    handle = LoadLibraryExW(wfull, NULL,
+                            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+
+    if (!handle) {
+        rc = GetLastError();
+        if (!FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                            NULL, rc, 0, err, sizeof(err), NULL)) {
+            snprintf(err, sizeof(err), "error %lu", (unsigned long) rc);
+        }
+        chimera_vfs_abort("Failed to load VFS module %s from %s: %s",
+                          module_name, path, err);
+    }
+
+    module = (struct chimera_vfs_module *) (uintptr_t) GetProcAddress(handle, modsym);
+
+    chimera_vfs_abort_if(!module, "VFS module %s has no symbol %s in %s",
+                         module_name, modsym, path);
+
+    chimera_vfs_info("VFS module %s loaded from %s", module_name, path);
+
+    return module;
 } /* chimera_vfs_load_module */
 
 #else  /* ifdef _WIN32 */

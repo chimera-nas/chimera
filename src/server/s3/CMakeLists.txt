@@ -12,3 +12,6 @@ install(TARGETS chimera_s3 DESTINATION lib)
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)
 endif()
+
+# Exports its data rather than importing it (common/export.h).
+target_compile_definitions(chimera_s3 PRIVATE CHIMERA_S3_BUILD)

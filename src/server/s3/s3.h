@@ -81,4 +81,12 @@ chimera_s3_advance_cred_clock(
     void   *s3_shared,
     int64_t seconds);
 
-extern struct chimera_server_protocol s3_protocol;
+#include "common/export.h"
+
+#ifdef CHIMERA_S3_BUILD
+#define CHIMERA_S3_DATA CHIMERA_DATA_EXPORT
+#else // ifdef CHIMERA_S3_BUILD
+#define CHIMERA_S3_DATA CHIMERA_DATA_IMPORT
+#endif // ifdef CHIMERA_S3_BUILD
+
+extern CHIMERA_S3_DATA struct chimera_server_protocol s3_protocol;

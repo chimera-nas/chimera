@@ -5,10 +5,11 @@
 #pragma once
 
 #include "common/compiler.h"
+#include "common/export.h"
 #include <stdarg.h>
 #include <stdio.h>
 
-extern int ChimeraLogLevel;
+extern CHIMERA_COMMON_DATA int ChimeraLogLevel;
 
 #define CHIMERA_LOG_FATAL 1
 #define CHIMERA_LOG_ERROR 2

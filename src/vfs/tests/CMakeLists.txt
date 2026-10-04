@@ -99,15 +99,13 @@ target_link_libraries(vfs_enforce_test chimera_vfs evpl)
 add_test(chimera/vfs/enforce_test vfs_enforce_test)
 
 # The attrstrip shim module lives in the test binary (wrapping an embedded
-# memfs) and is found by chimera_vfs_init through dlsym(RTLD_DEFAULT), hence
-# ENABLE_EXPORTS.  The Windows build resolves modules from a built-in table
-# instead, so the shim cannot be reached there and the test is Unix-only.
-if(NOT WIN32)
-    add_executable(vfs_attr_gate_test vfs_attr_gate_test.c)
-    target_link_libraries(vfs_attr_gate_test chimera_vfs chimera_vfs_memfs_objs evpl)
-    set_target_properties(vfs_attr_gate_test PROPERTIES ENABLE_EXPORTS ON)
-    add_test(chimera/vfs/attr_gate_test vfs_attr_gate_test)
-endif()
+# memfs) and is found by chimera_vfs_init in the executable's own exports
+# (dlsym(RTLD_DEFAULT), or GetProcAddress on the executable on Windows),
+# hence ENABLE_EXPORTS.
+add_executable(vfs_attr_gate_test vfs_attr_gate_test.c)
+target_link_libraries(vfs_attr_gate_test chimera_vfs chimera_vfs_memfs_objs evpl)
+set_target_properties(vfs_attr_gate_test PROPERTIES ENABLE_EXPORTS ON)
+add_test(chimera/vfs/attr_gate_test vfs_attr_gate_test)
 
 add_executable(vfs_clone_range_test vfs_clone_range_test.c)
 target_link_libraries(vfs_clone_range_test chimera_vfs evpl)

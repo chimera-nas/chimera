@@ -70,4 +70,12 @@ chimera_smb_add_ntlm_user(
     const char *username,
     const char *password);
 
-extern struct chimera_server_protocol smb_protocol;
+#include "common/export.h"
+
+#ifdef CHIMERA_SMB_BUILD
+#define CHIMERA_SMB_DATA CHIMERA_DATA_EXPORT
+#else // ifdef CHIMERA_SMB_BUILD
+#define CHIMERA_SMB_DATA CHIMERA_DATA_IMPORT
+#endif // ifdef CHIMERA_SMB_BUILD
+
+extern CHIMERA_SMB_DATA struct chimera_server_protocol smb_protocol;
