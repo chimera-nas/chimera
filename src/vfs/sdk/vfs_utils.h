@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "vfs_sdk_export.h"
+
 #include <stdint.h>
 #include <time.h>
 
@@ -23,14 +25,14 @@
  * breaks seekdir()/telldir() for cookies with bit 63 set.  A backend that
  * produces its own readdir cookies must honor the same constraint.
  */
-uint64_t
+CHIMERA_VFS_SDK_EXPORT uint64_t
 chimera_vfs_hash(
     const void *data,
     int         len);
 
 /* Fill ts with wall-clock time. Stopwatch slews corrections on the TSC
  * path to avoid backwards steps, and reads CLOCK_REALTIME directly otherwise. */
-void
+CHIMERA_VFS_SDK_EXPORT void
 chimera_vfs_realtime(
     struct timespec *ts);
 
@@ -39,7 +41,7 @@ struct chimera_vfs_request;
 /* Evict cached opens after a path-based backend changes the object denoted by
  * fh. Existing referenced handles remain valid until their holders release
  * them; subsequent opens must resolve the new object. */
-void
+CHIMERA_VFS_SDK_EXPORT void
 chimera_vfs_request_evict_cached_fh(
     struct chimera_vfs_request *request,
     const void                 *fh,
@@ -47,7 +49,7 @@ chimera_vfs_request_evict_cached_fh(
 
 /* Invalidate attributes after a backend-internal mutation, such as NFS
  * hidden-link cleanup, that did not pass through a VFS mutation operation. */
-void
+CHIMERA_VFS_SDK_EXPORT void
 chimera_vfs_request_invalidate_attrs(
     struct chimera_vfs_request *request,
     const void                 *fh,
@@ -58,6 +60,6 @@ chimera_vfs_request_invalidate_attrs(
  * (chimera_vfs_set_tcp_flavor).  Backends that open their own TCP
  * connections (the nfs and smb client modules, or any out-of-tree
  * equivalent) honor it; the vocabulary is in vfs_tcp_flavor.h. */
-enum chimera_tcp_flavor
+CHIMERA_VFS_SDK_EXPORT enum chimera_tcp_flavor
 chimera_vfs_request_tcp_flavor(
     const struct chimera_vfs_request *request);

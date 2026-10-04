@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include "vfs/vfs.h"
 
-extern struct chimera_vfs_module vfs_nfs;
+extern SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs;

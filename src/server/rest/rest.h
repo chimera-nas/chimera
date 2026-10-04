@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 struct chimera_server_config;
 struct chimera_server;
 struct chimera_vfs;
@@ -21,7 +23,7 @@ struct chimera_vfs_thread;
  * @param metrics Prometheus metrics (unused for now)
  * @return REST server instance or NULL if disabled (port is 0)
  */
-struct chimera_rest_server *
+SYMBOL_EXPORT struct chimera_rest_server *
 chimera_rest_init(
     const struct chimera_server_config *config,
     struct chimera_server              *server,
@@ -33,7 +35,7 @@ chimera_rest_init(
  *
  * @param rest REST server instance
  */
-void
+SYMBOL_EXPORT void
 chimera_rest_start(
     struct chimera_rest_server *rest);
 
@@ -42,7 +44,7 @@ chimera_rest_start(
  *
  * @param rest REST server instance
  */
-void
+SYMBOL_EXPORT void
 chimera_rest_stop(
     struct chimera_rest_server *rest);
 
@@ -51,7 +53,7 @@ chimera_rest_stop(
  *
  * @param rest REST server instance
  */
-void
+SYMBOL_EXPORT void
 chimera_rest_destroy(
     struct chimera_rest_server *rest);
 
@@ -62,7 +64,7 @@ chimera_rest_destroy(
  * @param rest REST server shared state
  * @return Thread-local REST state
  */
-void *
+SYMBOL_EXPORT void *
 chimera_rest_thread_init(
     struct evpl                *evpl,
     struct chimera_rest_server *rest,
@@ -73,6 +75,6 @@ chimera_rest_thread_init(
  *
  * @param thread_data Thread-local REST state
  */
-void
+SYMBOL_EXPORT void
 chimera_rest_thread_destroy(
     void *thread_data);

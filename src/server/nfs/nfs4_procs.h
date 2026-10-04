@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/stat.h>
@@ -102,13 +104,13 @@ chimera_nfs4_cred_has_mode_access(
  * @param attr       Output pointer to the attribute structure to populate.
  * @param attr_mask  Attribute mask specifying which attributes to retrieve.
  */
-void
+SYMBOL_EXPORT void
 nfs4_root_getattr(
     struct chimera_server_nfs_thread *thread,
     struct chimera_vfs_attrs         *attr,
     uint64_t                          attr_mask);
 
-void
+SYMBOL_EXPORT void
 nfs4_root_lookup(
     struct chimera_server_nfs_thread *nfs_thread,
     struct nfs_request               *req);
@@ -125,7 +127,7 @@ nfs4_root_lookup(
  * @param full_path  VFS path to resolve (leading slashes ignored);
  *                   caller-owned, not retained after return.
  */
-void
+SYMBOL_EXPORT void
 nfs4_root_lookup_export(
     struct chimera_server_nfs_thread *nfs_thread,
     struct nfs_request               *req,
@@ -149,7 +151,7 @@ typedef void (*nfs4_root_export_fh_callback_t)(
  * may run synchronously.  Fails with CHIMERA_VFS_ENOENT when no "/" export is
  * configured.
  */
-void
+SYMBOL_EXPORT void
 nfs4_root_export_fh_get(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
@@ -161,7 +163,7 @@ nfs4_root_export_fh_get(
  * so a backend whose root FH changed (e.g. a remount under a live export)
  * heals on the next mount rather than serving a stale handle forever.
  */
-void
+SYMBOL_EXPORT void
 nfs4_root_export_fh_resolve(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
@@ -175,7 +177,7 @@ nfs4_root_export_fh_resolve(
  * case the export path is resolved first.  With no "/" export configured this
  * is a cheap lockless check that always resumes with at_root_export == 0.
  */
-void
+SYMBOL_EXPORT void
 nfs4_root_junction_check(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
@@ -197,7 +199,7 @@ chimera_nfs4_putrootfh_common(
  * @param thread Pointer to the NFS server thread context.
  * @param req    Pointer to the NFS request structure.
  */
-void
+SYMBOL_EXPORT void
 nfs4_root_readdir(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req);

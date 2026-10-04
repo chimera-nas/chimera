@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+
+#include "vfs_sdk_export.h"
 #include <stdint.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -181,7 +183,7 @@ struct chimera_acl;
  * no-op.  This is the single source of truth for that three-way decision; the
  * native-storage backends (memfs/cairn/diskfs) all route through it.
  */
-int
+CHIMERA_VFS_SDK_EXPORT int
 chimera_vfs_resolve_set_time(
     const struct timespec *in,
     const struct timespec *now,
@@ -336,7 +338,7 @@ chimera_vfs_timespec_ge(
  * relatime_need_update.  The resulting bump must touch atime ONLY -- never ctime
  * -- so that after a bump conditions 1 and 2 are false until the next write.
  */
-int
+CHIMERA_VFS_SDK_EXPORT int
 chimera_vfs_relatime_needs_update(
     const struct timespec *atime,
     const struct timespec *mtime,

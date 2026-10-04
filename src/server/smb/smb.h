@@ -9,7 +9,7 @@
 #include "prometheus-c.h"
 struct chimera_smb_share;
 
-void
+SYMBOL_EXPORT void
 chimera_smb_add_share(
     void       *smb_shared,
     const char *name,
@@ -17,31 +17,31 @@ chimera_smb_add_share(
     int         continuous_availability);
 
 /* Enable access-based directory enumeration on a named share. */
-int
+SYMBOL_EXPORT int
 chimera_smb_share_set_access_based_enum(
     void       *smb_shared,
     const char *name);
 
 /* Enable per-share SMB3 encryption (SMB2_SHAREFLAG_ENCRYPT_DATA) on a named
  * share. */
-int
+SYMBOL_EXPORT int
 chimera_smb_share_set_encrypt_data(
     void       *smb_shared,
     const char *name);
 
 /* Force level-2 oplocks (SMB2_SHAREFLAG_FORCE_LEVELII_OPLOCK) on a named share:
  * the server grants at most a read (LEVEL_II) cache there. */
-int
+SYMBOL_EXPORT int
 chimera_smb_share_set_force_level2_oplock(
     void       *smb_shared,
     const char *name);
 
-int
+SYMBOL_EXPORT int
 chimera_smb_remove_share(
     void       *smb_shared,
     const char *name);
 
-const struct chimera_smb_share *
+SYMBOL_EXPORT const struct chimera_smb_share *
 chimera_smb_get_share(
     void       *smb_shared,
     const char *name);
@@ -50,17 +50,17 @@ typedef int (*chimera_smb_share_iterate_cb)(
     const struct chimera_smb_share *share,
     void                           *data);
 
-void
+SYMBOL_EXPORT void
 chimera_smb_iterate_shares(
     void                        *smb_shared,
     chimera_smb_share_iterate_cb callback,
     void                        *data);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_smb_share_get_name(
     const struct chimera_smb_share *share);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_smb_share_get_path(
     const struct chimera_smb_share *share);
 

@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include "smb2.h"
 
 struct chimera_smb_request;
@@ -12,15 +14,15 @@ struct chimera_smb_compound;
 struct evpl_iovec;
 struct chimera_smb_signing_ctx;
 
-struct chimera_smb_signing_ctx *
+SYMBOL_EXPORT struct chimera_smb_signing_ctx *
 chimera_smb_signing_ctx_create(
     void);
 
-void
+SYMBOL_EXPORT void
 chimera_smb_signing_ctx_destroy(
     struct chimera_smb_signing_ctx *ctx);
 
-int
+SYMBOL_EXPORT int
 chimera_smb_derive_signing_key(
     int            dialect,
     void          *output,
@@ -33,7 +35,7 @@ chimera_smb_derive_signing_key(
  * and encryption key derivation.  Returns 1 on success, 0 on failure.  Pass
  * label/context lengths INCLUDING any trailing NUL the spec requires.
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_kbkdf(
     const uint8_t *key,
     size_t         key_len,
@@ -45,7 +47,7 @@ chimera_smb_kbkdf(
     size_t         out_len);
 
 /* Extend an SMB 3.1.1 preauth-integrity hash in place: hash = SHA512(hash||msg). */
-void
+SYMBOL_EXPORT void
 chimera_smb_preauth_extend(
     uint8_t    *hash,
     const void *msg,
@@ -74,7 +76,7 @@ chimera_smb_sign_compound(
  * header (not the NetBIOS framing).  Sets SMB2_FLAGS_SIGNED and writes
  * the signature into hdr->signature.
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_sign_message(
     struct chimera_smb_signing_ctx *ctx,
     int                             dialect,
@@ -87,7 +89,7 @@ chimera_smb_sign_message(
  * Shared: the client signs its requests and the server signs its replies with
  * exactly this, so a divergence here is a MAC mismatch rather than a build
  * error. */
-int
+SYMBOL_EXPORT int
 chimera_smb_compute_signature_alg(
     struct chimera_smb_signing_ctx *ctx,
     uint16_t                        dialect,

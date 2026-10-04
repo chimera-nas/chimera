@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 /*
  * Identity resolver: the asynchronous front-end to the user cache (the single
  * identity authority).  A lookup that hits the cache returns synchronously on
@@ -65,17 +67,17 @@ typedef int (*chimera_vfs_identity_handler)(
     struct chimera_vfs_identity_result *out,
     void                               *private_data);
 
-struct chimera_vfs_identity *
+SYMBOL_EXPORT struct chimera_vfs_identity *
 chimera_vfs_identity_create(
     struct chimera_vfs *vfs,
     int                 num_workers);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_identity_destroy(
     struct chimera_vfs_identity *identity);
 
 /* Register a miss handler (e.g. the SMB server registers a winbind handler). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_identity_register_handler(
     struct chimera_vfs          *vfs,
     chimera_vfs_identity_handler handler,
@@ -87,7 +89,7 @@ chimera_vfs_identity_register_handler(
  * BY_UID/BY_GID; `name` (a NUL-terminated username or SID string) for
  * BY_NAME/BY_SID.
  */
-void
+SYMBOL_EXPORT void
 chimera_vfs_identity_resolve(
     struct chimera_vfs_thread    *thread,
     enum chimera_vfs_identity_key key,
@@ -97,7 +99,7 @@ chimera_vfs_identity_resolve(
     void                         *private_data);
 
 /* Drain this thread's completed resolve jobs (called from its doorbell). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_identity_thread_complete(
     struct chimera_vfs_thread *thread);
 
@@ -106,7 +108,7 @@ chimera_vfs_identity_thread_complete(
  * resolution).  Lets a caller decide whether a resolve would block before
  * committing to the async park path.
  */
-int
+SYMBOL_EXPORT int
 chimera_vfs_identity_cached(
     struct chimera_vfs           *vfs,
     enum chimera_vfs_identity_key key,

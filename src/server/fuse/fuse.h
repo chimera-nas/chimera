@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 /*
  * FUSE protocol server: exposes chimera VFS paths as kernel filesystems on
  * the local host by speaking the FUSE kernel ABI directly against /dev/fuse.
@@ -23,7 +25,7 @@ extern struct chimera_server_protocol fuse_protocol;
  * per kernel queue when the kernel offers FUSE-over-io_uring, default 16 or
  * $CHIMERA_FUSE_URING_DEPTH; 0 keeps the mount on plain /dev/fuse reads).  Returns 0 on success.
  */
-int
+SYMBOL_EXPORT int
 chimera_fuse_add_mount(
     void       *fuse_shared,
     const char *mountpoint,
@@ -38,7 +40,7 @@ chimera_fuse_add_mount(
  * /dev/fuse's one-read-one-request contract.  The server takes no notice of
  * the difference; only mount setup does.  Test-only.
  */
-int
+SYMBOL_EXPORT int
 chimera_fuse_add_synthetic_mount(
     void       *fuse_shared,
     const char *path,

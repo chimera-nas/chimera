@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+
+#include "vfs_sdk_export.h"
 #ifdef _MSC_VER
 #define CHIMERA_VFS_NORETURN __declspec(noreturn)
 #else // ifdef _MSC_VER
@@ -18,42 +20,42 @@
  * vocabulary; the level gate is the only logic they carry.
  */
 
-extern int ChimeraLogLevel;
+extern CHIMERA_VFS_SDK_COMMON_DATA int ChimeraLogLevel;
 
 #define CHIMERA_LOG_FATAL    1
 #define CHIMERA_LOG_ERROR    2
 #define CHIMERA_LOG_INFO     3
 #define CHIMERA_LOG_DEBUG    4
 
-void __chimera_debug(
+CHIMERA_VFS_SDK_EXPORT void __chimera_debug(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-void __chimera_info(
+CHIMERA_VFS_SDK_EXPORT void __chimera_info(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-void __chimera_error(
+CHIMERA_VFS_SDK_EXPORT void __chimera_error(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-CHIMERA_VFS_NORETURN void __chimera_fatal(
+CHIMERA_VFS_SDK_EXPORT CHIMERA_VFS_NORETURN void __chimera_fatal(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-CHIMERA_VFS_NORETURN void __chimera_abort(
+CHIMERA_VFS_SDK_EXPORT CHIMERA_VFS_NORETURN void __chimera_abort(
     const char *mod,
     const char *file,
     int         line,
