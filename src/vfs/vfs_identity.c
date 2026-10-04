@@ -401,7 +401,7 @@ chimera_vfs_identity_add_handler(
 
 /* ---- lifecycle --------------------------------------------------------- */
 
-SYMBOL_EXPORT SYMBOL_EXPORT struct chimera_vfs_identity *
+SYMBOL_EXPORT struct chimera_vfs_identity *
 chimera_vfs_identity_create(
     struct chimera_vfs *vfs,
     int                 num_workers)
