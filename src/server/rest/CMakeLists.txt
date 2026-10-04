@@ -51,7 +51,7 @@ else()
     endif()
 endif()
 
-target_link_libraries(chimera_rest chimera_vfs evpl_http evpl
+target_link_libraries(chimera_rest chimera_server_core chimera_server_config chimera_vfs evpl_http evpl
                       chimera_crypto ${CHIMERA_CRYPT_LIB})
 
 # Embed Swagger UI files at build time

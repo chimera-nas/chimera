@@ -4,6 +4,6 @@
 
 add_library(chimera_metrics ${CHIMERA_LIBRARY_TYPE} metrics.c)
 
-target_link_libraries(chimera_metrics evpl_http prometheus-c)
+target_link_libraries(chimera_metrics chimera_common evpl_http prometheus-c)
 
 install(TARGETS chimera_metrics DESTINATION lib)

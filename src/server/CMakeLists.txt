@@ -9,12 +9,24 @@
 # alongside CHIMERA_HAVE_URCU in the top-level CMakeLists.txt.)
 add_compile_definitions(_LGPL_SOURCE)
 
-add_library(chimera_server ${CHIMERA_LIBRARY_TYPE} server.c)
-target_link_libraries(chimera_server chimera_nfs chimera_s3 chimera_smb chimera_rest chimera_vfs chimera_common evpl ${CHIMERA_UNWIND_LIB} ${CHIMERA_OTEL_LIBS})
-# The VFS backends are loaded at runtime, not linked (src/vfs/CMakeLists.txt).
-add_dependencies(chimera_server chimera_vfs_modules)
+# The server configuration, below both the server and the protocol servers
+# that read it: they link it rather than chimera_server, which links them.
+add_library(chimera_server_config ${CHIMERA_LIBRARY_TYPE} server_config.c)
+target_link_libraries(chimera_server_config chimera_common evpl)
 
-install(TARGETS chimera_server DESTINATION lib)
+# The server proper.  It reaches its management plane (REST) only through the
+# hooks in server_mgmt.h: REST manages the server, so REST links it.
+add_library(chimera_server_core ${CHIMERA_LIBRARY_TYPE} server.c)
+target_link_libraries(chimera_server_core chimera_server_config chimera_nfs chimera_s3 chimera_smb chimera_vfs chimera_common evpl ${CHIMERA_UNWIND_LIB} ${CHIMERA_OTEL_LIBS})
+# The VFS backends are loaded at runtime, not linked (src/vfs/CMakeLists.txt).
+add_dependencies(chimera_server_core chimera_vfs_modules)
+
+# chimera_server_init: the server with REST as its management plane, in a
+# library above both.  What daemons and tests link.
+add_library(chimera_server ${CHIMERA_LIBRARY_TYPE} server_rest.c)
+target_link_libraries(chimera_server chimera_server_core chimera_rest)
+
+install(TARGETS chimera_server_config chimera_server_core chimera_server DESTINATION lib)
 
 # RPCSEC_GSS for the client half.  krb5_local.c is libevpl's self-contained
 # test realm -- real MIT krb5, no KDC, no keytab file, no network -- compiled
@@ -72,7 +84,7 @@ add_subdirectory(rest)
 # registration with #ifdef __linux__.
 if (CHIMERA_LINUX)
     add_subdirectory(fuse)
-    target_link_libraries(chimera_server chimera_fuse)
+    target_link_libraries(chimera_server_core chimera_fuse)
 endif()
 
 if (NOT DISABLE_TESTS)
