@@ -1224,7 +1224,7 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
      * completed and rung back, so no in-flight delegated close remains.  But the
      * close thread's event loop is still running after that handshake -- its
      * periodic timer sweep and idle-lease reaper can issue *new* closes, which
-     * for a backend whose close blocks (cairn, linux) route through a
+     * for a CHIMERA_VFS_CAP_BLOCKING backend (cairn, linux) route through a
      * delegation thread and ring its doorbell.  If the delegation threads (and
      * their doorbells) were torn down first, such a late close would ring a
      * closed doorbell fd -> EBADF fatal abort (a use-after-close of the

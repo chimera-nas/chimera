@@ -607,7 +607,7 @@ endif()
 #
 # Linking libaio is not enough: libaio >= 0.3.113 implements io_getevents()
 # with the io_pgetevents syscall, which the default seccomp profile of
-# podman/docker denies (ENOSYS).  libevpl's libaio poller reads that as "no
+# podman/docker denies (EPERM).  libevpl's libaio poller reads that as "no
 # completions yet", so every diskfs I/O waits forever.  Probe the call this
 # configure environment will test in, and fall back to pread when it fails.
 if (HAVE_LIBAIO AND NOT CMAKE_CROSSCOMPILING)
