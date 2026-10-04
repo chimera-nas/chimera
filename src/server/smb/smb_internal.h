@@ -1098,6 +1098,9 @@ struct chimera_smb_request {
              * INFO_LENGTH_MISMATCH / BUFFER_OVERFLOW before marshalling. */
             uint32_t                        max_response_size;
             uint32_t                        min_length;
+            /* The reply was cut to max_response_size: it still carries the
+             * part that fits, and completes STATUS_BUFFER_OVERFLOW. */
+            int                             truncated;
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_attrs        r_attrs;
             struct chimera_smb_fs_attrs     r_fs_attrs;
@@ -1247,6 +1250,9 @@ struct chimera_smb_request {
             struct evpl_iovec             iov;
             struct chimera_smb_open_file *open_file;
             uint32_t                     *last_file_offset;
+            /* Where the last entry's name ends: the reply stops there, not at
+             * the alignment padding that would precede a further entry. */
+            uint32_t                      last_entry_end;
             char                          pattern[SMB_FILENAME_MAX];
         } query_directory;
 
