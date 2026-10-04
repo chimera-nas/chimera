@@ -440,6 +440,20 @@ jobs:
         run: |
           $dir = & src/server/smb/tests/windows_client/ifstest/fetch_kit.ps1
           "IFSTEST_DIR=$dir" >> $env:GITHUB_ENV
+      # Windows' redirector keeps file-information, not-found and directory
+      # caches for a remote server, and answers queries from them -- including
+      # ones that follow its own SET_INFO.  It turns them off for the loopback
+      # connection to Windows' own server, so the NTFS-over-SMB baseline runs
+      # without them; run chimera the same way, so a result reflects what the
+      # server answered rather than what the client remembered.
+      - name: Turn off the redirector's information caches
+        shell: pwsh
+        run: |
+          $k = 'HKLM:\System\CurrentControlSet\Services\LanmanWorkstation\Parameters'
+          foreach ($n in 'FileInfoCacheLifetime', 'FileNotFoundCacheLifetime', 'DirectoryCacheLifetime') {
+            New-ItemProperty -Path $k -Name $n -Value 0 -PropertyType DWord -Force | Out-Null
+          }
+          Restart-Service LanmanWorkstation -Force
       - name: Run IFSTest against memfs, diskfs and cairn
         shell: pwsh
         timeout-minutes: 100
