@@ -14,7 +14,30 @@
 
 #include "common/chimera_rcu.h"
 
+#ifdef _WIN32
+/* Private to this DLL: chimera_rcu_pend reaches it (chimera_rcu.h). */
+static CHIMERA_THREAD_LOCAL struct chimera_rcu_pending chimera_rcu_pending;
+
+SYMBOL_EXPORT void
+chimera_rcu_pend(
+    chimera_rcu_head *head,
+    chimera_rcu_cb    func)
+{
+    if (!head) {
+        return;
+    }
+
+    if (chimera_rcu_pending.n == CHIMERA_RCU_PENDING_MAX) {
+        chimera_rcu_pending_flush();
+    }
+
+    chimera_rcu_pending.entry[chimera_rcu_pending.n].head = head;
+    chimera_rcu_pending.entry[chimera_rcu_pending.n].func = func;
+    chimera_rcu_pending.n++;
+} /* chimera_rcu_pend */
+#else /* ifdef _WIN32 */
 SYMBOL_EXPORT                           CHIMERA_THREAD_LOCAL struct chimera_rcu_pending chimera_rcu_pending;
+#endif /* ifdef _WIN32 */
 
 SYMBOL_EXPORT struct chimera_rcu_domain chimera_rcu_global;
 

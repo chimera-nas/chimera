@@ -11,7 +11,12 @@
  * would inside the server process.
  */
 
+#ifdef _WIN32
+#include <windows.h>
+#else /* ifdef _WIN32 */
 #include <dlfcn.h>
+#endif /* ifdef _WIN32 */
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +28,6 @@ main(
     int    argc,
     char **argv)
 {
-    void                      *handle;
     struct chimera_vfs_module *module;
 
     if (argc != 2) {
@@ -31,7 +35,24 @@ main(
         return 1;
     }
 
-    handle = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
+#ifdef _WIN32
+    HMODULE handle = LoadLibraryA(argv[1]);
+
+    if (!handle) {
+        fprintf(stderr, "LoadLibrary %s failed: error %lu\n", argv[1],
+                (unsigned long) GetLastError());
+        return 1;
+    }
+
+    module = (struct chimera_vfs_module *) (uintptr_t) GetProcAddress(handle, "vfs_example");
+
+    if (!module) {
+        fprintf(stderr, "vfs_example symbol not found: error %lu\n",
+                (unsigned long) GetLastError());
+        return 1;
+    }
+#else /* ifdef _WIN32 */
+    void *handle = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
 
     if (!handle) {
         fprintf(stderr, "dlopen %s failed: %s\n", argv[1], dlerror());
@@ -44,6 +65,7 @@ main(
         fprintf(stderr, "vfs_example symbol not found: %s\n", dlerror());
         return 1;
     }
+#endif /* ifdef _WIN32 */
 
     if (module->sdk_version != CHIMERA_VFS_SDK_VERSION) {
         fprintf(stderr, "sdk_version %u != %u\n",

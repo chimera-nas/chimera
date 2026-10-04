@@ -4,8 +4,15 @@
 
 #pragma once
 #include <stdint.h>
+#include "common/export.h"
 
-extern struct chimera_server_protocol nfs_protocol;
+#ifdef CHIMERA_NFS_BUILD
+#define CHIMERA_NFS_DATA                CHIMERA_DATA_EXPORT
+#else // ifdef CHIMERA_NFS_BUILD
+#define CHIMERA_NFS_DATA                CHIMERA_DATA_IMPORT
+#endif // ifdef CHIMERA_NFS_BUILD
+
+extern CHIMERA_NFS_DATA struct chimera_server_protocol nfs_protocol;
 
 struct chimera_nfs_export;
 

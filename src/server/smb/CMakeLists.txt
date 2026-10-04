@@ -68,3 +68,6 @@ if (NOT DISABLE_TESTS)
 
     add_subdirectory(tests)
 endif()
+
+# Exports its data rather than importing it (common/export.h).
+target_compile_definitions(chimera_smb PRIVATE CHIMERA_SMB_BUILD)
