@@ -5,6 +5,7 @@
 #ifndef __VFS_DUMP_H__
 #define __VFS_DUMP_H__
 
+#include "common/export.h"
 #include "common/logging.h"
 
 struct chimera_vfs_request;
@@ -24,7 +25,7 @@ void __chimera_vfs_dump_reply(
  * tracing is compiled out the whole call expands to nothing (no function
  * reference, no engine call). */
 #if CHIMERA_HAVE_OTEL
-void _chimera_vfs_trace_complete(
+SYMBOL_EXPORT void _chimera_vfs_trace_complete(
     struct chimera_vfs_request *request);
 #define chimera_vfs_trace_complete(request) \
         do { if (otel_span_recording(&(request)->otel)) { \

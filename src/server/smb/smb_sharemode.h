@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 #include "common/thread.h"
 #include "vfs/vfs.h"
@@ -52,15 +54,15 @@ struct chimera_smb_sharemode_table {
     struct chimera_smb_sharemode_file *buckets[CHIMERA_SMB_SHAREMODE_BUCKETS];
 };
 
-void
+SYMBOL_EXPORT void
 chimera_smb_sharemode_init(
     struct chimera_smb_sharemode_table *table);
 
-void
+SYMBOL_EXPORT void
 chimera_smb_sharemode_destroy(
     struct chimera_smb_sharemode_table *table);
 
-int
+SYMBOL_EXPORT int
 chimera_smb_sharemode_acquire(
     struct chimera_smb_sharemode_table *table,
     const uint8_t                      *parent_fh,
@@ -71,7 +73,7 @@ chimera_smb_sharemode_acquire(
     uint32_t                            share_access,
     struct chimera_smb_open_file       *open_file);
 
-void
+SYMBOL_EXPORT void
 chimera_smb_sharemode_release(
     struct chimera_smb_sharemode_table *table,
     struct chimera_smb_open_file       *open_file);

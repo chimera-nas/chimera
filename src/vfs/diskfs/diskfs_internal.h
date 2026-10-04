@@ -3594,7 +3594,7 @@ diskfs_commit(
     struct chimera_vfs_request *request,
     void                       *private_data);
 
-extern struct chimera_vfs_module vfs_diskfs;
+extern SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs;
 
 
 /* ------------------------------------------------------------------ */

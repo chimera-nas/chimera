@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -87,7 +89,7 @@ int smb_wbclient_map_principal(
 
 // Check if winbind is available
 // Returns: 1 if available, 0 if not
-int smb_wbclient_available(
+SYMBOL_EXPORT int smb_wbclient_available(
     void);
 
 // Fetch the NetBIOS identity winbind is joined with (name of the machine

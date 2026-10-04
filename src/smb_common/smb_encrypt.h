@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -38,7 +40,7 @@ struct chimera_smb_session;
  * preauth_hash (64 bytes) is required for SMB 3.1.1, ignored otherwise.
  * Returns 0 on success, -1 on failure.
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_derive_encryption_keys(
     int            is_client,
     int            dialect,
@@ -55,11 +57,11 @@ chimera_smb_derive_encryption_keys(
  * signing context: a per-thread object pre-fetches the AEAD ciphers and holds a
  * reusable crypto context (which is NOT thread-safe, hence per-thread).
  */
-struct chimera_smb_encrypt_ctx *
+SYMBOL_EXPORT struct chimera_smb_encrypt_ctx *
 chimera_smb_encrypt_ctx_create(
     void);
 
-void
+SYMBOL_EXPORT void
 chimera_smb_encrypt_ctx_destroy(
     struct chimera_smb_encrypt_ctx *ctx);
 
@@ -73,7 +75,7 @@ chimera_smb_encrypt_ctx_destroy(
  * with the AEAD tag written into the transform Signature field.  The caller
  * fills the reserved transport header and sends out_iov.  Returns 0 on success.
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_encrypt_compound(
     struct chimera_smb_encrypt_ctx *ctx,
     struct evpl                    *evpl,
@@ -97,7 +99,7 @@ chimera_smb_encrypt_compound(
  * decrypted SMB2 message, sets *plain_len_out, and returns 0.  On a malformed
  * header or AEAD tag-verification failure returns -1 (nothing allocated).
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_decrypt_message(
     struct chimera_smb_encrypt_ctx *ctx,
     struct evpl                    *evpl,

@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 #include "common/thread.h"
 #include <uthash.h>
@@ -227,7 +229,7 @@ struct chimera_vfs_notify {
 
 /* Public API */
 
-struct chimera_vfs_notify *
+SYMBOL_EXPORT struct chimera_vfs_notify *
 chimera_vfs_notify_init(
     struct chimera_vfs *vfs);
 
@@ -244,11 +246,11 @@ chimera_vfs_notify_init(
  * frontends (NFS/SMB/S3 servers) before tearing down the VFS.  Tests
  * that need concurrent shutdown must arrange their own quiescence.
  */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_destroy(
     struct chimera_vfs_notify *notify);
 
-struct chimera_vfs_notify_watch *
+SYMBOL_EXPORT struct chimera_vfs_notify_watch *
 chimera_vfs_notify_watch_create(
     struct chimera_vfs_notify    *notify,
     const uint8_t                *dir_fh,
@@ -258,7 +260,7 @@ chimera_vfs_notify_watch_create(
     chimera_vfs_notify_callback_t callback,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_watch_destroy(
     struct chimera_vfs_notify       *notify,
     struct chimera_vfs_notify_watch *watch);
@@ -268,14 +270,14 @@ chimera_vfs_notify_watch_destroy(
  * different CompletionFilter or WATCH_TREE flag — without this we
  * would either deliver too many events (filter ignored) or never
  * adjust subtree scope (watch_tree fixed at first request). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_watch_update(
     struct chimera_vfs_notify       *notify,
     struct chimera_vfs_notify_watch *watch,
     uint32_t                         filter_mask,
     int                              watch_tree);
 
-int
+SYMBOL_EXPORT int
 chimera_vfs_notify_drain(
     struct chimera_vfs_notify_watch *watch,
     struct chimera_vfs_notify_event *events,
@@ -289,7 +291,7 @@ chimera_vfs_notify_drain(
  * rescan, so the *next* CHANGE_NOTIFY on the handle must also report overflow
  * (MS-SMB2 / smb2.notify.valid-req).
  */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_mark_overflow(
     struct chimera_vfs_notify_watch *watch);
 
@@ -299,11 +301,11 @@ chimera_vfs_notify_mark_overflow(
  * polls this alongside drain to complete a pending CHANGE_NOTIFY with
  * STATUS_DELETE_PENDING.
  */
-int
+SYMBOL_EXPORT int
 chimera_vfs_notify_watch_take_deleted(
     struct chimera_vfs_notify_watch *watch);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_emit(
     struct chimera_vfs_notify *notify,
     const uint8_t             *dir_fh,
@@ -319,7 +321,7 @@ chimera_vfs_notify_emit(
  * directory-lease break this fires: the mutating client's cached directory view
  * is coherent with the change it just made (MS-SMB2 dirlease self-exemption).
  * `has_skip` == false is exactly chimera_vfs_notify_emit (break every lease). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_emit_lease(
     struct chimera_vfs_notify *notify,
     const uint8_t             *dir_fh,
@@ -337,7 +339,7 @@ chimera_vfs_notify_emit_lease(
  * the SMB create path when a create-capable disposition only opened an existing
  * file — change-notify fires (conservatively) but the directory's contents did
  * not change, so a directory read lease must not be recalled. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_emit_nobreak(
     struct chimera_vfs_notify *notify,
     const uint8_t             *dir_fh,
@@ -354,7 +356,7 @@ chimera_vfs_notify_emit_nobreak(
  * CHANGE_NOTIFY on a handle to the now-deleted directory completes with
  * STATUS_DELETE_PENDING instead of parking forever.
  */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_emit_delete(
     struct chimera_vfs_notify *notify,
     const uint8_t             *fh,
@@ -386,7 +388,7 @@ chimera_vfs_notify_emit_delete(
 
 /* Mark a watch as a sync watcher owned by `origin` (may be NULL, though a
  * NULL-origin sync watch gates even its own endpoint's mutations). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_watch_set_sync(
     struct chimera_vfs_notify       *notify,
     struct chimera_vfs_notify_watch *watch,
@@ -395,27 +397,27 @@ chimera_vfs_notify_watch_set_sync(
 /* Detach and return the watch's queued sync events (FIFO order).  Each
  * returned event MUST eventually be passed to chimera_vfs_notify_gate_ack
  * or its gate stalls until the deadline sweep. */
-struct chimera_vfs_notify_sync_event *
+SYMBOL_EXPORT struct chimera_vfs_notify_sync_event *
 chimera_vfs_notify_drain_sync(
     struct chimera_vfs_notify_watch *watch);
 
 /* Acknowledge one sync event: the consumer has invalidated its caches for
  * the event's name(s).  Frees the event; the last outstanding ack resumes
  * the gated operation's completion on its owning thread. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_gate_ack(
     struct chimera_vfs_notify            *notify,
     struct chimera_vfs_notify_sync_event *event);
 
 /* Fire every gate past its deadline (called from the periodic close-thread
  * sweep). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_gate_sweep(
     struct chimera_vfs_notify *notify);
 
 /* vfs_notify_gate.c: install the completion gate on a namespace-mutating
  * request when sync watchers exist.  Called by chimera_vfs_dispatch; cheap
  * no-op when no sync watches are registered. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_gate_install(
     struct chimera_vfs_request *request);

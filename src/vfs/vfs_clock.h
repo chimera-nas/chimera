@@ -27,10 +27,10 @@ struct chimera_vfs_clock {
 
 extern CHIMERA_VFS_DATA struct chimera_vfs_clock chimera_vfs_clock;
 
-void chimera_vfs_clock_init(
+SYMBOL_EXPORT void chimera_vfs_clock_init(
     void);
 
-void chimera_vfs_clock_shutdown(
+SYMBOL_EXPORT void chimera_vfs_clock_shutdown(
     void);
 
 /* Monotonic time in stopwatch ticks since init. */

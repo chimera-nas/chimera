@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "vfs_sdk_export.h"
+
 /*
  * Native Windows security identifier (SID) value type.
  *
@@ -52,7 +54,7 @@ _Static_assert(sizeof(struct chimera_sid) == 72,
  * its length (8 + 4 * sub_authority_count), or -1 if the buffer is too short
  * or the sub-authority count exceeds CHIMERA_SID_MAX_SUB_AUTHS.
  */
-int chimera_sid_bin_len(
+CHIMERA_VFS_SDK_EXPORT int chimera_sid_bin_len(
     const uint8_t *buf,
     uint32_t       avail);
 
@@ -62,7 +64,7 @@ int chimera_sid_bin_len(
  * consumed from `buf`, or -1 on a malformed/truncated SID or a too-small
  * `out`.
  */
-int chimera_sid_bin_to_str(
+CHIMERA_VFS_SDK_EXPORT int chimera_sid_bin_to_str(
     const uint8_t *buf,
     uint32_t       len,
     char          *out,
@@ -73,7 +75,7 @@ int chimera_sid_bin_to_str(
  * (capacity `outcap`).  Strict: digits only, no trailing text.  Returns the
  * binary length written, or -1 on malformed input / insufficient capacity.
  */
-int chimera_sid_str_to_bin(
+CHIMERA_VFS_SDK_EXPORT int chimera_sid_str_to_bin(
     const char *str,
     uint8_t    *out,
     int         outcap);
@@ -82,19 +84,19 @@ int chimera_sid_str_to_bin(
  * Copy the binary SID at the start of `buf` into `sid`.  Returns the number
  * of bytes consumed, or -1 (and `sid` cleared) if it is malformed.
  */
-int chimera_sid_from_bin(
+CHIMERA_VFS_SDK_EXPORT int chimera_sid_from_bin(
     struct chimera_sid *sid,
     const uint8_t      *buf,
     uint32_t            avail);
 
 /* Format `sid` as text.  Returns the string length, or -1 if absent/too small. */
-int chimera_sid_to_str(
+CHIMERA_VFS_SDK_EXPORT int chimera_sid_to_str(
     const struct chimera_sid *sid,
     char                     *out,
     int                       outlen);
 
 /* Parse text into `sid`.  Returns 0, or -1 (and `sid` cleared) on bad input. */
-int chimera_sid_from_str(
+CHIMERA_VFS_SDK_EXPORT int chimera_sid_from_str(
     struct chimera_sid *sid,
     const char         *str);
 
@@ -116,7 +118,7 @@ int chimera_sid_from_str(
  * neither SID is present -- nothing to store, and no record should exist --
  * or -1 when `outcap` is too small.
  */
-int chimera_sid_pair_encode(
+CHIMERA_VFS_SDK_EXPORT int chimera_sid_pair_encode(
     const struct chimera_sid *owner,
     const struct chimera_sid *group,
     uint8_t                  *out,
@@ -131,7 +133,7 @@ int chimera_sid_pair_encode(
  * is still positionally reachable after a malformed one is decoded anyway,
  * and bytes after the group SID are ignored.
  */
-int chimera_sid_pair_decode(
+CHIMERA_VFS_SDK_EXPORT int chimera_sid_pair_decode(
     const uint8_t      *buf,
     int                 len,
     struct chimera_sid *owner,

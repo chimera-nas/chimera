@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <jansson.h>
 
 /*
@@ -28,16 +30,16 @@
  * active afterwards, 0 if disabled or unavailable.  `config` is the parsed
  * top-level JSON (may be NULL).
  */
-int chimera_tracing_init(
+SYMBOL_EXPORT int chimera_tracing_init(
     json_t *config);
 
 /* Tear down tracing (flush + close exporters).  Safe if init returned 0. */
-void chimera_tracing_destroy(
+SYMBOL_EXPORT void chimera_tracing_destroy(
     void);
 
 /* Register/unregister the calling thread as a span producer.  No-ops unless
  * tracing came up. */
-void chimera_tracing_thread_register(
+SYMBOL_EXPORT void chimera_tracing_thread_register(
     void);
-void chimera_tracing_thread_unregister(
+SYMBOL_EXPORT void chimera_tracing_thread_unregister(
     void);

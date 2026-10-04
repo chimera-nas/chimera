@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -22,11 +24,11 @@ struct chimera_smb_compress_ctx;
  * §2.2.42.2.2), and the NONE chained pass-through.  All are advertised by the
  * negotiation layer and may be selected by a peer.
  */
-struct chimera_smb_compress_ctx *
+SYMBOL_EXPORT struct chimera_smb_compress_ctx *
 chimera_smb_compress_ctx_create(
     void);
 
-void
+SYMBOL_EXPORT void
 chimera_smb_compress_ctx_destroy(
     struct chimera_smb_compress_ctx *ctx);
 
@@ -37,14 +39,14 @@ chimera_smb_compress_ctx_destroy(
  * the compressed length, or -1 if the result would not fit in out_cap (the
  * caller then sends the message uncompressed).  Exposed for unit tests.
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_lz77_decompress(
     const uint8_t *in,
     int            in_len,
     uint8_t       *out,
     int            out_len);
 
-int
+SYMBOL_EXPORT int
 chimera_smb_lz77_compress(
     const uint8_t *in,
     int            in_len,
@@ -57,14 +59,14 @@ chimera_smb_lz77_compress(
  * returns the compressed length or -1 if it would not fit.  Exposed for unit
  * tests.
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_lznt1_decompress(
     const uint8_t *in,
     int            in_len,
     uint8_t       *out,
     int            out_len);
 
-int
+SYMBOL_EXPORT int
 chimera_smb_lznt1_compress(
     const uint8_t *in,
     int            in_len,
@@ -76,14 +78,14 @@ chimera_smb_lznt1_compress(
  * and returns the count; compress() returns the compressed length or -1.
  * Exposed for unit tests.
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_lz77huffman_decompress(
     const uint8_t *in,
     int            in_len,
     uint8_t       *out,
     int            out_len);
 
-int
+SYMBOL_EXPORT int
 chimera_smb_lz77huffman_compress(
     const uint8_t *in,
     int            in_len,
@@ -99,7 +101,7 @@ chimera_smb_lz77huffman_compress(
  * reconstructed SMB2 message, sets *plain_len_out, and returns 0.  On a
  * malformed header / payload returns -1 (nothing allocated).
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_decompress_message(
     struct chimera_smb_compress_ctx *ctx,
     struct evpl                     *evpl,
@@ -120,7 +122,7 @@ chimera_smb_decompress_message(
  * transport framing) and returns 0.  Returns -1 — and allocates nothing — when
  * compression did not shrink the payload (the caller then sends the plaintext).
  */
-int
+SYMBOL_EXPORT int
 chimera_smb_compress_message(
     struct chimera_smb_compress_ctx *ctx,
     struct evpl                     *evpl,
