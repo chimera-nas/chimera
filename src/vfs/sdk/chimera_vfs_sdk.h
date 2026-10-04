@@ -49,6 +49,7 @@
 #include "vfs_request.h"
 #include "vfs_module.h"
 #include "vfs_utils.h"
+#include "vfs_casefold.h"
 #include "vfs_log.h"
 #include "vfs_tcp_flavor.h"
 

@@ -90,6 +90,10 @@ add_test(chimera/vfs/claim_test vfs_claim_test)
 set_tests_properties(chimera/vfs/claim_test PROPERTIES TIMEOUT 30)
 set(CHIMERA_TEST_TIER "${_claim_saved_tier}")
 
+add_executable(vfs_casefold_test vfs_casefold_test.c)
+target_link_libraries(vfs_casefold_test chimera_vfs)
+add_test(chimera/vfs/casefold_test vfs_casefold_test)
+
 add_executable(vfs_acl_test vfs_acl_test.c)
 target_link_libraries(vfs_acl_test chimera_vfs)
 add_test(chimera/vfs/acl_test vfs_acl_test)
