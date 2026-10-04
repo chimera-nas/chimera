@@ -38,7 +38,7 @@ set_source_files_properties(${NDR_GEN_SRCS}
     PROPERTIES COMPILE_OPTIONS "${CHIMERA_GENERATED_C_OPTIONS}")
 add_dependencies(chimera_smb ndrzcc)
 
-target_link_libraries(chimera_smb chimera_smb_common chimera_vfs evpl ${CHIMERA_GSS_LIB})
+target_link_libraries(chimera_smb chimera_server_config chimera_smb_common chimera_vfs evpl ${CHIMERA_GSS_LIB})
 
 # SMB string conversion needs iconv even when Kerberos is disabled.
 if(NOT WIN32)
