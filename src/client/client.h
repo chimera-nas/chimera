@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+
+#include "common/export.h"
 #include "common/platform.h"
 
 #include <sys/types.h>
@@ -26,18 +28,18 @@ struct chimera_client_config;
 struct chimera_client_fh;
 struct prometheus_metrics;
 
-struct chimera_client_config *
+SYMBOL_EXPORT struct chimera_client_config *
 chimera_client_config_init(
     void);
 
-void
+SYMBOL_EXPORT void
 chimera_client_config_add_module(
     struct chimera_client_config *config,
     const char                   *module_name,
     const char                   *module_path,
     const char                   *config_data);
 
-void
+SYMBOL_EXPORT void
 chimera_client_config_set_tcp_flavor(
     struct chimera_client_config *config,
     enum chimera_tcp_flavor       flavor);
@@ -47,7 +49,7 @@ chimera_client_config_set_tcp_flavor(
  * >= 0; pass -1 to leave the current value untouched.  Mirrors the "common"
  * section keys parsed by chimera_common_delegation_config().
  */
-void
+SYMBOL_EXPORT void
 chimera_client_config_set_delegation(
     struct chimera_client_config *config,
     int                           sync_delegation,
@@ -55,19 +57,19 @@ chimera_client_config_set_delegation(
     int                           async_delegation,
     int                           async_delegation_threads);
 
-struct chimera_client *
+SYMBOL_EXPORT struct chimera_client *
 chimera_client_init(
     const struct chimera_client_config *config,
     const struct chimera_vfs_cred      *cred,
     struct prometheus_metrics          *metrics);
 
-struct chimera_client *
+SYMBOL_EXPORT struct chimera_client *
 chimera_client_init_json(
     const char                    *config_path,
     const struct chimera_vfs_cred *cred,
     struct prometheus_metrics     *metrics);
 
-int
+SYMBOL_EXPORT int
 chimera_client_add_user(
     struct chimera_client *client,
     const char            *username,
@@ -80,12 +82,12 @@ chimera_client_add_user(
     const uint32_t        *gids,
     int                    pinned);
 
-struct chimera_client_thread *
+SYMBOL_EXPORT struct chimera_client_thread *
 chimera_client_thread_init(
     struct evpl           *evpl,
     struct chimera_client *client);
 
-void
+SYMBOL_EXPORT void
 chimera_client_thread_shutdown(
     struct evpl                  *evpl,
     struct chimera_client_thread *thread);
@@ -96,7 +98,7 @@ typedef void (*chimera_mount_callback_t)(
     void                         *private_data);
 
 
-void
+SYMBOL_EXPORT void
 chimera_mount(
     struct chimera_client_thread *client,
     const char                   *mount_path,
@@ -111,7 +113,7 @@ typedef void (*chimera_umount_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_umount(
     struct chimera_client_thread *thread,
     const char                   *mount_path,
@@ -125,7 +127,7 @@ typedef void (*chimera_mkfs_callback_t)(
 
 /* Create a named filesystem inside a CAP_MKFS module (memfs, diskfs, cairn).
  * The filesystem is then mountable with a module path of "<fsname>[/path]". */
-void
+SYMBOL_EXPORT void
 chimera_mkfs(
     struct chimera_client_thread *client,
     const char                   *module_name,
@@ -140,7 +142,7 @@ typedef void (*chimera_rmfs_callback_t)(
     void                         *private_data);
 
 /* Remove a named filesystem; fails with CHIMERA_VFS_EBUSY while mounted. */
-void
+SYMBOL_EXPORT void
 chimera_rmfs(
     struct chimera_client_thread *client,
     const char                   *module_name,
@@ -149,7 +151,7 @@ chimera_rmfs(
     void                         *private_data);
 
 
-void
+SYMBOL_EXPORT void
 chimera_drain(
     struct chimera_client_thread *thread);
 
@@ -159,7 +161,7 @@ typedef void (*chimera_open_callback_t)(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_open(
     struct chimera_client_thread *client,
     const char                   *path,
@@ -173,7 +175,7 @@ typedef void (*chimera_mkdir_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_mkdir(
     struct chimera_client_thread *thread,
     const char                   *path,
@@ -186,7 +188,7 @@ typedef void (*chimera_mknod_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_mknod(
     struct chimera_client_thread *thread,
     const char                   *path,
@@ -203,7 +205,7 @@ typedef void (*chimera_read_callback_t)(
     int                           niov,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_read(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
@@ -218,7 +220,7 @@ typedef void (*chimera_write_callback_t)(
     void                         *private_data);
 
 /* Write from a simple buffer - copies to evpl_iovec internally */
-void
+SYMBOL_EXPORT void
 chimera_write(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
@@ -229,7 +231,7 @@ chimera_write(
     void                           *private_data);
 
 /* Write from struct iovec array - copies to evpl_iovec internally */
-void
+SYMBOL_EXPORT void
 chimera_writev(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
@@ -241,7 +243,7 @@ chimera_writev(
     void                           *private_data);
 
 /* Write from evpl_iovec directly - caller provides evpl_iovec (moves ownership) */
-void
+SYMBOL_EXPORT void
 chimera_writerv(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
@@ -264,7 +266,7 @@ typedef void (*chimera_read_into_callback_t)(
     uint32_t                      eof,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_read_into(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
@@ -276,7 +278,7 @@ chimera_read_into(
     void                           *private_data);
 
 
-void
+SYMBOL_EXPORT void
 chimera_close(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *oh);
@@ -291,7 +293,7 @@ typedef void (*chimera_copy_range_callback_t)(
  * that advertises CHIMERA_VFS_CAP_COPY_RANGE (and currently must be the
  * same backend).
  */
-void
+SYMBOL_EXPORT void
 chimera_copy_range(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *src_handle,
@@ -312,7 +314,7 @@ typedef void (*chimera_write_same_callback_t)(
  * `offset`, each zero-filled with `pattern` placed at `reloff_pattern`.
  * Requires CHIMERA_VFS_CAP_WRITE_SAME on the backend; ENOTSUP otherwise.
  */
-void
+SYMBOL_EXPORT void
 chimera_write_same(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
@@ -333,7 +335,7 @@ typedef void (*chimera_clone_range_callback_t)(
 /* Reflink-style share of a byte range. Requires CHIMERA_VFS_CAP_CLONE_RANGE
  * on the destination backend; will surface ENOTSUP otherwise.
  */
-void
+SYMBOL_EXPORT void
 chimera_clone_range(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *src_handle,
@@ -349,7 +351,7 @@ typedef void (*chimera_symlink_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_symlink(
     struct chimera_client_thread *thread,
     const char                   *path,
@@ -364,7 +366,7 @@ typedef void (*chimera_link_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_link(
     struct chimera_client_thread *thread,
     const char                   *source_path,
@@ -379,7 +381,7 @@ typedef void (*chimera_remove_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_remove(
     struct chimera_client_thread *thread,
     const char                   *path,
@@ -392,7 +394,7 @@ typedef void (*chimera_rename_callback_t)(
     enum chimera_vfs_error        status,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_rename(
     struct chimera_client_thread *thread,
     const char                   *source_path,
@@ -430,7 +432,7 @@ typedef void (*chimera_readlink_callback_t)(
     int                           targetlen,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_readlink(
     struct chimera_client_thread *thread,
     const char                   *path,
@@ -446,7 +448,7 @@ typedef void (*chimera_stat_callback_t)(
     const struct chimera_stat    *st,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_stat(
     struct chimera_client_thread *thread,
     const char                   *path,
@@ -460,14 +462,14 @@ typedef void (*chimera_fstat_callback_t)(
     const struct chimera_stat    *st,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_fstat(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
     chimera_fstat_callback_t        callback,
     void                           *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_destroy(
     struct chimera_client *client);
 
@@ -490,7 +492,7 @@ typedef void (*chimera_readdir_complete_t)(
     int                           eof,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_readdir(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
@@ -510,7 +512,7 @@ typedef void (*chimera_fsetattr_callback_t)(
     void                         *private_data);
 
 /* Set the size of an open file (ftruncate). */
-void
+SYMBOL_EXPORT void
 chimera_ftruncate(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
@@ -524,7 +526,7 @@ typedef void (*chimera_commit_callback_t)(
     void                         *private_data);
 
 /* Flush an open file's data to stable storage (fsync). */
-void
+SYMBOL_EXPORT void
 chimera_commit(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,
@@ -570,7 +572,7 @@ typedef void (*chimera_statfs_callback_t)(
     const struct chimera_statvfs *st,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_statfs(
     struct chimera_client_thread *thread,
     const char                   *path,
@@ -584,7 +586,7 @@ typedef void (*chimera_fstatfs_callback_t)(
     const struct chimera_statvfs *st,
     void                         *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_fstatfs(
     struct chimera_client_thread   *thread,
     struct chimera_vfs_open_handle *handle,

@@ -22,6 +22,7 @@
 #ifndef DISKFS_TEST_H
 #define DISKFS_TEST_H
 
+#include "common/export.h"
 #include <stdint.h>
 
 struct chimera_vfs;
@@ -46,7 +47,7 @@ struct diskfs_test_space {
 
 /* Fill *out with a consistent space snapshot.  Returns 0, or -1 if diskfs is
  * not the mounted module. */
-int
+SYMBOL_EXPORT int
 diskfs_test_space(
     struct chimera_vfs       *vfs,
     struct diskfs_test_space *out);
@@ -65,7 +66,7 @@ diskfs_test_space(
  * the cross-AG sum check is only meaningful once reclaim has quiesced (call
  * diskfs_test_await_reclaim first if a delete-heavy step just ran).
  */
-int
+SYMBOL_EXPORT int
 diskfs_test_check(
     struct chimera_vfs *vfs,
     char               *err,
@@ -85,7 +86,7 @@ struct diskfs_test_inode {
     uint16_t root_nitems;
 };
 
-int
+SYMBOL_EXPORT int
 diskfs_test_inode(
     struct chimera_vfs       *vfs,
     uint64_t                  inum,
@@ -99,7 +100,7 @@ diskfs_test_inode(
  * observes their progress; evpl is the caller's loop, pumped so any completion
  * routed back to it makes progress too.
  */
-int
+SYMBOL_EXPORT int
 diskfs_test_await_reclaim(
     struct chimera_vfs *vfs,
     struct evpl        *evpl,
@@ -119,7 +120,7 @@ diskfs_test_await_reclaim(
  *     chimera_vfs_destroy(vfs);             // crash teardown happens here
  *     // ... re-init a fresh vfs and mount the same device, "initialize" omitted
  */
-void
+SYMBOL_EXPORT void
 diskfs_test_crash(
     struct chimera_vfs *vfs);
 

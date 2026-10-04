@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "vfs_sdk_export.h"
+
 /*
  * Canonical access-control model for Chimera.
  *
@@ -200,7 +202,7 @@ chimera_acl_size(unsigned num_aces)
  *
  * `is_dir` selects directory-meaningful semantics where they differ.
  */
-uint32_t chimera_acl_access_check(
+CHIMERA_VFS_SDK_EXPORT uint32_t chimera_acl_access_check(
     const struct chimera_acl      *acl,
     uint32_t                       mode,
     uint64_t                       owner_uid,
@@ -216,7 +218,7 @@ uint32_t chimera_acl_access_check(
  * enumeration, where an entry is hidden unless its DACL itself grants the
  * caller the requested read rights.
  */
-uint32_t chimera_acl_access_raw(
+CHIMERA_VFS_SDK_EXPORT uint32_t chimera_acl_access_raw(
     const struct chimera_acl      *acl,
     uint64_t                       owner_uid,
     uint64_t                       owner_gid,
@@ -228,7 +230,7 @@ uint32_t chimera_acl_access_raw(
  * Writes up to 5 ACEs into `out`; returns the ACE count, or -1 if max_aces is
  * too small.
  */
-int chimera_acl_from_mode(
+CHIMERA_VFS_SDK_EXPORT int chimera_acl_from_mode(
     uint32_t            mode,
     struct chimera_acl *out,
     unsigned            max_aces);
@@ -240,7 +242,7 @@ int chimera_acl_from_mode(
  * client sees owner-full-control (plain mode would deny e.g. FILE_EXECUTE on a
  * 0644 file).  Writes up to 4 ACEs into `out`; returns the ACE count, or -1.
  */
-int chimera_acl_default_acl(
+CHIMERA_VFS_SDK_EXPORT int chimera_acl_default_acl(
     uint32_t            mode,
     struct chimera_acl *out,
     unsigned            max_aces);
@@ -250,7 +252,7 @@ int chimera_acl_default_acl(
  * getattr.  Lossy, restrictive rounding (a class bit is set only if granted by
  * the ACEs that bear on that class).  Returns the 9 permission bits (no type).
  */
-uint32_t chimera_acl_to_mode(
+CHIMERA_VFS_SDK_EXPORT uint32_t chimera_acl_to_mode(
     const struct chimera_acl *acl);
 
 /*
@@ -258,7 +260,7 @@ uint32_t chimera_acl_to_mode(
  * (OWNER@/GROUP@/EVERYONE@) ACEs from new_mode while preserving explicit
  * named-user/named-group ACEs.  Writes into `out`; returns ACE count or -1.
  */
-int chimera_acl_chmod(
+CHIMERA_VFS_SDK_EXPORT int chimera_acl_chmod(
     const struct chimera_acl *in,
     uint32_t                  new_mode,
     struct chimera_acl       *out,
@@ -271,7 +273,7 @@ int chimera_acl_chmod(
  * parent contributes no inheritable ACE, falls back to from_mode(create_mode).
  * Writes into `out`; returns ACE count or -1.
  */
-int chimera_acl_inherit(
+CHIMERA_VFS_SDK_EXPORT int chimera_acl_inherit(
     const struct chimera_acl *parent,
     int                       is_dir,
     uint32_t                  create_mode,

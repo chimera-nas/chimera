@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include "prometheus-c.h"
 
 #include "vfs/sdk/vfs_tcp_flavor.h"
@@ -17,14 +19,14 @@ struct chimera_metrics;
  * binding a port; see chimera_tcp_flavor_endpoint_create for how a port names
  * an inproc endpoint.
  */
-struct chimera_metrics * chimera_metrics_init(
+SYMBOL_EXPORT struct chimera_metrics * chimera_metrics_init(
     int                     port,
     enum chimera_tcp_flavor flavor);
 
-void chimera_metrics_destroy(
+SYMBOL_EXPORT void chimera_metrics_destroy(
     struct chimera_metrics *metrics);
 
-struct prometheus_metrics * chimera_metrics_get(
+SYMBOL_EXPORT struct prometheus_metrics * chimera_metrics_get(
     struct chimera_metrics *metrics);
 
 /*
@@ -34,6 +36,6 @@ struct prometheus_metrics * chimera_metrics_get(
  * short-lived processes can retain their metrics after exiting.  No-op when
  * `path` is NULL.  Returns 0 on success, -1 on error.
  */
-int chimera_metrics_dump_file(
+SYMBOL_EXPORT int chimera_metrics_dump_file(
     struct prometheus_metrics *metrics,
     const char                *path);

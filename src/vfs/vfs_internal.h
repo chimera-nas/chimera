@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdlib.h>
 #include <time.h>
 #ifdef _WIN32
@@ -724,7 +726,7 @@ chimera_vfs_mount_is_readonly(const struct chimera_vfs_request *request)
 /* vfs_notify.c: swap in the sync-coherence completion gate on namespace
  * mutations when sync watchers exist (see vfs_notify.h).  Declared here
  * rather than pulling vfs_notify.h into every dispatch consumer. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_notify_gate_install(
     struct chimera_vfs_request *request);
 

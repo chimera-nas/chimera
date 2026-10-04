@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 /*
  * Identity mapping for ACL principals.
  *
@@ -62,7 +64,7 @@ chimera_idmap_special_principal(uint8_t special)
  * NFSv4 name -- a CHIMERA_PRINCIPAL_SID maps to no uid or gid and must not
  * be presented as one; the caller drops such an ACE.
  */
-int chimera_idmap_principal_to_who(
+SYMBOL_EXPORT int chimera_idmap_principal_to_who(
     const struct chimera_principal *p,
     const char                     *domain,
     char                           *buf,
@@ -75,7 +77,7 @@ int chimera_idmap_principal_to_who(
  * `*p` is fully defined on return -- every byte, including the native-SID
  * tail -- and zeroed on failure, whatever the caller's storage held.
  */
-int chimera_idmap_who_to_principal(
+SYMBOL_EXPORT int chimera_idmap_who_to_principal(
     const char               *who,
     int                       len,
     int                       is_group,
@@ -93,7 +95,7 @@ int chimera_idmap_who_to_principal(
  * parses the Samba S-1-22 forms as well.  Returns the string length, or -1 if
  * the buffer is too small / the principal is not representable.
  */
-int chimera_idmap_principal_to_sid(
+SYMBOL_EXPORT int chimera_idmap_principal_to_sid(
     const struct chimera_principal *p,
     char                           *buf,
     int                             buflen);
@@ -103,6 +105,6 @@ int chimera_idmap_principal_to_sid(
  * SIDs, the Samba unix-id SIDs (S-1-22-1/2), and the modefromsid SIDs
  * (S-1-5-88-1/2).  Returns 0 on success, -1 if unrecognised.
  */
-int chimera_idmap_sid_to_principal(
+SYMBOL_EXPORT int chimera_idmap_sid_to_principal(
     const char               *sid,
     struct chimera_principal *p);

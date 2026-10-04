@@ -558,18 +558,18 @@ chimera_client_request_free(
     DL_PREPEND(thread->free_requests, request);
 } /* chimera_client_request_free */
 
-void chimera_dispatch_mount(
+SYMBOL_EXPORT void chimera_dispatch_mount(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request);
 
-void chimera_dispatch_umount(
+SYMBOL_EXPORT void chimera_dispatch_umount(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request);
 
-void chimera_dispatch_mkfs(
+SYMBOL_EXPORT void chimera_dispatch_mkfs(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request);
 
-void chimera_dispatch_rmfs(
+SYMBOL_EXPORT void chimera_dispatch_rmfs(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request);

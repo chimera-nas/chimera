@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 #include <stdatomic.h>
 #include <stdio.h>      /* snprintf, for chimera_vfs_pnfs_backing_name */
@@ -69,20 +71,20 @@ struct chimera_vfs_pnfs {
     struct chimera_vfs_ds ds[CHIMERA_PNFS_MAX_DS];
 };
 
-struct chimera_vfs_pnfs * chimera_vfs_pnfs_create(
+SYMBOL_EXPORT struct chimera_vfs_pnfs * chimera_vfs_pnfs_create(
     void);
 
-void chimera_vfs_pnfs_destroy(
+SYMBOL_EXPORT void chimera_vfs_pnfs_destroy(
     struct chimera_vfs_pnfs *pnfs);
 
-void chimera_vfs_pnfs_set_enabled(
+SYMBOL_EXPORT void chimera_vfs_pnfs_set_enabled(
     struct chimera_vfs *vfs,
     int                 enabled);
 
-int chimera_vfs_pnfs_enabled(
+SYMBOL_EXPORT int chimera_vfs_pnfs_enabled(
     const struct chimera_vfs *vfs);
 
-int chimera_vfs_pnfs_feature_enabled(
+SYMBOL_EXPORT int chimera_vfs_pnfs_feature_enabled(
     const struct chimera_vfs *vfs);
 
 /*
@@ -92,7 +94,7 @@ int chimera_vfs_pnfs_feature_enabled(
  * the nfs module; its root handle is resolved later (after mounts) with
  * chimera_vfs_pnfs_set_device_root().  Returns the device index or -1.
  */
-int chimera_vfs_pnfs_add_device(
+SYMBOL_EXPORT int chimera_vfs_pnfs_add_device(
     struct chimera_vfs *vfs,
     const char         *netid,
     const char         *uaddr,
@@ -102,20 +104,20 @@ int chimera_vfs_pnfs_add_device(
     int                 minorversion);
 
 /* Record the resolved DS backing-root file handle for device idx. */
-void chimera_vfs_pnfs_set_device_root(
+SYMBOL_EXPORT void chimera_vfs_pnfs_set_device_root(
     struct chimera_vfs *vfs,
     int                 idx,
     const void         *root_fh,
     uint32_t            root_fh_len);
 
-int chimera_vfs_pnfs_num_devices(
+SYMBOL_EXPORT int chimera_vfs_pnfs_num_devices(
     const struct chimera_vfs *vfs);
 
-struct chimera_vfs_ds * chimera_vfs_pnfs_get_device(
+SYMBOL_EXPORT struct chimera_vfs_ds * chimera_vfs_pnfs_get_device(
     const struct chimera_vfs *vfs,
     int                       idx);
 
-const struct chimera_vfs_ds * chimera_vfs_pnfs_find_device(
+SYMBOL_EXPORT const struct chimera_vfs_ds * chimera_vfs_pnfs_find_device(
     const struct chimera_vfs *vfs,
     const uint8_t            *deviceid);
 
@@ -144,7 +146,7 @@ typedef void (*chimera_vfs_pnfs_io_callback_t)(
  * False for every handle when no data server is configured, and for anything
  * inside a data server's own backing mount.  Lets the caller skip allocating
  * an async context on the common path. */
-int chimera_vfs_pnfs_io_possible(
+SYMBOL_EXPORT int chimera_vfs_pnfs_io_possible(
     struct chimera_vfs_thread            *thread,
     const struct chimera_vfs_open_handle *handle);
 
@@ -158,7 +160,7 @@ typedef void (*chimera_vfs_pnfs_sync_callback_t)(
  * wherever the file's bytes live.  required_cap is the backend capability the
  * caller gated on (0 if none), re-checked after a redirect because the data
  * server's backend may not implement it. */
-void chimera_vfs_pnfs_dispatch(
+SYMBOL_EXPORT void chimera_vfs_pnfs_dispatch(
     struct chimera_vfs_request *request,
     int                         for_write,
     uint64_t                    required_cap);
@@ -166,13 +168,13 @@ void chimera_vfs_pnfs_dispatch(
 /* Push the size/mtime a redirected op produced on the backing file back onto
  * the MDS inode, then continue to `next`.  A no-op (straight to `next`) when the
  * op was not redirected or did not succeed. */
-void chimera_vfs_pnfs_sync_mds(
+SYMBOL_EXPORT void chimera_vfs_pnfs_sync_mds(
     struct chimera_vfs_request      *request,
     const struct chimera_vfs_attrs  *backing_post,
     uint64_t                         end_offset,
     chimera_vfs_pnfs_sync_callback_t next);
 
-void chimera_vfs_pnfs_resolve_io(
+SYMBOL_EXPORT void chimera_vfs_pnfs_resolve_io(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
@@ -188,13 +190,13 @@ void chimera_vfs_pnfs_resolve_io(
  * server.  unpack returns 0 and points the out-params into `blob` (no copy), or
  * -1 if the blob is malformed or truncated.
  */
-uint32_t chimera_vfs_pnfs_blob_pack(
+SYMBOL_EXPORT uint32_t chimera_vfs_pnfs_blob_pack(
     uint8_t       *blob,
     const uint8_t *deviceid,
     const uint8_t *backing_fh,
     uint32_t       backing_fh_len);
 
-int chimera_vfs_pnfs_blob_unpack(
+SYMBOL_EXPORT int chimera_vfs_pnfs_blob_unpack(
     const uint8_t  *blob,
     uint32_t        blob_len,
     const uint8_t **r_deviceid,
@@ -243,7 +245,7 @@ chimera_vfs_pnfs_backing_name(
  * behind other files' layouts, so nothing under it is ever itself DS-resident;
  * the data redirect uses this to avoid re-entering itself.
  */
-int chimera_vfs_pnfs_fh_is_ds_backing(
+SYMBOL_EXPORT int chimera_vfs_pnfs_fh_is_ds_backing(
     const struct chimera_vfs *vfs,
     const void               *fh,
     int                       fhlen);
@@ -253,5 +255,5 @@ int chimera_vfs_pnfs_fh_is_ds_backing(
  * or NULL if pNFS is disabled / no devices are configured / no DS has had its
  * backing root resolved yet.
  */
-struct chimera_vfs_ds * chimera_vfs_pnfs_steer(
+SYMBOL_EXPORT struct chimera_vfs_ds * chimera_vfs_pnfs_steer(
     struct chimera_vfs *vfs);

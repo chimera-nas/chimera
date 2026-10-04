@@ -302,6 +302,19 @@ chimera_rcu_pend(
 
 #endif /* ifdef _WIN32 */
 
+/* Dispatch this thread's pending retirements, if it has any. */
+static inline void
+chimera_rcu_pending_flush_if_any(void)
+{
+#ifdef _WIN32
+    chimera_rcu_pending_flush();     /* the list is private to chimera_common */
+#else /* ifdef _WIN32 */
+    if (chimera_rcu_pending.n) {
+        chimera_rcu_pending_flush();
+    }
+#endif /* ifdef _WIN32 */
+} /* chimera_rcu_pending_flush_if_any */
+
 #ifdef CHIMERA_HAVE_URCU
 
 #define chimera_rcu_deref(p)     rcu_dereference(p)
@@ -385,9 +398,7 @@ static inline void
 chimera_rcu_mutate_end(struct chimera_rcu_domain *domain)
 {
     chimera_rcu_domain_wrunlock(domain);
-    if (chimera_rcu_pending.n) {
-        chimera_rcu_pending_flush();
-    }
+    chimera_rcu_pending_flush_if_any();
 } /* chimera_rcu_mutate_end */
 
 static inline void
@@ -400,9 +411,7 @@ static inline void
 chimera_rcu_publish_end(struct chimera_rcu_domain *domain)
 {
     chimera_rcu_domain_wrunlock(domain);
-    if (chimera_rcu_pending.n) {
-        chimera_rcu_pending_flush();
-    }
+    chimera_rcu_pending_flush_if_any();
 } /* chimera_rcu_publish_end */
 
 #endif /* CHIMERA_HAVE_URCU */

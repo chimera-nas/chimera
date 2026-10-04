@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/export.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,163 +39,163 @@ struct chimera_server_config_smb_nic {
 };
 
 
-struct chimera_server_config *
+SYMBOL_EXPORT struct chimera_server_config *
 chimera_server_config_init(
     void);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_tcp_flavor(
     struct chimera_server_config *config,
     enum chimera_tcp_flavor       flavor);
 
-enum chimera_tcp_flavor
+SYMBOL_EXPORT enum chimera_tcp_flavor
 chimera_server_config_get_tcp_flavor(
     const struct chimera_server_config *config);
 
-enum evpl_protocol_id
+SYMBOL_EXPORT enum evpl_protocol_id
 chimera_server_config_get_tcp_stream_protocol(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_core_threads(
     struct chimera_server_config *config,
     int                           threads);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_sync_delegation(
     struct chimera_server_config *config,
     int                           enable);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_sync_delegation_threads(
     struct chimera_server_config *config,
     int                           threads);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_async_delegation(
     struct chimera_server_config *config,
     int                           enable);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_async_delegation_threads(
     struct chimera_server_config *config,
     int                           threads);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_persistent_handles(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_persistent_handles(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_directory_leases(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_directory_leases(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_named_streams(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_named_streams(
     const struct chimera_server_config *config);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_named_streams(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_signing_required(
     struct chimera_server_config *config,
     int                           required);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_signing_required(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_encryption(
     struct chimera_server_config *config,
     int                           mode);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_encryption(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_compression(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_compression(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_leases(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_leases(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_oplocks(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_oplocks(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_notify_disabled(
     struct chimera_server_config *config,
     int                           disabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_notify_disabled(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_acl_inherited_canonicalize(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_acl_inherited_canonicalize(
     const struct chimera_server_config *config);
 
 /* Emit the POSIX mode as a modefromsid ACE on QUERY SECURITY (default off) so a
  * POSIX/CIFS-style client reads the exact mode rather than the translated
  * Windows ACL.  Used by the POSIX-over-SMB loopback. */
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_mode_from_sid(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_mode_from_sid(
     const struct chimera_server_config *config);
 
 /* POSIX rename semantics: skip the SMB contained-open recall and destination-
  * parent dir-lease probe so a rename never fails because of open handles (POSIX
  * rename does not).  Default 0; the POSIX-over-SMB loopback enables it. */
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_posix_rename(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_posix_rename(
     const struct chimera_server_config *config);
 
@@ -203,174 +204,174 @@ chimera_server_config_get_smb_posix_rename(
  * detection while the original is deferred on a share conflict) instead of the
  * default Samba behaviour (STATUS_FILE_NOT_AVAILABLE, which clients retry).
  * The two are mutually exclusive; see the default in chimera_server_config_init. */
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_replay_pending_windows(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_replay_pending_windows(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb2_max_async_credits(
     struct chimera_server_config *config,
     int                           value);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb2_max_async_credits(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_fs_physical_bytes_per_sector(
     struct chimera_server_config *config,
     uint32_t                      value);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_smb_fs_physical_bytes_per_sector(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_fs_sector_size_flags(
     struct chimera_server_config *config,
     uint32_t                      value);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_smb_fs_sector_size_flags(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_cache_ttl(
     struct chimera_server_config *config,
     int                           ttl);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_cache_ttl(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_rcu_reclaim_threads(
     struct chimera_server_config *config,
     int                           threads);
 
 /* Bound on how long umount waits for a mount's open handles to be dropped
  * before reporting EBUSY (milliseconds). */
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_umount_timeout(
     struct chimera_server_config *config,
     int                           timeout_ms);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_attr_cache_enabled(
     struct chimera_server_config *config,
     int                           enabled);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_name_cache_enabled(
     struct chimera_server_config *config,
     int                           enabled);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_session_slots(
     struct chimera_server_config *config,
     int                           slots);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs4_session_slots(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_delegations(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs4_delegations(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_drc(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs4_drc(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs3_drc(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs3_drc(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_lease_time(
     struct chimera_server_config *config,
     uint32_t                      seconds);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_nfs4_lease_time(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_grace_time(
     struct chimera_server_config *config,
     uint32_t                      seconds);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_nfs4_grace_time(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_node_id(
     struct chimera_server_config *config,
     int                           node_id);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs4_node_id(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_courtesy_time(
     struct chimera_server_config *config,
     uint32_t                      seconds);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_nfs4_courtesy_time(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_kv_module(
     struct chimera_server_config *config,
     const char                   *kv_module);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_kv_module(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(
     struct chimera_server_config *config,
     int                           open_files);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_external_portmap(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_external_portmap(
     struct chimera_server_config *config,
     int                           enable);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_portmap_hostname(
     struct chimera_server_config *config,
     const char                   *hostname);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_portmap_hostname(
     const struct chimera_server_config *config);
 
@@ -380,40 +381,40 @@ chimera_server_config_get_portmap_hostname(
  * INET_ADDRSTRLEN (16). Aborts startup with a clear error on resolution
  * failure.
  */
-void
+SYMBOL_EXPORT void
 chimera_server_resolve_ipv4(
     const char *hostname,
     char       *out_buf,
     size_t      out_size);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_soft_fail_bad_req(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_soft_fail_bad_req(
     struct chimera_server_config *config,
     int                           enable);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_rdma(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_pnfs_enabled(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_pnfs_enabled(
     const struct chimera_server_config *config);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_add_pnfs_ds(
     struct chimera_server_config *config,
     const char                   *netid,
@@ -426,20 +427,20 @@ chimera_server_config_add_pnfs_ds(
 /* After mounts are established, resolve each pNFS data server's backing root
  * (its nfs-mounted export directory) into the device table so the MDS can
  * create backing files there.  Returns 0 on success. */
-int
+SYMBOL_EXPORT int
 chimera_server_pnfs_resolve(
     struct chimera_server *server);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_port(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_s3_port(
     struct chimera_server_config *config,
     int                           port);
@@ -450,143 +451,143 @@ chimera_server_config_set_s3_port(
 #define CHIMERA_S3_ANON_UID 65534
 #define CHIMERA_S3_ANON_GID 65534
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_s3_anon_ids(
     struct chimera_server_config *config,
     uint32_t                      uid,
     uint32_t                      gid);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_s3_anon_uid(
     const struct chimera_server_config *config);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_s3_anon_gid(
     const struct chimera_server_config *config);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_s3_port(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_port(
     const struct chimera_server_config *config);
 
 /* Protocols are opt-in: each serves only when its config explicitly enables
  * it (default off).  The corresponding port settings above keep the customary
  * defaults and matter only once the protocol is enabled. */
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_enabled(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_enabled(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_enabled(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_enabled(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_s3_enabled(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_s3_enabled(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_fuse_enabled(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_fuse_enabled(
     const struct chimera_server_config *config);
 
 /* Carry FUSE requests over io_uring when the kernel offers it (default on);
  * off keeps every mount on plain /dev/fuse reads. */
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_fuse_io_uring(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_fuse_io_uring(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_data_server(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_data_server(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_server_scope(
     struct chimera_server_config *config,
     uint64_t                      scope);
 
-uint64_t
+SYMBOL_EXPORT uint64_t
 chimera_server_config_get_nfs_server_scope(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma_hostname(
     struct chimera_server_config *config,
     const char                   *hostname);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_nfs_rdma_hostname(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_rdma_port(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_tcp_rdma_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_tcp_rdma_port(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_lockmgr_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_lockmgr_port(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_nsm_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_nsm_port(
     const struct chimera_server_config *config);
 
@@ -594,134 +595,134 @@ chimera_server_config_get_nfs_nsm_port(
  * so two NFS servers can share one address space -- the in-process pNFS proxy
  * suite runs a metadata server and the proxy in front of it in one test
  * process, and the second server to bind a well-known number would abort. */
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_mount_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_mount_port(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_portmap_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_portmap_port(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_state_dir(
     struct chimera_server_config *config,
     const char                   *dir);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_state_dir(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_add_module(
     struct chimera_server_config *config,
     const char                   *module_name,
     const char                   *module_path,
     const char                   *config_data);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_metrics_port(
     struct chimera_server_config *config,
     int                           port);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_rest_http_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_rest_http_port(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_rest_https_port(
     struct chimera_server_config *config,
     int                           port);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_rest_https_port(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_rest_debug_fsops(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_rest_debug_fsops(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_rest_auth_enabled(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_rest_auth_enabled(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_rest_ssl_cert(
     struct chimera_server_config *config,
     const char                   *cert_path);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_rest_ssl_cert(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_rest_ssl_key(
     struct chimera_server_config *config,
     const char                   *key_path);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_rest_ssl_key(
     const struct chimera_server_config *config);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_num_dialects(
     const struct chimera_server_config *config);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_smb_dialects(
     const struct chimera_server_config *config,
     int                                 index);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_min_dialect(
     struct chimera_server_config *config,
     uint32_t                      min_dialect);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_num_nic_info(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_nic_info(
     struct chimera_server_config               *config,
     int                                         num_nic_info,
     const struct chimera_server_config_smb_nic *smb_nic_info);
 
-const struct chimera_server_config_smb_nic *
+SYMBOL_EXPORT const struct chimera_server_config_smb_nic *
 chimera_server_config_get_smb_nic_info(
     const struct chimera_server_config *config,
     int                                 index);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_anonuid(
     struct chimera_server_config *config,
     uint32_t                      anonuid);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_anonuid(
     const struct chimera_server_config *config);
 
@@ -731,39 +732,39 @@ chimera_server_config_get_anonuid(
  * Values outside 1..CHIMERA_NFS_EXPORT_ID_MAX are clamped into range with an
  * error logged (0 would reject every create; a larger cap could never be
  * reached, ids being unique per export). */
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_max_exports(
     struct chimera_server_config *config,
     uint32_t                      nfs_max_exports);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_nfs_max_exports(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_anongid(
     struct chimera_server_config *config,
     uint32_t                      anongid);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_server_config_get_anongid(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_fh_sign(
     struct chimera_server_config *config,
     int                           enable);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_fh_sign(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_fh_key(
     struct chimera_server_config *config,
     const char                   *hexkey);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_nfs_fh_key(
     const struct chimera_server_config *config);
 
@@ -772,7 +773,7 @@ chimera_server_thread_wake(
     struct evpl       *evpl,
     struct evpl_timer *timer);
 
-int
+SYMBOL_EXPORT int
 chimera_server_mount(
     struct chimera_server *server,
     const char            *mount_path,
@@ -783,7 +784,7 @@ chimera_server_mount(
 /* Create a named filesystem inside a CAP_MKFS module (memfs, diskfs, cairn).
  * Returns 0 on success or a chimera_vfs_error (EEXIST if the name is taken,
  * ENOTSUP if the module has no filesystem support). */
-int
+SYMBOL_EXPORT int
 chimera_server_mkfs(
     struct chimera_server *server,
     const char            *module_name,
@@ -792,7 +793,7 @@ chimera_server_mkfs(
 
 /* Remove a named filesystem.  Returns 0 on success or a chimera_vfs_error
  * (EBUSY while the filesystem still has active mounts). */
-int
+SYMBOL_EXPORT int
 chimera_server_rmfs(
     struct chimera_server *server,
     const char            *module_name,
@@ -801,7 +802,7 @@ chimera_server_rmfs(
 /* Ensure module_path exists inside module_name (creating intermediate dirs with
  * the given mode, owner 0/0) before it is mounted -- backs the "create" mount
  * option.  Returns 0 on success, -1 if any component could not be created. */
-int
+SYMBOL_EXPORT int
 chimera_server_mkpath(
     struct chimera_server *server,
     const char            *module_name,
@@ -813,7 +814,7 @@ chimera_server_mkpath(
  * link, plus a dangling root-level link).  A test-harness aid -- the server
  * never resolves these links (it returns STATUS_STOPPED_ON_SYMLINK).  Returns
  * 0 on success, -1 otherwise. */
-int
+SYMBOL_EXPORT int
 chimera_server_seed_symlinks(
     struct chimera_server *server,
     const char            *module_name,
@@ -822,20 +823,20 @@ chimera_server_seed_symlinks(
 /* Seed the fixtures the WPTS MS-FSA suite expects to pre-exist on a memfs-backed
  * share: a directory (ExistingFolder) and a regular file (ExistingFile.txt).  A
  * test-harness aid.  Returns 0 on success, -1 otherwise. */
-int
+SYMBOL_EXPORT int
 chimera_server_seed_fsa(
     struct chimera_server *server,
     const char            *module_name,
     const char            *module_path);
 
-int
+SYMBOL_EXPORT int
 chimera_server_unmount(
     struct chimera_server *server,
     const char            *mount_path);
 
 /* Query share/export/bucket references without a VFS thread context or RCU
  * reader registration. */
-int
+SYMBOL_EXPORT int
 chimera_server_mount_in_use(
     struct chimera_server *server,
     const char            *mount_path);
@@ -851,24 +852,24 @@ typedef int (*chimera_server_mount_iterate_cb)(
  * that callback only; returning nonzero stops enumeration. The callback runs
  * without the mount-table lock and may call server APIs. No VFS thread context
  * or RCU reader registration is required. */
-void
+SYMBOL_EXPORT void
 chimera_server_iterate_mounts(
     struct chimera_server          *server,
     chimera_server_mount_iterate_cb callback,
     void                           *data);
 
-int
+SYMBOL_EXPORT int
 chimera_server_create_bucket(
     struct chimera_server *server,
     const char            *bucket_name,
     const char            *bucket_path);
 
-int
+SYMBOL_EXPORT int
 chimera_server_set_s3_bucket_root(
     struct chimera_server *server,
     const char            *bucket_root_path);
 
-int
+SYMBOL_EXPORT int
 chimera_server_create_share(
     struct chimera_server *server,
     const char            *share_name,
@@ -877,7 +878,7 @@ chimera_server_create_share(
 
 /* Register a FUSE mountpoint (Linux only; the kernel mount happens at server
  * start).  Returns -1 when FUSE is disabled or unsupported on this build. */
-int
+SYMBOL_EXPORT int
 chimera_server_create_fuse_mount(
     struct chimera_server *server,
     const char            *mountpoint,
@@ -886,23 +887,23 @@ chimera_server_create_fuse_mount(
 
 /* Serve a FUSE session over a caller-supplied descriptor rather than a real
  * kernel mount (see chimera_fuse_add_synthetic_mount).  Test-only. */
-int
+SYMBOL_EXPORT int
 chimera_server_create_fuse_synthetic_mount(
     struct chimera_server *server,
     const char            *path,
     int                    fd);
 
-int
+SYMBOL_EXPORT int
 chimera_server_share_set_access_based_enum(
     struct chimera_server *server,
     const char            *share_name);
 
-int
+SYMBOL_EXPORT int
 chimera_server_share_set_encrypt_data(
     struct chimera_server *server,
     const char            *share_name);
 
-int
+SYMBOL_EXPORT int
 chimera_server_share_set_force_level2_oplock(
     struct chimera_server *server,
     const char            *share_name);
@@ -918,7 +919,7 @@ chimera_server_share_set_force_level2_oplock(
  * is reached, -ENOMEM on allocation failure, -1 if the NFS protocol is not
  * initialized.
  */
-int
+SYMBOL_EXPORT int
 chimera_server_create_export(
     struct chimera_server                *server,
     const char                           *share_name,
@@ -926,7 +927,7 @@ chimera_server_create_export(
     uint32_t                              export_id,
     const struct chimera_nfs_export_opts *opts);
 
-int
+SYMBOL_EXPORT int
 chimera_server_export_set_options(
     struct chimera_server *server,
     const char            *name,
@@ -935,26 +936,26 @@ chimera_server_export_set_options(
     uint32_t               anonuid,
     uint32_t               anongid);
 
-int
+SYMBOL_EXPORT int
 chimera_server_export_set_sec(
     struct chimera_server *server,
     const char            *name,
     uint32_t               sec_allowed);
 
-struct chimera_server *
+SYMBOL_EXPORT struct chimera_server *
 chimera_server_init(
     const struct chimera_server_config *config,
     struct prometheus_metrics          *metrics);
 
-void
+SYMBOL_EXPORT void
 chimera_server_start(
     struct chimera_server *server);
 
-void
+SYMBOL_EXPORT void
 chimera_server_destroy(
     struct chimera_server *server);
 
-int
+SYMBOL_EXPORT int
 chimera_server_add_user(
     struct chimera_server *server,
     const char            *username,
@@ -967,7 +968,7 @@ chimera_server_add_user(
     const uint32_t        *gids,
     int                    pinned);
 
-int
+SYMBOL_EXPORT int
 chimera_server_remove_user(
     struct chimera_server *server,
     const char            *username);
@@ -975,7 +976,7 @@ chimera_server_remove_user(
 /* A group the server knows natively, with the SID a native-SID backend stores
  * for it.  Mirrors chimera_server_add_user for the group half of an identity;
  * the same pinning rules apply. */
-int
+SYMBOL_EXPORT int
 chimera_server_add_group(
     struct chimera_server *server,
     const char            *groupname,
@@ -983,12 +984,12 @@ chimera_server_add_group(
     uint32_t               gid,
     int                    pinned);
 
-int
+SYMBOL_EXPORT int
 chimera_server_remove_group(
     struct chimera_server *server,
     const char            *groupname);
 
-const struct chimera_vfs_user *
+SYMBOL_EXPORT const struct chimera_vfs_user *
 chimera_server_get_user(
     struct chimera_server *server,
     const char            *username);
@@ -997,18 +998,18 @@ typedef int (*chimera_server_user_iterate_cb)(
     const struct chimera_vfs_user *user,
     void                          *data);
 
-void
+SYMBOL_EXPORT void
 chimera_server_iterate_users(
     struct chimera_server         *server,
     chimera_server_user_iterate_cb callback,
     void                          *data);
 
-int
+SYMBOL_EXPORT int
 chimera_server_remove_export(
     struct chimera_server *server,
     const char            *name);
 
-const struct chimera_nfs_export *
+SYMBOL_EXPORT const struct chimera_nfs_export *
 chimera_server_get_export(
     struct chimera_server *server,
     const char            *name);
@@ -1017,18 +1018,18 @@ typedef int (*chimera_server_export_iterate_cb)(
     const struct chimera_nfs_export *export,
     void *data);
 
-void
+SYMBOL_EXPORT void
 chimera_server_iterate_exports(
     struct chimera_server           *server,
     chimera_server_export_iterate_cb callback,
     void                            *data);
 
-int
+SYMBOL_EXPORT int
 chimera_server_remove_share(
     struct chimera_server *server,
     const char            *name);
 
-const struct chimera_smb_share *
+SYMBOL_EXPORT const struct chimera_smb_share *
 chimera_server_get_share(
     struct chimera_server *server,
     const char            *name);
@@ -1037,23 +1038,23 @@ typedef int (*chimera_server_share_iterate_cb)(
     const struct chimera_smb_share *share,
     void                           *data);
 
-void
+SYMBOL_EXPORT void
 chimera_server_iterate_shares(
     struct chimera_server          *server,
     chimera_server_share_iterate_cb callback,
     void                           *data);
 
-int
+SYMBOL_EXPORT int
 chimera_server_remove_bucket(
     struct chimera_server *server,
     const char            *name);
 
-const struct s3_bucket *
+SYMBOL_EXPORT const struct s3_bucket *
 chimera_server_get_bucket(
     struct chimera_server *server,
     const char            *name);
 
-void
+SYMBOL_EXPORT void
 chimera_server_release_bucket(
     struct chimera_server *server);
 
@@ -1061,17 +1062,17 @@ typedef int (*chimera_server_bucket_iterate_cb)(
     const struct s3_bucket *bucket,
     void                   *data);
 
-void
+SYMBOL_EXPORT void
 chimera_server_iterate_buckets(
     struct chimera_server           *server,
     chimera_server_bucket_iterate_cb callback,
     void                            *data);
 
-struct chimera_vfs *
+SYMBOL_EXPORT struct chimera_vfs *
 chimera_server_get_vfs(
     struct chimera_server *server);
 
-int
+SYMBOL_EXPORT int
 chimera_server_add_s3_cred(
     struct chimera_server *server,
     const char            *access_key,
@@ -1081,7 +1082,7 @@ chimera_server_add_s3_cred(
     const char            *display_name,
     int                    pinned);
 
-int
+SYMBOL_EXPORT int
 chimera_server_remove_s3_cred(
     struct chimera_server *server,
     const char            *access_key);
@@ -1089,74 +1090,74 @@ chimera_server_remove_s3_cred(
 /* Advance the S3 credential cache's synthetic clock and sweep expired
  * credentials synchronously (test instrumentation; see
  * chimera_s3_advance_cred_clock). */
-void
+SYMBOL_EXPORT void
 chimera_server_advance_s3_cred_clock(
     struct chimera_server *server,
     int64_t                seconds);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_winbind_enabled(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_winbind_enabled(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_winbind_domain(
     struct chimera_server_config *config,
     const char                   *domain);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_smb_winbind_domain(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_kerberos_enabled(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_kerberos_enabled(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_kerberos_keytab(
     struct chimera_server_config *config,
     const char                   *keytab);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_smb_kerberos_keytab(
     const struct chimera_server_config *config);
 
 /* Serve an authenticated Kerberos principal as uid/gid 65534 when no identity
  * source can map it (winbind off).  Off by default: a winbind-less Kerberos
  * logon is then refused.  Ignored when winbind is enabled. */
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_kerberos_anonymous_fallback(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_smb_kerberos_anonymous_fallback(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_kerberos_enabled(
     struct chimera_server_config *config,
     int                           enabled);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_kerberos_enabled(
     const struct chimera_server_config *config);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_kerberos_keytab(
     struct chimera_server_config *config,
     const char                   *keytab);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_nfs_kerberos_keytab(
     const struct chimera_server_config *config);
 
@@ -1166,7 +1167,7 @@ chimera_server_config_get_nfs_kerberos_keytab(
  * fallback.  See the struct comment in server.c for why an explicit map
  * exists at all.
  */
-int
+SYMBOL_EXPORT int
 chimera_server_config_add_nfs_principal_map(
     struct chimera_server_config *config,
     const char                   *principal,
@@ -1175,12 +1176,12 @@ chimera_server_config_add_nfs_principal_map(
     uint32_t                      num_gids,
     const uint32_t               *gids);
 
-int
+SYMBOL_EXPORT int
 chimera_server_config_get_nfs_principal_map_count(
     const struct chimera_server_config *config);
 
 /* Returns the principal, or NULL when index is out of range. */
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_nfs_principal_map_entry(
     const struct chimera_server_config *config,
     int                                 index,
@@ -1189,11 +1190,11 @@ chimera_server_config_get_nfs_principal_map_entry(
     uint32_t                           *num_gids,
     const uint32_t                    **gids);
 
-void
+SYMBOL_EXPORT void
 chimera_server_config_set_smb_kerberos_realm(
     struct chimera_server_config *config,
     const char                   *realm);
 
-const char *
+SYMBOL_EXPORT const char *
 chimera_server_config_get_smb_kerberos_realm(
     const struct chimera_server_config *config);
