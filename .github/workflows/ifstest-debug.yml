@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: Unlicense
+#
+# Scratch, not for merging: one debug-logged IFSTest run against chimera memfs,
+# for a wire trace of the SMB requests behind individual IFSTest failures.
+#
+# Nothing from the HLK is stored anywhere we control: every run fetches the one
+# package that carries IFSTest ("HLK Filter.Driver Content", about 25 MB with
+# its cabinets) from Microsoft's public download location, found through the
+# official HLKSetup.exe link on learn.microsoft.com/windows-hardware/test/hlk,
+# extracts it with an administrative install, and discards the runner.
+name: IFSTest debug probe
+on:
+  push:
+    branches: [ifstest-debug]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    name: IFSTest on Server 2025
+    runs-on: windows-2025
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch the IFS test kit from Microsoft
+        shell: pwsh
+        run: |
+          $dir = & src/server/smb/tests/windows_client/ifstest/fetch_kit.ps1
+          "IFSTEST_DIR=$dir" >> $env:GITHUB_ENV
+
+      - name: Fetch the chimera daemon
+        id: bundle
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: windows-smb-client-bundle-x64
+          path: bundle
+          run-id: 37216428570
+          github-token: ${{ github.token }}
+
+      - name: IFSTest on chimera memfs, debug-logged
+        if: steps.bundle.outcome == 'success'
+        shell: pwsh
+        timeout-minutes: 90
+        env:
+          IFSTEST_CHIMERA_DEBUG: "1"
+        run: python src/server/smb/tests/windows_client/ifstest/ifstest_chimera.py bundle/chimera.exe $env:IFSTEST_DIR ifstest-logs 2400 memfs
+
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ifstest-logs
+          path: ifstest-logs/
+          retention-days: 7
