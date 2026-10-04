@@ -182,8 +182,14 @@
 #define STBSP__PUBLICDEC extern "C" STBSP__ASAN
 #define STBSP__PUBLICDEF extern "C" STBSP__ASAN
 #else  /* ifdef __cplusplus */
-#define STBSP__PUBLICDEC extern STBSP__ASAN
-#define STBSP__PUBLICDEF STBSP__ASAN
+/* chimera_common exports these to the other libraries (common/export.h). */
+#ifdef _WIN32
+#define STBSP__EXPORT    __declspec(dllexport)
+#else  /* ifdef _WIN32 */
+#define STBSP__EXPORT    __attribute__((visibility("default")))
+#endif /* ifdef _WIN32 */
+#define STBSP__PUBLICDEC extern STBSP__ASAN STBSP__EXPORT
+#define STBSP__PUBLICDEF STBSP__ASAN STBSP__EXPORT
 #endif /* ifdef __cplusplus */
 #endif /* ifdef STB_SPRINTF_STATIC */
 
