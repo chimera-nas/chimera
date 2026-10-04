@@ -359,10 +359,12 @@ chimera_vfs_request_alloc_common(
         request->thread      = thread;
         request->plugin_data = malloc(CHIMERA_VFS_PLUGIN_DATA_SIZE);
     }
-    request->status        = CHIMERA_VFS_UNSET;
-    request->cred          = cred;
-    request->module        = module;
-    request->mount_private = mount_private;
+    request->status           = CHIMERA_VFS_UNSET;
+    request->r_matched[0].len = 0;
+    request->r_matched[1].len = 0;
+    request->cred             = cred;
+    request->module           = module;
+    request->mount_private    = mount_private;
 
     /* Reset implicit-lease mediation state: requests are pooled and not
      * fully memset on reuse, so a prior op's owner/pin must not leak in. */

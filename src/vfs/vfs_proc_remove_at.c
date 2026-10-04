@@ -98,6 +98,19 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
                                       NULL,
                                       0);
 
+        if (request->r_matched[0].len) {
+            chimera_vfs_name_cache_insert(thread, name_cache,
+                                          request->remove_at.handle->fh_hash,
+                                          request->remove_at.handle->fh,
+                                          request->remove_at.handle->fh_len,
+                                          chimera_vfs_hash(request->r_matched[0].name,
+                                                           request->r_matched[0].len),
+                                          request->r_matched[0].name,
+                                          request->r_matched[0].len,
+                                          NULL,
+                                          0);
+        }
+
         chimera_vfs_attr_cache_insert(thread, attr_cache,
                                       request->remove_at.handle->fh_hash,
                                       request->remove_at.handle->fh,

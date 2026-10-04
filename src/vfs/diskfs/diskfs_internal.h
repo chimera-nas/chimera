@@ -254,6 +254,16 @@ struct diskfs_request_private {
     struct diskfs_stream_list  *stream_list;
     uint32_t                    stream_count;
     uint32_t                    stream_cap;
+    /* The directory entries a name operation matched -- [0] its name (the
+     * source of a rename), [1] a rename's target -- under the names they are
+     * stored as, which for an SMB caller may differ in case from the names
+     * asked for.  Their own dirent hashes key their removal. */
+    struct {
+        uint64_t hash;
+        uint16_t name_len;
+        char     name[256];
+    }                           matched[2];
+
     /* setattr through a stream handle: the stream's file, which takes the
      * attributes other than size and allocation (stream_base_mask). */
     struct diskfs_inode        *stream_base;
@@ -1064,6 +1074,8 @@ enum diskfs_bt_rectype {
     DISKFS_REC_SID      = 9,  /* single record: native owner/group SIDs (subkey 0) */
     DISKFS_REC_STREAM   = 10, /* named data stream: subkey = hash of the case-folded
                                * name; payload = diskfs_stream_rec */
+    DISKFS_REC_DIRFOLD  = 11, /* directory folded-name index: subkey = hash of the
+                               * case-folded name; payload = diskfs_dirfold_rec */
 };
 
 
@@ -1113,6 +1125,18 @@ struct diskfs_dirent_rec {
     uint32_t gen;
     uint16_t name_len;
     char     name[];
+};
+#pragma pack(pop)
+
+/* A directory's folded-name index record: the dirent hashes (the subkeys of
+ * the DISKFS_REC_DIRENT records) of every entry whose name folds to this
+ * record's subkey (chimera_vfs_casefold_hash).  Normally one; more only where
+ * a case-sensitive (NFS) client created names differing only in case.  An
+ * SMB caller finds an entry named in another case through it. */
+#pragma pack(push, 1)
+struct diskfs_dirfold_rec {
+    uint32_t count;
+    uint64_t hash[];
 };
 #pragma pack(pop)
 

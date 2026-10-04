@@ -545,10 +545,6 @@ def check_security_descriptor(d):
 # failure is reported as skipped, and one that starts passing fails the run so
 # the entry gets removed.
 KNOWN_FAILURES = {
-    ("diskfs", "case_insensitive_lookup"):
-        "diskfs has no case-insensitive fallback for SMB opens (memfs does)",
-    ("cairn", "case_insensitive_lookup"):
-        "cairn has no case-insensitive fallback for SMB opens (memfs does)",
 }
 
 CHECKS = [
