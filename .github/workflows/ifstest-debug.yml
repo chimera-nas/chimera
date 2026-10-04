@@ -40,6 +40,16 @@ jobs:
           run-id: 37216428570
           github-token: ${{ github.token }}
 
+      - name: Turn off the redirector's file-info caches
+        shell: pwsh
+        run: |
+          $k = 'HKLM:\System\CurrentControlSet\Services\LanmanWorkstation\Parameters'
+          foreach ($n in 'FileInfoCacheLifetime','FileNotFoundCacheLifetime','DirectoryCacheLifetime') {
+            New-ItemProperty -Path $k -Name $n -Value 0 -PropertyType DWord -Force | Out-Null
+          }
+          Restart-Service LanmanWorkstation -Force
+          Get-ItemProperty $k | Format-List *Lifetime
+
       - name: IFSTest on chimera memfs through a recording relay
         if: steps.bundle.outcome == 'success'
         shell: pwsh
