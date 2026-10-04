@@ -70,6 +70,31 @@ chimera_vfs_identity_has_capability(
     uint32_t            caps);
 
 /*
+ * Restrict principal lookups for `module_name` to `domain`; called once per
+ * domain.  A module given one or more domains is asked only about principals
+ * of those domains (after the realm map), and never about an unqualified one;
+ * a module given none is asked about every principal.  Aborts when the module
+ * is not loaded or does not map principals.  Startup only: call after
+ * chimera_vfs_identity_load_modules and before any lookup.
+ */
+void
+chimera_vfs_identity_add_domain(
+    struct chimera_vfs *vfs,
+    const char         *module_name,
+    const char         *domain);
+
+/*
+ * Map a Kerberos realm (or any principal qualifier) to the domain it belongs
+ * to, compared without regard to case.  The engine applies the map before
+ * routing and hands modules DOMAIN\user.  Startup only, as above.
+ */
+void
+chimera_vfs_identity_add_realm(
+    struct chimera_vfs *vfs,
+    const char         *realm,
+    const char         *domain);
+
+/*
  * Resolve an identity.  On a cache hit the callback fires inline before this
  * returns; on a miss it fires later on `thread`'s evpl loop.  `id` is used for
  * BY_UID/BY_GID; `name` (a NUL-terminated username, SID string or principal)

@@ -108,10 +108,11 @@ def main():
                     remove_certificates(proc.pid)
 
         # Lexical ordering must not let an automatic ID steal the pinned ID.
+        # The identity realm map rides along: it needs no module to load.
         write_config({
             "/a_auto": {"path": "/data", "root_squash": True},
             "/b_pinned": {"path": "/data", "export_id": 1, "sec": ["krb5"]},
-        })
+        }, {"identity": {"realms": {"EXAMPLE.COM": "EXAMPLE"}}})
         with (root / "daemon.log").open("w+b") as log:
             proc = subprocess.Popen(
                 [daemon, "-c", str(config_path)], stdout=log, stderr=log,
@@ -146,6 +147,10 @@ def main():
                 proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
                 assert proc.wait(timeout=30) == 0, "daemon shutdown failed"
                 print("PASS: orderly daemon shutdown", flush=True)
+                log.seek(0)
+                assert b"identity realm EXAMPLE.COM maps to domain EXAMPLE" in log.read(), \
+                    "identity.realms was not applied"
+                print("PASS: identity realm map applied", flush=True)
             finally:
                 if proc.poll() is None:
                     proc.kill()

@@ -230,10 +230,32 @@ chimera (`winbind`, when built with libwbclient) needs none.
 |---|---|---|
 | `path` | string | Filesystem path to the module's `.so` (out-of-tree modules only). |
 | `config` | object | Module-specific options passed to the module at init. |
+| `domains` | array | Domains whose authenticated principals this module maps. Omitted, the module is asked about every principal; given, only about principals of the listed domains (compared without regard to case), never about an unqualified one. Only for modules that map principals. |
 
 Naming a module this build cannot provide (for example `winbind` without
-libwbclient) is fatal at startup. `server.smb_auth.winbind_enabled` remains
-supported and behaves as an implicit `"winbind": {}` entry here.
+libwbclient) is fatal at startup, as is a `domains` list on a module that is
+not loaded or does not map principals. `server.smb_auth.winbind_enabled`
+remains supported and behaves as an implicit `"winbind": {}` entry here.
+
+The key `realms` is reserved: it is not a module but a map from a Kerberos
+realm to the domain its principals belong to. A principal `user@REALM` is
+rewritten as `DOMAIN\user` before routing, so a realm whose name differs from
+its domain's still reaches the module that serves the domain. An unmapped
+realm is used as the domain as written.
+
+```json
+"server": {
+    "identity": {
+        "realms": {
+            "CORP.EXAMPLE.COM": "CORP",
+            "LAB.EXAMPLE.COM": "LAB"
+        },
+        "winbind": { "domains": ["CORP", "LAB"] },
+        "ldapmap": { "path": "/usr/lib/chimera/identity_ldapmap.so",
+                     "domains": ["PARTNER"] }
+    }
+}
+```
 
 ### `mounts`
 

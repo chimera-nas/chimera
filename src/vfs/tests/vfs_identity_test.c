@@ -142,6 +142,7 @@ static struct chimera_vfs_identity_module domain_only_module = {
 #define TEST_PRINCIPAL_GROUP_SID "S-1-5-21-111-222-333-513"
 
 static char principal_seen[512];
+static int  principal_calls;
 
 static enum chimera_vfs_identity_status
 principal_lookup(
@@ -159,6 +160,7 @@ principal_lookup(
     }
 
     snprintf(principal_seen, sizeof(principal_seen), "%s", name);
+    principal_calls++;
 
     if (strncmp(name, "DOWN\\", 5) == 0) {
         return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
@@ -182,6 +184,45 @@ static struct chimera_vfs_identity_module principal_module = {
     .capabilities = CHIMERA_VFS_IDENTITY_CAP_LOOKUP |
         CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL,
     .lookup       = principal_lookup,
+};
+
+/* A second principal mapper, for another domain, to route between. */
+#define TEST_OTHER_UID 6001
+
+static int                                other_calls;
+
+static enum chimera_vfs_identity_status
+other_principal_lookup(
+    void                               *private_data,
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out)
+{
+    (void) private_data;
+    (void) id;
+
+    if (key != CHIMERA_VFS_IDENTITY_BY_PRINCIPAL) {
+        return CHIMERA_VFS_IDENTITY_NOT_MINE;
+    }
+
+    other_calls++;
+
+    if (strcmp(name, "OTHER\\bob") != 0) {
+        return CHIMERA_VFS_IDENTITY_NOT_MINE;
+    }
+
+    out->user.uid = TEST_OTHER_UID;
+    out->user.gid = TEST_OTHER_UID;
+    return CHIMERA_VFS_IDENTITY_OK;
+} /* other_principal_lookup */
+
+static struct chimera_vfs_identity_module other_principal_module = {
+    .sdk_version  = CHIMERA_VFS_IDENTITY_SDK_VERSION,
+    .name         = "otherprincipal",
+    .capabilities = CHIMERA_VFS_IDENTITY_CAP_LOOKUP |
+        CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL,
+    .lookup       = other_principal_lookup,
 };
 
 #ifdef _WIN32
@@ -490,6 +531,43 @@ main(
         assert(!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
                                             TEST_PRINCIPAL_UID, NULL));
         TEST_PASS("the blocking lookup leaves the cache alone");
+    }
+
+    /* --- 8. principals are routed by domain, after the realm map --- */
+    {
+        struct chimera_vfs_identity_result r;
+
+        chimera_vfs_identity_register_module(vfs, &other_principal_module, "");
+        chimera_vfs_identity_add_domain(vfs, "principal", "AD");
+        chimera_vfs_identity_add_domain(vfs, "principal", "DOWN");
+        chimera_vfs_identity_add_domain(vfs, "otherprincipal", "OTHER");
+        chimera_vfs_identity_add_realm(vfs, "AD.EXAMPLE.COM", "AD");
+
+        principal_calls = other_calls = 0;
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "bob@ad.example.com", &r) == CHIMERA_VFS_IDENTITY_OK);
+        assert(strcmp(principal_seen, "AD\\bob") == 0);
+        assert(r.user.uid == TEST_PRINCIPAL_UID);
+        assert(principal_calls == 1 && other_calls == 0);
+        TEST_PASS("a mapped realm reaches its domain's module as DOMAIN\\user");
+
+        principal_calls = other_calls = 0;
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "bob@OTHER", &r) == CHIMERA_VFS_IDENTITY_OK);
+        assert(r.user.uid == TEST_OTHER_UID);
+        assert(principal_calls == 0 && other_calls == 1);
+        TEST_PASS("a principal skips the modules that serve other domains");
+
+        /* The first module would answer AD\bob if it were asked; it is not
+         * asked about OTHER\bob at all, so the same name in two domains maps to
+         * two accounts. */
+        principal_calls = other_calls = 0;
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "bob@UNROUTED", &r) == CHIMERA_VFS_IDENTITY_NOT_MINE);
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "bob", &r) == CHIMERA_VFS_IDENTITY_NOT_MINE);
+        assert(principal_calls == 0 && other_calls == 0);
+        TEST_PASS("a domain no module serves, or none at all, is nobody's");
     }
 
     chimera_vfs_thread_destroy(thread);

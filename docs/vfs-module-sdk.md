@@ -195,8 +195,12 @@ behind NSS can name the same identity properly.
 
 `BY_PRINCIPAL` reaches only modules that declare `CAP_PRINCIPAL`, never NSS,
 so a domain principal cannot land on a same-named local account.  The engine
-rewrites the principal before the walk: `user@REALM` arrives as `REALM\user`,
-a `DOMAIN\user` name as written, and a bare name unqualified.  A principal
+rewrites the principal before the walk: `user@REALM` arrives as `DOMAIN\user`
+after the configured realm map (or `REALM\user` when the realm is unmapped), a
+`DOMAIN\user` name as written, and a bare name unqualified.  Routing is the
+engine's too: a module configured with a `domains` list is asked only about
+principals of those domains, so a module never needs to recognize and decline
+another forest's names.  A principal
 always maps to a user; the answer may also fill `user.group_sid`, the SID of
 its primary group, which SMB records on the session.
 

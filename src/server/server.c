@@ -62,6 +62,14 @@
 
 #define CHIMERA_SERVER_MAX_MODULES          64
 #define CHIMERA_SERVER_MAX_IDENTITY_MODULES 16
+#define CHIMERA_SERVER_MAX_IDENTITY_ROUTES  64
+
+/* A (key, value) pair of identity routing configuration: a module and a
+ * domain it serves, or a realm and the domain it maps to. */
+struct chimera_server_identity_route {
+    char key[256];
+    char domain[256];
+};
 
 #define CHIMERA_SERVER_MAX_PROTOCOLS        4
 
@@ -196,6 +204,12 @@ struct chimera_server_config {
      * chimera_server_config_add_identity_module. */
     struct chimera_vfs_module_cfg         identity_modules[CHIMERA_SERVER_MAX_IDENTITY_MODULES];
     int                                   num_identity_modules;
+    /* Principal routing; see chimera_server_config_add_identity_domain and
+     * chimera_server_config_add_identity_realm. */
+    struct chimera_server_identity_route  identity_domains[CHIMERA_SERVER_MAX_IDENTITY_ROUTES];
+    int                                   num_identity_domains;
+    struct chimera_server_identity_route  identity_realms[CHIMERA_SERVER_MAX_IDENTITY_ROUTES];
+    int                                   num_identity_realms;
     struct chimera_server_config_smb_nic  smb_nic_info[16];
     struct chimera_server_config_smb_auth smb_auth;
     struct chimera_server_config_nfs_auth nfs_auth;
@@ -1458,6 +1472,47 @@ chimera_server_config_add_identity_module(
         module_cfg->module_path[0] = '\0';
     }
 } /* chimera_server_config_add_identity_module */
+
+static void
+chimera_server_identity_route_add(
+    struct chimera_server_identity_route *routes,
+    int                                  *num_routes,
+    const char                           *what,
+    const char                           *key,
+    const char                           *domain)
+{
+    if (*num_routes >= CHIMERA_SERVER_MAX_IDENTITY_ROUTES) {
+        chimera_server_error("Too many identity %s entries configured; ignoring %s -> %s",
+                             what, key, domain);
+        return;
+    }
+
+    snprintf(routes[*num_routes].key, sizeof(routes[*num_routes].key), "%s", key);
+    snprintf(routes[*num_routes].domain, sizeof(routes[*num_routes].domain), "%s", domain);
+    (*num_routes)++;
+} /* chimera_server_identity_route_add */
+
+SYMBOL_EXPORT void
+chimera_server_config_add_identity_domain(
+    struct chimera_server_config *config,
+    const char                   *module_name,
+    const char                   *domain)
+{
+    chimera_server_identity_route_add(config->identity_domains,
+                                      &config->num_identity_domains,
+                                      "domain", module_name, domain);
+} /* chimera_server_config_add_identity_domain */
+
+SYMBOL_EXPORT void
+chimera_server_config_add_identity_realm(
+    struct chimera_server_config *config,
+    const char                   *realm,
+    const char                   *domain)
+{
+    chimera_server_identity_route_add(config->identity_realms,
+                                      &config->num_identity_realms,
+                                      "realm", realm, domain);
+} /* chimera_server_config_add_identity_realm */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_metrics_port(
@@ -2996,6 +3051,15 @@ chimera_server_init(
         }
 
         chimera_vfs_identity_load_modules(server->vfs, identity_cfgs, num_identity_cfgs);
+
+        for (i = 0; i < config->num_identity_domains; i++) {
+            chimera_vfs_identity_add_domain(server->vfs, config->identity_domains[i].key,
+                                            config->identity_domains[i].domain);
+        }
+        for (i = 0; i < config->num_identity_realms; i++) {
+            chimera_vfs_identity_add_realm(server->vfs, config->identity_realms[i].key,
+                                           config->identity_realms[i].domain);
+        }
     }
 
     /* Propagate the common TCP flavor so VFS client modules (e.g. nfs)

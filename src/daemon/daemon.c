@@ -1085,7 +1085,10 @@ main(
     /* "identity": identity modules (src/identity) behind the built-in NSS
      * one, in object order -- which is walk order.  Each value is an object
      * with an optional "path" (a shared object to dlopen for an out-of-tree
-     * module) and an optional "config" object handed to the module's init. */
+     * module), an optional "config" object handed to the module's init and
+     * an optional "domains" array restricting the principals it is asked to
+     * map.  The reserved key "realms" is not a module: it maps Kerberos
+     * realms to the domains they belong to. */
     json_t *identity_modules = json_object_get(server_params, "identity");
     if (json_is_object(identity_modules)) {
         const char *module_name;
@@ -1094,7 +1097,29 @@ main(
         {
             const char *mod_path   = NULL;
             json_t     *config_obj = NULL;
+            json_t     *domains    = NULL;
             char       *config_str = NULL;
+
+            if (strcmp(module_name, "realms") == 0) {
+                const char *realm;
+                json_t     *domain;
+
+                if (!json_is_object(module_cfg)) {
+                    chimera_server_error("identity.realms is not an object, ignoring it");
+                    continue;
+                }
+                json_object_foreach(module_cfg, realm, domain)
+                {
+                    if (!json_is_string(domain)) {
+                        chimera_server_error("identity.realms.%s is not a string, ignoring it",
+                                             realm);
+                        continue;
+                    }
+                    chimera_server_config_add_identity_realm(server_config, realm,
+                                                             json_string_value(domain));
+                }
+                continue;
+            }
 
             if (json_is_object(module_cfg)) {
                 mod_path   = json_string_value(json_object_get(module_cfg, "path"));
@@ -1115,6 +1140,26 @@ main(
             chimera_server_config_add_identity_module(server_config, module_name, mod_path,
                                                       config_str ? config_str : "");
             free(config_str);
+
+            domains = json_is_object(module_cfg) ? json_object_get(module_cfg, "domains") : NULL;
+            if (json_is_array(domains)) {
+                size_t  di;
+                json_t *domain;
+
+                json_array_foreach(domains, di, domain)
+                {
+                    if (json_is_string(domain)) {
+                        chimera_server_config_add_identity_domain(server_config, module_name,
+                                                                  json_string_value(domain));
+                    } else {
+                        chimera_server_error("identity.%s.domains[%zu] is not a string, "
+                                             "ignoring it", module_name, di);
+                    }
+                }
+            } else if (domains) {
+                chimera_server_error("identity.%s.domains is not an array, ignoring it",
+                                     module_name);
+            }
         }
     }
 

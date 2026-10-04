@@ -19,6 +19,7 @@
 #ifdef _WIN32
 #include "common/platform.h"
 #else  /* ifdef _WIN32 */
+#include <strings.h>
 #include <unistd.h>
 #include <dlfcn.h>
 #endif /* ifdef _WIN32 */
@@ -58,7 +59,17 @@ static const struct chimera_vfs_identity_module *chimera_vfs_identity_builtins[]
 struct chimera_vfs_identity_module_entry {
     const struct chimera_vfs_identity_module *module;
     void                                     *private_data;
+    /* The domains this module serves principals for; none means every
+     * principal.  See chimera_vfs_identity_add_domain. */
+    char                                    **domains;
+    int                                       num_domains;
     struct chimera_vfs_identity_module_entry *next;
+};
+
+/* One realm map entry: principals qualified by `realm` belong to `domain`. */
+struct chimera_vfs_identity_realm {
+    char realm[CHIMERA_VFS_IDENTITY_NAME_MAX_LEN];
+    char domain[CHIMERA_VFS_IDENTITY_NAME_MAX_LEN];
 };
 
 struct chimera_vfs_identity_request {
@@ -84,6 +95,8 @@ struct chimera_vfs_identity {
     int                                       shutdown;
     evpl_mutex_t                              module_lock;
     struct chimera_vfs_identity_module_entry *modules;
+    struct chimera_vfs_identity_realm        *realms;
+    int                                       num_realms;
 };
 
 /* Copy a cached user into a standalone result (so callbacks never hold an RCU
@@ -177,28 +190,83 @@ chimera_vfs_identity_result_has_sid(const struct chimera_vfs_identity_result *re
 } /* chimera_vfs_identity_result_has_sid */
 
 /*
- * Rewrite a principal as DOMAIN\user, the one form modules see.  A Kerberos
- * client name arrives as user@REALM; a down-level logon name as DOMAIN\user;
- * a bare name has no domain.  Returns 0, or -1 when the principal does not fit.
+ * Rewrite a principal as DOMAIN\user, the one form modules see, and report the
+ * domain it belongs to.  A Kerberos client name arrives as user@REALM; a
+ * down-level logon name as DOMAIN\user; a bare name has no domain.  Whatever
+ * qualifies the name is looked up in the realm map, so a principal from a
+ * realm whose name differs from its domain's still reaches the module that
+ * serves that domain.  Returns 0, or -1 when the principal does not fit.
  */
 static int
 chimera_vfs_identity_normalize_principal(
-    const char *principal,
-    char       *out,
-    size_t      out_len)
+    const struct chimera_vfs_identity *identity,
+    const char                        *principal,
+    char                              *domain,
+    size_t                             domain_len,
+    char                              *out,
+    size_t                             out_len)
 {
-    const char *at = strrchr(principal, '@');
-    int         n;
+    const char *at  = strrchr(principal, '@');
+    const char *sep = strchr(principal, '\\');
+    const char *qual = "", *user = principal;
+    size_t      qual_len = 0, user_len = strlen(principal);
+    int         i, n;
 
     if (at && at != principal && at[1] != '\0') {
-        n = snprintf(out, out_len, "%s\\%.*s", at + 1,
-                     (int) (at - principal), principal);
+        qual     = at + 1;
+        qual_len = strlen(qual);
+        user_len = (size_t) (at - principal);
+    } else if (sep && sep != principal && sep[1] != '\0') {
+        qual_len = (size_t) (sep - principal);
+        qual     = principal;
+        user     = sep + 1;
+        user_len = strlen(user);
+    }
+
+    if (qual_len >= domain_len) {
+        return -1;
+    }
+    memcpy(domain, qual, qual_len);
+    domain[qual_len] = '\0';
+
+    for (i = 0; i < identity->num_realms; i++) {
+        if (strcasecmp(domain, identity->realms[i].realm) == 0) {
+            snprintf(domain, domain_len, "%s", identity->realms[i].domain);
+            break;
+        }
+    }
+
+    if (domain[0]) {
+        n = snprintf(out, out_len, "%s\\%.*s", domain, (int) user_len, user);
     } else {
-        n = snprintf(out, out_len, "%s", principal);
+        n = snprintf(out, out_len, "%.*s", (int) user_len, user);
     }
 
     return (n < 0 || (size_t) n >= out_len) ? -1 : 0;
 } /* chimera_vfs_identity_normalize_principal */
+
+/* Non-zero if `entry` serves principals of `domain`: it lists that domain, or
+ * lists none and so serves every principal.  A module that lists domains never
+ * sees an unqualified principal. */
+static int
+chimera_vfs_identity_serves_domain(
+    const struct chimera_vfs_identity_module_entry *entry,
+    const char                                     *domain)
+{
+    int i;
+
+    if (entry->num_domains == 0) {
+        return 1;
+    }
+
+    for (i = 0; i < entry->num_domains; i++) {
+        if (strcasecmp(domain, entry->domains[i]) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+} /* chimera_vfs_identity_serves_domain */
 
 /*
  * Walk the registered modules in order until one resolves the key.
@@ -225,7 +293,10 @@ chimera_vfs_identity_normalize_principal(
  * BY_PRINCIPAL goes only to modules that declare CAP_PRINCIPAL.  A principal
  * is a name some authority has already vouched for, and mapping it is a policy
  * decision a module opts into -- NSS in particular never sees one, so a
- * domain principal can never land on a same-named local account.
+ * domain principal can never land on a same-named local account.  Among those
+ * modules it is routed by domain: one configured with a domain list sees only
+ * the principals of those domains, so a module for one forest is never asked
+ * about another's.
  *
  * Returns OK with *out filled; otherwise UNAVAILABLE when no module answered
  * and at least one was down, else NOT_MINE.
@@ -241,6 +312,7 @@ chimera_vfs_identity_run_lookup(
     struct chimera_vfs_identity_module_entry *entry;
     struct chimera_vfs_identity_result        provisional;
     char principal[CHIMERA_VFS_IDENTITY_PRINCIPAL_MAX_LEN];
+    char domain[CHIMERA_VFS_IDENTITY_NAME_MAX_LEN];
     int have_provisional = 0;
     int any_unavailable  = 0;
     int prefer_sid;
@@ -252,7 +324,8 @@ chimera_vfs_identity_run_lookup(
 
     if (key == CHIMERA_VFS_IDENTITY_BY_PRINCIPAL) {
         if (!name || name[0] == '\0' ||
-            chimera_vfs_identity_normalize_principal(name, principal,
+            chimera_vfs_identity_normalize_principal(identity, name, domain,
+                                                     sizeof(domain), principal,
                                                      sizeof(principal)) != 0) {
             return CHIMERA_VFS_IDENTITY_NOT_MINE;
         }
@@ -268,6 +341,10 @@ chimera_vfs_identity_run_lookup(
      * after grabbing the head. */
     for (; entry; entry = entry->next) {
         if ((entry->module->capabilities & required) != required) {
+            continue;
+        }
+        if (key == CHIMERA_VFS_IDENTITY_BY_PRINCIPAL &&
+            !chimera_vfs_identity_serves_domain(entry, domain)) {
             continue;
         }
 
@@ -528,6 +605,10 @@ chimera_vfs_identity_destroy(struct chimera_vfs_identity *identity)
         if (entry->module->destroy) {
             entry->module->destroy(entry->private_data);
         }
+        for (i = 0; i < entry->num_domains; i++) {
+            free(entry->domains[i]);
+        }
+        free(entry->domains);
         free(entry);
         entry = next;
     }
@@ -536,6 +617,7 @@ chimera_vfs_identity_destroy(struct chimera_vfs_identity *identity)
     evpl_cond_destroy(&identity->cond);
     evpl_mutex_destroy(&identity->module_lock);
 
+    free(identity->realms);
     free(identity->workers);
     free(identity);
 } /* chimera_vfs_identity_destroy */
@@ -618,6 +700,63 @@ chimera_vfs_identity_has_capability(
 
     return found;
 } /* chimera_vfs_identity_has_capability */
+
+SYMBOL_EXPORT void
+chimera_vfs_identity_add_domain(
+    struct chimera_vfs *vfs,
+    const char         *module_name,
+    const char         *domain)
+{
+    struct chimera_vfs_identity              *identity = vfs->identity;
+    struct chimera_vfs_identity_module_entry *entry;
+
+    evpl_mutex_lock(&identity->module_lock);
+    for (entry = identity->modules; entry; entry = entry->next) {
+        if (strcmp(entry->module->name, module_name) == 0) {
+            break;
+        }
+    }
+    evpl_mutex_unlock(&identity->module_lock);
+
+    /* A route to a module that is not loaded would silently strand that
+     * domain's principals; the configuration is wrong, so say so. */
+    chimera_vfs_abort_if(!entry, "identity domain %s routed to module %s, which is not loaded",
+                         domain, module_name);
+    chimera_vfs_abort_if(!(entry->module->capabilities & CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL),
+                         "identity domain %s routed to module %s, which does not map principals",
+                         domain, module_name);
+
+    entry->domains = realloc(entry->domains,
+                             (entry->num_domains + 1) * sizeof(*entry->domains));
+    chimera_vfs_abort_if(!entry->domains, "out of memory routing identity domain %s", domain);
+    entry->domains[entry->num_domains] = strdup(domain);
+    chimera_vfs_abort_if(!entry->domains[entry->num_domains],
+                         "out of memory routing identity domain %s", domain);
+    entry->num_domains++;
+
+    chimera_vfs_info("identity module %s serves principals of domain %s",
+                     module_name, domain);
+} /* chimera_vfs_identity_add_domain */
+
+SYMBOL_EXPORT void
+chimera_vfs_identity_add_realm(
+    struct chimera_vfs *vfs,
+    const char         *realm,
+    const char         *domain)
+{
+    struct chimera_vfs_identity       *identity = vfs->identity;
+    struct chimera_vfs_identity_realm *entry;
+
+    identity->realms = realloc(identity->realms,
+                               (identity->num_realms + 1) * sizeof(*identity->realms));
+    chimera_vfs_abort_if(!identity->realms, "out of memory mapping identity realm %s", realm);
+
+    entry = &identity->realms[identity->num_realms++];
+    snprintf(entry->realm, sizeof(entry->realm), "%s", realm);
+    snprintf(entry->domain, sizeof(entry->domain), "%s", domain);
+
+    chimera_vfs_info("identity realm %s maps to domain %s", realm, domain);
+} /* chimera_vfs_identity_add_realm */
 
 SYMBOL_EXPORT enum chimera_vfs_identity_status
 chimera_vfs_identity_domain_info(

@@ -639,6 +639,25 @@ chimera_server_config_add_identity_module(
     const char                   *module_path,
     const char                   *config_data);
 
+/* Route principal lookups for identity module `module_name` to `domain`;
+ * call once per domain.  A module given domains is asked only about the
+ * principals of those domains; one given none is asked about every principal.
+ * A module that is not loaded, or that does not map principals, is fatal at
+ * startup. */
+void
+chimera_server_config_add_identity_domain(
+    struct chimera_server_config *config,
+    const char                   *module_name,
+    const char                   *domain);
+
+/* Treat principals qualified by `realm` (user@realm) as belonging to
+ * `domain` when routing and mapping them; compared without regard to case. */
+void
+chimera_server_config_add_identity_realm(
+    struct chimera_server_config *config,
+    const char                   *realm,
+    const char                   *domain);
+
 void
 chimera_server_config_set_metrics_port(
     struct chimera_server_config *config,
