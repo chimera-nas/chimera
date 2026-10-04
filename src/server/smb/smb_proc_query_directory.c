@@ -46,6 +46,9 @@ chimera_smb_query_directory_readdir_complete(
 
     if (request->query_directory.last_file_offset) {
         *request->query_directory.last_file_offset = 0;
+        /* As Windows does, end the buffer with the last entry's name: only
+         * entries that are followed by another are padded to 8 bytes. */
+        request->query_directory.output_length = request->query_directory.last_entry_end;
     }
 
     chimera_smb_open_file_release(request, request->query_directory.open_file);
@@ -79,11 +82,11 @@ chimera_smb_query_directory_readdir_callback(
 {
     struct chimera_smb_request       *request = arg;
     struct chimera_server_smb_thread *thread  = request->compound->thread;
-    uint16_t                         *namebuf;
+    uint16_t                         *namebuf = NULL;
     uint16_t                          namelen_padded;
     uint32_t                          file_index, expected_length;
     uint32_t                         *fname_len_field;
-    int                               name_utf16_len;
+    int                               name_utf16_len = 0;
     struct evpl_iovec_cursor          entry_cursor;
     struct chimera_smb_attrs          smb_attrs;
 
@@ -175,6 +178,11 @@ chimera_smb_query_directory_readdir_callback(
 
     request->query_directory.last_file_offset = (uint32_t *) ((char *) evpl_iovec_data(&request->query_directory.iov) +
                                                               request->query_directory.output_length);
+
+    /* Zero the entry up front so its alignment padding carries no stale
+     * buffer contents onto the wire. */
+    memset((char *) evpl_iovec_data(&request->query_directory.iov) +
+           request->query_directory.output_length, 0, expected_length);
 
     evpl_iovec_cursor_init(&entry_cursor, &request->query_directory.iov, 1);
 
@@ -340,6 +348,9 @@ chimera_smb_query_directory_readdir_callback(
             break;
     } /* switch */
 
+    request->query_directory.last_entry_end = (uint32_t) ((char *) namebuf -
+                                                          (char *) evpl_iovec_data(&request->query_directory.iov)) +
+        name_utf16_len;
     request->query_directory.output_length += expected_length;
 
     request->query_directory.open_file->position = cookie;
@@ -576,6 +587,7 @@ chimera_smb_parse_query_directory(
     request->query_directory.output_length    = 0;
     request->query_directory.eof              = 1;
     request->query_directory.last_file_offset = NULL;
+    request->query_directory.last_entry_end   = 0;
 
     if (request->query_directory.pattern_length > SMB_FILENAME_MAX * 2) {
         chimera_smb_error("Received SMB2 QUERY_DIRECTORY request with invalid name length (%u > %u)",

@@ -13,6 +13,13 @@
 
 /* FileAttributeTagInformation of a reparse point chimera keeps verbatim: the
  * tag is the first field of the stored buffer. */
+/* The status a QUERY_INFO whose data was gathered completes with. */
+static inline unsigned int
+chimera_smb_query_info_ok(const struct chimera_smb_request *request)
+{
+    return request->query_info.truncated ? SMB2_STATUS_BUFFER_OVERFLOW : SMB2_STATUS_SUCCESS;
+} /* chimera_smb_query_info_ok */
+
 static void
 chimera_smb_query_info_reparse_tag_cb(
     enum chimera_vfs_error error_code,
@@ -28,7 +35,7 @@ chimera_smb_query_info_reparse_tag_cb(
     request->query_info.ea_out = NULL;
 
     chimera_smb_open_file_release(request, request->query_info.open_file);
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(request, chimera_smb_query_info_ok(request));
 } /* chimera_smb_query_info_reparse_tag_cb */
 
 static void
@@ -103,7 +110,7 @@ chimera_smb_query_info_getattr_callback(
     if (unlikely(error_code)) {
         chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
     } else {
-        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        chimera_smb_complete_request(request, chimera_smb_query_info_ok(request));
     }
 } /* chimera_smb_query_info_getattr_callback */
 
@@ -114,7 +121,8 @@ chimera_smb_query_info_getattr_callback(
  * min_length is the info level's fixed minimum; levels that did not set one
  * inherit their own output_length.  A buffer below that minimum is
  * INFO_LENGTH_MISMATCH; a buffer that merely cannot hold the whole reply gets
- * the reply truncated and BUFFER_OVERFLOW.
+ * the reply truncated: it is still gathered and returned, cut to the buffer,
+ * with BUFFER_OVERFLOW (see chimera_smb_query_info_ok()).
  */
 static inline unsigned int
 chimera_smb_query_info_check_length(struct chimera_smb_request *request)
@@ -129,7 +137,7 @@ chimera_smb_query_info_check_length(struct chimera_smb_request *request)
 
     if (request->query_info.max_response_size < request->query_info.output_length) {
         request->query_info.output_length = request->query_info.max_response_size;
-        return SMB2_STATUS_BUFFER_OVERFLOW;
+        request->query_info.truncated     = 1;
     }
 
     return SMB2_STATUS_SUCCESS;
@@ -833,6 +841,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
          * the regular path's initialization further down -- the fixed-size
          * levels below inherit output_length from it, ALL_INFO overrides it. */
         request->query_info.min_length = 0;
+        request->query_info.truncated  = 0;
 
         memset(&pipe_attrs, 0, sizeof(pipe_attrs));
         pipe_attrs.va_mode  = S_IFREG | 0666;
@@ -924,6 +933,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
      * (MS-SMB2 3.3.5.20.1 / smb2.getinfo.q*_buffercheck).  For fixed-size
      * levels it equals output_length; variable-size levels override it below. */
     request->query_info.min_length = 0;
+    request->query_info.truncated  = 0;
 
     switch (request->query_info.info_type) {
         case SMB2_INFO_FILE:
@@ -1140,7 +1150,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                             request);
     } else {
         chimera_smb_open_file_release(request, request->query_info.open_file);
-        chimera_smb_complete_request(request, status);
+        chimera_smb_complete_request(request, chimera_smb_query_info_ok(request));
     }
 
 } /* chimera_smb_query_info */
@@ -1152,6 +1162,7 @@ chimera_smb_query_info_reply(
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
     uint16_t                          namebuf[8];
+    struct evpl_iovec_cursor          body;
 
     if (request->query_info.info_type == SMB2_INFO_SECURITY) {
         chimera_smb_query_security_reply(reply_cursor, request);
@@ -1162,6 +1173,8 @@ chimera_smb_query_info_reply(
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_QUERY_INFO_REPLY_SIZE);
     evpl_iovec_cursor_append_uint16(reply_cursor, 64 + 8);  /* Fixed offset from SMB protocol */
     evpl_iovec_cursor_append_uint32(reply_cursor, request->query_info.output_length);
+
+    body = *reply_cursor;
 
     switch (request->query_info.info_type) {
         case SMB2_INFO_FILE:
@@ -1360,6 +1373,12 @@ chimera_smb_query_info_reply(
             break;
     } /* switch */
 
+    /* A BUFFER_OVERFLOW reply carries only the OutputBufferLength bytes that
+     * fit; the class marshallers above write the whole structure. */
+    if (reply_cursor->consumed - body.consumed > (int) request->query_info.output_length) {
+        *reply_cursor = body;
+        evpl_iovec_cursor_skip(reply_cursor, request->query_info.output_length);
+    }
 } /* chimera_smb_query_info_reply */
 
 int

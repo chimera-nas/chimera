@@ -7,13 +7,10 @@
 #                         makes only of a local volume
 # allocation-accounting   allocation not reported at NTFS cluster granularity
 #                         after zeroing a range
-# delete-pending-client-cache  the client answers DeletePending from its own
-#                         cache; the server reports it correctly
 # disk-ioctl              IOCTL_DISK_GET_DRIVE_GEOMETRY is not answered
 # no-compression          chimera has no file compression
 # no-privilege-model      no SeSecurityPrivilege, so SACL access is refused
 # ntfs-lazy-dirent-times  NTFS updates a directory entry's times only at close
-# open-by-file-id         the client does not send FILE_OPEN_BY_FILE_ID
 # reparse-delete-validation  DELETE_REPARSE_POINT parameter checks differ
 # section-sharing         an open while a mapped section is still alive
 # sparse-attribute        FILE_ATTRIBUTE_SPARSE_FILE on the unnamed stream
@@ -43,7 +40,6 @@ Encryption:EncryptionAttributeTest,*,fails-over-windows-smb
 Encryption:ReadWriteRawEncryptedTest,*,fails-over-windows-smb
 Encryption:SuperOverEncryptedTest,*,fails-over-windows-smb
 FileInformation:AlternateNameInformationTest,*,fails-over-windows-smb
-FileInformation:DispositionInformationTest,*,delete-pending-client-cache
 FileInformation:StatInformationTest,*,fails-over-windows-smb
 FileInformation:TimeStampTest,*,fails-over-windows-smb
 FileSystemControlGeneral:SetCompressionTest,*,no-compression
@@ -69,7 +65,6 @@ OpLocks:OplockBreakIandIIOnCloseTest,*,fails-over-windows-smb
 OpLocks:OplockBreakItoIITest,*,fails-over-windows-smb
 OpLocks:OplockIIWriteBreakingTest,*,fails-over-windows-smb
 OpLocks:OplockSetInfoBreakTest,*,fails-over-windows-smb
-OpenCreateGeneral:FileOpenByIDTest,*,open-by-file-id
 OpenCreateGeneral:OpenVolumeTest,*,volume-handle
 OpenCreateGeneral:ShareAccessTest,*,fails-over-windows-smb
 OpenCreateGeneral:ShortFileNameTest,*,fails-over-windows-smb
