@@ -17,7 +17,7 @@ add_library(chimera_fuse ${CHIMERA_LIBRARY_TYPE}
     fuse_proc_xattr.c
     fuse_uring.c)
 
-target_link_libraries(chimera_fuse chimera_vfs chimera_common evpl)
+target_link_libraries(chimera_fuse chimera_server_config chimera_vfs chimera_common evpl)
 
 # FUSE-over-io_uring (fuse_uring.c); without liburing the mount negotiates
 # plain /dev/fuse only.

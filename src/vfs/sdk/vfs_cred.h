@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "vfs_sdk_export.h"
+
 #include <stdint.h>
 #include <string.h>
 #include "vfs_attrs.h"
@@ -77,7 +79,7 @@ struct chimera_vfs_cred {
  * would at worst share a handle (no security boundary under AUTH_SYS, which the
  * client asserts anyway), so a 64-bit mix is ample.
  */
-uint64_t
+CHIMERA_VFS_SDK_EXPORT uint64_t
 chimera_vfs_cred_hash(
     const struct chimera_vfs_cred *cred);
 
@@ -88,7 +90,7 @@ chimera_vfs_cred_hash(
  * they can be restored after impersonating a client credential. Safe to call
  * multiple times; the static is initialized exactly once per translation unit.
  */
-struct chimera_vfs_cred *
+CHIMERA_VFS_SDK_EXPORT struct chimera_vfs_cred *
 chimera_vfs_get_server_cred(
     void);
 
@@ -121,7 +123,7 @@ chimera_vfs_cred_init_anonymous(
  * @param ngids  Number of supplementary group IDs
  * @param gids   Array of supplementary group IDs (may be NULL if ngids == 0)
  */
-void
+CHIMERA_VFS_SDK_EXPORT void
 chimera_vfs_cred_init_unix(
     struct chimera_vfs_cred *cred,
     uint32_t                 uid,
@@ -142,7 +144,7 @@ chimera_vfs_cred_init_unix(
  *               CHIMERA_VFS_CRED_MAX_GIDS)
  * @param gids   Array of supplementary group IDs (may be NULL if ngids == 0)
  */
-void
+CHIMERA_VFS_SDK_EXPORT void
 chimera_vfs_cred_init_attr(
     struct chimera_vfs_cred *cred,
     uint32_t                 uid,
@@ -170,7 +172,7 @@ chimera_vfs_cred_init_attr(
  *                   may be NULL)
  * @return 0 on success, errno value on failure
  */
-int
+CHIMERA_VFS_SDK_EXPORT int
 chimera_setup_credential(
     const struct chimera_vfs_cred *cred,
     struct chimera_vfs_attrs      *set_attrs);
@@ -185,7 +187,7 @@ chimera_setup_credential(
  * @param cred  The client credential that was previously applied
  * @return 0 on success, errno value on failure
  */
-int
+CHIMERA_VFS_SDK_EXPORT int
 chimera_restore_privilege(
     const struct chimera_vfs_cred *cred);
 
@@ -204,7 +206,7 @@ chimera_restore_privilege(
  * a non-privileged (non-root) UNIX writer triggers the clear, and only for a
  * regular file that actually carries S_ISUID/S_ISGID.
  */
-uint32_t
+CHIMERA_VFS_SDK_EXPORT uint32_t
 chimera_vfs_killpriv_mode(
     const struct chimera_vfs_cred *cred,
     uint32_t                       mode);

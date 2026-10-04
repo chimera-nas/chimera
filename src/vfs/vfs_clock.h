@@ -5,6 +5,7 @@
 #pragma once
 
 #include "common/atomic.h"
+#include "common/export.h"
 #include <stdint.h>
 #include <time.h>
 #include "stopwatch.h"
@@ -17,12 +18,19 @@ struct chimera_vfs_clock {
     int                      initialized;
 };
 
-extern struct chimera_vfs_clock chimera_vfs_clock;
+/* Exported data (see common/macros.h). */
+#ifdef CHIMERA_VFS_BUILD
+#define CHIMERA_VFS_DATA CHIMERA_DATA_EXPORT
+#else // ifdef CHIMERA_VFS_BUILD
+#define CHIMERA_VFS_DATA CHIMERA_DATA_IMPORT
+#endif // ifdef CHIMERA_VFS_BUILD
 
-void chimera_vfs_clock_init(
+extern CHIMERA_VFS_DATA struct chimera_vfs_clock chimera_vfs_clock;
+
+SYMBOL_EXPORT void chimera_vfs_clock_init(
     void);
 
-void chimera_vfs_clock_shutdown(
+SYMBOL_EXPORT void chimera_vfs_clock_shutdown(
     void);
 
 /* Monotonic time in stopwatch ticks since init. */

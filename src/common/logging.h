@@ -5,17 +5,18 @@
 #pragma once
 
 #include "common/compiler.h"
+#include "common/export.h"
 #include <stdarg.h>
 #include <stdio.h>
 
-extern int ChimeraLogLevel;
+extern CHIMERA_COMMON_DATA int ChimeraLogLevel;
 
 #define CHIMERA_LOG_FATAL 1
 #define CHIMERA_LOG_ERROR 2
 #define CHIMERA_LOG_INFO  3
 #define CHIMERA_LOG_DEBUG 4
 
-void chimera_log_init(
+SYMBOL_EXPORT void chimera_log_init(
     void);
 
 /*
@@ -23,23 +24,23 @@ void chimera_log_init(
  * the given stream instead of the default stdout.  The stream is closed when
  * logging is flushed/torn down.  Must be called before chimera_log_init().
  */
-void chimera_log_set_file(
+SYMBOL_EXPORT void chimera_log_set_file(
     FILE *fp);
 
 /*
  * Disable logging entirely: chimera_vlog drops all messages and no logging
  * thread is started.  Must be called before chimera_log_init().
  */
-void chimera_log_disable(
+SYMBOL_EXPORT void chimera_log_disable(
     void);
 
-void chimera_enable_crash_handler(
+SYMBOL_EXPORT void chimera_enable_crash_handler(
     void);
 
-void chimera_log_flush(
+SYMBOL_EXPORT void chimera_log_flush(
     void);
 
-void
+SYMBOL_EXPORT void
 chimera_vlog(
     const char *level,
     const char *mod,
@@ -48,34 +49,34 @@ chimera_vlog(
     const char *fmt,
     va_list     argp);
 
-void __chimera_debug(
+SYMBOL_EXPORT void __chimera_debug(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-void __chimera_info(
+SYMBOL_EXPORT void __chimera_info(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
-void __chimera_error(
-    const char *mod,
-    const char *file,
-    int         line,
-    const char *fmt,
-    ...);
-
-CHIMERA_NORETURN void __chimera_fatal(
+SYMBOL_EXPORT void __chimera_error(
     const char *mod,
     const char *file,
     int         line,
     const char *fmt,
     ...);
 
-CHIMERA_NORETURN void __chimera_abort(
+SYMBOL_EXPORT CHIMERA_NORETURN void __chimera_fatal(
+    const char *mod,
+    const char *file,
+    int         line,
+    const char *fmt,
+    ...);
+
+SYMBOL_EXPORT CHIMERA_NORETURN void __chimera_abort(
     const char *mod,
     const char *file,
     int         line,

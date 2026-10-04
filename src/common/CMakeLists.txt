@@ -23,3 +23,6 @@ if (NOT DISABLE_TESTS)
 endif()
 
 install(TARGETS chimera_common chimera_crypto DESTINATION lib)
+
+# Exports its data rather than importing it (common/export.h).
+target_compile_definitions(chimera_common PRIVATE CHIMERA_COMMON_BUILD)

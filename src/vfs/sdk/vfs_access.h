@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "vfs_sdk_export.h"
+
 /*
  * Central access-control gate.
  *
@@ -35,7 +37,7 @@ struct chimera_vfs_open_handle;
  * or root, attrs missing one of them grant nothing (see
  * chimera_vfs_gate_attrs_missing).
  */
-uint32_t chimera_vfs_access_check(
+CHIMERA_VFS_SDK_EXPORT uint32_t chimera_vfs_access_check(
     const struct chimera_vfs_attrs *attr,
     const struct chimera_vfs_cred  *cred,
     uint32_t                        requested);
@@ -59,7 +61,7 @@ chimera_vfs_access_allowed(
  * so the wrapper can avoid the pre-step attr/ACL fetch entirely.  Returns 1
  * when the engine is the sole authority and must run.
  */
-int chimera_vfs_gate_needed(
+CHIMERA_VFS_SDK_EXPORT int chimera_vfs_gate_needed(
     uint64_t                       module_capabilities,
     const struct chimera_vfs_cred *cred);
 
@@ -72,7 +74,7 @@ int chimera_vfs_gate_needed(
  * SMB (AUTH_ATTR) is not subjected to POSIX prefix DAC (it owns its own model);
  * root and AUTH_NONE remain exempt; engine backends behave as gate_needed().
  */
-int chimera_vfs_gate_needed_dac(
+CHIMERA_VFS_SDK_EXPORT int chimera_vfs_gate_needed_dac(
     uint64_t                       module_capabilities,
     const struct chimera_vfs_cred *cred);
 
@@ -82,7 +84,7 @@ int chimera_vfs_gate_needed_dac(
  * server, so path-prefix search on lookup falls to the engine for them too.
  * Used only by the lookup gate -- per-op data gates use gate_needed_dac.
  */
-int chimera_vfs_gate_needed_prefix(
+CHIMERA_VFS_SDK_EXPORT int chimera_vfs_gate_needed_prefix(
     uint64_t                       module_capabilities,
     const struct chimera_vfs_cred *cred);
 
@@ -92,7 +94,7 @@ int chimera_vfs_gate_needed_prefix(
  * (CHIMERA_VFS_CAP_REMOTE_DAC): their server enforces every wire operation
  * but has no open to enforce, so open(2) semantics fall to the engine.
  */
-int chimera_vfs_open_gate_needed(
+CHIMERA_VFS_SDK_EXPORT int chimera_vfs_open_gate_needed(
     uint64_t                       module_capabilities,
     const struct chimera_vfs_cred *cred);
 
@@ -106,7 +108,7 @@ int chimera_vfs_open_gate_needed(
  * a missing mode would skip the check and a missing uid/gid would be read as
  * root:root, both of which grant access the object does not.
  */
-uint64_t chimera_vfs_gate_attrs_missing(
+CHIMERA_VFS_SDK_EXPORT uint64_t chimera_vfs_gate_attrs_missing(
     const struct chimera_vfs_attrs *attr,
     uint64_t                        module_capabilities);
 
@@ -117,7 +119,7 @@ uint64_t chimera_vfs_gate_attrs_missing(
  * ACL via va_acl), else CHIMERA_VFS_EACCES.  Callers gate on
  * chimera_vfs_gate_needed() first and fetch attrs+ACL before calling this.
  */
-enum chimera_vfs_error chimera_vfs_gate(
+CHIMERA_VFS_SDK_EXPORT enum chimera_vfs_error chimera_vfs_gate(
     const struct chimera_vfs_attrs *attr,
     const struct chimera_vfs_cred  *cred,
     uint32_t                        required);
@@ -129,7 +131,7 @@ enum chimera_vfs_error chimera_vfs_gate(
  * attrs must carry mode/uid (+ ACL where present); `child_attr` may be NULL when
  * only the parent's DELETE_CHILD grant matters.  Returns non-zero to allow.
  */
-int chimera_vfs_delete_allowed(
+CHIMERA_VFS_SDK_EXPORT int chimera_vfs_delete_allowed(
     const struct chimera_vfs_attrs *parent_attr,
     const struct chimera_vfs_attrs *child_attr,
     const struct chimera_vfs_cred  *cred);
@@ -192,7 +194,7 @@ struct chimera_vfs_gate_ctx {
  * chimera_vfs_gate_needed(); running the gate for a DAC-exempt credential
  * costs the fetch and decides nothing.
  */
-int chimera_vfs_gate_needed_create(
+CHIMERA_VFS_SDK_EXPORT int chimera_vfs_gate_needed_create(
     uint64_t                       module_capabilities,
     const struct chimera_vfs_cred *cred);
 
@@ -207,7 +209,7 @@ int chimera_vfs_gate_needed_create(
  * never overrides a group the caller named itself (an NFSv4 createattrs
  * owner_group), which outranks the default.
  */
-void chimera_vfs_create_inherit_gid(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_create_inherit_gid(
     struct chimera_vfs_attrs       *create_attr,
     const struct chimera_vfs_attrs *parent_attr);
 
@@ -217,7 +219,7 @@ void chimera_vfs_create_inherit_gid(
  * new object is to carry: the gate applies chimera_vfs_create_inherit_gid()
  * to them from the parent attrs it fetches.
  */
-void chimera_vfs_gate_handle_create(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_handle_create(
     struct chimera_vfs_gate_ctx    *ctx,
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
@@ -227,7 +229,7 @@ void chimera_vfs_gate_handle_create(
     chimera_vfs_gate_callback_t     callback,
     void                           *private_data);
 
-void chimera_vfs_gate_fh_always_create(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_fh_always_create(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
@@ -239,7 +241,7 @@ void chimera_vfs_gate_fh_always_create(
     void                          *private_data);
 
 /* Require `required` (CHIMERA_ACE_* mask) on the object named by `fh`. */
-void chimera_vfs_gate_fh(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_fh(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
@@ -254,7 +256,7 @@ void chimera_vfs_gate_fh(
  * deny an operation itself and POSIX orders an access denial ahead of it,
  * on a backend that will never see the op (see the unprivileged
  * device-mknod EPERM in vfs_proc_mknod_at.c). */
-void chimera_vfs_gate_fh_always(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_fh_always(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
@@ -268,7 +270,7 @@ void chimera_vfs_gate_fh_always(
  * assertion is dropped.  For callers authorizing access to the object itself
  * rather than traversing it -- an open(2) access-mode check, which must be
  * able to say EACCES about a regular file. */
-void chimera_vfs_gate_fh_obj(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_fh_obj(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
@@ -281,7 +283,7 @@ void chimera_vfs_gate_fh_obj(
 /* As chimera_vfs_gate_fh(), but enforced even for DELEGATES_DAC (passthrough)
  * backends -- for DAC the kernel cannot see on handle-based lookups (path-prefix
  * search, link/rename destination-directory write). */
-void chimera_vfs_gate_fh_dac(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_fh_dac(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
@@ -293,7 +295,7 @@ void chimera_vfs_gate_fh_dac(
 
 /* As chimera_vfs_gate_fh_dac(), but for the lookup prefix: additionally
  * enforced for remote-DAC proxies (see chimera_vfs_gate_needed_prefix). */
-void chimera_vfs_gate_fh_prefix(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_fh_prefix(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
@@ -308,7 +310,7 @@ void chimera_vfs_gate_fh_prefix(
  * Correct for a path-only backend whose FH is a path token that ENOENTs after
  * an unlink-while-open, and a strict win elsewhere (one fewer open, no TOCTOU).
  * The caller retains ownership of `handle`. */
-void chimera_vfs_gate_handle(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_handle(
     struct chimera_vfs_gate_ctx    *ctx,
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
@@ -319,7 +321,7 @@ void chimera_vfs_gate_handle(
 
 /* As chimera_vfs_gate_handle(), enforced even for DELEGATES_DAC passthroughs
  * (see chimera_vfs_gate_needed_dac). */
-void chimera_vfs_gate_handle_dac(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_handle_dac(
     struct chimera_vfs_gate_ctx    *ctx,
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
@@ -350,7 +352,7 @@ struct chimera_vfs_toolong_ctx {
  * when it may, which is the order POSIX pathname resolution requires.  See the
  * commentary at chimera_vfs_name_too_long_complete().
  */
-void chimera_vfs_name_too_long_handle(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_name_too_long_handle(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
@@ -358,7 +360,7 @@ void chimera_vfs_name_too_long_handle(
     void                           *callback,
     void                           *private_data);
 
-void chimera_vfs_name_too_long_fh(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_name_too_long_fh(
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     const void                    *fh,
@@ -369,12 +371,12 @@ void chimera_vfs_name_too_long_fh(
 
 /* Release an over-long-name context.  Read `callback` and `private_data` out
  * of it FIRST: the scratch goes straight back on the thread's free list. */
-void chimera_vfs_toolong_free(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_toolong_free(
     struct chimera_vfs_toolong_ctx *ctx);
 
 /* As chimera_vfs_gate_handle(), enforced additionally for remote-DAC proxies
  * (the lookup prefix search).  See chimera_vfs_gate_needed_prefix. */
-void chimera_vfs_gate_handle_prefix(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_handle_prefix(
     struct chimera_vfs_gate_ctx    *ctx,
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
@@ -385,7 +387,7 @@ void chimera_vfs_gate_handle_prefix(
 
 /* As chimera_vfs_gate_delete(), but the parent directory is an already-open
  * handle the caller holds (the child is still identified by FH). */
-void chimera_vfs_gate_delete_handle(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_delete_handle(
     struct chimera_vfs_gate_ctx    *ctx,
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
@@ -396,7 +398,7 @@ void chimera_vfs_gate_delete_handle(
     void                           *private_data);
 
 /* Authorize deleting `child_fh` from directory `parent_fh` (delete_allowed). */
-void chimera_vfs_gate_delete_always(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_delete_always(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
@@ -407,7 +409,7 @@ void chimera_vfs_gate_delete_always(
     chimera_vfs_gate_callback_t    callback,
     void                          *private_data);
 
-void chimera_vfs_gate_delete(
+CHIMERA_VFS_SDK_EXPORT void chimera_vfs_gate_delete(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,

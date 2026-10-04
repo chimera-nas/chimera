@@ -5,11 +5,7 @@
 #pragma once
 #include "common/compiler.h"
 
-#ifdef _WIN32
-#define SYMBOL_EXPORT
-#else // ifdef _WIN32
-#define SYMBOL_EXPORT __attribute__((visibility("default")))
-#endif // ifdef _WIN32
+#include "common/export.h"
 
 #ifndef offsetof
 #define offsetof(type, member) ((size_t) &((type *) 0)->member)

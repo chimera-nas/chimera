@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 
 #include "smb_wbclient.h"
@@ -48,7 +50,7 @@ struct smb_kerberos_identity {
  * Returns 0 with *out filled, or -1 when the logon must be refused (the caller
  * answers STATUS_LOGON_FAILURE).  Logs the reason for every refusal.
  */
-int
+SYMBOL_EXPORT int
 smb_kerberos_resolve_identity(
     int                           winbind_enabled,
     int                           anonymous_fallback,

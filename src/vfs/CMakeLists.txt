@@ -72,15 +72,10 @@ install(FILES
 # chimera_vfs_init dlopens by name at runtime (src/vfs/vfs.c), and none is
 # linked into chimera_vfs.  They land beside libchimera_vfs in the build tree
 # and install beside it, which is where the loader looks for a module whose
-# config gives no explicit module_path.  The native Windows build is all
-# static archives (cmake/Platform.cmake) with no shared VFS core for a plugin
-# to bind to, so there the backends stay linked in and are resolved from a
-# built-in table.
-if (WIN32)
-    set(CHIMERA_VFS_MODULE_TYPE STATIC)
-else ()
-    set(CHIMERA_VFS_MODULE_TYPE MODULE)
-endif ()
+# config gives no explicit module_path.  On Windows the modules are DLLs
+# bound to chimera_vfs.dll and chimera_common.dll exactly as the Linux ones
+# are to the shared objects.
+set(CHIMERA_VFS_MODULE_TYPE MODULE)
 
 target_compile_definitions(chimera_vfs PRIVATE
     CHIMERA_VFS_MODULE_PREFIX="${CMAKE_SHARED_MODULE_PREFIX}chimera_vfs_"
@@ -90,11 +85,16 @@ target_compile_definitions(chimera_vfs PRIVATE
 # Finish a backend target created with add_library(... ${CHIMERA_VFS_MODULE_TYPE}):
 # place it where the loader finds it and bind it to the VFS core it plugs into.
 function(chimera_vfs_module target)
-    if (NOT WIN32)
+    if (WIN32)
+        # Beside chimera_vfs.dll, which CMake places with the executables;
+        # a MODULE is a LIBRARY artifact, so it has to be sent there.
+        set_target_properties(${target} PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+    else ()
         set_target_properties(${target} PROPERTIES
             LIBRARY_OUTPUT_DIRECTORY ${CHIMERA_VFS_BINARY_DIR})
-        target_link_libraries(${target} chimera_vfs)
     endif ()
+    target_link_libraries(${target} chimera_vfs chimera_common)
     install(TARGETS ${target} DESTINATION lib)
     set_property(GLOBAL APPEND PROPERTY CHIMERA_VFS_MODULE_TARGETS ${target})
 endfunction()
@@ -142,10 +142,6 @@ get_property(CHIMERA_VFS_MODULE_TARGETS GLOBAL PROPERTY CHIMERA_VFS_MODULE_TARGE
 target_link_libraries(chimera_vfs
     chimera_common prometheus-c xxhash ${CHIMERA_DL_LIB} ${CHIMERA_RCU_LIBS})
 
-if (WIN32)
-    target_link_libraries(chimera_vfs ${CHIMERA_VFS_MODULE_TARGETS})
-endif()
-
 # Nothing links the backends, so give the libraries that bring up a VFS a
 # build dependency on them: building any of those builds a loadable set.
 add_custom_target(chimera_vfs_modules DEPENDS ${CHIMERA_VFS_MODULE_TARGETS})
@@ -153,3 +149,6 @@ add_custom_target(chimera_vfs_modules DEPENDS ${CHIMERA_VFS_MODULE_TARGETS})
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)
 endif()
+
+# Exports its data rather than importing it (common/export.h).
+target_compile_definitions(chimera_vfs PRIVATE CHIMERA_VFS_BUILD)

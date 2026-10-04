@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -49,7 +51,7 @@ struct chimera_smb_auth_config;
  * wholly within buf_len.  Exposed for the hardening tests, which drive it with
  * adversarial offsets; production callers reach it through smb_ntlm_process().
  */
-char *
+SYMBOL_EXPORT char *
 smb_ntlm_parse_utf16_field(
     const uint8_t *buf,
     size_t         buf_len,

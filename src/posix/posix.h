@@ -5,6 +5,7 @@
 #ifndef CHIMERA_POSIX_H
 #define CHIMERA_POSIX_H
 
+#include "common/export.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -23,30 +24,30 @@ struct prometheus_metrics;
 struct evpl_iovec;
 struct chimera_acl;
 
-struct chimera_posix_client *
+SYMBOL_EXPORT struct chimera_posix_client *
 chimera_posix_init(
     const struct chimera_client_config *config,
     const struct chimera_vfs_cred      *cred,
     struct prometheus_metrics          *metrics);
 
-struct chimera_posix_client *
+SYMBOL_EXPORT struct chimera_posix_client *
 chimera_posix_init_json(
     const char                    *config_path,
     const struct chimera_vfs_cred *cred,
     struct prometheus_metrics     *metrics);
 
-void
+SYMBOL_EXPORT void
 chimera_posix_shutdown(
     void);
 
 /* Override the effective credential used for subsequent operations on the
  * calling thread.  Pass NULL to clear the override and fall back to the
  * client-global credential.  The credential is copied. */
-void
+SYMBOL_EXPORT void
 chimera_posix_set_cred(
     const struct chimera_vfs_cred *cred);
 
-void
+SYMBOL_EXPORT void
 chimera_posix_clear_cred(
     void);
 
@@ -57,38 +58,38 @@ chimera_posix_clear_cred(
  * processes onto one address space (the model-based test harnesses do
  * exactly that, and without this every simulated process would share one
  * owner and never conflict with itself).  Pass NULL to restore the default. */
-void
+SYMBOL_EXPORT void
 chimera_posix_set_lock_owner(
     const uint64_t *owner);
 
 /* Set the calling thread's file-mode creation mask (mirrors umask(2)); returns
  * the previous mask.  Applied to mode in the create paths (open O_CREAT, mkdir,
  * mknod, ...).  Until first set, no umask is applied. */
-mode_t
+SYMBOL_EXPORT mode_t
 chimera_posix_umask(
     mode_t mask);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_mount(
     const char *mount_path,
     const char *module_name,
     const char *module_path);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_mount_with_options(
     const char *mount_path,
     const char *module_name,
     const char *module_path,
     const char *options);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_umount(
     const char *mount_path);
 
 /* Create a named filesystem inside a CAP_MKFS module (memfs, diskfs, cairn);
  * mount it afterwards with a module path of "<fsname>[/path]".  Returns 0 on
  * success, -1 with errno set otherwise (EEXIST if the name is taken). */
-int
+SYMBOL_EXPORT int
 chimera_posix_mkfs(
     const char *module_name,
     const char *fsname,
@@ -96,104 +97,104 @@ chimera_posix_mkfs(
 
 /* Remove a named filesystem.  Returns 0 on success, -1 with errno set
  * otherwise (EBUSY while the filesystem still has active mounts). */
-int
+SYMBOL_EXPORT int
 chimera_posix_rmfs(
     const char *module_name,
     const char *fsname);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_open(
     const char *path,
     int         flags,
     ...);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_close(
     int fd);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_read(
     int    fd,
     void  *buf,
     size_t count);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_write(
     int         fd,
     const void *buf,
     size_t      count);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_mkdir(
     const char *path,
     mode_t      mode);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_mknod(
     const char   *path,
     mode_t        mode,
     chimera_dev_t dev);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_symlink(
     const char *target,
     const char *path);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_link(
     const char *oldpath,
     const char *newpath);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_unlink(
     const char *path);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_rename(
     const char *oldpath,
     const char *newpath);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_readlink(
     const char *path,
     char       *buf,
     size_t      bufsiz);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_stat(
     const char           *path,
     chimera_posix_stat_t *st);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_lstat(
     const char           *path,
     chimera_posix_stat_t *st);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fstat(
     int                   fd,
     chimera_posix_stat_t *st);
 
-chimera_off_t
+SYMBOL_EXPORT chimera_off_t
 chimera_posix_lseek(
     int           fd,
     chimera_off_t offset,
     int           whence);
 
-int64_t
+SYMBOL_EXPORT int64_t
 chimera_posix_lseek64(
     int     fd,
     int64_t offset,
     int     whence);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_pread(
     int           fd,
     void         *buf,
     size_t        count,
     chimera_off_t offset);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_pread64(
     int     fd,
     void   *buf,
@@ -204,14 +205,14 @@ chimera_posix_pread64(
  * directly in `iov` (no copy into a separate buffer); the caller owns `iov` and
  * must allocate it from the evpl allocator so it is RDMA-registered.  Returns
  * the byte count read, or -1 with errno set. */
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_read_into(
     int                fd,
     struct evpl_iovec *iov,
     int                niov,
     size_t             count);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_pread_into(
     int                fd,
     struct evpl_iovec *iov,
@@ -219,61 +220,61 @@ chimera_posix_pread_into(
     size_t             count,
     chimera_off_t      offset);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_pwrite(
     int           fd,
     const void   *buf,
     size_t        count,
     chimera_off_t offset);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_pwrite64(
     int         fd,
     const void *buf,
     size_t      count,
     int64_t     offset);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_readv(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_writev(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_preadv(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
     chimera_off_t       offset);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_preadv64(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
     int64_t             offset);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_pwritev(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
     chimera_off_t       offset);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_pwritev64(
     int                 fd,
     const struct iovec *iov,
     int                 iovcnt,
     int64_t             offset);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_preadv2(
     int                 fd,
     const struct iovec *iov,
@@ -281,7 +282,7 @@ chimera_posix_preadv2(
     chimera_off_t       offset,
     int                 flags);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_preadv64v2(
     int                 fd,
     const struct iovec *iov,
@@ -289,7 +290,7 @@ chimera_posix_preadv64v2(
     int64_t             offset,
     int                 flags);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_pwritev2(
     int                 fd,
     const struct iovec *iov,
@@ -297,7 +298,7 @@ chimera_posix_pwritev2(
     chimera_off_t       offset,
     int                 flags);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_pwritev64v2(
     int                 fd,
     const struct iovec *iov,
@@ -309,38 +310,38 @@ chimera_posix_pwritev64v2(
 struct chimera_posix_dir;
 typedef struct chimera_posix_dir CHIMERA_DIR;
 
-CHIMERA_DIR *
+SYMBOL_EXPORT CHIMERA_DIR *
 chimera_posix_opendir(
     const char *path);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_closedir(
     CHIMERA_DIR *dirp);
 
-struct dirent *
+SYMBOL_EXPORT struct dirent *
 chimera_posix_readdir(
     CHIMERA_DIR *dirp);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_dirfd(
     CHIMERA_DIR *dirp);
 
-void
+SYMBOL_EXPORT void
 chimera_posix_rewinddir(
     CHIMERA_DIR *dirp);
 
 /* Directory positions are opaque cookies. Preserve the full value returned
  * by telldir; a Windows long cannot hold all backend cookies. */
-void
+SYMBOL_EXPORT void
 chimera_posix_seekdir(
     CHIMERA_DIR     *dirp,
     chimera_dirpos_t loc);
 
-chimera_dirpos_t
+SYMBOL_EXPORT chimera_dirpos_t
 chimera_posix_telldir(
     CHIMERA_DIR *dirp);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_scandir(
     const char      *dirp,
     struct dirent ***namelist,
@@ -360,147 +361,147 @@ typedef struct {
     int64_t pos;
 } chimera_fpos_t;
 
-CHIMERA_FILE *
+SYMBOL_EXPORT CHIMERA_FILE *
 chimera_posix_fopen(
     const char *path,
     const char *mode);
 
-CHIMERA_FILE *
+SYMBOL_EXPORT CHIMERA_FILE *
 chimera_posix_freopen(
     const char   *path,
     const char   *mode,
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fclose(
     CHIMERA_FILE *stream);
 
-size_t
+SYMBOL_EXPORT size_t
 chimera_posix_fread(
     void         *ptr,
     size_t        size,
     size_t        nmemb,
     CHIMERA_FILE *stream);
 
-size_t
+SYMBOL_EXPORT size_t
 chimera_posix_fwrite(
     const void   *ptr,
     size_t        size,
     size_t        nmemb,
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fseek(
     CHIMERA_FILE *stream,
     long          offset,
     int           whence);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fseeko(
     CHIMERA_FILE *stream,
     chimera_off_t offset,
     int           whence);
 
-long
+SYMBOL_EXPORT long
 chimera_posix_ftell(
     CHIMERA_FILE *stream);
 
-chimera_off_t
+SYMBOL_EXPORT chimera_off_t
 chimera_posix_ftello(
     CHIMERA_FILE *stream);
 
-void
+SYMBOL_EXPORT void
 chimera_posix_rewind(
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fgetpos(
     CHIMERA_FILE   *stream,
     chimera_fpos_t *pos);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fsetpos(
     CHIMERA_FILE         *stream,
     const chimera_fpos_t *pos);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_feof(
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_ferror(
     CHIMERA_FILE *stream);
 
-void
+SYMBOL_EXPORT void
 chimera_posix_clearerr(
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fileno(
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fflush(
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fgetc(
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fputc(
     int           c,
     CHIMERA_FILE *stream);
 
-char *
+SYMBOL_EXPORT char *
 chimera_posix_fgets(
     char         *s,
     int           size,
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fputs(
     const char   *s,
     CHIMERA_FILE *stream);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_ungetc(
     int           c,
     CHIMERA_FILE *stream);
 
 // rmdir
-int
+SYMBOL_EXPORT int
 chimera_posix_rmdir(
     const char *path);
 
 // *at() functions - directory-relative operations
-int
+SYMBOL_EXPORT int
 chimera_posix_openat(
     int         dirfd,
     const char *pathname,
     int         flags,
     ...);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_mkdirat(
     int         dirfd,
     const char *pathname,
     mode_t      mode);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_unlinkat(
     int         dirfd,
     const char *pathname,
     int         flags);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_renameat(
     int         olddirfd,
     const char *oldpath,
     int         newdirfd,
     const char *newpath);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_linkat(
     int         olddirfd,
     const char *oldpath,
@@ -508,27 +509,27 @@ chimera_posix_linkat(
     const char *newpath,
     int         flags);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_symlinkat(
     const char *target,
     int         newdirfd,
     const char *linkpath);
 
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_readlinkat(
     int         dirfd,
     const char *pathname,
     char       *buf,
     size_t      bufsiz);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fstatat(
     int                   dirfd,
     const char           *pathname,
     chimera_posix_stat_t *statbuf,
     int                   flags);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_faccessat(
     int         dirfd,
     const char *pathname,
@@ -536,42 +537,42 @@ chimera_posix_faccessat(
     int         flags);
 
 // Permission and ownership functions
-int
+SYMBOL_EXPORT int
 chimera_posix_chmod(
     const char *path,
     mode_t      mode);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fchmod(
     int    fd,
     mode_t mode);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fchmodat(
     int         dirfd,
     const char *pathname,
     mode_t      mode,
     int         flags);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_chown(
     const char *path,
     uid_t       owner,
     gid_t       group);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_lchown(
     const char *path,
     uid_t       owner,
     gid_t       group);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fchown(
     int   fd,
     uid_t owner,
     gid_t group);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fchownat(
     int         dirfd,
     const char *pathname,
@@ -580,14 +581,14 @@ chimera_posix_fchownat(
     int         flags);
 
 // Timestamp functions
-int
+SYMBOL_EXPORT int
 chimera_posix_utimensat(
     int                   dirfd,
     const char           *pathname,
     const struct timespec times[2],
     int                   flags);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_futimens(
     int                   fd,
     const struct timespec times[2]);
@@ -597,50 +598,50 @@ chimera_posix_futimens(
 // (CHIMERA_VFS_ATTR_ACL); getacl reads it back into a caller-owned buffer.
 // Both run under the calling thread's effective credential
 // (chimera_posix_set_cred), so they are authorized as the chosen user.
-int
+SYMBOL_EXPORT int
 chimera_posix_setacl(
     const char               *path,
     const struct chimera_acl *acl);
 
 // Read the ACL of `path` into `buf` (capacity `bufsize` bytes).  Returns the
 // ACE count on success, or -1 with errno set (ERANGE if `buf` is too small).
-int
+SYMBOL_EXPORT int
 chimera_posix_getacl(
     const char         *path,
     struct chimera_acl *buf,
     size_t              bufsize);
 
 // Configurable pathname limits (pathconf(3)/fpathconf(3))
-long
+SYMBOL_EXPORT long
 chimera_posix_pathconf(
     const char *path,
     int         name);
 
-long
+SYMBOL_EXPORT long
 chimera_posix_fpathconf(
     int fd,
     int name);
 
 // Truncate functions
-int
+SYMBOL_EXPORT int
 chimera_posix_truncate(
     const char   *path,
     chimera_off_t length);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_ftruncate(
     int           fd,
     chimera_off_t length);
 
 // Preallocate space for a file (posix_fallocate(3))
-int
+SYMBOL_EXPORT int
 chimera_posix_fallocate(
     int           fd,
     chimera_off_t offset,
     chimera_off_t len);
 
 // fallocate(2) with a mode (0 = allocate; PUNCH_HOLE|KEEP_SIZE = deallocate)
-int
+SYMBOL_EXPORT int
 chimera_posix_fallocate_mode(
     int           fd,
     int           mode,
@@ -648,13 +649,13 @@ chimera_posix_fallocate_mode(
     chimera_off_t len);
 
 // File locking
-int
+SYMBOL_EXPORT int
 chimera_posix_fcntl(
     int fd,
     int cmd,
     ...);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_lockf(
     int           fd,
     int           cmd,
@@ -664,7 +665,7 @@ chimera_posix_lockf(
 // If off_in / off_out are NULL the corresponding fd's current offset is used
 // and updated; otherwise *off_in / *off_out are updated by the number of
 // bytes copied. `flags` must be 0.
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_copy_file_range(
     int            fd_in,
     chimera_off_t *off_in,
@@ -675,7 +676,7 @@ chimera_posix_copy_file_range(
 
 // Reflink/COW clone of a byte range. Backend must advertise
 // CHIMERA_VFS_CAP_CLONE_RANGE; otherwise returns -1 with errno=EOPNOTSUPP.
-int
+SYMBOL_EXPORT int
 chimera_posix_clone_file_range(
     int           dst_fd,
     chimera_off_t dst_offset,
@@ -687,7 +688,7 @@ chimera_posix_clone_file_range(
 // each zero-filled with `pattern` placed at reloff_pattern. Backend must
 // advertise CHIMERA_VFS_CAP_WRITE_SAME; otherwise returns -1 errno=EOPNOTSUPP.
 // Returns the number of bytes written (block_size * block_count) or -1.
-ssize_t
+SYMBOL_EXPORT ssize_t
 chimera_posix_write_same(
     int           fd,
     chimera_off_t offset,
@@ -698,47 +699,47 @@ chimera_posix_write_same(
     uint32_t      reloff_pattern);
 
 // Sync functions
-int
+SYMBOL_EXPORT int
 chimera_posix_fsync(
     int fd);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fdatasync(
     int fd);
 
 // Duplicate file descriptor functions
-int
+SYMBOL_EXPORT int
 chimera_posix_dup(
     int oldfd);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_dup2(
     int oldfd,
     int newfd);
 
 // Convert fd to FILE*
-CHIMERA_FILE *
+SYMBOL_EXPORT CHIMERA_FILE *
 chimera_posix_fdopen(
     int         fd,
     const char *mode);
 
 // Filesystem statistics
-int
+SYMBOL_EXPORT int
 chimera_posix_statfs(
     const char    *path,
     struct statfs *buf);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fstatfs(
     int            fd,
     struct statfs *buf);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_statvfs(
     const char     *path,
     struct statvfs *buf);
 
-int
+SYMBOL_EXPORT int
 chimera_posix_fstatvfs(
     int             fd,
     struct statvfs *buf);

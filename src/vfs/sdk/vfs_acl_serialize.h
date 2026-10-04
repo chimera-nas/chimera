@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "vfs_sdk_export.h"
+
 /*
  * Stable, versioned, little-endian serialization of a canonical chimera_acl,
  * used for on-disk persistence by native backends (e.g. cairn's CAIRN_KEY_ACL
@@ -37,14 +39,14 @@
 #define CHIMERA_ACL_SERIAL_ACE_MAX (CHIMERA_ACL_SERIAL_ACE + 1 + CHIMERA_SID_MAX_LEN)
 
 /* Number of bytes chimera_acl_serialize() will write for `acl`. */
-size_t chimera_acl_serialized_size(
+CHIMERA_VFS_SDK_EXPORT size_t chimera_acl_serialized_size(
     const struct chimera_acl *acl);
 
 /*
  * Serialize `acl` into `buf` (capacity `buflen`).  Returns the number of bytes
  * written, or -1 if the buffer is too small.
  */
-int chimera_acl_serialize(
+CHIMERA_VFS_SDK_EXPORT int chimera_acl_serialize(
     const struct chimera_acl *acl,
     void                     *buf,
     size_t                    buflen);
@@ -53,7 +55,7 @@ int chimera_acl_serialize(
  * Deserialize from `buf` (`buflen` bytes) into `out` (capacity `max_aces`).
  * Returns the ACE count, or -1 on a malformed/oversized/unsupported blob.
  */
-int chimera_acl_deserialize(
+CHIMERA_VFS_SDK_EXPORT int chimera_acl_deserialize(
     const void         *buf,
     size_t              buflen,
     struct chimera_acl *out,

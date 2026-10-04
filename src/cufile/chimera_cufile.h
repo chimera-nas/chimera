@@ -1,8 +1,10 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #pragma once
+
+#include "common/export.h"
 
 #include <cufile.h>
 
@@ -17,24 +19,24 @@ extern const struct CUfileFSOps chimera_cufile_ops;
             (cuda_desc)->fs_ops        = &chimera_cufile_ops;            \
         }
 
-const char * chimera_cufile_fs_type(
+SYMBOL_EXPORT const char * chimera_cufile_fs_type(
     void *handle);
 
-int     chimera_cufile_getRDMADevicePriority(
+SYMBOL_EXPORT int     chimera_cufile_getRDMADevicePriority(
     void *handle,
     char *,
     size_t,
     loff_t,
     sockaddr_t * hostaddr);
 
-ssize_t chimera_cufile_read(
+SYMBOL_EXPORT ssize_t chimera_cufile_read(
     void *handle,
     char *,
     size_t,
     loff_t,
     cufileRDMAInfo_t *);
 
-ssize_t chimera_cufile_write(
+SYMBOL_EXPORT ssize_t chimera_cufile_write(
     void *handle,
     const char *,
     size_t,

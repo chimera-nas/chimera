@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdatomic.h>
@@ -214,15 +216,15 @@ struct chimera_vfs_bl_work {
 /* Lifecycle / lookup (unchanged shape)                                 */
 /* -------------------------------------------------------------------- */
 
-struct chimera_vfs_state *
+SYMBOL_EXPORT struct chimera_vfs_state *
 chimera_vfs_state_init(
     void);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_state_destroy(
     struct chimera_vfs_state *state);
 
-struct chimera_vfs_file_state *
+SYMBOL_EXPORT struct chimera_vfs_file_state *
 chimera_vfs_state_get(
     struct chimera_vfs_state *state,
     const uint8_t            *fh,
@@ -230,7 +232,7 @@ chimera_vfs_state_get(
     uint64_t                  fh_hash,
     bool                      create);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_state_put(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file);
@@ -255,7 +257,7 @@ typedef void (*chimera_vfs_smb_open_cb_t)(
     void *smb_open_file,
     void *private_data);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_foreach_smb_open(
     struct chimera_vfs_file_state *file,
     chimera_vfs_smb_open_cb_t      cb,
@@ -272,7 +274,7 @@ chimera_vfs_claim_foreach_smb_open(
 /* SMB share reservation: access ⊆ R|W|D, deny ⊆ R|W|D.  A zero/zero pair
  * builds the inert attribute-only registration (query-visible, conflicts
  * with nothing). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_smb_open(
     struct chimera_vfs_claim         *claim,
     uint8_t                           access,
@@ -280,7 +282,7 @@ chimera_vfs_claim_init_smb_open(
     const struct chimera_claim_owner *owner);
 
 /* NFSv4 OPEN share/deny: access ⊆ R|W, deny ⊆ R|W. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_nfs4_open(
     struct chimera_vfs_claim         *claim,
     uint8_t                           access,
@@ -288,7 +290,7 @@ chimera_vfs_claim_init_nfs4_open(
     const struct chimera_claim_owner *owner);
 
 /* SMB2 RqLs lease: used ⊆ CR|CW|H (owner->key carries the LeaseKey). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_rqls(
     struct chimera_vfs_claim         *claim,
     uint8_t                           used,
@@ -296,14 +298,14 @@ chimera_vfs_claim_init_rqls(
 
 /* Legacy oplock at LEVEL_II (CR), EXCLUSIVE (CR|CW), or BATCH (CR|CW|H) —
  * the construct is derived from `used`. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_oplock(
     struct chimera_vfs_claim         *claim,
     uint8_t                           used,
     const struct chimera_claim_owner *owner);
 
 /* SMB3 directory lease: used ⊆ CR|H. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_dir_lease(
     struct chimera_vfs_claim         *claim,
     uint8_t                           used,
@@ -312,7 +314,7 @@ chimera_vfs_claim_init_dir_lease(
 /* NFSv4 delegation.  A read delegation carries R|CR; a write delegation
  * R|W|CR|CW (delegations perform real I/O under their stateids, which is
  * also what makes deny-read opens conflict with them). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_delegation(
     struct chimera_vfs_claim         *claim,
     bool                              write,
@@ -324,12 +326,12 @@ chimera_vfs_claim_init_delegation(
 /* FUSE kernel read-cache grant (one per mount+file; owner.client_key =
  * mount identity): DELEG_R-shaped rows and awaited-class breaks, but
  * sweep-revocable at the break deadline (the liveness backstop). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_fuse_grant(
     struct chimera_vfs_claim         *claim,
     const struct chimera_claim_owner *owner);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_range(
     struct chimera_vfs_claim         *claim,
     bool                              exclusive,
@@ -339,7 +341,7 @@ chimera_vfs_claim_init_range(
     const struct chimera_claim_owner *owner);
 
 /* Transient deny-only probe (the SMB rename dp_probe: used 0, deny D). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_deny_probe(
     struct chimera_vfs_claim         *claim,
     uint8_t                           deny,
@@ -353,7 +355,7 @@ chimera_vfs_claim_init_deny_probe(
  * claim is inserted (ownership with the core until release).  On BREAKING
  * the recalls have been started; the caller retries (or uses the ticketed
  * form).  conflict_out (optional) is filled BY VALUE. */
-enum chimera_vfs_claim_result
+SYMBOL_EXPORT enum chimera_vfs_claim_result
 chimera_vfs_claim_try_acquire(
     struct chimera_vfs_state          *state,
     struct chimera_vfs_file_state     *file,
@@ -370,7 +372,7 @@ chimera_vfs_claim_try_acquire(
  * DENIED on backend refusal).  NULL skips projection (tests, callers with
  * no dispatch context); AGGREGATE projection is unaffected (it rides the
  * service thread). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_acquire(
     struct chimera_vfs_thread          *thread,
     struct chimera_vfs_state           *state,
@@ -385,14 +387,14 @@ chimera_vfs_claim_acquire(
 
 /* Always synchronous; pumps waiters.  Callers may free the embedding
  * struct immediately after. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_release_ranged(
     struct chimera_vfs_thread     *thread,
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_claim      *claim);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_release(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file,
@@ -402,7 +404,7 @@ chimera_vfs_claim_release(
  * chimera_vfs_claim_grant_release(pump=false), for teardown where a woken
  * waiter would complete against a connection that is already gone.  The
  * claim is still unlinked, so the embedding struct may be freed after. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_release_nopump(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file,
@@ -412,7 +414,7 @@ chimera_vfs_claim_release_nopump(
  * the same file lock, then pump waiters. The optional grant must belong to
  * file; the caller must detach its protocol member before calling. A shared
  * grant remains until its final reference is dropped. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_release_open(
     struct chimera_vfs_state       *state,
     struct chimera_vfs_file_state  *file,
@@ -421,7 +423,7 @@ chimera_vfs_claim_release_open(
 
 /* Shrink an inserted ACCESS claim's masks in place (truncating-open W drop,
  * OPEN_DOWNGRADE).  Never conflicts; pumps waiters. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_shrink(
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_claim      *claim,
@@ -435,7 +437,7 @@ chimera_vfs_claim_shrink(
  * the file, and a re-lock has to replace the owner's older coverage, but
  * neither should pay for the release machinery when there is nothing to
  * release. */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_range_owner_holds(
     struct chimera_vfs_file_state    *file,
     const struct chimera_claim_owner *owner,
@@ -444,7 +446,7 @@ chimera_vfs_claim_range_owner_holds(
     uint64_t                          length);
 
 /* Pure probe (LOCKT / NLM TEST / F_GETLK / FAIL_IMMEDIATELY pre-check). */
-enum chimera_vfs_claim_result
+SYMBOL_EXPORT enum chimera_vfs_claim_result
 chimera_vfs_claim_test(
     struct chimera_vfs_file_state     *file,
     const struct chimera_vfs_claim    *probe,
@@ -470,7 +472,7 @@ chimera_vfs_claim_test(
  * record can only be dropped once the confirm completes -- and in that gap
  * a new acquire of the same range would be granted locally and then
  * refused by an arbiter still holding the old record. */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_cancel(
     struct chimera_vfs_state           *state,
     struct chimera_vfs_pending_acquire *ticket);
@@ -487,7 +489,7 @@ chimera_vfs_claim_cancel(
  * `except`, when non-NULL, is left alone: it is how a re-lock expresses
  * POSIX's replace rule, having already inserted the new claim, without
  * carving the very claim it just took. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_range_replace(
     struct chimera_vfs_state         *state,
     struct chimera_vfs_file_state    *file,
@@ -529,7 +531,7 @@ enum chimera_vfs_claim_grant_flavor {
  * be NULL) reports whether the seed was consumed — false on a coalesce hit
  * or a racing-create collapse, where the caller registers its member on the
  * returned grant itself. */
-enum chimera_vfs_claim_result
+SYMBOL_EXPORT enum chimera_vfs_claim_result
 chimera_vfs_claim_grant_acquire(
     struct chimera_vfs_state           *state,
     struct chimera_vfs_file_state      *file,
@@ -544,7 +546,7 @@ chimera_vfs_claim_grant_acquire(
 
 /* Coalesce-only: returns an existing same-owner / same-LeaseKey grant with
  * its refcount bumped (upgrading per R31 when upgrade_ok), or NULL. */
-struct chimera_vfs_claim_grant *
+SYMBOL_EXPORT struct chimera_vfs_claim_grant *
 chimera_vfs_claim_grant_coalesce(
     struct chimera_vfs_file_state    *file,
     const struct chimera_claim_owner *owner,
@@ -552,7 +554,7 @@ chimera_vfs_claim_grant_coalesce(
     int                               upgrade_ok);
 
 /* Deferred-open rescue upgrade (refcount-1 + IDLE + sole cache claim). */
-uint8_t
+SYMBOL_EXPORT uint8_t
 chimera_vfs_claim_grant_try_upgrade(
     struct chimera_vfs_file_state  *file,
     struct chimera_vfs_claim_grant *grant,
@@ -562,13 +564,13 @@ chimera_vfs_claim_grant_try_upgrade(
  * breaking another owner (MS-SMB2 3.3.5.9 "granting never breaks"); steps
  * W then H toward the CR floor.  strict returns 0 when even CR conflicts
  * (oplock-transparent stat-opens). */
-uint8_t
+SYMBOL_EXPORT uint8_t
 chimera_vfs_claim_grant_cap_mode(
     struct chimera_vfs_file_state  *file,
     const struct chimera_vfs_claim *template_claim,
     bool                            strict);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_grant_release(
     struct chimera_vfs_state       *state,
     struct chimera_vfs_claim_grant *grant,
@@ -576,12 +578,12 @@ chimera_vfs_claim_grant_release(
 
 /* Same-client cache queries used by the SMB create path's grant-capping
  * policy (the sole-opener rule lives HERE, not in the admission masks). */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_client_holds_handle_cache(
     struct chimera_vfs_file_state *file,
     uint64_t                       client_key);
 
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_client_holds_cache(
     struct chimera_vfs_file_state *file,
     uint64_t                       client_key);
@@ -590,7 +592,7 @@ chimera_vfs_claim_client_holds_cache(
 /* Break machinery                                                      */
 /* -------------------------------------------------------------------- */
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_ack(
     struct chimera_vfs_claim *claim,
     uint8_t                   resulting_used);
@@ -609,21 +611,21 @@ chimera_vfs_claim_ack(
  *
  * *out_cb is set only when this call is what newly revoked the claim.  The
  * caller owns the post-revoke pumps that chimera_vfs_claim_revoke() does. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_revoke_locked(
     struct chimera_vfs_file_state  *file,
     struct chimera_vfs_claim       *claim,
     chimera_vfs_claim_revoked_cb_t *out_cb,
     void                          **out_private);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_revoke(
     struct chimera_vfs_claim *claim);
 
 /* Durable park/unpark: masks the claim's advertised H and H denial while
  * parked (R48).  Takes file->lock; use the _locked form from a context that
  * already holds it (e.g. a grant member walk). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_park(
     struct chimera_vfs_claim *claim,
     bool                      parked);
@@ -638,7 +640,7 @@ chimera_vfs_claim_park_locked(
 
 /* True while an ack-required break by another grant is outstanding (the
  * conflicting-CREATE park predicate, R39). */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_ack_pending(
     struct chimera_vfs_state             *state,
     const uint8_t                        *fh,
@@ -648,14 +650,14 @@ chimera_vfs_claim_ack_pending(
 
 /* Notified-edge machinery (R40): true while a begun break's notification
  * has not yet been sent; mark it sent by lease key. */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_break_pending_notify(
     struct chimera_vfs_state *state,
     const uint8_t            *fh,
     uint8_t                   fh_len,
     uint64_t                  fh_hash);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_mark_break_notified(
     struct chimera_vfs_state *state,
     const uint8_t            *fh,
@@ -667,14 +669,14 @@ chimera_vfs_claim_mark_break_notified(
 /* Register/retire a protocol request that is holding its reply until a break on
  * this file settles (see chimera_vfs_file_state::break_waiters).  Add on park,
  * remove on resume or park-deadline -- exactly once each. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_break_waiter_add(
     struct chimera_vfs_state *state,
     const uint8_t            *fh,
     uint8_t                   fh_len,
     uint64_t                  fh_hash);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_break_waiter_remove(
     struct chimera_vfs_state *state,
     const uint8_t            *fh,
@@ -682,7 +684,7 @@ chimera_vfs_claim_break_waiter_remove(
     uint64_t                  fh_hash);
 
 /* Is anyone holding a reply on a break on this file? */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_has_break_waiter(
     struct chimera_vfs_state *state,
     const uint8_t            *fh,
@@ -691,7 +693,7 @@ chimera_vfs_claim_has_break_waiter(
 
 /* Revoke every mid-break cache claim except `except` (parked-open deadline
  * expiry). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_revoke_breaks(
     struct chimera_vfs_state             *state,
     const uint8_t                        *fh,
@@ -707,7 +709,7 @@ chimera_vfs_claim_revoke_breaks(
  * that take a caller floor (OPEN_H/OPEN_H_FORCE/OPEN_W/NS_UNLINK); other
  * rows fix their own.  actor may be NULL for a leaseless mutator (breaks
  * every eligible holder). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_invalidate(
     struct chimera_vfs_state         *state,
     const uint8_t                    *fh,
@@ -719,7 +721,7 @@ chimera_vfs_claim_invalidate(
 
 /* NS_FULL as a synchronous query: kick the full recall and report whether
  * any holder still blocks (NFSv4 REMOVE/RENAME's NFS4ERR_DELAY loop). */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_break_caching(
     struct chimera_vfs_state *state,
     const uint8_t            *fh,
@@ -734,23 +736,23 @@ chimera_vfs_claim_break_caching(
  * A NULL actor means the implicit INTERNAL claim mediates; an actor with a
  * real owner self-exempts its own cache and fires WRITE invalidation for
  * writes (R61). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_io_claim_acquire(
     struct chimera_vfs_request       *request,
     const struct chimera_claim_actor *actor,
     void (                           *next )(
         struct chimera_vfs_request *request));
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_io_claim_release(
     struct chimera_vfs_request *request);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_state_io_resume(
     struct chimera_vfs_request *request);
 
 /* Parking namespace recalls (unchanged shape from the old core). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_io_recall(
     struct chimera_vfs_request *request,
     const uint8_t              *fh,
@@ -760,7 +762,7 @@ chimera_vfs_io_recall(
     void (                     *next )(
         struct chimera_vfs_request *request));
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_io_recall_single(
     struct chimera_vfs_request *request,
     const uint8_t              *fh,
@@ -774,7 +776,7 @@ chimera_vfs_io_recall_single(
  * Zero-length reads are exempt before the walk.  MAND rows are stamped on
  * every range lock regardless of protocol: shared denies W globally (its
  * own owner included), exclusive denies R|W exempting its own actor. */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_io_denied(
     struct chimera_vfs_state         *state,
     const uint8_t                    *fh,
@@ -786,7 +788,7 @@ chimera_vfs_claim_io_denied(
     const struct chimera_claim_actor *actor);
 
 /* Idle reaper (100ms sweep from the close thread; virtual-clock driven). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_state_reap_idle(
     struct chimera_vfs_state *state,
     uint64_t                  idle_ms);
@@ -801,14 +803,14 @@ chimera_vfs_state_reap_idle(
  * from any thread.  Callers outside the VFS threads use this to decide
  * whether an acquire has to marshal onto a VFS thread at all: with no such
  * module every projection hook is a no-op, so nothing is gained by it. */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_backend_capable(
     struct chimera_vfs_state *state);
 
 /* The same question for byte ranges: is any registered module a RANGE
  * arbiter?  Callers outside the VFS threads use this to decide whether a
  * lock acquire has to marshal onto a VFS thread at all. */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_backend_range_capable(
     struct chimera_vfs_state *state);
 
@@ -816,7 +818,7 @@ chimera_vfs_claim_backend_range_capable(
  * scans the registered modules for CAP_LEASE, mints the node owner, and
  * records the service thread + doorbell.  Absent a CAP_LEASE module every
  * projection hook is a no-op. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_backend_attach(
     struct chimera_vfs_state  *state,
     struct chimera_vfs        *vfs,
@@ -826,7 +828,7 @@ chimera_vfs_claim_backend_attach(
 /* Detach the service doorbell (called by the service thread before it
 * destroys the doorbell): late posts from teardown traffic on other threads
 * then enqueue without ringing instead of ringing a closed eventfd. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_backend_detach(
     struct chimera_vfs_state *state);
 
@@ -834,7 +836,7 @@ chimera_vfs_claim_backend_detach(
  * behind every previously queued backend op so a later acquire of the same
  * range cannot overtake it.  For holders the core does not track as claims
  * (a SEEK_END grant, whose absolute range only the backend knows). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_backend_release_token(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file,
@@ -845,7 +847,7 @@ chimera_vfs_claim_backend_release_token(
 * are none).  An unlock path must wait for this before reporting success:
 * ordering alone only settles the node's own view, while another process
 * asking the same shared arbiter has no way to wait for our work queue. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_backend_flush_releases(
     struct chimera_vfs_thread     *thread,
     struct chimera_vfs_state      *state,
@@ -856,7 +858,7 @@ chimera_vfs_claim_backend_flush_releases(
 
 /* Drain the projection work queue; runs ONLY on the service thread (wired
  * into the close thread's timer and doorbell). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_backend_service(
     struct chimera_vfs_state *state);
 
@@ -865,7 +867,7 @@ chimera_vfs_claim_backend_service(
  * when no CAP_LEASE module exists.  Called from every claim mutation site
  * (the single-entrance property: acquire/release/shrink/ack/revoke/drain
  * all funnel here). */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_backend_reeval(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file);
@@ -873,7 +875,7 @@ chimera_vfs_claim_backend_reeval(
 /* The recall upcall handed to backends (as acquire.recall_cb with
  * recall_arg = the chimera_vfs_state).  Any thread; marshals internally;
  * tolerates an unknown file or stale token as a no-op. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_backend_recall(
     void          *recall_arg,
     const uint8_t *fh,
@@ -902,38 +904,38 @@ typedef void (*chimera_vfs_claim_visit_cb_t)(
     const struct chimera_vfs_claim *claim,
     void                           *arg);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_scan(
     struct chimera_vfs_file_state         *file,
     const struct chimera_vfs_claim_filter *filter,
     chimera_vfs_claim_visit_cb_t           visit_cb,
     void                                  *arg);
 
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_state_has_other_share_holder(
     struct chimera_vfs_file_state  *file,
     const struct chimera_vfs_claim *exclude);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_state_set_delete_pending(
     struct chimera_vfs_file_state *file);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_state_clear_delete_pending(
     struct chimera_vfs_file_state *file);
 
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_state_is_delete_pending(
     struct chimera_vfs_file_state *file);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_state_stream_holder_inc(
     struct chimera_vfs_file_state *file);
 
-void
+SYMBOL_EXPORT void
 chimera_vfs_state_stream_holder_dec(
     struct chimera_vfs_file_state *file);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_vfs_state_stream_holders(
     struct chimera_vfs_file_state *file);

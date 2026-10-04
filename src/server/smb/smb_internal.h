@@ -1824,12 +1824,12 @@ struct chimera_server_smb_shared {
 
 /* Forward decl so the inline open_file release paths can call into
  * smb_proc_lock.c without including smb_procs.h here. */
-void
+SYMBOL_EXPORT void
 chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
 
-void
+SYMBOL_EXPORT void
 chimera_smb_open_file_drain_locks_nopump(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
@@ -1837,11 +1837,11 @@ chimera_smb_open_file_drain_locks_nopump(
 /* Forward decls (defined in smb_proc_lock.c; also in smb_procs.h, which this
  * header cannot include) so the inline tree-teardown path can abort and complete
  * a blocking byte-range LOCK parked on an open being torn down. */
-struct chimera_smb_request *
+SYMBOL_EXPORT struct chimera_smb_request *
 chimera_smb_lock_abort_parked(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
-void
+SYMBOL_EXPORT void
 chimera_smb_lock_park_finish(
     struct chimera_smb_request *request,
     uint32_t                    status);
@@ -1868,13 +1868,13 @@ chimera_smb_teardown_doc_unlink(
     const struct chimera_vfs_doc_info *doc_info);
 
 /* Durable/persistent handle registry (smb_durable.c). */
-void
+SYMBOL_EXPORT void
 chimera_smb_durable_table_init(
     struct chimera_smb_durable_table *table);
-void
+SYMBOL_EXPORT void
 chimera_smb_durable_table_destroy(
     struct chimera_smb_durable_table *table);
-void
+SYMBOL_EXPORT void
 chimera_smb_durable_register(
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_open_file     *open_file,
@@ -1884,11 +1884,11 @@ chimera_smb_durable_register(
     const char                       *name,
     uint32_t                          name_len,
     bool                              persistent);
-void
+SYMBOL_EXPORT void
 chimera_smb_durable_forget(
     struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id);
-void
+SYMBOL_EXPORT void
 chimera_smb_durable_park(
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_open_file     *open_file);
@@ -1905,11 +1905,11 @@ enum chimera_smb_durable_hold {
     CHIMERA_SMB_DURABLE_HOLD_BLOCK,    /* persistent within its timeout: the
                                         * conflicting open fails FILE_NOT_AVAILABLE */
 };
-enum chimera_smb_durable_hold
+SYMBOL_EXPORT enum chimera_smb_durable_hold
 chimera_smb_durable_parked_hold(
     struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id);
-struct chimera_smb_open_file *
+SYMBOL_EXPORT struct chimera_smb_open_file *
 chimera_smb_durable_claim(
     struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id,
@@ -1933,7 +1933,7 @@ enum chimera_smb_guid_replay_result {
     CHIMERA_SMB_GUID_REPLAY_DENIED,    /* replay verify failed (lease key/type) -> ACCESS_DENIED */
 };
 
-enum chimera_smb_guid_replay_result
+SYMBOL_EXPORT enum chimera_smb_guid_replay_result
 chimera_smb_durable_claim_by_guid(
     struct chimera_server_smb_shared *shared,
     const uint8_t                    *create_guid,
@@ -1950,7 +1950,7 @@ chimera_smb_durable_sweep(
 /* Release every registry entry's live open at thread shutdown so the VFS
  * close thread can drain.  Without this a parked durable handle's VFS open
  * handle leaks and chimera_vfs_destroy hangs waiting for it. */
-void
+SYMBOL_EXPORT void
 chimera_smb_durable_drain_all(
     struct chimera_server_smb_thread *thread);
 
@@ -1960,7 +1960,7 @@ chimera_smb_durable_drain_all(
  * include_persistent is set: an ordinary conflicting open must not displace a
  * persistent handle (it has to be reclaimed via CreateGuid), but an
  * AppInstanceId failover (MS-SMB2 3.3.5.9.7) does displace it. */
-bool
+SYMBOL_EXPORT bool
 chimera_smb_durable_purge_parked(
     struct chimera_server_smb_thread *thread,
     uint64_t                          persistent_id,
@@ -1996,14 +1996,14 @@ enum chimera_smb_durable_yield {
 * disconnecting, create_conn cleared, or the entry already parked); _SPECULATIVE
 * when no disconnect signal is visible yet but the holder is a non-persistent
 * durable open (and so must yield if its owner is in fact disconnecting). */
-enum chimera_smb_durable_yield
+SYMBOL_EXPORT enum chimera_smb_durable_yield
 chimera_smb_durable_conn_disconnecting(
     struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id);
 
 /* Scan a share's backend (routed via `fh`) for persisted handle records and
  * rebuild cold registry entries.  Best-effort, idempotent. */
-void
+SYMBOL_EXPORT void
 chimera_smb_durable_recover_share(
     struct chimera_server_smb_thread *thread,
     const void                       *fh,
@@ -2011,26 +2011,26 @@ chimera_smb_durable_recover_share(
 
 /* Add a cold (recovered-from-backend, not-yet-reopened) entry from a record
  * read off the backend at startup.  Idempotent on persistent_id. */
-void
+SYMBOL_EXPORT void
 chimera_smb_durable_recover_entry(
     struct chimera_server_smb_shared        *shared,
     const struct chimera_smb_durable_record *record);
 
 /* Build the backend KV key for a persistent id into buf (>= CHIMERA_SMB_DURABLE_KEY_LEN). */
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_smb_durable_key(
     uint8_t *buf,
     uint64_t persistent_id);
 
 /* Serialize a record into buf; returns bytes written (0 if buf too small). */
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_smb_durable_serialize(
     uint8_t                                 *buf,
     uint32_t                                 buf_size,
     const struct chimera_smb_durable_record *record);
 
 /* Parse a serialized record; returns 0 on success, -1 on malformed input. */
-int
+SYMBOL_EXPORT int
 chimera_smb_durable_deserialize(
     const uint8_t                     *buf,
     uint32_t                           buf_len,

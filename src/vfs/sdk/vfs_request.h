@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "vfs_sdk_export.h"
+
 /*
  * Chimera VFS module SDK: the request contract.
  *
@@ -1504,6 +1506,6 @@ struct chimera_vfs_request {
 * delegation to the owning thread. The core frees it when the request is
 * recycled, after the protocol callback returns. Returns NULL on allocation
 * failure. Unlike plugin_data, this storage may also hold large replies. */
-void * chimera_vfs_request_alloc_memory(
+CHIMERA_VFS_SDK_EXPORT void * chimera_vfs_request_alloc_memory(
     struct chimera_vfs_request *request,
     size_t                      size);

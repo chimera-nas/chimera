@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include "vfs/sdk/chimera_vfs_sdk.h"
 
 /* SMB2 client VFS module.  Proxies VFS operations to a remote SMB2 server,
@@ -11,4 +13,4 @@
  * MOUNT (connect + NEGOTIATE + SESSION_SETUP + TREE_CONNECT) and UMOUNT
  * (TREE_DISCONNECT + LOGOFF + disconnect); file operations are layered on
  * incrementally. */
-extern struct chimera_vfs_module vfs_smb;
+extern SYMBOL_EXPORT struct chimera_vfs_module vfs_smb;

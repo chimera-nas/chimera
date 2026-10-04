@@ -4,8 +4,15 @@
 
 #pragma once
 #include <stdint.h>
+#include "common/export.h"
 
-extern struct chimera_server_protocol nfs_protocol;
+#ifdef CHIMERA_NFS_BUILD
+#define CHIMERA_NFS_DATA                CHIMERA_DATA_EXPORT
+#else // ifdef CHIMERA_NFS_BUILD
+#define CHIMERA_NFS_DATA                CHIMERA_DATA_IMPORT
+#endif // ifdef CHIMERA_NFS_BUILD
+
+extern CHIMERA_NFS_DATA struct chimera_server_protocol nfs_protocol;
 
 struct chimera_nfs_export;
 
@@ -104,7 +111,7 @@ struct chimera_nfs_export_opts {
  * @param name Export name to test (NULL is invalid).
  * @return Non-zero if the name is usable as an export name, 0 otherwise.
  */
-int
+SYMBOL_EXPORT int
 chimera_nfs_export_name_valid(
     const char *name);
 
@@ -127,7 +134,7 @@ chimera_nfs_export_name_valid(
  *         id is already in use, -ENOSPC if the configured export limit
  *         (nfs_max_exports) is reached, -ENOMEM on allocation failure.
  */
-int chimera_nfs_add_export(
+SYMBOL_EXPORT int chimera_nfs_add_export(
     void                                 *nfs_shared,
     const char                           *name,
     const char                           *path,
@@ -142,7 +149,7 @@ int chimera_nfs_add_export(
  * @param name       Name of the export to remove.
  * @return 0 on success, negative value on error.
  */
-int
+SYMBOL_EXPORT int
 chimera_nfs_remove_export(
     void       *nfs_shared,
     const char *name);
@@ -154,7 +161,7 @@ chimera_nfs_remove_export(
  * @param nfs_shared Pointer to the NFS shared context.
  * @return Number of exports.
  */
-int
+SYMBOL_EXPORT int
 chimera_nfs_export_count(
     void *nfs_shared);
 
@@ -170,7 +177,7 @@ chimera_nfs_export_count(
  * @param out_export    Optional output (may be NULL) receiving the matched export.
  * @return 0 on success, non-zero if the export was not found or an error occurred.
  */
-int
+SYMBOL_EXPORT int
 chimera_nfs_find_export_path(
     void                             *nfs_shared,
     const char                       *path,
@@ -186,7 +193,7 @@ chimera_nfs_find_export_path(
  * @param name       Name of the export.
  * @return Pointer to the export if found, NULL otherwise.
  */
-const struct chimera_nfs_export *
+SYMBOL_EXPORT const struct chimera_nfs_export *
 chimera_nfs_get_export(
     void       *nfs_shared,
     const char *name);
@@ -204,7 +211,7 @@ chimera_nfs_get_export(
  * @param out        Receives a by-value copy of the export.
  * @return 0 on success, -1 if no export has that name.
  */
-int
+SYMBOL_EXPORT int
 chimera_nfs_get_export_copy(
     void                      *nfs_shared,
     const char                *name,
@@ -225,7 +232,7 @@ chimera_nfs_get_export_copy(
  * @param out        Receives a by-value copy of the export.
  * @return 0 on success, -1 if no export matches the component.
  */
-int
+SYMBOL_EXPORT int
 chimera_nfs_get_export_by_component(
     void                      *nfs_shared,
     const char                *name,
@@ -252,7 +259,7 @@ typedef int (*chimera_nfs_export_iterate_cb)(
  * @param callback   Callback function to invoke for each export.
  * @param data       User data pointer passed to the callback.
  */
-void
+SYMBOL_EXPORT void
 chimera_nfs_iterate_exports(
     void                         *nfs_shared,
     chimera_nfs_export_iterate_cb callback,
@@ -265,7 +272,7 @@ chimera_nfs_iterate_exports(
  * @param export Pointer to the export.
  * @return Name of the export.
  */
-const char *
+SYMBOL_EXPORT const char *
 chimera_nfs_export_get_name(
     const struct chimera_nfs_export *export);
 
@@ -276,7 +283,7 @@ chimera_nfs_export_get_name(
  * @param export Pointer to the export.
  * @return Path of the export.
  */
-const char *
+SYMBOL_EXPORT const char *
 chimera_nfs_export_get_path(
     const struct chimera_nfs_export *export);
 
@@ -291,7 +298,7 @@ chimera_nfs_export_get_path(
  * @param anongid    Anonymous gid squashed callers are mapped to.
  * @return 0 on success, -1 if no export with that name exists.
  */
-int
+SYMBOL_EXPORT int
 chimera_nfs_export_set_options(
     void       *nfs_shared,
     const char *name,
@@ -300,7 +307,7 @@ chimera_nfs_export_set_options(
     uint32_t    anonuid,
     uint32_t    anongid);
 
-int
+SYMBOL_EXPORT int
 chimera_nfs_export_set_sec(
     void       *nfs_shared,
     const char *name,
@@ -313,7 +320,7 @@ chimera_nfs_export_set_sec(
  * @param id         Export id (1-based; 0 is invalid).
  * @return Pointer to the export if found, NULL otherwise.
  */
-const struct chimera_nfs_export *
+SYMBOL_EXPORT const struct chimera_nfs_export *
 chimera_nfs_get_export_by_id(
     void    *nfs_shared,
     uint16_t id);
@@ -321,26 +328,26 @@ chimera_nfs_get_export_by_id(
 /**
  * @brief Per-export attribute accessors.
  */
-uint16_t
+SYMBOL_EXPORT uint16_t
 chimera_nfs_export_get_id(
     const struct chimera_nfs_export *export);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_nfs_export_get_access(
     const struct chimera_nfs_export *export);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_nfs_export_get_squash(
     const struct chimera_nfs_export *export);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_nfs_export_get_anonuid(
     const struct chimera_nfs_export *export);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_nfs_export_get_anongid(
     const struct chimera_nfs_export *export);
 
-uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_nfs_export_get_sec(
     const struct chimera_nfs_export *export);

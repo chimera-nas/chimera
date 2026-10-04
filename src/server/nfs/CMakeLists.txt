@@ -40,10 +40,13 @@ add_library(chimera_nfs ${CHIMERA_LIBRARY_TYPE} nfs.c nfs4_session.c nfs4_state.
             ${CHIMERA_NFS_GSS_SOURCE})
 
 target_compile_definitions(chimera_nfs PRIVATE XXH_INLINE_ALL)
-target_link_libraries(chimera_nfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS} ${CHIMERA_GSS_LIB})
+target_link_libraries(chimera_nfs chimera_server_config chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS} ${CHIMERA_GSS_LIB})
 
 install(TARGETS chimera_nfs DESTINATION lib)
 
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)
 endif()
+
+# Exports its data rather than importing it (common/export.h).
+target_compile_definitions(chimera_nfs PRIVATE CHIMERA_NFS_BUILD)

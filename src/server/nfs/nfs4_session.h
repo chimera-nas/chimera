@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "common/export.h"
+
 #include "common/thread.h"
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -139,7 +141,7 @@ struct nfs4_client_principal {
 /* SP4_MACH_CRED enforcement: 1 if `p` may operate on client `c` (no protection,
  * or the bound machine principal matches); 0 -> reject with NFS4ERR_WRONG_CRED. */
 struct nfs4_client;
-int
+SYMBOL_EXPORT int
 nfs4_client_mach_cred_ok(
     const struct nfs4_client           *c,
     const struct nfs4_client_principal *p);
@@ -478,7 +480,7 @@ nfs4_client_destroy_clientid(
  * such client exists (caller maps to NFS4ERR_STALE_CLIENTID). */
 struct nfs_open_owner;
 
-nfsstat4
+SYMBOL_EXPORT nfsstat4
 nfs4_clients_check_io_denied(
     struct nfs4_client_table *table,
     const uint8_t            *fh,
@@ -487,7 +489,7 @@ nfs4_clients_check_io_denied(
 
 /* True if any client holds `fh` open; keeps a removed-but-open file's
  * handle valid regardless of which connection issues the PUTFH. */
-bool
+SYMBOL_EXPORT bool
 nfs4_clients_have_open_state(
     struct nfs4_client_table *table,
     const uint8_t            *fh,
@@ -495,7 +497,7 @@ nfs4_clients_have_open_state(
 /* Recover an NFSv4 lock-owner byte-string from the (clientid, XXH3 owner
  * hash) the VFS range-lease layer records, for a LOCK/LOCKT DENIED reply.
  * Returns true and fills out_owner/out_len on a hit. */
-bool
+SYMBOL_EXPORT bool
 nfs4_client_lookup_lock_owner(
     struct nfs4_client_table *table,
     uint64_t                  clientid,
