@@ -207,7 +207,7 @@ typedef void (*chimera_rcu_cb)(
  * of an event-loop iteration; write-locked to wait for all of them to reach an
  * iteration boundary.  See the header comment.
  */
-extern SYMBOL_EXPORT struct chimera_rcu_domain chimera_rcu_global;
+extern CHIMERA_COMMON_DATA struct chimera_rcu_domain chimera_rcu_global;
 
 SYMBOL_EXPORT void chimera_rcu_domain_init(
     struct chimera_rcu_domain *domain);
@@ -264,10 +264,20 @@ struct chimera_rcu_pending {
     } entry[CHIMERA_RCU_PENDING_MAX];
 };
 
-extern SYMBOL_EXPORT CHIMERA_THREAD_LOCAL struct chimera_rcu_pending chimera_rcu_pending;
-
 SYMBOL_EXPORT void chimera_rcu_pending_flush(
     void);
+
+#ifdef _WIN32
+
+/* Thread-local data cannot be exported from a DLL, so on Windows the pending
+ * list stays inside chimera_common and is reached through a call. */
+SYMBOL_EXPORT void chimera_rcu_pend(
+    chimera_rcu_head *head,
+    chimera_rcu_cb    func);
+
+#else /* ifdef _WIN32 */
+
+extern CHIMERA_COMMON_DATA CHIMERA_THREAD_LOCAL struct chimera_rcu_pending chimera_rcu_pending;
 
 static inline void
 chimera_rcu_pend(
@@ -289,6 +299,8 @@ chimera_rcu_pend(
     chimera_rcu_pending.entry[chimera_rcu_pending.n].func = func;
     chimera_rcu_pending.n++;
 } /* chimera_rcu_pend */
+
+#endif /* ifdef _WIN32 */
 
 #ifdef CHIMERA_HAVE_URCU
 

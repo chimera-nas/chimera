@@ -162,6 +162,10 @@ See `examples/vfs_module/vfs_example.c` for the skeleton.  In short:
    `server.vfs` in the daemon config).  The loader dlopens the object,
    resolves `vfs_<name>`, and validates `sdk_version` -- the same path
    every in-tree backend takes, since none is linked into chimera.
+   On Windows the module is `chimera_vfs_<name>.dll`, loaded the same way
+   with `LoadLibraryEx`.  A DLL cannot leave its imports for the host to
+   supply, so a Windows module links the import libraries of
+   `chimera_vfs` and `chimera_common` (see `examples/vfs_module`).
 
 Pointer-valued result attributes must remain valid until the consumer callback
 finishes. For deferred replies or blocking modules, `request->complete()` can

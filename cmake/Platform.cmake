@@ -5,11 +5,16 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+# Every chimera library is a shared object, a DLL on Windows, as on Linux, so
+# each holds one copy of its state (logging, RCU, the VFS) whoever loads it.
+# A DLL must link every library it calls, so the libraries form a strict
+# hierarchy with no cycles; common/export.h covers what crosses a boundary.
+set(CHIMERA_LIBRARY_TYPE SHARED)
+
 if(WIN32)
-    # Backends call the VFS core and protocol modules call the server core.
-    # Static archives let CMake resolve these cycles without unresolved DLL
-    # imports or a second copy of the process-wide state in each module.
-    set(CHIMERA_LIBRARY_TYPE STATIC)
+    # DLLs are found beside the executable that loads them, so every runtime
+    # artifact -- executables, DLLs and the runtime-loaded VFS modules -- goes
+    # to one directory.
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
     set(CHIMERA_GSS_LIB "")
     find_path(CHIMERA_UTHASH_INCLUDE uthash.h REQUIRED)
@@ -30,7 +35,6 @@ if(WIN32)
         endif()
     endif()
 else()
-    set(CHIMERA_LIBRARY_TYPE SHARED)
     set(CHIMERA_GSS_LIB gssapi_krb5)
 endif()
 

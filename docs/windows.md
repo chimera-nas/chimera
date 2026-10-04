@@ -202,10 +202,13 @@ tier, in the `ifstest` job of the Windows workflow (Server 2025, x64).
   native password verification. MIT Kerberos/GSSAPI defaults off, and
   requests requiring that provider fail explicitly. NSS, Winbind, and an
   SSPI/Active Directory provider are not part of this port.
-* Chimera libraries are static archives on Windows, with built-in backend
-  registration. This preserves one copy of shared state across the cyclic
-  VFS/server dependency graph. Loading external VFS modules through
-  `module_path` is not supported by this build.
+* Chimera libraries are DLLs on Windows, as they are shared objects on Linux,
+  and VFS backends are loaded at runtime from `chimera_vfs_<name>.dll` beside
+  `chimera_vfs.dll` (or `$CHIMERA_VFS_MODULE_DIR`, or a `module_path`). A DLL
+  must name the DLL every import comes from, so the libraries form a strict
+  hierarchy with no cycles, and data crossing a DLL boundary is declared
+  through `common/export.h`. An out-of-tree backend links the import
+  libraries `chimera_vfs.lib` and `chimera_common.lib`.
 * The public client API uses `chimera_off_t`, `chimera_dev_t`,
   `chimera_dirpos_t`, and `chimera_posix_stat_t` so file offsets, device IDs, directory
   positions, and metadata remain
