@@ -90,6 +90,9 @@ set_source_files_properties(
     ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} ${NLM4_XDR_C} ${SM_INTER_XDR_C} PROPERTIES COMPILE_OPTIONS "${CHIMERA_GENERATED_C_OPTIONS}"
 )
 
+# The generated XDR code cannot carry SYMBOL_EXPORT, so this library exports
+# everything: -fvisibility=default on Unix, and on Windows the equivalent
+# WINDOWS_EXPORT_ALL_SYMBOLS (set on the target below).
 if(NOT MSVC)
     add_definitions(-fvisibility=default)
 endif()
@@ -103,6 +106,7 @@ add_library(chimera_nfs_common  ${CHIMERA_LIBRARY_TYPE}
             ${PORTMAP_XDR_C} ${PORTMAP_XDR_H}
             ${NLM4_XDR_C} ${NLM4_XDR_H}
             ${SM_INTER_XDR_C} ${SM_INTER_XDR_H})
+set_target_properties(chimera_nfs_common PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 target_link_libraries(chimera_nfs_common chimera_common evpl evpl_rpc2)
 
