@@ -85,7 +85,7 @@ The chimera side of both procedures is the `server.smb_auth` object:
 | `kerberos_enabled` | bool | `false` | Accept Kerberos through SPNEGO. |
 | `kerberos_keytab` | string | - | Keytab used to accept Kerberos contexts. If unset, the MIT default (or `KRB5_KTNAME`) applies. |
 | `kerberos_realm` | string | - | Realm the host belongs to, recorded at startup. |
-| `kerberos_anonymous_fallback` | bool | `false` | Serve an authenticated Kerberos principal as uid/gid 65534 when `winbind_enabled` is off. Off, a Kerberos logon without winbind is refused with `NT_STATUS_LOGON_FAILURE`. Ignored when `winbind_enabled` is set. |
+| `kerberos_anonymous_fallback` | bool | `false` | Serve an authenticated Kerberos principal as uid/gid 65534 when no identity module maps principals (`winbind` is the in-tree one). Off, such a logon is refused with `NT_STATUS_LOGON_FAILURE`. Ignored when `winbind_enabled` is set or a principal-mapping module is configured. |
 
 See [server.smb_auth](configuration#serversmb_auth) in the configuration
 reference for how these sit in the wider config file.
@@ -118,9 +118,11 @@ is joined it advertises fallback names and every pass-through logon fails with
 a rejoin.
 
 **Enable winbind for every Kerberos deployment that has a domain behind it.**
-The Kerberos path maps the authenticated principal to a uid through winbind.
-With `winbind_enabled` set, a winbindd that is down or a principal it cannot
-map refuses the logon with `NT_STATUS_LOGON_FAILURE`; an accepted service
+The Kerberos path maps the authenticated principal to a uid through the
+identity modules that map principals, which in-tree is `winbind`. With
+`winbind_enabled` set (or a `winbind` entry in `server.identity`), a winbindd
+that is down or a principal it cannot map refuses the logon with
+`NT_STATUS_LOGON_FAILURE`; an accepted service
 ticket alone never yields a session, and chimera logs the principal and the
 reason at error level. With `winbind_enabled` off, chimera has no identity
 source for the principal and refuses the logon too, unless

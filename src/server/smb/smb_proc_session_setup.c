@@ -392,10 +392,11 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
     }
 
     /* An accepted Kerberos context is not yet a logon.  The principal still has
-     * to map to a Unix identity, and a deployment that configured winbind asked
-     * for real identities: if winbindd is down or cannot map the principal the
-     * logon is refused with STATUS_LOGON_FAILURE, the answer the NTLM
-     * pass-through path gives a logon winbind cannot validate.  Resolved here,
+     * to map to a Unix identity, and a deployment that configured a principal
+     * mapper (winbind) asked for real identities: if the mapper is down or
+     * cannot map the principal the logon is refused with STATUS_LOGON_FAILURE,
+     * the answer the NTLM pass-through path gives a logon winbind cannot
+     * validate.  Resolved here,
      * ahead of session allocation, so the refusal takes the ordinary failure
      * path below -- no session, and a session an earlier interim leg allocated
      * is torn down -- instead of falling back to an anonymous identity that an
@@ -403,7 +404,8 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
     struct smb_kerberos_identity krb_ident = { 0 };
 
     if (rc == 0 && mech == SMB_AUTH_MECH_KERBEROS &&
-        smb_kerberos_resolve_identity(shared->config.auth.winbind_enabled,
+        smb_kerberos_resolve_identity(shared->vfs,
+                                      shared->config.auth.winbind_enabled,
                                       shared->config.auth.kerberos_anonymous_fallback,
                                       smb_gssapi_get_principal(&conn->gssapi_ctx),
                                       &krb_ident) != 0) {

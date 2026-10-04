@@ -132,6 +132,58 @@ static struct chimera_vfs_identity_module domain_only_module = {
     .domain_info  = no_lookup_domain_info,
 };
 
+/*
+ * Stands in for winbind's principal mapping.  Records the name the engine
+ * handed it, so the test can see the normalization, and knows one account.
+ * DOWN\x reports the backend unavailable.
+ */
+#define TEST_PRINCIPAL_UID       5001
+#define TEST_PRINCIPAL_SID       "S-1-5-21-111-222-333-5001"
+#define TEST_PRINCIPAL_GROUP_SID "S-1-5-21-111-222-333-513"
+
+static char principal_seen[512];
+
+static enum chimera_vfs_identity_status
+principal_lookup(
+    void                               *private_data,
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out)
+{
+    (void) private_data;
+    (void) id;
+
+    if (key != CHIMERA_VFS_IDENTITY_BY_PRINCIPAL) {
+        return CHIMERA_VFS_IDENTITY_NOT_MINE;
+    }
+
+    snprintf(principal_seen, sizeof(principal_seen), "%s", name);
+
+    if (strncmp(name, "DOWN\\", 5) == 0) {
+        return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+    }
+    if (strcmp(name, "AD\\bob") != 0) {
+        return CHIMERA_VFS_IDENTITY_NOT_MINE;
+    }
+
+    out->user.uid = TEST_PRINCIPAL_UID;
+    out->user.gid = 513;
+    snprintf(out->user.username, sizeof(out->user.username), "AD\\bob");
+    out->user.username_len = (int) strlen(out->user.username);
+    snprintf(out->user.sid, sizeof(out->user.sid), TEST_PRINCIPAL_SID);
+    snprintf(out->user.group_sid, sizeof(out->user.group_sid), TEST_PRINCIPAL_GROUP_SID);
+    return CHIMERA_VFS_IDENTITY_OK;
+} /* principal_lookup */
+
+static struct chimera_vfs_identity_module principal_module = {
+    .sdk_version  = CHIMERA_VFS_IDENTITY_SDK_VERSION,
+    .name         = "principal",
+    .capabilities = CHIMERA_VFS_IDENTITY_CAP_LOOKUP |
+        CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL,
+    .lookup       = principal_lookup,
+};
+
 #ifdef _WIN32
 /* Windows has no NSS provider. Supply deterministic worker results so the
  * same async completion, caching, and SID-precedence checks still run. */
@@ -394,6 +446,50 @@ main(
         assert(strcmp(join.netbios_domain, "TESTDOM") == 0);
         assert(join.netbios_name[0] == '\0');
         TEST_PASS("domain_info answered by the module that has the capability");
+    }
+
+    /* --- 7. principals go only to modules that opted in --- */
+    {
+        struct chimera_vfs_identity_result r;
+        const uint32_t                     principal_caps =
+            CHIMERA_VFS_IDENTITY_CAP_LOOKUP | CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL;
+
+        /* NSS knows "root", but a principal is never handed to it: with no
+         * principal mapper nothing answers. */
+        assert(!chimera_vfs_identity_has_capability(vfs, principal_caps));
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "root", &r) == CHIMERA_VFS_IDENTITY_NOT_MINE);
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "root@EXAMPLE.COM", &r) ==
+               CHIMERA_VFS_IDENTITY_NOT_MINE);
+        TEST_PASS("a principal is never resolved through NSS");
+
+        chimera_vfs_identity_register_module(vfs, &principal_module, "");
+        assert(chimera_vfs_identity_has_capability(vfs, principal_caps));
+
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "bob@AD", &r) == CHIMERA_VFS_IDENTITY_OK);
+        assert(strcmp(principal_seen, "AD\\bob") == 0);
+        assert(!r.is_group && r.user.uid == TEST_PRINCIPAL_UID);
+        assert(strcmp(r.user.sid, TEST_PRINCIPAL_SID) == 0);
+        assert(strcmp(r.user.group_sid, TEST_PRINCIPAL_GROUP_SID) == 0);
+        TEST_PASS("user@REALM reaches the module as REALM\\user");
+
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "AD\\bob", &r) == CHIMERA_VFS_IDENTITY_OK);
+        assert(strcmp(principal_seen, "AD\\bob") == 0);
+        TEST_PASS("DOMAIN\\user passes through unchanged");
+
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "carol@AD", &r) == CHIMERA_VFS_IDENTITY_NOT_MINE);
+        assert(chimera_vfs_identity_lookup(vfs, CHIMERA_VFS_IDENTITY_BY_PRINCIPAL, 0,
+                                           "bob@DOWN", &r) == CHIMERA_VFS_IDENTITY_UNAVAILABLE);
+        TEST_PASS("an unknown principal and a down backend are told apart");
+
+        /* The blocking lookup bypasses the cache: nothing was added. */
+        assert(!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
+                                            TEST_PRINCIPAL_UID, NULL));
+        TEST_PASS("the blocking lookup leaves the cache alone");
     }
 
     chimera_vfs_thread_destroy(thread);

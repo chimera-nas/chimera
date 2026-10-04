@@ -664,14 +664,16 @@ test_wbclient_lm_implied_zeros(void)
  * Test the identity policy applied to an accepted Kerberos context.
  *
  * A GSSAPI accept proves who the client is; it is not a logon until the
- * principal maps to a Unix identity.  With winbind_enabled the mapping must come
- * from winbind, so an unreachable winbindd (or a principal it cannot map)
- * refuses the logon instead of degrading it to the 65534 identity -- which is
- * what a deployment whose winbindd had died used to hand every Kerberos client
- * while its NTLM logons were being refused.  Without winbind the logon is
- * refused unless the deployment opted into the nobody mapping, and that
- * opt-in never overrides a configured winbind.  The winbind-down cases are
- * skipped when a winbindd really answers on this host.
+ * principal maps to a Unix identity.  With a principal mapper required (as
+ * winbind_enabled implies) the mapping must come from one, so a missing or
+ * unreachable mapper refuses the logon instead of degrading it to the 65534
+ * identity -- which is what a deployment whose winbindd had died used to hand
+ * every Kerberos client while its NTLM logons were being refused.  Without a
+ * mapper the logon is refused unless the deployment opted into the nobody
+ * mapping, and that opt-in never overrides a required one.  The engine side
+ * of the mapping (module selection, the down-backend status) is covered by
+ * vfs_identity_test; the winbindd-down end to end case by
+ * smbclient_kerberos_winbind_down.
  */
 static void
 test_kerberos_identity_policy(void)
@@ -681,50 +683,48 @@ test_kerberos_identity_policy(void)
 
     fprintf(stderr, "\nTesting Kerberos identity policy...\n");
 
-    /* No principal is never a logon, whatever the configuration. */
-    rc = smb_kerberos_resolve_identity(0, 1, NULL, &ident);
+    /* No principal is never a logon, whatever the configuration.  A NULL vfs
+     * is a server with no principal mapper registered. */
+    rc = smb_kerberos_resolve_identity(NULL, 0, 1, NULL, &ident);
     if (rc == -1) {
         TEST_PASS("NULL principal is refused");
     } else {
         TEST_FAIL("NULL principal is refused");
     }
 
-    rc = smb_kerberos_resolve_identity(1, 1, "", &ident);
+    rc = smb_kerberos_resolve_identity(NULL, 1, 1, "", &ident);
     if (rc == -1) {
         TEST_PASS("Empty principal is refused");
     } else {
         TEST_FAIL("Empty principal is refused");
     }
 
-    if (smb_wbclient_available()) {
-        TEST_SKIP("winbind_enabled without winbindd (a winbindd answers on this host)");
+    /* A required mapper that is not there refuses, and the fallback knob never
+     * stands in for it. */
+    rc = smb_kerberos_resolve_identity(NULL, 1, 0, "testuser1@TEST.LOCAL", &ident);
+    if (rc == -1) {
+        TEST_PASS("mapper required but absent refuses the logon");
     } else {
-        rc = smb_kerberos_resolve_identity(1, 0, "testuser1@TEST.LOCAL", &ident);
-        if (rc == -1) {
-            TEST_PASS("winbind_enabled with winbindd unavailable refuses the logon");
-        } else {
-            TEST_FAIL("winbind_enabled with winbindd unavailable refuses the logon");
-        }
+        TEST_FAIL("mapper required but absent refuses the logon");
+    }
 
-        /* The fallback knob never overrides a configured winbind. */
-        rc = smb_kerberos_resolve_identity(1, 1, "testuser1@TEST.LOCAL", &ident);
-        if (rc == -1) {
-            TEST_PASS("anonymous fallback is ignored when winbind_enabled is set");
-        } else {
-            TEST_FAIL("anonymous fallback is ignored when winbind_enabled is set");
-        }
+    rc = smb_kerberos_resolve_identity(NULL, 1, 1, "testuser1@TEST.LOCAL", &ident);
+    if (rc == -1) {
+        TEST_PASS("anonymous fallback is ignored when a mapper is required");
+    } else {
+        TEST_FAIL("anonymous fallback is ignored when a mapper is required");
     }
 
     /* No identity source at all: refused by default. */
-    rc = smb_kerberos_resolve_identity(0, 0, "testuser1@TEST.LOCAL", &ident);
+    rc = smb_kerberos_resolve_identity(NULL, 0, 0, "testuser1@TEST.LOCAL", &ident);
     if (rc == -1 && ident.resolved == 0) {
-        TEST_PASS("winbind disabled without the fallback knob refuses the logon");
+        TEST_PASS("no mapper without the fallback knob refuses the logon");
     } else {
-        TEST_FAIL("winbind disabled without the fallback knob refuses the logon");
+        TEST_FAIL("no mapper without the fallback knob refuses the logon");
     }
 
     /* The explicit opt-in serves the principal as nobody. */
-    rc = smb_kerberos_resolve_identity(0, 1, "testuser1@TEST.LOCAL", &ident);
+    rc = smb_kerberos_resolve_identity(NULL, 0, 1, "testuser1@TEST.LOCAL", &ident);
     if (rc == 0 && ident.uid == 65534 && ident.gid == 65534 &&
         ident.ngids == 0 && ident.is_ad_user == 0 && ident.resolved == 1 &&
         strcmp(ident.sid, "S-1-22-1-65534") == 0) {

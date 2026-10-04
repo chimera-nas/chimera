@@ -68,21 +68,6 @@ int smb_wbclient_auth_ntlm(
     char          *group_sid_out,
     uint8_t       *session_key);
 
-// Map a Kerberos principal name to Unix credentials via winbind
-// principal format: "user@REALM" or "DOMAIN\user"
-// Returns: 0 on success, -1 on failure
-// sid_out should be at least SMB_WBCLIENT_SID_MAX_LEN bytes (can be NULL)
-// group_sid_out likewise: the SID of the primary gid, empty when winbind
-// maps that gid to no SID (can be NULL)
-int smb_wbclient_map_principal(
-    const char *principal,
-    uint32_t   *uid,
-    uint32_t   *gid,
-    uint32_t   *ngids,
-    uint32_t   *gids,
-    char       *sid_out,
-    char       *group_sid_out);
-
 // Check if winbind is available
 // Returns: 1 if available, 0 if not
 int smb_wbclient_available(

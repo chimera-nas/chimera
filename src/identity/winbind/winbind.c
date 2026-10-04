@@ -4,8 +4,9 @@
 
 /*
  * Winbind identity module: resolves uids, gids, names and real Active
- * Directory SIDs through winbindd (libwbclient), and reports the identity the
- * host is joined to its domain with.  Configured behind NSS; the engine
+ * Directory SIDs through winbindd (libwbclient), maps authenticated Kerberos
+ * principals to the accounts they name, and reports the identity the host is
+ * joined to its domain with.  Configured behind NSS; the engine
  * prefers this module's SID-bearing answer for a numeric key over NSS's
  * SID-less one.
  */
@@ -185,6 +186,61 @@ wbc_fill_status(int rc)
     return rc == 0 ? CHIMERA_VFS_IDENTITY_OK : CHIMERA_VFS_IDENTITY_NOT_MINE;
 } /* wbc_fill_status */
 
+/* Map an authenticated principal, normalized by the engine to DOMAIN\user or
+ * a bare user (winbind's default domain), to the user it names.  A principal
+ * that names a group or anything else is not an account to log on as. */
+static enum chimera_vfs_identity_status
+wbc_lookup_principal(
+    const char                       *principal,
+    struct chimera_vfs_identity_user *out)
+{
+    wbcErr wbc_err;
+    struct wbcDomainSid sid, group_sid;
+    enum wbcSidType     sid_type;
+    char buf[2 * CHIMERA_VFS_IDENTITY_NAME_MAX_LEN];
+    char *domain = "", *user = buf;
+    char *sep;
+    char sidbuf[CHIMERA_VFS_IDENTITY_SID_MAX_LEN];
+
+    wbc_copy_string(buf, sizeof(buf), principal);
+    sep = strchr(buf, '\\');
+    if (sep) {
+        *sep   = '\0';
+        domain = buf;
+        user   = sep + 1;
+    }
+
+    wbc_err = wbcLookupName(domain, user, &sid, &sid_type);
+    if (wbc_err != WBC_ERR_SUCCESS) {
+        chimera_winbind_debug("wbcLookupName failed for %s\\%s: %s",
+                              domain, user, wbcErrorString(wbc_err));
+        return wbc_miss_status(wbc_err);
+    }
+
+    if (sid_type != WBC_SID_NAME_USER) {
+        chimera_winbind_debug("principal %s\\%s is not a user (type %d)",
+                              domain, user, sid_type);
+        return CHIMERA_VFS_IDENTITY_NOT_MINE;
+    }
+
+    if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
+        sidbuf[0] = '\0';
+    }
+
+    if (wbc_fill_user(&sid, sidbuf[0] ? sidbuf : NULL, out) != 0) {
+        chimera_winbind_error("principal %s\\%s has no Unix uid", domain, user);
+        return CHIMERA_VFS_IDENTITY_NOT_MINE;
+    }
+
+    /* The session's primary group SID, for the gid winbind just named. */
+    if (wbcGidToSid(out->gid, &group_sid) != WBC_ERR_SUCCESS ||
+        wbc_sid_to_string(&group_sid, out->group_sid, sizeof(out->group_sid)) < 0) {
+        out->group_sid[0] = '\0';
+    }
+
+    return CHIMERA_VFS_IDENTITY_OK;
+} /* wbc_lookup_principal */
+
 static enum chimera_vfs_identity_status
 chimera_identity_winbind_lookup(
     void                               *private_data,
@@ -289,6 +345,12 @@ chimera_identity_winbind_lookup(
             }
             return wbc_fill_status(rc);
 
+        case CHIMERA_VFS_IDENTITY_BY_PRINCIPAL:
+            if (!name) {
+                return CHIMERA_VFS_IDENTITY_NOT_MINE;
+            }
+            return wbc_lookup_principal(name, &out->user);
+
         default:
             return CHIMERA_VFS_IDENTITY_NOT_MINE;
     } /* switch */
@@ -327,6 +389,7 @@ SYMBOL_EXPORT struct chimera_vfs_identity_module identity_winbind = {
     .sdk_version  = CHIMERA_VFS_IDENTITY_SDK_VERSION,
     .name         = "winbind",
     .capabilities = CHIMERA_VFS_IDENTITY_CAP_LOOKUP |
+        CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL |
         CHIMERA_VFS_IDENTITY_CAP_DOMAIN_INFO,
     .lookup      = chimera_identity_winbind_lookup,
     .domain_info = chimera_identity_winbind_domain_info,

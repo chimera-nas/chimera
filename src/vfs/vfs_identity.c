@@ -50,6 +50,11 @@ static const struct chimera_vfs_identity_module *chimera_vfs_identity_builtins[]
     NULL
 };
 
+/* Longest key string a request carries: a SID, a username, or a principal,
+ * which is a username plus its domain or realm. */
+#define CHIMERA_VFS_IDENTITY_PRINCIPAL_MAX_LEN \
+        (2 * CHIMERA_VFS_IDENTITY_NAME_MAX_LEN)
+
 struct chimera_vfs_identity_module_entry {
     const struct chimera_vfs_identity_module *module;
     void                                     *private_data;
@@ -62,8 +67,7 @@ struct chimera_vfs_identity_request {
     struct chimera_vfs_thread           *origin;
     enum chimera_vfs_identity_key        key;
     uint32_t                             id;
-    char                                 name[CHIMERA_VFS_SID_MAX_LEN > 256 ?
-                                              CHIMERA_VFS_SID_MAX_LEN : 256];
+    char                                 name[CHIMERA_VFS_IDENTITY_PRINCIPAL_MAX_LEN];
     int                                  found;
     struct chimera_vfs_identity_result   result;
     chimera_vfs_identity_callback        callback;
@@ -173,6 +177,30 @@ chimera_vfs_identity_result_has_sid(const struct chimera_vfs_identity_result *re
 } /* chimera_vfs_identity_result_has_sid */
 
 /*
+ * Rewrite a principal as DOMAIN\user, the one form modules see.  A Kerberos
+ * client name arrives as user@REALM; a down-level logon name as DOMAIN\user;
+ * a bare name has no domain.  Returns 0, or -1 when the principal does not fit.
+ */
+static int
+chimera_vfs_identity_normalize_principal(
+    const char *principal,
+    char       *out,
+    size_t      out_len)
+{
+    const char *at = strrchr(principal, '@');
+    int         n;
+
+    if (at && at != principal && at[1] != '\0') {
+        n = snprintf(out, out_len, "%s\\%.*s", at + 1,
+                     (int) (at - principal), principal);
+    } else {
+        n = snprintf(out, out_len, "%s", principal);
+    }
+
+    return (n < 0 || (size_t) n >= out_len) ? -1 : 0;
+} /* chimera_vfs_identity_normalize_principal */
+
+/*
  * Walk the registered modules in order until one resolves the key.
  *
  * For the numeric keys (BY_UID / BY_GID) a plain first-wins walk is not enough.
@@ -188,26 +216,49 @@ chimera_vfs_identity_result_has_sid(const struct chimera_vfs_identity_result *re
  * case a later module can name the same identity properly, and settle for the
  * provisional answer only if none can.  This is safe precisely because the key
  * is numeric -- every module is being asked about the same uid/gid, so they
- * can only disagree about the SID, never about which identity it is.  BY_NAME
- * and BY_SID stay first-wins: there the key is a string that two modules could
- * legitimately resolve to different identities (a local "alice" and a domain
- * "alice"), and preferring the SID-bearing answer would silently change which
- * account wins.
+ * can only disagree about the SID, never about which identity it is.  BY_NAME,
+ * BY_SID and BY_PRINCIPAL stay first-wins: there the key is a string that two
+ * modules could legitimately resolve to different identities (a local "alice"
+ * and a domain "alice"), and preferring the SID-bearing answer would silently
+ * change which account wins.
+ *
+ * BY_PRINCIPAL goes only to modules that declare CAP_PRINCIPAL.  A principal
+ * is a name some authority has already vouched for, and mapping it is a policy
+ * decision a module opts into -- NSS in particular never sees one, so a
+ * domain principal can never land on a same-named local account.
+ *
+ * Returns OK with *out filled; otherwise UNAVAILABLE when no module answered
+ * and at least one was down, else NOT_MINE.
  */
-static int
+static enum chimera_vfs_identity_status
 chimera_vfs_identity_run_lookup(
-    struct chimera_vfs_identity         *identity,
-    struct chimera_vfs_identity_request *req)
+    struct chimera_vfs_identity        *identity,
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out)
 {
     struct chimera_vfs_identity_module_entry *entry;
     struct chimera_vfs_identity_result        provisional;
-    int                                       have_provisional = 0;
-    int                                       prefer_sid;
-    int                                       rc = -1;
+    char principal[CHIMERA_VFS_IDENTITY_PRINCIPAL_MAX_LEN];
+    int have_provisional = 0;
+    int any_unavailable  = 0;
+    int prefer_sid;
+    uint32_t required = CHIMERA_VFS_IDENTITY_CAP_LOOKUP;
     enum chimera_vfs_identity_status          status;
 
-    prefer_sid = (req->key == CHIMERA_VFS_IDENTITY_BY_UID ||
-                  req->key == CHIMERA_VFS_IDENTITY_BY_GID);
+    prefer_sid = (key == CHIMERA_VFS_IDENTITY_BY_UID ||
+                  key == CHIMERA_VFS_IDENTITY_BY_GID);
+
+    if (key == CHIMERA_VFS_IDENTITY_BY_PRINCIPAL) {
+        if (!name || name[0] == '\0' ||
+            chimera_vfs_identity_normalize_principal(name, principal,
+                                                     sizeof(principal)) != 0) {
+            return CHIMERA_VFS_IDENTITY_NOT_MINE;
+        }
+        name      = principal;
+        required |= CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL;
+    }
 
     evpl_mutex_lock(&identity->module_lock);
     entry = identity->modules;
@@ -215,40 +266,37 @@ chimera_vfs_identity_run_lookup(
 
     /* The module list is only appended to at startup, so it is safe to walk
      * after grabbing the head. */
-    while (entry) {
-        if (!(entry->module->capabilities & CHIMERA_VFS_IDENTITY_CAP_LOOKUP)) {
-            entry = entry->next;
+    for (; entry; entry = entry->next) {
+        if ((entry->module->capabilities & required) != required) {
             continue;
         }
 
-        memset(&req->result, 0, sizeof(req->result));
-        status = entry->module->lookup(entry->private_data, req->key, req->id,
-                                       req->name, &req->result);
+        memset(out, 0, sizeof(*out));
+        status = entry->module->lookup(entry->private_data, key, id, name, out);
 
         if (status == CHIMERA_VFS_IDENTITY_UNAVAILABLE) {
             chimera_vfs_error("identity module %s unavailable during lookup",
                               entry->module->name);
+            any_unavailable = 1;
         } else if (status == CHIMERA_VFS_IDENTITY_OK) {
-            if (!prefer_sid ||
-                chimera_vfs_identity_result_has_sid(&req->result)) {
-                rc = 0;
-                break;
+            if (!prefer_sid || chimera_vfs_identity_result_has_sid(out)) {
+                return CHIMERA_VFS_IDENTITY_OK;
             }
             /* Resolved, but with no SID.  Hold it and keep looking. */
             if (!have_provisional) {
-                provisional      = req->result;
+                provisional      = *out;
                 have_provisional = 1;
             }
         }
-        entry = entry->next;
     }
 
-    if (rc != 0 && have_provisional) {
-        req->result = provisional;
-        rc          = 0;
+    if (have_provisional) {
+        *out = provisional;
+        return CHIMERA_VFS_IDENTITY_OK;
     }
 
-    return rc;
+    return any_unavailable ? CHIMERA_VFS_IDENTITY_UNAVAILABLE :
+           CHIMERA_VFS_IDENTITY_NOT_MINE;
 } /* chimera_vfs_identity_run_lookup */
 
 static void *
@@ -281,7 +329,9 @@ chimera_vfs_identity_worker(void *arg)
         evpl_mutex_unlock(&identity->lock);
 
         /* Blocking resolution happens here, off the event loop. */
-        if (chimera_vfs_identity_run_lookup(identity, req) == 0) {
+        if (chimera_vfs_identity_run_lookup(identity, req->key, req->id,
+                                            req->name, &req->result) ==
+            CHIMERA_VFS_IDENTITY_OK) {
             req->found = 1;
             /* Populate the cache so future lookups for this identity are
              * synchronous (TTL-expiring, non-pinned).  A group goes to the
@@ -353,6 +403,10 @@ chimera_vfs_identity_add_module(
     chimera_vfs_abort_if((module->capabilities & CHIMERA_VFS_IDENTITY_CAP_LOOKUP) &&
                          !module->lookup,
                          "identity module %s claims CAP_LOOKUP without a lookup op",
+                         module->name);
+    chimera_vfs_abort_if((module->capabilities & CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL) &&
+                         !(module->capabilities & CHIMERA_VFS_IDENTITY_CAP_LOOKUP),
+                         "identity module %s claims CAP_PRINCIPAL without CAP_LOOKUP",
                          module->name);
     chimera_vfs_abort_if((module->capabilities & CHIMERA_VFS_IDENTITY_CAP_DOMAIN_INFO) &&
                          !module->domain_info,
@@ -631,6 +685,19 @@ chimera_vfs_identity_resolve(
     evpl_cond_signal(&identity->cond);
     evpl_mutex_unlock(&identity->lock);
 } /* chimera_vfs_identity_resolve */
+
+SYMBOL_EXPORT enum chimera_vfs_identity_status
+chimera_vfs_identity_lookup(
+    struct chimera_vfs                 *vfs,
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    return chimera_vfs_identity_run_lookup(vfs->identity, key, id, name, out);
+} /* chimera_vfs_identity_lookup */
 
 SYMBOL_EXPORT int
 chimera_vfs_identity_cached(

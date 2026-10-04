@@ -18,7 +18,7 @@
  * module_path.
  *
  * This version of the contract covers the resolve family -- name / uid / gid /
- * SID to identity record -- plus domain_info, which is not identity at all but
+ * SID / principal to identity record -- plus domain_info, which is not identity at all but
  * domain membership: the names the host is joined to a domain with.  Every op
  * is optional and gated by a capability bit; a module implements the subset it
  * can.
@@ -46,12 +46,19 @@ struct prometheus_metrics;
 #define CHIMERA_VFS_IDENTITY_CAP_LOOKUP      (1U << 0)
 /* the NetBIOS / DNS names the host is domain-joined with */
 #define CHIMERA_VFS_IDENTITY_CAP_DOMAIN_INFO (1U << 1)
+/* lookup also answers BY_PRINCIPAL; requires CAP_LOOKUP */
+#define CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL   (1U << 2)
 
 enum chimera_vfs_identity_key {
     CHIMERA_VFS_IDENTITY_BY_UID,
     CHIMERA_VFS_IDENTITY_BY_GID,
     CHIMERA_VFS_IDENTITY_BY_NAME,
     CHIMERA_VFS_IDENTITY_BY_SID,
+    /* An already-authenticated principal (a Kerberos client name) to the
+     * account it stands for.  Sent only to CAP_PRINCIPAL modules, with the
+     * name normalized by the engine to DOMAIN\user (or a bare user when the
+     * principal names no domain). */
+    CHIMERA_VFS_IDENTITY_BY_PRINCIPAL,
 };
 
 /*
@@ -76,6 +83,9 @@ struct chimera_vfs_identity_user {
     /* Empty when the backend has no notion of a SID (NSS); the engine then
      * falls back to the algorithmic form when a SID is needed. */
     char     sid[CHIMERA_VFS_IDENTITY_SID_MAX_LEN];
+    /* The primary group's SID.  Optional: filled for BY_PRINCIPAL, where the
+     * caller builds a session from it; empty means unknown. */
+    char     group_sid[CHIMERA_VFS_IDENTITY_SID_MAX_LEN];
 };
 
 struct chimera_vfs_identity_group {
@@ -141,9 +151,11 @@ struct chimera_vfs_identity_module {
 
     /* CAP_LOOKUP
      * Resolve `key` -- `id` for BY_UID / BY_GID, `name` (a NUL-terminated
-     * username or SID string) for BY_NAME / BY_SID -- into *out, which
-     * arrives zeroed.  Fill out->user, or out->group with out->is_group set.
-     * Return OK, or NOT_MINE when the key is unknown here.
+     * username, SID string or normalized principal) for BY_NAME / BY_SID /
+     * BY_PRINCIPAL -- into *out, which arrives zeroed.  Fill out->user, or
+     * out->group with out->is_group set; a principal always names a user.
+     * Return OK, or NOT_MINE when the key is unknown here (including a key
+     * this module does not handle).
      */
     enum chimera_vfs_identity_status (*lookup)(
         void *private_data,

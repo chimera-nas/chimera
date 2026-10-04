@@ -184,6 +184,7 @@ A module declares a capability mask and implements the matching ops:
 | Capability | Op | Meaning |
 |---|---|---|
 | `CHIMERA_VFS_IDENTITY_CAP_LOOKUP` | `lookup` | Resolve a `BY_UID` / `BY_GID` / `BY_NAME` / `BY_SID` key into a user or group record. |
+| `CHIMERA_VFS_IDENTITY_CAP_PRINCIPAL` | `lookup` | Also answer `BY_PRINCIPAL`: map an already-authenticated principal (a Kerberos client name) to the user it names. Requires `CAP_LOOKUP`. |
 | `CHIMERA_VFS_IDENTITY_CAP_DOMAIN_INFO` | `domain_info` | Report the NetBIOS and DNS names the host is joined with. |
 
 An op returns `CHIMERA_VFS_IDENTITY_OK`, `NOT_MINE` (the key is unknown here;
@@ -191,6 +192,13 @@ the engine moves on) or `UNAVAILABLE` (the backend is down; routed like
 `NOT_MINE`, reported differently).  For a numeric key the engine treats a
 SID-less answer as provisional and keeps walking, so a SID-bearing module
 behind NSS can name the same identity properly.
+
+`BY_PRINCIPAL` reaches only modules that declare `CAP_PRINCIPAL`, never NSS,
+so a domain principal cannot land on a same-named local account.  The engine
+rewrites the principal before the walk: `user@REALM` arrives as `REALM\user`,
+a `DOMAIN\user` name as written, and a bare name unqualified.  A principal
+always maps to a user; the answer may also fill `user.group_sid`, the SID of
+its primary group, which SMB records on the session.
 
 The in-tree modules live under `src/identity/`: `nss` (always present, walked
 first) and `winbind` (built when libwbclient is found).  An out-of-tree module

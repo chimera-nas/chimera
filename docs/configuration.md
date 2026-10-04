@@ -153,7 +153,7 @@ Domain-authentication backends for SMB.
 | `kerberos_enabled` | bool | `false` | Enable Kerberos authentication. |
 | `kerberos_keytab` | string | - | Path to the Kerberos keytab. |
 | `kerberos_realm` | string | - | Kerberos realm. |
-| `kerberos_anonymous_fallback` | bool | `false` | Serve an authenticated Kerberos principal as uid/gid 65534 when `winbind_enabled` is off. Off, a Kerberos logon without winbind is refused with `NT_STATUS_LOGON_FAILURE`. Ignored when `winbind_enabled` is set. |
+| `kerberos_anonymous_fallback` | bool | `false` | Serve an authenticated Kerberos principal as uid/gid 65534 when no identity module maps principals (`winbind` is the in-tree one). Off, such a logon is refused with `NT_STATUS_LOGON_FAILURE`. Ignored when `winbind_enabled` is set or a principal-mapping module is configured. |
 
 Winbind and Kerberos both require setup outside chimera (a domain join, a
 keytab, and NSS pointed at winbind). See
@@ -210,8 +210,8 @@ is registered here, keyed by module name, before it can be used in `mounts`:
 
 #### `server.identity` - identity modules
 
-Identity modules resolve names, uids, gids and Windows SIDs into identity
-records behind the user cache (see the
+Identity modules resolve names, uids, gids, Windows SIDs and authenticated
+Kerberos principals into identity records behind the user cache (see the
 [identity module SDK](vfs-module-sdk#identity-modules)). The built-in `nss`
 module (the host's nsswitch) is always present and consulted first; the
 modules listed here are walked after it, in the order written. A module

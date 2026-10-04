@@ -72,8 +72,8 @@ chimera_vfs_identity_has_capability(
 /*
  * Resolve an identity.  On a cache hit the callback fires inline before this
  * returns; on a miss it fires later on `thread`'s evpl loop.  `id` is used for
- * BY_UID/BY_GID; `name` (a NUL-terminated username or SID string) for
- * BY_NAME/BY_SID.
+ * BY_UID/BY_GID; `name` (a NUL-terminated username, SID string or principal)
+ * for BY_NAME/BY_SID/BY_PRINCIPAL.
  */
 void
 chimera_vfs_identity_resolve(
@@ -83,6 +83,21 @@ chimera_vfs_identity_resolve(
     const char                   *name,
     chimera_vfs_identity_callback callback,
     void                         *private_data);
+
+/*
+ * Resolve an identity by walking the modules on the calling thread, bypassing
+ * the cache in both directions.  Blocking (a winbindd round trip): for a
+ * caller that already blocks, such as SMB session setup mapping a Kerberos
+ * principal, never the I/O path.  Returns OK with *out filled, NOT_MINE when
+ * no module knows the key, UNAVAILABLE when none answered and one was down.
+ */
+enum chimera_vfs_identity_status
+chimera_vfs_identity_lookup(
+    struct chimera_vfs                 *vfs,
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out);
 
 /* Drain this thread's completed resolve jobs (called from its doorbell). */
 void
