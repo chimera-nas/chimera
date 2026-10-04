@@ -7,6 +7,50 @@
   // recorded here as the fact that distinguishes this corpus from the base one.
   "blockSize": 5242880,
 
+  // FEATURES: optional capabilities of S3 this server does not have.  Each
+  // is on by default (Amazon S3 has them all); switched off, the model never
+  // draws a request that needs it.  Declared in
+  // ext/specs/quint/s3/corpus.schema.json.
+  "features": {
+    // No preconditions: If-Match, If-None-Match, If-Modified-Since,
+    // If-Unmodified-Since and x-amz-copy-source-if-* are not evaluated.
+    "conditional": false,
+    // No object versioning: ?versioning is not served, and ?versionId is
+    // not honoured.
+    "versioning": false,
+    // No bucket policy: ?policy is not served and nothing is enforced.
+    "bucketPolicy": false,
+    // No presigned URLs: a signature in the query string is not accepted.
+    "presigned": false,
+    // No flexible checksums: x-amz-checksum-* is neither verified nor
+    // returned.
+    "checksums": false
+  },
+
+  // RELAXATIONS: where chimera does not do what Amazon S3 does, and that is
+  // accepted.  The model's defaults are AWS as measured (ext/specs
+  // harness/s3/README.md); each of these is false on AWS and declared, with
+  // what AWS does instead, in ext/specs/quint/s3/corpus.schema.json.
+  "policies": {
+    // A 416 carries "Content-Range: bytes */<length>" (RFC 9110 says SHOULD).
+    // AWS sends none.
+    "rangeErrorContentRange": true,
+    // bytes=-N against a zero-length object is 416.  AWS ignores the range
+    // and answers 200 with an empty body.
+    "emptySuffixRangeUnsatisfiable": true,
+    // With a delimiter, a common prefix the start key lies inside is still
+    // returned.  AWS never returns it.
+    "listReturnsMarkerPrefix": true,
+    // A key named twice in one DeleteObjects is reported twice.  AWS reports
+    // it once.
+    "deleteReportsDuplicates": true,
+    // A successful PutBucketTagging answers 200 OK.  AWS answers 204.
+    "putBucketTaggingOk": true,
+    // An object stored with no Content-Type is reported as
+    // application/octet-stream.  AWS says binary/octet-stream.
+    "defaultContentTypeAppOctet": true
+  },
+
   // No deviations: every one this cell used to carry has been FIXED in the
   // server (204 and idempotency on DeleteObject, 409 BucketNotEmpty, 400
   // InvalidRequest for a self-copy, 206 for a whole-object range), so the
