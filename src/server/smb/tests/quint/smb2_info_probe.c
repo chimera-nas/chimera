@@ -191,9 +191,10 @@ probe_query_sweep(
 
 /* memfs stores rich ACLs, punches holes, reflinks, keeps xattrs (where object
  * IDs live) and named streams, so with the knob on it advertises everything
- * chimera can derive. */
-#define FSA_MEMFS_STREAMS_ON           (FSA_CASE_SENSITIVE_SEARCH |      \
-                                        FSA_CASE_PRESERVED_NAMES |       \
+ * chimera can derive.  Its filesystem takes the default mixed case policy --
+ * SMB names match case-insensitively -- so, like Windows' own file systems, it
+ * does not report FILE_CASE_SENSITIVE_SEARCH. */
+#define FSA_MEMFS_STREAMS_ON           (FSA_CASE_PRESERVED_NAMES |       \
                                         FSA_UNICODE_ON_DISK |            \
                                         FSA_PERSISTENT_ACLS |            \
                                         FSA_SUPPORTS_SPARSE_FILES |      \

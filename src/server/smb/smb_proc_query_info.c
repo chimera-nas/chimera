@@ -1083,7 +1083,11 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     request->query_info.r_fs_attrs.smb_fs_attributes =
                         chimera_smb_fs_attributes(
                             request->query_info.open_file->handle->vfs_module->capabilities,
-                            thread->shared->config.named_streams);
+                            thread->shared->config.named_streams,
+                            chimera_vfs_case_policy(thread->shared->vfs,
+                                                    request->query_info.open_file->handle->fh,
+                                                    request->query_info.open_file->handle->fh_len) ==
+                            CHIMERA_VFS_CASE_SENSITIVE);
                     /* 12-byte fixed part + "NTFS" (8 bytes).  The minimum is
                      * sizeof(FILE_FS_ATTRIBUTE_INFORMATION), 16 with its one-WCHAR
                      * name: smaller is INFO_LENGTH_MISMATCH

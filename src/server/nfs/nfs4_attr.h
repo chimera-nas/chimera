@@ -473,6 +473,7 @@ chimera_nfs4_marshall_attrs(
     uint8_t                         minorversion,
     uint32_t                        pnfs_layout_type,
     int                             xattr_supported,
+    int                             case_insensitive,
     int                             nfs4_delegations,
     uint32_t                        lease_time_s,
     uint16_t                        export_id,
@@ -754,7 +755,9 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[0]  |= (1 << FATTR4_CASE_INSENSITIVE);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
+            /* True only of an insensitive filesystem: every other
+             * policy matches an NFS client's names exactly. */
+            chimera_nfs4_attr_append_uint32(&attrs, !!case_insensitive);
         }
 
         if (req_mask[0] & (1 << FATTR4_CASE_PRESERVING)) {

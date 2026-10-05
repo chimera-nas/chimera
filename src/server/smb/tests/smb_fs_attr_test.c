@@ -27,9 +27,10 @@
             }                                                        \
         } while (0)
 
-/* Every backend gets these: names are case-sensitive and case-preserving,
- * stored as Unicode, and reparse points (symlinks / device nodes via the NFS
- * reparse tag) ride on symlink_at / mknod_at, which every FS module has. */
+/* Every case-sensitive filesystem gets these: names are case-sensitive
+ * and case-preserving, stored as Unicode, and reparse points (symlinks /
+ * device nodes via the NFS reparse tag) ride on symlink_at / mknod_at, which
+ * every FS module has. */
 #define BASE (SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH |  \
               SMB2_FS_ATTR_CASE_PRESERVED_NAMES |   \
               SMB2_FS_ATTR_UNICODE_ON_DISK |        \
@@ -41,8 +42,8 @@
 static int
 test_no_caps(void)
 {
-    CHECK(chimera_smb_fs_attributes(0, 0) == BASE);
-    CHECK(chimera_smb_fs_attributes(0, 1) == BASE);
+    CHECK(chimera_smb_fs_attributes(0, 0, 1) == BASE);
+    CHECK(chimera_smb_fs_attributes(0, 1, 1) == BASE);
     return 0;
 } /* test_no_caps */
 
@@ -50,14 +51,14 @@ test_no_caps(void)
 static int
 test_each_cap_alone(void)
 {
-    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_SPARSE, 0) ==
+    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_SPARSE, 0, 1) ==
           (BASE | SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES));
-    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_CLONE_RANGE, 0) ==
+    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_CLONE_RANGE, 0, 1) ==
           (BASE | SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING));
-    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_ACL_NATIVE, 0) ==
+    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_ACL_NATIVE, 0, 1) ==
           (BASE | SMB2_FS_ATTR_PERSISTENT_ACLS));
     /* Object IDs are kept as xattrs. */
-    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_XATTR, 0) ==
+    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_XATTR, 0, 1) ==
           (BASE | SMB2_FS_ATTR_SUPPORTS_OBJECT_IDS));
     return 0;
 } /* test_each_cap_alone */
@@ -69,8 +70,8 @@ test_each_cap_alone(void)
 static int
 test_named_streams_gate(void)
 {
-    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_NAMED_STREAMS, 0) == BASE);
-    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_NAMED_STREAMS, 1) ==
+    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_NAMED_STREAMS, 0, 1) == BASE);
+    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_NAMED_STREAMS, 1, 1) ==
           (BASE | SMB2_FS_ATTR_NAMED_STREAMS));
     return 0;
 } /* test_named_streams_gate */
@@ -84,12 +85,26 @@ test_mode_only_backend(void)
         CHIMERA_VFS_CAP_SPARSE | CHIMERA_VFS_CAP_CLONE_RANGE |
         CHIMERA_VFS_CAP_DELEGATES_DAC;
 
-    CHECK(chimera_smb_fs_attributes(caps, 1) ==
+    CHECK(chimera_smb_fs_attributes(caps, 1, 1) ==
           (BASE | SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES |
            SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING |
            SMB2_FS_ATTR_SUPPORTS_OBJECT_IDS));
     return 0;
 } /* test_mode_only_backend */
+
+/* FILE_CASE_SENSITIVE_SEARCH follows the filesystem's case policy, not the
+ * module: a filesystem whose SMB clients match names case-insensitively, as
+ * Windows does, does not report it. */
+static int
+test_case_policy(void)
+{
+    CHECK(chimera_smb_fs_attributes(0, 0, 0) ==
+          (BASE & ~SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH));
+    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_CASEFOLD, 0, 0) ==
+          (BASE & ~SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH));
+    CHECK(chimera_smb_fs_attributes(CHIMERA_VFS_CAP_CASEFOLD, 0, 1) == BASE);
+    return 0;
+} /* test_case_policy */
 
 /* Unrelated capabilities never leak into the word. */
 static int
@@ -101,7 +116,7 @@ test_unrelated_caps_ignored(void)
         CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE;
 
-    CHECK(chimera_smb_fs_attributes(caps, 1) == BASE);
+    CHECK(chimera_smb_fs_attributes(caps, 1, 1) == BASE);
     return 0;
 } /* test_unrelated_caps_ignored */
 
@@ -118,6 +133,9 @@ main(void)
         return 1;
     }
     if (test_mode_only_backend()) {
+        return 1;
+    }
+    if (test_case_policy()) {
         return 1;
     }
     if (test_unrelated_caps_ignored()) {
