@@ -1018,7 +1018,7 @@ jobs:
   # ---------------------------------------------------------------------------
   macos:
     name: Test macOS ${{ matrix.build_type }}
-    runs-on: macos-14
+    runs-on: macos-26
     permissions:
       contents: read
     strategy:
@@ -1035,30 +1035,7 @@ jobs:
         env:
           CCACHE_REF: ghcr.io/chimera-nas/ccache:4.14-darwin
         run: |
-          # Pin homebrew-core rather than installing whatever was published
-          # overnight.  userspace-rcu 0.15.7 (2026-09-11) is bottled from
-          # arm64_sequoia onward only -- no arm64_sonoma -- and these jobs run
-          # on macos-14, so the install fails outright with "no bottle
-          # available!".  The revision below is the last with a Sonoma bottle
-          # (a 0.15.6 rebottle, 2026-09-10); old bottles are content-addressed
-          # in GHCR and stay pullable, so this installs a binary, not a source
-          # build.
-          #
-          # This pins the whole index, which is the point: every formula here
-          # gets a no-Sonoma bottle set at its next version bump, so without a
-          # pin this breaks again on someone else's schedule.  Bumping it is
-          # then a reviewed change.  HOMEBREW_NO_INSTALL_FROM_API makes brew
-          # resolve from the tap instead of the live API; the fetch is depth-1
-          # at that commit rather than a full 1.4 GB tap clone.
-          export HOMEBREW_NO_INSTALL_FROM_API=1
-          export HOMEBREW_NO_AUTO_UPDATE=1
-          CORE="$(brew --repo)/Library/Taps/homebrew/homebrew-core"
-          rm -rf "$CORE" && mkdir -p "$CORE"
-          git -C "$CORE" init -q
-          git -C "$CORE" remote add origin \
-            https://github.com/Homebrew/homebrew-core.git
-          git -C "$CORE" fetch -q --depth 1 origin 6d80bc690123b975991058ef769b80a925199c7b
-          git -C "$CORE" checkout -q FETCH_HEAD
+          # macOS 26 has current Homebrew bottles; use the standard formula index.
           # bison: Apple ships 2.3 and the ndrzcc grammar needs 3.x; the
           # top-level CMakeLists already adds the keg-only Homebrew path.
           # libxcrypt: Darwin libc crypt(3) is DES-only, and REST auth needs
@@ -1091,9 +1068,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-v2-macos-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-26-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-v2-macos-${{ matrix.build_type }}-
+            ccache-v2-macos-26-${{ matrix.build_type }}-
 
       - name: Restore the model corpus cache
         uses: actions/cache/restore@v4
@@ -1190,7 +1167,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-v2-macos-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-26-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Save the model corpus cache
         if: always() && github.event_name == 'push'
@@ -1220,7 +1197,7 @@ jobs:
   # worth 70s of brew.  ccache comes from the same mirror as everywhere else.
   analyze-macos:
     name: Analyze macOS ${{ matrix.build_type }}
-    runs-on: macos-14
+    runs-on: macos-26
     permissions:
       contents: read
     strategy:
@@ -1237,30 +1214,7 @@ jobs:
         env:
           CCACHE_REF: ghcr.io/chimera-nas/ccache:4.14-darwin
         run: |
-          # Pin homebrew-core rather than installing whatever was published
-          # overnight.  userspace-rcu 0.15.7 (2026-09-11) is bottled from
-          # arm64_sequoia onward only -- no arm64_sonoma -- and these jobs run
-          # on macos-14, so the install fails outright with "no bottle
-          # available!".  The revision below is the last with a Sonoma bottle
-          # (a 0.15.6 rebottle, 2026-09-10); old bottles are content-addressed
-          # in GHCR and stay pullable, so this installs a binary, not a source
-          # build.
-          #
-          # This pins the whole index, which is the point: every formula here
-          # gets a no-Sonoma bottle set at its next version bump, so without a
-          # pin this breaks again on someone else's schedule.  Bumping it is
-          # then a reviewed change.  HOMEBREW_NO_INSTALL_FROM_API makes brew
-          # resolve from the tap instead of the live API; the fetch is depth-1
-          # at that commit rather than a full 1.4 GB tap clone.
-          export HOMEBREW_NO_INSTALL_FROM_API=1
-          export HOMEBREW_NO_AUTO_UPDATE=1
-          CORE="$(brew --repo)/Library/Taps/homebrew/homebrew-core"
-          rm -rf "$CORE" && mkdir -p "$CORE"
-          git -C "$CORE" init -q
-          git -C "$CORE" remote add origin \
-            https://github.com/Homebrew/homebrew-core.git
-          git -C "$CORE" fetch -q --depth 1 origin 6d80bc690123b975991058ef769b80a925199c7b
-          git -C "$CORE" checkout -q FETCH_HEAD
+          # macOS 26 has current Homebrew bottles; use the standard formula index.
           # llvm: the analyzer this job has always run.  bison 3.x for the
           # ndrzcc grammar, libxcrypt for full crypt(5) verification.
           # No llvm: scan-build needed it for the analyzer *driver*, but driving
@@ -1282,9 +1236,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-v2-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-26-analyze-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-v2-macos-analyze-${{ matrix.build_type }}-
+            ccache-v2-macos-26-analyze-${{ matrix.build_type }}-
 
       - name: Run the clang static analyzer
         id: static-analysis
@@ -1329,7 +1283,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-v2-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-26-analyze-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
