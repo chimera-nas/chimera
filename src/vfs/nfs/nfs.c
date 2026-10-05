@@ -211,6 +211,8 @@ chimera_nfs_protocol_to_string(enum evpl_protocol_id protocol)
             return "LIBFABRIC-RDM";
         case EVPL_STREAM_SPDK_TCP:
             return "SPDK-TCP";
+        case EVPL_STREAM_SPDK_TCP_URING:
+            return "SPDK-TCP-URING";
         case EVPL_NUM_PROTO:
             return "UNKNOWN";
     } /* switch */
