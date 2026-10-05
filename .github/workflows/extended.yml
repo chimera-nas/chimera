@@ -1529,6 +1529,7 @@ jobs:
   # src/server/smb/tests/windows_client/windows_smb_client_test.py.
   windows-smb-client:
     name: SMB client ${{ matrix.os }} ${{ matrix.arch }}
+    permissions: {}
     needs: windows
     if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
@@ -1580,6 +1581,8 @@ jobs:
   # See src/server/smb/tests/windows_client/ifstest/.
   windows-ifstest:
     name: IFSTest Server 2025 x64
+    permissions:
+      contents: read
     needs: windows
     if: ${{ !cancelled() }}
     runs-on: windows-2025
