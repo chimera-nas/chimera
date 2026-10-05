@@ -301,11 +301,11 @@ jobs:
             Get-ChildItem $entries -Directory | Where-Object LastWriteTime -lt $runStart | Remove-Item -Recurse -Force
           }
           exit 0
-      # The daemon and its DLLs, for the smb-client job below: it runs the
+      # The daemon and its DLLs, for the client jobs in extended.yml: they run the
       # real Windows SMB client against this build on runners that cannot
       # build it themselves.
       - name: Bundle the daemon for the SMB client test
-        if: matrix.config == 'Release'
+        if: inputs.test_tier == 'extended' && matrix.config == 'Release'
         shell: pwsh
         run: |
           $bundle = "$env:RUNNER_TEMP/smb-client-bundle"
@@ -313,7 +313,7 @@ jobs:
           Copy-Item build/bin/chimera.exe, build/bin/chimera.pdb, build/bin/*.dll $bundle
           Copy-Item src/server/smb/tests/windows_client/windows_smb_client_test.py $bundle
       - name: Upload the SMB client test bundle
-        if: matrix.config == 'Release'
+        if: inputs.test_tier == 'extended' && matrix.config == 'Release'
         uses: actions/upload-artifact@v6
         with:
           name: windows-smb-client-bundle-${{ matrix.arch }}
@@ -365,117 +365,3 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item "$env:RUNNER_TEMP/chimera-vcpkg-nuget.config" -Force -ErrorAction SilentlyContinue
-
-  # The real Windows SMB client against a native chimera daemon on the same
-  # machine, one daemon per backend.  Port 445 belongs to the kernel's own SMB
-  # server, so the drive is mapped with `net use /TCPPORT`, which the client
-  # has from Windows 11 24H2 and Windows Server 2025; Server 2022, the image
-  # the x64 build cells use, has no such option.  So this job takes the
-  # Release daemon those cells built and runs it on Server 2025 (x64) and
-  # Windows 11 (ARM64).  See
-  # src/server/smb/tests/windows_client/windows_smb_client_test.py.
-  smb-client:
-    name: SMB client ${{ matrix.os }} ${{ matrix.arch }}
-    needs: test
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(inputs.full_matrix && '[{"runner":"windows-2025","os":"Server 2025","label":"server2025","arch":"x64"},{"runner":"windows-11-vs2026-arm","os":"Windows 11","label":"windows11","arch":"ARM64"}]' || '[{"runner":"windows-2025","os":"Server 2025","label":"server2025","arch":"x64"}]') }}
-    steps:
-      # As in the test job: the ARM64 image's C: is slow to flush, and diskfs
-      # and cairn flush on nearly every operation.
-      - name: Put scratch space on the local NVMe disk
-        shell: pwsh
-        run: |
-          $raw = Get-Disk | Where-Object PartitionStyle -eq 'RAW' | Sort-Object Size -Descending | Select-Object -First 1
-          if (-not $raw) { 'No raw local disk; scratch stays on the default drive.'; exit 0 }
-          $volume = Initialize-Disk -Number $raw.Number -PartitionStyle GPT -PassThru |
-            New-Partition -UseMaximumSize -AssignDriveLetter |
-            Format-Volume -FileSystem NTFS -NewFileSystemLabel scratch -Confirm:$false -Force
-          $temp = "$($volume.DriveLetter):\temp"
-          New-Item -ItemType Directory -Force $temp | Out-Null
-          "TEMP=$temp" >> $env:GITHUB_ENV
-          "TMP=$temp" >> $env:GITHUB_ENV
-      - uses: actions/download-artifact@v6
-        with:
-          name: windows-smb-client-bundle-${{ matrix.arch }}
-          path: bundle
-      - name: Run the Windows SMB client against memfs, diskfs and cairn
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force ctest-results | Out-Null
-          python bundle/windows_smb_client_test.py bundle/chimera.exe memfs diskfs cairn --junit ctest-results/results.xml --duration ctest-results/duration_seconds --daemon-log ctest-results/daemon.log
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: ctest-junit-windows-smbclient-${{ matrix.label }}-${{ matrix.arch }}
-          path: ctest-results/
-          if-no-files-found: warn
-          retention-days: 30
-
-  # Microsoft's IFSTest (from the Windows HLK) through the Windows SMB client
-  # against the same Release daemon, on Server 2025 for the reason the
-  # smb-client job gives.  The kit is fetched from Microsoft on every run (see
-  # fetch_kit.ps1) and a pass takes about 25 minutes per backend, so it runs
-  # only at the extended tier.  Tests known not to pass are listed, with the
-  # reason, in ifstest_expected.csv; anything else that fails, fails the job.
-  # See src/server/smb/tests/windows_client/ifstest/.
-  ifstest:
-    name: IFSTest Server 2025 x64
-    needs: test
-    if: ${{ !cancelled() && inputs.test_tier == 'extended' }}
-    runs-on: windows-2025
-    timeout-minutes: 150
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v6
-        with:
-          name: windows-smb-client-bundle-x64
-          path: bundle
-      - name: Fetch IFSTest from Microsoft
-        shell: pwsh
-        run: |
-          $dir = & src/server/smb/tests/windows_client/ifstest/fetch_kit.ps1
-          "IFSTEST_DIR=$dir" >> $env:GITHUB_ENV
-      # Windows' redirector keeps file-information, not-found and directory
-      # caches for a remote server, and answers queries from them -- including
-      # ones that follow its own SET_INFO.  It turns them off for the loopback
-      # connection to Windows' own server, so the NTFS-over-SMB baseline runs
-      # without them; run chimera the same way, so a result reflects what the
-      # server answered rather than what the client remembered.
-      - name: Turn off the redirector's information caches
-        shell: pwsh
-        run: |
-          $k = 'HKLM:\System\CurrentControlSet\Services\LanmanWorkstation\Parameters'
-          foreach ($n in 'FileInfoCacheLifetime', 'FileNotFoundCacheLifetime', 'DirectoryCacheLifetime') {
-            New-ItemProperty -Path $k -Name $n -Value 0 -PropertyType DWord -Force | Out-Null
-          }
-          Restart-Service LanmanWorkstation -Force
-      - name: Run IFSTest against memfs, diskfs and cairn
-        shell: pwsh
-        timeout-minutes: 100
-        run: python src/server/smb/tests/windows_client/ifstest/ifstest_chimera.py bundle/chimera.exe $env:IFSTEST_DIR ifstest-logs 1500 memfs diskfs cairn
-      - name: Check the results against the known failures
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force ctest-results | Out-Null
-          python src/server/smb/tests/windows_client/ifstest/ifstest_check.py ifstest-logs src/server/smb/tests/windows_client/ifstest/ifstest_expected.csv --junit ctest-results/results.xml memfs diskfs cairn
-      - name: Upload IFSTest logs
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: ifstest-logs
-          path: ifstest-logs/
-          retention-days: 30
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: ctest-junit-windows-ifstest-server2025-x64
-          path: ctest-results/
-          if-no-files-found: warn
-          retention-days: 30
