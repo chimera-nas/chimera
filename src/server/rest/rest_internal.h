@@ -81,7 +81,7 @@ struct chimera_rest_thread {
  * @param status  HTTP status code to dispatch
  * @param obj     JSON object to serialize as the response body
  */
-void
+SYMBOL_EXPORT void
 chimera_rest_send_json(
     struct evpl                 *evpl,
     struct chimera_rest_request *request,
@@ -98,7 +98,7 @@ chimera_rest_send_json(
  * @param error   Short error label (e.g. "Bad Request")
  * @param message Human-readable error description
  */
-void
+SYMBOL_EXPORT void
 chimera_rest_send_error(
     struct evpl                 *evpl,
     struct chimera_rest_request *request,
@@ -114,7 +114,7 @@ chimera_rest_send_error(
  * @param status    HTTP status code to dispatch
  * @param json_body NUL-terminated JSON string to send as the body
  */
-void
+SYMBOL_EXPORT void
 chimera_rest_send_json_response(
     struct evpl                 *evpl,
     struct chimera_rest_request *request,
@@ -183,9 +183,13 @@ struct chimera_rest_request {
     struct chimera_rest_request     *next_reply;
 };
 
-extern const struct chimera_rest_host chimera_rest_host;
+#ifdef CHIMERA_REST_BUILD
+CHIMERA_DATA_EXPORT extern const struct chimera_rest_host chimera_rest_host;
+#else // ifdef CHIMERA_REST_BUILD
+CHIMERA_DATA_IMPORT extern const struct chimera_rest_host chimera_rest_host;
+#endif // ifdef CHIMERA_REST_BUILD
 
-void chimera_rest_reply(
+SYMBOL_EXPORT void chimera_rest_reply(
     struct chimera_rest_request *request,
     uint32_t                     status,
     const char                  *content_type,

@@ -12,6 +12,7 @@ endif()
 add_library(chimera_rest ${CHIMERA_LIBRARY_TYPE}
     rest.c rest_request.c rest_module.c rest_auth.c rest_services.c)
 target_compile_definitions(chimera_rest PRIVATE
+    CHIMERA_REST_BUILD
     CHIMERA_REST_MODULE_SUFFIX="${CMAKE_SHARED_MODULE_SUFFIX}")
 
 add_library(chimera_rest_core MODULE rest_core.c rest_users.c rest_exports.c
