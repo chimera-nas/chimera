@@ -502,6 +502,26 @@ chimera_vfs_utf8_put(
     return 4;
 } /* chimera_vfs_utf8_put */
 
+SYMBOL_EXPORT int
+chimera_vfs_casefold_decode(
+    const char *name,
+    int         len,
+    uint32_t   *out,
+    int         max,
+    int         fold)
+{
+    const uint8_t *s = (const uint8_t *) name;
+    int            i = 0, n = 0;
+
+    while (i < len && n < max) {
+        uint32_t cp = chimera_vfs_utf8_next(s, len, &i);
+
+        out[n++] = fold ? chimera_vfs_upcase_cp(cp) : cp;
+    }
+
+    return n;
+} /* chimera_vfs_casefold_decode */
+
 SYMBOL_EXPORT uint64_t
 chimera_vfs_casefold_hash(
     const char *name,

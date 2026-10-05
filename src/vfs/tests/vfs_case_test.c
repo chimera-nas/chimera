@@ -14,6 +14,10 @@
  * case variant from an SMB caller, and that removing or renaming an entry by
  * another spelling leaves no stale entry under the stored one.
  *
+ * Each case policy (the "case=" mkfs option, enum chimera_vfs_case_policy)
+ * gets a filesystem of its own: mixed (the default) for all of the above,
+ * then sensitive and insensitive for what each changes.
+ *
  *     vfs_case_test <backend>
  *
  * where <backend> is memfs (default), diskfs_io_uring, diskfs_aio or cairn.
@@ -321,8 +325,9 @@ expect_fh(
     }
 } /* expect_fh */
 
+/* The default policy, mixed: SMB callers match case-insensitively. */
 static void
-run_checks(void)
+check_mixed(void)
 {
     uint8_t  foo_fh[CHIMERA_VFS_FH_SIZE], tgt_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t foo_fh_len, tgt_fh_len;
@@ -408,14 +413,86 @@ run_checks(void)
     } else {
         fprintf(stderr, "NOTE: backend does not replace by link\n");
     }
-} /* run_checks */
+} /* check_mixed */
 
-/* Per-backend wiring, as vfs_zerorange_test does it. */
+/* sensitive: every caller matches exactly, an SMB caller included. */
+static void
+check_sensitive(void)
+{
+    expect("create Foo.txt", open_name(&cred_unix, "Foo.txt", CHIMERA_VFS_OPEN_CREATE), CHIMERA_VFS_OK);
+    expect("smb lookup FOO.TXT", lookup(&cred_smb, "FOO.TXT"), CHIMERA_VFS_ENOENT);
+    expect("smb create foo.txt beside Foo.txt",
+           open_name(&cred_smb, "foo.txt", CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_EXCLUSIVE),
+           CHIMERA_VFS_OK);
+    expect("unix lookup foo.txt", lookup(&cred_unix, "foo.txt"), CHIMERA_VFS_OK);
+} /* check_sensitive */
+
+/* insensitive: every caller matches case-insensitively, so no name may
+ * differ only in case from another. */
+static void
+check_insensitive(void)
+{
+    uint8_t  foo_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t foo_fh_len;
+
+    expect("create Foo.txt", open_name(&cred_unix, "Foo.txt", CHIMERA_VFS_OPEN_CREATE), CHIMERA_VFS_OK);
+    memcpy(foo_fh, ctx.fh, ctx.fh_len);
+    foo_fh_len = ctx.fh_len;
+
+    expect("unix lookup FOO.TXT", lookup(&cred_unix, "FOO.TXT"), CHIMERA_VFS_OK);
+    expect_fh("unix lookup FOO.TXT", foo_fh, foo_fh_len);
+    expect("unix open foo.txt", open_name(&cred_unix, "foo.txt", CHIMERA_VFS_OPEN_CREATE), CHIMERA_VFS_OK);
+    expect_fh("unix open foo.txt", foo_fh, foo_fh_len);
+    expect("unix exclusive create FOO.txt",
+           open_name(&cred_unix, "FOO.txt", CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_EXCLUSIVE),
+           CHIMERA_VFS_EEXIST);
+    expect("unix mkdir FOO.TXT", mkdir_name(&cred_unix, "FOO.TXT"), CHIMERA_VFS_EEXIST);
+
+    /* A rename that only changes an entry's case renames it. */
+    expect("unix rename foo.txt -> FOO.txt", rename_name(&cred_unix, "foo.txt", "FOO.txt"), CHIMERA_VFS_OK);
+    expect("unix lookup FOO.txt after case rename", lookup(&cred_unix, "FOO.txt"), CHIMERA_VFS_OK);
+    expect_fh("unix lookup FOO.txt after case rename", foo_fh, foo_fh_len);
+
+    expect("unix remove fOO.TXT", remove_name(&cred_unix, "fOO.TXT"), CHIMERA_VFS_OK);
+    expect("unix lookup Foo.txt after remove", lookup(&cred_unix, "Foo.txt"), CHIMERA_VFS_ENOENT);
+} /* check_insensitive */
+
+/* The wildcard matcher directory searches use folds case as lookups do,
+ * beyond ASCII, and matches exactly for an exact-match caller. */
+static void
+expect_wildcard(
+    const char *name,
+    const char *pattern,
+    int         ci,
+    int         want)
+{
+    if (chimera_vfs_dirent_match(name, strlen(name), pattern, strlen(pattern), ci) != want) {
+        fprintf(stderr, "FAIL: wildcard '%s' against '%s' (ci=%d): expected %d\n",
+                pattern, name, ci, want);
+        failures++;
+    }
+} /* expect_wildcard */
+
+static void
+check_wildcards(void)
+{
+    expect_wildcard("Foo.TXT", "*.txt", 1, 1);
+    expect_wildcard("Foo.TXT", "*.txt", 0, 0);
+    expect_wildcard("Foo.TXT", "*.TXT", 0, 1);
+    /* Été against éTÉ */
+    expect_wildcard("\xc3\x89t\xc3\xa9", "\xc3\xa9T\xc3\x89", 1, 1);
+    expect_wildcard("\xc3\x89t\xc3\xa9", "\xc3\xa9T\xc3\x89", 0, 0);
+    /* Жук against ж?К */
+    expect_wildcard("\xd0\x96\xd1\x83\xd0\xba", "\xd0\xb6?\xd0\x9a", 1, 1);
+    expect_wildcard("readme", "README", 1, 1);
+    expect_wildcard("readme", "README?", 1, 0);
+} /* check_wildcards */
+
+/* Per-backend wiring, as vfs_zerorange_test does it; every backend here
+ * makes named filesystems (CHIMERA_VFS_CAP_MKFS). */
 struct backend_spec {
     int         ncfg;
     const char *mount_module;
-    char        mount_path[300];
-    int         needs_mkfs;
 };
 
 static void
@@ -433,16 +510,12 @@ backend_configure(
     if (strcmp(backend, "memfs") == 0) {
         strncpy(cfgs[0].module_name, "memfs", sizeof(cfgs[0].module_name) - 1);
         spec->mount_module = "memfs";
-        spec->needs_mkfs   = 1;
-        snprintf(spec->mount_path, sizeof(spec->mount_path), "fs0");
     } else if (strcmp(backend, "cairn") == 0) {
         strncpy(cfgs[0].module_name, "cairn", sizeof(cfgs[0].module_name) - 1);
         snprintf(cfg, sizeof(cfg),
                  "{\"initialize\":true,\"path\":\"%s\"}", session_dir);
         strncpy(cfgs[0].config_data, cfg, sizeof(cfgs[0].config_data) - 1);
         spec->mount_module = "cairn";
-        spec->needs_mkfs   = 1;
-        snprintf(spec->mount_path, sizeof(spec->mount_path), "fs0");
     } else if (strcmp(backend, "diskfs_io_uring") == 0 ||
                strcmp(backend, "diskfs_aio") == 0) {
         const char *iotype = (strcmp(backend, "diskfs_aio") == 0) ? "libaio"
@@ -464,8 +537,6 @@ backend_configure(
         strncpy(cfgs[0].module_name, "diskfs", sizeof(cfgs[0].module_name) - 1);
         strncpy(cfgs[0].config_data, cfg, sizeof(cfgs[0].config_data) - 1);
         spec->mount_module = "diskfs";
-        spec->needs_mkfs   = 1;
-        snprintf(spec->mount_path, sizeof(spec->mount_path), "fs0");
     } else {
         fprintf(stderr, "unknown backend: %s\n", backend);
         exit(2);
@@ -474,6 +545,57 @@ backend_configure(
     strncpy(cfgs[1].module_name, "memkv", sizeof(cfgs[1].module_name) - 1);
     spec->ncfg = 2;
 } /* backend_configure */
+
+/* Make a filesystem with the given mkfs options, mount it at /<name>, point
+ * the checks at its root, run check, and tear it all down again. */
+static void
+with_fs(
+    struct chimera_vfs        *vfs,
+    const struct backend_spec *spec,
+    const char                *name,
+    const char                *options,
+    void (                    *check )(void))
+{
+    char path[64];
+
+    snprintf(path, sizeof(path), "/%s", name);
+
+    chimera_vfs_mkfs(ctx.vfs_thread, NULL, spec->mount_module, name, options,
+                     mount_cb, NULL);
+    wait_done();
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    chimera_vfs_mount(ctx.vfs_thread, NULL, path, spec->mount_module, name,
+                      NULL, mount_cb, NULL);
+    wait_done();
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    chimera_vfs_get_root_fh(vfs, dir_fh, &dir_fh_len);
+    chimera_vfs_lookup(ctx.vfs_thread, &cred_unix, dir_fh, dir_fh_len, name, strlen(name),
+                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
+                       lookup_cb, NULL);
+    wait_done();
+    assert(ctx.status == CHIMERA_VFS_OK);
+    memcpy(dir_fh, ctx.fh, ctx.fh_len);
+    dir_fh_len = ctx.fh_len;
+
+    check();
+
+    chimera_vfs_umount(ctx.vfs_thread, NULL, path, mount_cb, NULL);
+    wait_done();
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    for (int i = 0; i < 50; i++) {
+        chimera_vfs_rmfs(ctx.vfs_thread, NULL, spec->mount_module, name,
+                         mount_cb, NULL);
+        wait_done();
+        if (ctx.status != CHIMERA_VFS_EBUSY) {
+            break;
+        }
+        usleep(100000);
+    }
+    assert(ctx.status == CHIMERA_VFS_OK);
+} /* with_fs */
 
 int
 main(
@@ -511,45 +633,18 @@ main(
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, vfs);
     assert(ctx.vfs_thread != NULL);
 
-    if (spec.needs_mkfs) {
-        chimera_vfs_mkfs(ctx.vfs_thread, NULL, spec.mount_module, "fs0", NULL,
-                         mount_cb, NULL);
-        wait_done();
-        assert(ctx.status == CHIMERA_VFS_OK);
-    }
+    check_wildcards();
 
-    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", spec.mount_module,
-                      spec.mount_path, NULL, mount_cb, NULL);
+    /* Each policy on a filesystem of its own, named for it. */
+    with_fs(vfs, &spec, "mixed", NULL, check_mixed);
+    with_fs(vfs, &spec, "sensitive", "case=sensitive", check_sensitive);
+    with_fs(vfs, &spec, "insensitive", "case=insensitive", check_insensitive);
+
+    /* A policy mkfs does not know is refused. */
+    chimera_vfs_mkfs(ctx.vfs_thread, NULL, spec.mount_module, "bogus", "case=sideways",
+                     mount_cb, NULL);
     wait_done();
-    assert(ctx.status == CHIMERA_VFS_OK);
-
-    chimera_vfs_get_root_fh(vfs, dir_fh, &dir_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred_unix, dir_fh, dir_fh_len, "test", 4,
-                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
-                       lookup_cb, NULL);
-    wait_done();
-    assert(ctx.status == CHIMERA_VFS_OK);
-    memcpy(dir_fh, ctx.fh, ctx.fh_len);
-    dir_fh_len = ctx.fh_len;
-
-    run_checks();
-
-    chimera_vfs_umount(ctx.vfs_thread, NULL, "/test", mount_cb, NULL);
-    wait_done();
-    assert(ctx.status == CHIMERA_VFS_OK);
-
-    if (spec.needs_mkfs) {
-        for (int i = 0; i < 50; i++) {
-            chimera_vfs_rmfs(ctx.vfs_thread, NULL, spec.mount_module, "fs0",
-                             mount_cb, NULL);
-            wait_done();
-            if (ctx.status != CHIMERA_VFS_EBUSY) {
-                break;
-            }
-            usleep(100000);
-        }
-        assert(ctx.status == CHIMERA_VFS_OK);
-    }
+    expect("mkfs case=sideways", ctx.status, CHIMERA_VFS_EINVAL);
 
     chimera_vfs_thread_destroy(ctx.vfs_thread);
     chimera_vfs_destroy(vfs);

@@ -417,12 +417,3 @@ chimera_vfs_name_cache_remove_matched(
                                       matched->name, matched->len);
     }
 } /* chimera_vfs_name_cache_remove_matched */
-
-/* An SMB (AUTH_ATTR) caller resolves names case-insensitively, so a negative
- * entry -- which records only that the exact spelling is absent -- proves
- * nothing to it. */
-static inline int
-chimera_vfs_name_cache_negative_ok(const struct chimera_vfs_cred *cred)
-{
-    return !cred || cred->flavor != CHIMERA_VFS_AUTH_ATTR;
-} /* chimera_vfs_name_cache_negative_ok */

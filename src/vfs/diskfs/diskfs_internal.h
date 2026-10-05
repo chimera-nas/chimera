@@ -1762,19 +1762,21 @@ struct diskfs_intent_log {
  * are pool-unique, so inode/b+tree records carry no filesystem discriminator;
  * only the root and fsid are per-fs. */
 struct diskfs_fs {
-    struct diskfs_shared *shared;
-    char                 *name;
-    uint64_t              fsid;
-    uint64_t              root_inum;
-    uint32_t              root_gen;
+    struct diskfs_shared        *shared;
+    char                        *name;
+    uint64_t                     fsid;
+    uint64_t                     root_inum;
+    uint32_t                     root_gen;
+    enum chimera_vfs_case_policy case_policy; /* see sm_fs_entry */
+    uint32_t                     name_fold;
     /* Mounts currently referencing this filesystem; RMFS fails with EBUSY
      * while non-zero.  Guarded by shared->lock. */
-    int                   mount_count;
-    uint8_t               root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t              root_fhlen;
-    struct diskfs_fs     *prev;
-    struct diskfs_fs     *next;
-    chimera_rcu_head      rcu;
+    int                          mount_count;
+    uint8_t                      root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                     root_fhlen;
+    struct diskfs_fs            *prev;
+    struct diskfs_fs            *next;
+    chimera_rcu_head             rcu;
 };
 
 
@@ -3193,7 +3195,9 @@ diskfs_fs_attach(
     int                   namelen,
     uint64_t              fsid,
     uint64_t              root_inum,
-    uint32_t              root_gen);
+    uint32_t              root_gen,
+    uint16_t              case_policy,
+    uint16_t              name_fold);
 
 void
 diskfs_destroy(

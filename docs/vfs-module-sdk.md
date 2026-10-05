@@ -134,11 +134,39 @@ attrs and their `CHIMERA_VFS_ATTR_OWNER_SID` / `GROUP_SID` bits.  A module
 built against version 1 must be rebuilt. Version 3 adds request-owned temporary
 allocations (`chimera_vfs_request_alloc_memory`) and changes the request
 layout; modules built against earlier SDK versions must be rebuilt.
+Version 4 adds case-insensitive name resolution: the
+`CHIMERA_VFS_CAP_CASEFOLD` capability, the `name_ci` request flag and
+`r_matched` stored-name report, the mkfs request's `case_policy` and the
+mount request's `r_case_policy`, and the `vfs_casefold.h` helpers; it changes
+the request layout.  See [Case-insensitive names](#case-insensitive-names).
 
 The `struct chimera_vfs_request` layout is exposed in full and is
 therefore ABI-stable only within an SDK version.  A public-head /
 private-tail split of the request is possible future work if a stable
 cross-version ABI is ever wanted.
+
+## Case-insensitive names
+
+How a filesystem compares names is a property of the filesystem, chosen at
+mkfs with the `case=` option (`enum chimera_vfs_case_policy`: `sensitive`,
+`mixed`, `insensitive`).  Only a module declaring `CHIMERA_VFS_CAP_CASEFOLD`
+makes anything but `sensitive`; the core parses the option and hands the
+module `request->mkfs.case_policy` to keep with the filesystem.  At mount the
+module reports it back in `request->mount.r_case_policy` (it starts
+`sensitive`), and the core resolves it, per request, into `request->name_ci`
+on every name operation (lookup, open, create, mkdir, mknod, symlink, link,
+remove, rename) and readdir: match the name case-insensitively, through
+`chimera_vfs_casefold_hash()` / `chimera_vfs_name_equal_ci()`, preferring an
+exact match.
+
+A case-folding filesystem keeps a folded-name index beside its exact one; a
+sensitive one need not.  Whenever a name resolves to an entry stored under
+another spelling, report the stored name with `chimera_vfs_request_matched()`
+— slot 0 for the operation's name (a rename's source), slot 1 for a rename's
+or link's existing target — so the core keeps its name cache keyed by stored
+names.  A module that persists the folded-name index records
+`CHIMERA_VFS_CASEFOLD_VERSION` with each case-folding filesystem and refuses
+to mount one whose index was built with another case table.
 
 ## Writing a module
 

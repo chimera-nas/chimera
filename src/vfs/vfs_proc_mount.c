@@ -234,6 +234,9 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
         }
     }
 
+    /* The mounted filesystem's, as the module reported it. */
+    mount->attrs.case_policy = request->mount.r_case_policy;
+
     /* Store the root FH (first 16 bytes is the mount_id) */
     memcpy(mount->root_fh, request->mount.r_attr.va_fh, request->mount.r_attr.va_fh_len);
     mount->root_fh_len = request->mount.r_attr.va_fh_len;
@@ -304,6 +307,7 @@ chimera_vfs_mount_dispatch(struct chimera_vfs_mount_ctx *ctx)
         return;
     }
 
+
     request->opcode                   = CHIMERA_VFS_OP_MOUNT;
     request->complete                 = chimera_vfs_mount_complete;
     request->mount.path               = ctx->module_path;
@@ -312,6 +316,7 @@ chimera_vfs_mount_dispatch(struct chimera_vfs_mount_ctx *ctx)
     request->mount.mount_path         = ctx->path;
     request->mount.mount_pathlen      = ctx->pathlen;
     request->mount.raw_options        = ctx->options;
+    request->mount.r_case_policy      = CHIMERA_VFS_CASE_SENSITIVE;
     request->mount.r_attr.va_req_mask = CHIMERA_VFS_ATTR_MASK_CACHEABLE | CHIMERA_VFS_ATTR_FH;
     request->mount.r_attr.va_set_mask = 0;
     request->proto_callback           = NULL;
@@ -580,3 +585,12 @@ chimera_vfs_mount_detached(
     chimera_vfs_mount_start(thread, cred, name, module_name, module_path,
                             options, 1, callback, private_data);
 } /* chimera_vfs_mount_detached */
+
+SYMBOL_EXPORT enum chimera_vfs_case_policy
+chimera_vfs_case_policy(
+    struct chimera_vfs *vfs,
+    const void         *fh,
+    int                 fh_len)
+{
+    return chimera_vfs_fh_case_policy(vfs, fh, fh_len);
+} /* chimera_vfs_case_policy */

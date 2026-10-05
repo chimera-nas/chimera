@@ -548,17 +548,6 @@ diskfs_dir_next_async(
 
 /* ---- the folded-name index (DISKFS_REC_DIRFOLD) ------------------------ */
 
-/* Windows matches names case-insensitively, so an SMB (AUTH_ATTR) caller's
- * name matches an entry whose name differs only in case -- for opens, and for
- * the collision checks of creates, links and renames.  NFS and POSIX callers
- * keep exact matching. */
-static inline int
-diskfs_name_ci(const struct chimera_vfs_request *request)
-{
-    return request->cred && request->cred->flavor == CHIMERA_VFS_AUTH_ATTR;
-} /* diskfs_name_ci */
-
-
 static inline struct diskfs_bt_key
 diskfs_dirfold_key(uint64_t fold)
 {
@@ -762,9 +751,26 @@ diskfs_dir_insert_async(
     diskfs_bt_cb_t        cb,
     void                 *private_data)
 {
-    struct diskfs_dirent_change *c = calloc(1, sizeof(*c));
+    struct diskfs_dirent_change *c;
     struct diskfs_dirent_rec    *r;
 
+    /* A case-sensitive filesystem keeps no folded-name index: just the
+     * dirent. */
+    if (dir->fs->case_policy == CHIMERA_VFS_CASE_SENSITIVE) {
+        char                 buf[DISKFS_DIRENT_REC_MAX];
+        struct diskfs_bt_key key = diskfs_dirent_key(hash);
+
+        r           = (struct diskfs_dirent_rec *) buf;
+        r->inum     = child_inum;
+        r->gen      = child_gen;
+        r->name_len = (uint16_t) namelen;
+        memcpy(r->name, name, namelen);
+
+        return diskfs_bt_insert_async(op, thread, txn, dir, &key, buf,
+                                      sizeof(*r) + namelen, cb, private_data);
+    }
+
+    c = calloc(1, sizeof(*c));
     chimera_diskfs_abort_if(!c, "Out of memory changing a directory");
 
     r           = (struct diskfs_dirent_rec *) c->rec;
@@ -800,8 +806,15 @@ diskfs_dir_remove_async(
     diskfs_bt_cb_t        cb,
     void                 *private_data)
 {
-    struct diskfs_dirent_change *c = calloc(1, sizeof(*c));
+    struct diskfs_dirent_change *c;
 
+    if (dir->fs->case_policy == CHIMERA_VFS_CASE_SENSITIVE) {
+        struct diskfs_bt_key key = diskfs_dirent_key(hash);
+
+        return diskfs_bt_remove_async(op, thread, txn, dir, &key, cb, private_data);
+    }
+
+    c = calloc(1, sizeof(*c));
     chimera_diskfs_abort_if(!c, "Out of memory changing a directory");
 
     c->thread       = thread;
@@ -1107,7 +1120,7 @@ diskfs_lookup_at_parent_cb(
 
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, name, namelen,
-                                   diskfs_name_ci(request), p->rec_scratch,
+                                   request->name_ci, p->rec_scratch,
                                    sizeof(p->rec_scratch),
                                    diskfs_lookup_at_dirent_cb, request)) {
         diskfs_lookup_at_dirent_cb(op, op->result, request);
@@ -1360,7 +1373,7 @@ diskfs_mkdir_at_parent_cb(
 
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->mkdir_at.name,
-                                   request->mkdir_at.name_len, diskfs_name_ci(request),
+                                   request->mkdir_at.name_len, request->name_ci,
                                    p->rec_scratch, sizeof(p->rec_scratch),
                                    diskfs_mkdir_at_check_cb, request)) {
         diskfs_mkdir_at_check_cb(op, op->result, request);
@@ -1561,7 +1574,7 @@ diskfs_mknod_at_parent_cb(
 
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->mknod_at.name,
-                                   request->mknod_at.name_len, diskfs_name_ci(request),
+                                   request->mknod_at.name_len, request->name_ci,
                                    p->rec_scratch, sizeof(p->rec_scratch),
                                    diskfs_mknod_at_check_cb, request)) {
         diskfs_mknod_at_check_cb(op, op->result, request);
@@ -1834,7 +1847,7 @@ diskfs_remove_at_parent_cb(
 
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->remove_at.name,
-                                   request->remove_at.namelen, diskfs_name_ci(request),
+                                   request->remove_at.namelen, request->name_ci,
                                    p->rec_scratch, sizeof(p->rec_scratch),
                                    diskfs_remove_at_lookup_cb, request)) {
         diskfs_remove_at_lookup_cb(op, op->result, request);
@@ -2594,7 +2607,7 @@ diskfs_open_at_parent_cb(
 
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->open_at.name,
-                                   request->open_at.namelen, diskfs_name_ci(request),
+                                   request->open_at.namelen, request->name_ci,
                                    p->rec_scratch, sizeof(p->rec_scratch),
                                    diskfs_open_at_check_cb, request)) {
         diskfs_open_at_check_cb(op, op->result, request);
@@ -2960,7 +2973,7 @@ diskfs_symlink_at_parent_cb(
 
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->symlink_at.name,
-                                   request->symlink_at.namelen, diskfs_name_ci(request),
+                                   request->symlink_at.namelen, request->name_ci,
                                    p->rec_scratch, sizeof(p->rec_scratch),
                                    diskfs_symlink_at_check_cb, request)) {
         diskfs_symlink_at_check_cb(op, op->result, request);
@@ -3438,7 +3451,7 @@ diskfs_rename_at_dest_lookup(struct chimera_vfs_request *request)
     if (diskfs_dir_lookup_ci_async(bop, thread, np, request->rename_at.new_name_hash,
                                    request->rename_at.new_name,
                                    request->rename_at.new_namelen,
-                                   diskfs_name_ci(request), p->rec_scratch,
+                                   request->name_ci, p->rec_scratch,
                                    sizeof(p->rec_scratch),
                                    diskfs_rename_at_dest_cb, request)) {
         diskfs_rename_at_dest_cb(bop, bop->result, request);
@@ -3580,7 +3593,7 @@ diskfs_rename_at_have_parents(struct chimera_vfs_request *request)
     bop = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_lookup_ci_async(bop, thread, op, request->rename_at.name_hash,
                                    request->rename_at.name, request->rename_at.namelen,
-                                   diskfs_name_ci(request), p->rec_scratch,
+                                   request->name_ci, p->rec_scratch,
                                    sizeof(p->rec_scratch),
                                    diskfs_rename_at_source_cb, request)) {
         diskfs_rename_at_source_cb(bop, bop->result, request);
@@ -3915,7 +3928,7 @@ diskfs_link_at_inode_cb(
 
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_lookup_ci_async(op, thread, parent, hash, request->link_at.name,
-                                   request->link_at.namelen, diskfs_name_ci(request),
+                                   request->link_at.namelen, request->name_ci,
                                    p->rec_scratch, sizeof(p->rec_scratch),
                                    diskfs_link_at_check_cb, request)) {
         diskfs_link_at_check_cb(op, op->result, request);

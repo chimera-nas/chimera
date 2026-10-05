@@ -150,8 +150,11 @@ chimera_vfs_lookup_at_dispatch(
             cached_attr.va_fh,
             &cached_attr.va_fh_len);
 
+        /* A negative entry records only that this exact spelling is
+         * absent, which proves nothing to a case-insensitive caller. */
         if (rc == 0 && (cached_attr.va_fh_len > 0 ||
-                        chimera_vfs_name_cache_negative_ok(cred))) {
+                        !chimera_vfs_fh_name_ci(thread->vfs, cred, handle->fh,
+                                                handle->fh_len))) {
 
             if (cached_attr.va_fh_len == 0) {
 

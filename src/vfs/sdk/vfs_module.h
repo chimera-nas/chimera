@@ -28,7 +28,7 @@ struct chimera_vfs_request;
  * chimera_vfs_register() refuses a module built against a different
  * version, so a stale out-of-tree binary fails loudly at load time
  * instead of corrupting memory. */
-#define CHIMERA_VFS_SDK_VERSION            3
+#define CHIMERA_VFS_SDK_VERSION            4
 
 /* If set, module requires open handles for path operations
  * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open
@@ -391,6 +391,14 @@ struct chimera_vfs_handle_state {
  * passthroughs and of the negotiated version for the proxies.  The bit exists
  * to answer FileFsAttributeInformation.  Do not turn it into a core gate. */
 #define CHIMERA_VFS_CAP_SPARSE                (1U << 31)
+
+/* The module can make filesystems whose names compare case-insensitively
+ * (enum chimera_vfs_case_policy, chosen at mkfs): it keeps such a
+ * filesystem's folded-name index, reports its policy at mount
+ * (request->mount.r_case_policy), and resolves a name case-insensitively when
+ * the request says to (request->name_ci).  A filesystem of a module without
+ * it is case-sensitive. */
+#define CHIMERA_VFS_CAP_CASEFOLD              (1ULL << 32)
 
 struct chimera_vfs_module {
     /* Required

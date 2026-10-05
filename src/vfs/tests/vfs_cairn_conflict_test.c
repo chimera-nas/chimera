@@ -109,7 +109,7 @@ seed_name(
     value.inum     = inum;
     value.name_len = strlen(name);
     memcpy(value.name, name, value.name_len);
-    cairn_put_dirent(thread, &key, &value);
+    cairn_put_dirent(thread, 0, &key, &value);
 } /* seed_name */
 
 static void

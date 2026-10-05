@@ -257,7 +257,11 @@ struct sm_fs_entry {
     uint64_t fsid;
     uint64_t root_inum;
     uint32_t root_gen;
-    uint32_t pad;
+    /* enum chimera_vfs_case_policy, chosen at mkfs, and for a case-folding
+     * filesystem the CHIMERA_VFS_CASEFOLD_VERSION its folded-name index was
+     * built with.  Both 0 (sensitive) for one made before diskfs kept them. */
+    uint16_t case_policy;
+    uint16_t name_fold;
 };
 
 struct sm_superblock {

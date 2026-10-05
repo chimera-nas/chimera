@@ -1340,7 +1340,8 @@ diskfs_init(
                     continue;
                 }
                 diskfs_fs_attach(shared, e->name, (int) strnlen(e->name, sizeof(e->name)),
-                                 e->fsid, e->root_inum, e->root_gen);
+                                 e->fsid, e->root_inum, e->root_gen, e->case_policy,
+                                 e->name_fold);
             }
 
             /* The pool-level bootstrap inodes (orphan shards then the
@@ -1510,16 +1511,20 @@ diskfs_fs_attach(
     int                   namelen,
     uint64_t              fsid,
     uint64_t              root_inum,
-    uint32_t              root_gen)
+    uint32_t              root_gen,
+    uint16_t              case_policy,
+    uint16_t              name_fold)
 {
     struct diskfs_fs *fs                              = calloc(1, sizeof(*fs));
     uint8_t           fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
 
-    fs->shared    = shared;
-    fs->name      = strndup(name, namelen);
-    fs->fsid      = fsid;
-    fs->root_inum = root_inum;
-    fs->root_gen  = root_gen;
+    fs->shared      = shared;
+    fs->name        = strndup(name, namelen);
+    fs->fsid        = fsid;
+    fs->root_inum   = root_inum;
+    fs->root_gen    = root_gen;
+    fs->case_policy = case_policy;
+    fs->name_fold   = name_fold;
 
     memcpy(fsid_buf, &fs->fsid, sizeof(fs->fsid));
     fs->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,

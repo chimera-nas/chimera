@@ -364,6 +364,7 @@ chimera_vfs_request_alloc_common(
     request->status           = CHIMERA_VFS_UNSET;
     request->r_matched[0].len = 0;
     request->r_matched[1].len = 0;
+    request->name_ci          = 0;
     request->cred             = cred;
     request->module           = module;
     request->mount_private    = mount_private;
@@ -725,6 +726,72 @@ chimera_vfs_mount_is_readonly(const struct chimera_vfs_request *request)
     return !!(attrs.flags & CHIMERA_VFS_MOUNT_ATTR_READONLY);
 } /* chimera_vfs_mount_is_readonly */
 
+/* The case policy of the filesystem mounted where fh belongs; sensitive if
+ * it is not mounted. */
+static inline enum chimera_vfs_case_policy
+chimera_vfs_fh_case_policy(
+    struct chimera_vfs *vfs,
+    const void         *fh,
+    int                 fh_len)
+{
+    struct chimera_vfs_mount_attrs attrs;
+
+    if (fh_len < CHIMERA_VFS_MOUNT_ID_SIZE ||
+        chimera_vfs_mount_table_lookup_attrs(vfs->mount_table, fh, &attrs) != 0) {
+        return CHIMERA_VFS_CASE_SENSITIVE;
+    }
+
+    return attrs.case_policy;
+} /* chimera_vfs_fh_case_policy */
+
+/* Whether a caller matches names case-insensitively under a case policy. */
+static inline int
+chimera_vfs_case_ci(
+    enum chimera_vfs_case_policy   policy,
+    const struct chimera_vfs_cred *cred)
+{
+    switch (policy) {
+        case CHIMERA_VFS_CASE_MIXED:
+            return cred && cred->flavor == CHIMERA_VFS_AUTH_ATTR;
+        case CHIMERA_VFS_CASE_INSENSITIVE:
+            return 1;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_vfs_case_ci */
+
+/* Whether cred matches names under fh case-insensitively. */
+static inline int
+chimera_vfs_fh_name_ci(
+    struct chimera_vfs            *vfs,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fh_len)
+{
+    return chimera_vfs_case_ci(chimera_vfs_fh_case_policy(vfs, fh, fh_len), cred);
+} /* chimera_vfs_fh_name_ci */
+
+/* The ops that resolve or create a name in a directory, plus readdir (whose
+ * search pattern matches names the same way). */
+static inline int
+chimera_vfs_op_names(uint32_t opcode)
+{
+    switch (opcode) {
+        case CHIMERA_VFS_OP_LOOKUP_AT:
+        case CHIMERA_VFS_OP_OPEN_AT:
+        case CHIMERA_VFS_OP_MKDIR_AT:
+        case CHIMERA_VFS_OP_MKNOD_AT:
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+        case CHIMERA_VFS_OP_REMOVE_AT:
+        case CHIMERA_VFS_OP_RENAME_AT:
+        case CHIMERA_VFS_OP_LINK_AT:
+        case CHIMERA_VFS_OP_READDIR:
+            return 1;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_vfs_op_names */
+
 /* vfs_notify.c: swap in the sync-coherence completion gate on namespace
  * mutations when sync watchers exist (see vfs_notify.h).  Declared here
  * rather than pulling vfs_notify.h into every dispatch consumer. */
@@ -760,6 +827,11 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
         request->status = CHIMERA_VFS_EROFS;
         request->complete(request);
         return;
+    }
+
+    if (chimera_vfs_op_names(request->opcode)) {
+        request->name_ci = chimera_vfs_fh_name_ci(vfs, request->cred, request->fh,
+                                                  request->fh_len);
     }
 
     if ((module->capabilities & CHIMERA_VFS_CAP_BLOCKING) &&
