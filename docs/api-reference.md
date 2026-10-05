@@ -492,7 +492,7 @@ list endpoint.
 ### Create filesystem
 
 ```
-POST /api/v1/filesystems
+POST /api/core/v1/filesystems
 ```
 
 **Request body**
@@ -515,7 +515,7 @@ filesystems, such as `nfs`), `404` (no such module), `409` (the module
 already holds a filesystem with that name), `500` (creation failed).
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/filesystems \
+curl -X POST http://localhost:8080/api/core/v1/filesystems \
   -H "Content-Type: application/json" \
   -d '{"module":"memfs","name":"fs1"}'
 ```
@@ -523,7 +523,7 @@ curl -X POST http://localhost:8080/api/v1/filesystems \
 ### Delete filesystem
 
 ```
-DELETE /api/v1/filesystems/{module}/{name}
+DELETE /api/core/v1/filesystems/{module}/{name}
 ```
 
 | Path parameter | Type   | Description                         |
@@ -541,7 +541,7 @@ it), `409` (the filesystem still has mounts; delete them first), `500`
 (removal failed).
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/filesystems/memfs/fs1
+curl -X DELETE http://localhost:8080/api/core/v1/filesystems/memfs/fs1
 ```
 
 The `chimera_admin` Python client exposes these as `create_filesystem()` and
@@ -555,7 +555,7 @@ VFS mounts map a mount name to a backing path served by a VFS module (for exampl
 `linux` or `memfs`). For `memfs`, `diskfs` and `cairn` the path starts with the
 name of a filesystem the module already holds: one declared under `filesystems`
 in the configuration, or one created with
-[`POST /api/v1/filesystems`](#create-filesystem). A mount
+[`POST /api/core/v1/filesystems`](#create-filesystem). A mount
 may carry an optional comma-separated `key[=value]` options string; when
 present it is echoed back on reads.
 

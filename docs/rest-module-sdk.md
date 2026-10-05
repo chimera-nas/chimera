@@ -15,8 +15,7 @@ the same module from different libraries.
 ## Platform status
 
 Modules use the native dynamic loader: `dlopen` on Unix and `LoadLibraryExW` on
-Windows. Windows modules are DLLs even when the server and VFS use static
-libraries. The bundled modules receive a private host-services table and do not
+Windows. The server, VFS, and REST modules use shared libraries on all platforms. The bundled modules receive a private host-services table and do not
 link another copy of the server or VFS runtime.
 
 ## Configuration

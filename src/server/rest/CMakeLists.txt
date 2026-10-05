@@ -18,7 +18,7 @@ add_library(chimera_rest_core MODULE rest_core.c rest_users.c rest_exports.c
     rest_shares.c rest_buckets.c rest_mounts.c rest_filesystems.c rest_config.c)
 add_library(chimera_rest_docs MODULE rest_swagger.c)
 # Bundled modules call back into one host runtime through private services.
-# In particular, Windows DLLs must never link copies of the static VFS/server.
+# This private interface is retained here for the bundled modules.
 function(configure_rest_module module)
     target_sources(${module} PRIVATE rest_module_bind.c)
     set_target_properties(${module} PROPERTIES PREFIX "")
