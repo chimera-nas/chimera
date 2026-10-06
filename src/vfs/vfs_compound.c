@@ -44,6 +44,7 @@
 #include <utlist.h>
 
 #include "vfs_compound.h"
+#include "vfs_lock_internal.h"
 #include "vfs_internal_procs.h"
 #include "vfs_claim.h"
 #include "vfs_claim_journal_attempt.h"
@@ -68,6 +69,12 @@ struct chimera_vfs_compound_group {
     struct chimera_vfs_compound_group_config config;
     enum chimera_vfs_error status;
     uint32_t                                 last_op;
+};
+
+enum compound_lock_scope {
+    COMPOUND_LOCK_NONE,
+    COMPOUND_LOCK_LOCAL,
+    COMPOUND_LOCK_DEDICATED,
 };
 
 struct chimera_vfs_compound {
@@ -98,6 +105,7 @@ struct chimera_vfs_compound {
      * was malformed.  Submitting runs nothing and fails. */
     uint8_t                                  build_failed;
     enum chimera_vfs_error                   build_error;
+    enum compound_lock_scope                 lock_scope;
     uint32_t                                 index;  /* op being executed        */
     uint32_t                                 completed;  /* ops that ran             */
     enum chimera_vfs_error                   status;
@@ -1103,6 +1111,64 @@ chimera_vfs_compound_take_iov(
     compound->ops[index]->niov = 0;
 } /* chimera_vfs_compound_take_iov */
 
+/* Local lock publication can still be vetoed by close/recovery at finish.
+ * Compose it with cursor management and metadata queries, never filesystem
+ * mutations or another publication journal. Projected locks and mandatory
+ * owner releases retain their dedicated scope. This is checked both before
+ * any dispatch and after prepare, including dynamically appended operations. */
+static bool
+compound_lock_op_allowed(
+    const struct chimera_vfs_compound    *compound,
+    const struct chimera_vfs_compound_op *op)
+{
+    if (compound->lock_scope == COMPOUND_LOCK_NONE) {
+        return true;
+    }
+    switch (op->type) {
+        case CHIMERA_VFS_COMPOUND_OP_LOCK_TEST:
+        case CHIMERA_VFS_COMPOUND_OP_LOCK_CHANGE:
+        case CHIMERA_VFS_COMPOUND_OP_LOCK_RELEASE_OWNER:
+            return op->lock_attempt != NULL;
+        case CHIMERA_VFS_COMPOUND_OP_PUTFH:
+        case CHIMERA_VFS_COMPOUND_OP_PUTHANDLE:
+            return true;
+        default:
+            break;
+    } /* switch */
+    if (compound->lock_scope == COMPOUND_LOCK_DEDICATED) {
+        return false;
+    }
+    switch (op->type) {
+        case CHIMERA_VFS_COMPOUND_OP_CHECKPOINT:
+        case CHIMERA_VFS_COMPOUND_OP_PUTROOT:
+        case CHIMERA_VFS_COMPOUND_OP_LOOKUP:
+        case CHIMERA_VFS_COMPOUND_OP_LOOKUPP:
+        case CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH:
+        case CHIMERA_VFS_COMPOUND_OP_GETATTR:
+        case CHIMERA_VFS_COMPOUND_OP_ACCESS:
+        case CHIMERA_VFS_COMPOUND_OP_GETFH:
+        case CHIMERA_VFS_COMPOUND_OP_READLINK:
+        case CHIMERA_VFS_COMPOUND_OP_GETXATTR:
+        case CHIMERA_VFS_COMPOUND_OP_LISTXATTRS:
+        case CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS:
+        case CHIMERA_VFS_COMPOUND_OP_SAVEFH:
+        case CHIMERA_VFS_COMPOUND_OP_RESTOREFH:
+        case CHIMERA_VFS_COMPOUND_OP_SAVEHANDLE:
+        case CHIMERA_VFS_COMPOUND_OP_RESTOREHANDLE:
+        case CHIMERA_VFS_COMPOUND_OP_GETHANDLE:
+            return true;
+        case CHIMERA_VFS_COMPOUND_OP_OPEN_CURRENT:
+            return !(op->open_flags & ~(CHIMERA_VFS_OPEN_INFERRED |
+                                        CHIMERA_VFS_OPEN_PATH |
+                                        CHIMERA_VFS_OPEN_READ_ONLY |
+                                        CHIMERA_VFS_OPEN_WRITE_ONLY |
+                                        CHIMERA_VFS_OPEN_DIRECTORY |
+                                        CHIMERA_VFS_OPEN_NOFOLLOW));
+        default:
+            return false;
+    } /* switch */
+} /* compound_lock_op_allowed */
+
 /* Claim the next op slot, or -1 when the sequence is full. */
 static struct chimera_vfs_compound_op *
 chimera_vfs_compound_next_op(
@@ -1268,7 +1334,7 @@ chimera_vfs_compound_add_lock(
     int                             index;
     struct chimera_vfs_compound_op *op;
 
-    /* The dedicated-lock contract is validated at submit. A dynamic lock
+    /* The lock composition contract is validated at submit. A dynamic lock
      * would bypass it and mix projected or late-veto publication with ordinary
      * operations; reject before allocating any operation/attempt resources. */
     if (compound->running || compound->original_ops) {
@@ -6872,6 +6938,11 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
         }
     }
 
+    if (!compound_lock_op_allowed(compound, op)) {
+        chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOTSUP);
+        return;
+    }
+
     /* Group order need not match physical indices. A dependent handle must
      * come from a successfully completed operation, never a skipped group. */
     if (!op->in_handle && op->handle_from >= 0 &&
@@ -8701,25 +8772,24 @@ chimera_vfs_compound_submit(
         }
     }
 
-    /* Initial lock routing is deliberately a dedicated compound: no backend
-     * transaction is kept open across an unbounded lock wait, and legacy
-     * projection cannot mix with retryable filesystem mutations. */
+    /* One typed lock journal may accompany local resolution/metadata work.
+     * Multiple journals need joint admission/publication, and projected locks
+     * cannot mix with retryable filesystem operations. */
     unsigned lock_ops = 0;
+    compound->lock_scope = COMPOUND_LOCK_NONE;
     for (uint32_t i = 0; i < compound->num_ops; i++) {
-        lock_ops += compound->ops[i]->lock_attempt != NULL;
+        struct chimera_vfs_compound_op *op = compound->ops[i];
+        if (op->lock_attempt) {
+            lock_ops++;
+            compound->lock_scope = op->lock_request.project_backend ||
+                op->type == CHIMERA_VFS_COMPOUND_OP_LOCK_RELEASE_OWNER ?
+                COMPOUND_LOCK_DEDICATED : COMPOUND_LOCK_LOCAL;
+        }
     }
     if (lock_ops) {
-        bool local_open = compound->num_ops == 4 &&
-            compound->ops[0]->type == CHIMERA_VFS_COMPOUND_OP_PUTFH &&
-            compound->ops[1]->type == CHIMERA_VFS_COMPOUND_OP_OPEN_CURRENT &&
-            compound->ops[2]->type == CHIMERA_VFS_COMPOUND_OP_GETHANDLE &&
-            compound->ops[3]->lock_from_fh;
         for (uint32_t i = 0; i < compound->num_ops; i++) {
             struct chimera_vfs_compound_op *op = compound->ops[i];
-            if (lock_ops != 1 || (!op->lock_attempt &&
-                                  op->type != CHIMERA_VFS_COMPOUND_OP_PUTFH &&
-                                  op->type != CHIMERA_VFS_COMPOUND_OP_PUTHANDLE &&
-                                  !(local_open && (i == 1 || i == 2)))) {
+            if (lock_ops != 1 || !compound_lock_op_allowed(compound, op)) {
                 compound->build_failed = 1;
                 compound->build_error  = CHIMERA_VFS_ENOTSUP;
             }

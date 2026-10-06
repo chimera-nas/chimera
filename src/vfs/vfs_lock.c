@@ -7,7 +7,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
-#include "vfs_lock.h"
+#include "vfs_lock_internal.h"
 #include "vfs_claim.h"
 #include "vfs_claim_internal.h"
 #include "sdk/vfs_log.h"
@@ -147,21 +147,8 @@ chimera_vfs_lock_domain_admit(
         b->generation = 1;
         b->projected  = owner->proto == CHIMERA_CLAIM_PROTO_POSIX &&
             handle->vfs_module && (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_CLAIM_RANGE);
-        b->file = chimera_vfs_state_get(domain->vfs->vfs_state, b->fh, b->fh_len, b->hash, true);
-        if (!b->file) {
-            free(b);
-            evpl_mutex_unlock(&domain->lock);
-            return 0;
-        }
         b->next        = domain->owners;
         domain->owners = b;
-    }
-    if (!b->file) {
-        b->file = chimera_vfs_state_get(domain->vfs->vfs_state, b->fh, b->fh_len, b->hash, true);
-        if (!b->file) {
-            evpl_mutex_unlock(&domain->lock);
-            return 0;
-        }
     }
     uint64_t generation = b->generation;
     evpl_mutex_unlock(&domain->lock);
@@ -209,6 +196,26 @@ lock_ranges_free(struct lock_range *ranges)
         ranges = next;
     }
 } /* lock_ranges_free */
+
+/* Keep admission generations across close/recovery, but retain file state
+* only while an attempt, accepted coverage or backend cleanup needs it.
+* The domain mutex protects both the bucket and its attempt references. */
+static void
+lock_file_put_idle(
+    struct chimera_vfs_lock_domain *domain,
+    struct lock_owner_file         *b)
+{
+    if (!b || !b->file || b->ranges || b->busy || b->backend_dirty || b->retiring) {
+        return;
+    }
+    for (struct chimera_vfs_lock_attempt *a = domain->attempts; a; a = a->next) {
+        if (a->bucket == b) {
+            return;
+        }
+    }
+    chimera_vfs_state_put(domain->vfs->vfs_state, b->file);
+    b->file = NULL;
+} /* lock_file_put_idle */
 
 /* Retirement only detaches claims under the domain mutex. Pumping runs after
  * dropping it: arbiter grant callbacks take this mutex to keep the attempt
@@ -287,6 +294,7 @@ chimera_vfs_lock_domain_retire(
     }
     struct chimera_vfs_file_state *file = b && b->file ?
         chimera_vfs_state_get(domain->vfs->vfs_state, b->fh, b->fh_len, b->hash, false) : NULL;
+    lock_file_put_idle(domain, b);
     evpl_mutex_unlock(&domain->lock);
     if (file) {
         chimera_vfs_claim_replacement_complete(file);
@@ -352,6 +360,7 @@ lock_domain_retire_all(
         evpl_mutex_lock(&domain->lock);
         struct chimera_vfs_file_state *file = b->file ?
             chimera_vfs_state_get(domain->vfs->vfs_state, b->fh, b->fh_len, b->hash, false) : NULL;
+        lock_file_put_idle(domain, b);
         evpl_mutex_unlock(&domain->lock);
         if (file) {
             chimera_vfs_claim_replacement_complete(file);
@@ -1038,15 +1047,7 @@ chimera_vfs_lock_attempt_free(struct chimera_vfs_lock_attempt *a)
         p = &(*p)->next;
     }
     *p = a->next;
-    struct lock_owner_file           *b    = a->bucket;
-    bool                              held = false;
-    for (struct chimera_vfs_lock_attempt *other = a->domain->attempts; other; other = other->next) {
-        held |= other->bucket == b;
-    }
-    if (b && !held && !b->ranges && !b->backend_dirty && !b->retiring && b->file) {
-        chimera_vfs_state_put(a->domain->vfs->vfs_state, b->file);
-        b->file = NULL;
-    }
+    lock_file_put_idle(a->domain, a->bucket);
     evpl_mutex_unlock(&a->domain->lock);
     evpl_remove_doorbell(a->thread->evpl, &a->bell);
     free(a);

@@ -21,11 +21,15 @@ def scrub(source, strings=False):
     return LEXEMES.sub(replace, source)
 
 
-header = scrub((ROOT / "src/vfs/vfs_internal_procs.h").read_text(encoding="utf-8"), strings=True)
-private = set(re.findall(r"\b(chimera_vfs_\w+)\s*\(", header))
-private.add("CHIMERA_VFS_INTERNAL_API")
+private_headers = ("vfs_internal_procs.h", "vfs_lock_internal.h")
+private = {"CHIMERA_VFS_INTERNAL_API"}
+for name in private_headers:
+    header = scrub((ROOT / "src/vfs" / name).read_text(encoding="utf-8"), strings=True)
+    private.update(re.findall(r"\b(chimera_vfs_\w+)\s*\(", header))
 symbols = re.compile(r"\b(?:" + "|".join(sorted(private)) + r")\b")
-includes = re.compile(r'^\s*#\s*include\s*["<][^">\n]*vfs_internal_procs\.h[">]', re.M)
+includes = re.compile(
+    r'^\s*#\s*include\s*["<][^">\n]*(?:'
+    + "|".join(re.escape(name) for name in private_headers) + r')[">]', re.M)
 violations = []
 for directory in ("src/server", "src/client", "src/posix", "src/rest"):
     for path in sorted((ROOT / directory).rglob("*")):

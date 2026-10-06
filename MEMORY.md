@@ -5328,3 +5328,60 @@ Publication only removed extra EOF blank lines in two newly staged files; no
 behavior changed. Staged/root/nested diff checks and the northside API guard
 were rechecked. Rebase and its
 validation follow publication; this checkpoint is not post-rebase evidence.
+
+## 2026-10-06 NLM/FUSE follow-up after main rebase
+
+Latest task: finish the remaining NLM/FUSE compound work. Ordinary operations
+were already compound-routed; remaining useful work was in the shared local
+lock executor. No frontend protocol handler rewrite was necessary.
+
+- Local-only typed locks can now accompany cursor/path resolution, non-mutating
+  OPEN_CURRENT, metadata queries and replayable CHECKPOINT callouts. One typed
+  lock journal per compound remains intentional. Multiple journals can deadlock
+  same-owner admission or partially publish across cancellation; filesystem
+  mutations require the deferred backend transaction/joint publication work.
+- Scope is validated before initial dispatch AND after prepare, including
+  dynamically added operations. Old exact-four-op NLM shape validation let a
+  prepare callback change OPEN flags without a scope check; dynamic filesystem
+  suffixes could also bypass submit-only validation. New regression covers both.
+- Moved lock attempt allocation/execution/accept/reset/free into guarded
+  src/vfs/vfs_lock_internal.h. scripts/check_vfs_northside.py enforces both private
+  operation headers and symbols; lock domain controls/builders remain public.
+- Confirmed a file-state retention bug: after an accepted lock's compound was
+  freed, mandatory owner retirement removed ranges but retained b->file until
+  domain destruction. Admission now creates only generation tombstones;
+  attempts acquire file state, and retirement/free share idle reference cleanup.
+  Pending attempts and projected cleanup retain their pins. Tombstones remain
+  until domain destruction to cover admission-before-worker-enqueue races.
+- New quick test src/vfs/tests/vfs_lock_compound_test.c covers both FUSE/NLM owner
+  identities, retirement after accepted finish, retirement with held finish,
+  stale queued generations after file-state reclamation, composed metadata retry,
+  dynamic suffix replay, and forbidden static/prepared/dynamic mutations.
+- NLM CANCEL/recovery/disconnect and FUSE interrupt/close/shutdown remain mandatory
+  controls. FUSE FLUSH's owner retirement belongs after terminal compound COMMIT
+  (including terminal error), never in a retryable pre-finish callback. Existing
+  SHARE/UNSHARE non-enforcement and projected NLM locks remain separate work.
+- Focused Debug and Release: each 28 passed, one skip out of 29 selected. The skipped FUSE io_uring
+  mounted lock test reports fuse.enable_uring=0. Regular mounted FUSE locks,
+  five-backend NLM replay and POSIX/native NFS3 locks pass.
+- Both Debug and Release quick: 286/289; only the three established remote
+  pNFS failures. Both Clang stages retain exactly the prior 40 warning signatures / 112
+  occurrences, with none added/increased. make check remains red on those
+  analyzer reports and pNFS failures (same fsstat zero-capacity signatures).
+  Both final builds and the new lock regression pass after final header review.
+- Required make check initially caught an uncrustify non-idempotent nested
+  ternary initializer in the new test. Moved that assignment out of the
+  initializer; make syntax and syntax-check now pass. Production code unchanged.
+- Disk pressure: removed old generated Clang trees (make check recreates them)
+  and 2,253 nfs3_mbt_pt_* test fixture directories older than this task, retaining
+  current-run fixtures and logs. Approximately 1.3GB of stale fixtures reclaimed.
+- Preserved the public opaque lock-attempt forward declaration for the compound
+  op structure; its callable executor API is private. Final source builds pass
+  in Debug/Release; final compound_locks ctest reruns pass in both. Formatting,
+  SDK/northside API guards, REUSE and copyright checks all pass.
+- Logs: /tmp/chimera-nlm-fuse-check.log, focused-{debug,release}.log,
+  final-build-{debug,release}.log, final-unit-{debug,release}.log, syntax-final.log
+  (all with chimera-nlm-fuse- prefix); warning-compare.txt records the exact
+  unchanged analyzer signature/occurrence counts. Follow-up publication targets
+  draft PR #1692 on compound-boilerplate.
+  Review: docs/reviews/nlm-fuse-compound-followup-2026-10-06.md.

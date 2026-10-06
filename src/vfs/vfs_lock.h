@@ -78,10 +78,16 @@ void chimera_vfs_lock_domain_shutdown(
     struct chimera_vfs_thread      *thread,
     struct chimera_vfs_lock_domain *domain);
 
-/* Initial typed-lock scope is a dedicated compound containing exactly one
- * lock operation, optionally preceded by PUTFH/PUTHANDLE cursor seeds or the
- * local bookkeeping-open prefix constructed by add_lock_change_fh.
- * Mutation plus unrelated filesystem operations is rejected before dispatch. */
+/* Exactly one typed lock may be built into a compound, before submission.
+ * A local-only TEST/CHANGE can accompany cursor operations, non-mutating
+ * OPEN_CURRENT, path resolution, metadata queries and replayable CHECKPOINT
+ * callouts. Static operations are checked before execution; dynamic additions
+ * and prepared arguments are checked before dispatch. Filesystem mutations,
+ * other claim journals and multiple typed locks are unsupported: retirement
+ * can veto the lock at finish, and separate journals cannot publish atomically.
+ * Like any compound, a failed suffix leaves its successful prefix accepted.
+ * Backend-projected locks and mandatory RELEASE_OWNER retain dedicated scope,
+ * allowing only PUTFH/PUTHANDLE seeds alongside the lock. */
 int chimera_vfs_compound_add_lock_test(
     struct chimera_vfs_compound           *compound,
     struct chimera_vfs_lock_domain        *domain,
@@ -96,7 +102,7 @@ int chimera_vfs_compound_add_lock_change(
  * construction, so cancellation/retirement also covers the pending OPEN.
  * UNLOCK only needs PUTFH, LOCK_CHANGE: retiring local coverage must also work
  * for a stale/unlinked backend object. For acquisitions, GETHANDLE is operation 2 and can be taken after accepted completion.
- * No filesystem mutations may accompany this dedicated locking compound. */
+ * The local-only composition rules above apply to any appended operations. */
 int chimera_vfs_compound_add_lock_change_fh(
     struct chimera_vfs_compound           *compound,
     struct chimera_vfs_lock_domain        *domain,
@@ -113,46 +119,3 @@ int chimera_vfs_compound_add_lock_release_owner(
 bool chimera_vfs_compound_lock_cancel(
     struct chimera_vfs_compound *compound,
     uint32_t                     index);
-
-/* Executor-private interface. A projected change rejects an installed finish
- * adapter BEFORE mutation: legacy backend locks do not support rollback.
- * Mandatory RELEASE_OWNER runs independently of finish acceptance, drains
- * legacy backend state first, and is never replayed by compound_retry. A finish
- * error remains visible to the caller even though mandatory cleanup ran. */
-struct chimera_vfs_lock_attempt * chimera_vfs_lock_attempt_alloc(
-    struct chimera_vfs_thread             *thread,
-    struct chimera_vfs_lock_domain        *domain,
-    struct chimera_vfs_open_handle        *handle,
-    const struct chimera_vfs_lock_request *request,
-    bool                                   test,
-    bool                                   release);
-struct chimera_vfs_lock_attempt * chimera_vfs_lock_attempt_alloc_fh(
-    struct chimera_vfs_thread             *thread,
-    struct chimera_vfs_lock_domain        *domain,
-    const uint8_t                         *fh,
-    uint32_t                               fh_len,
-    const struct chimera_vfs_lock_request *request);
-bool chimera_vfs_lock_attempt_matches_fh(
-    struct chimera_vfs_lock_attempt *attempt,
-    const uint8_t                   *fh,
-    uint32_t                         fh_len);
-void chimera_vfs_lock_attempt_execute(
-    struct chimera_vfs_lock_attempt *attempt,
-    bool finish_adapter,
-    void ( *complete )(enum chimera_vfs_error, void *),
-    void *private_data);
-enum chimera_vfs_error chimera_vfs_lock_attempt_accept(
-    struct chimera_vfs_lock_attempt *attempt);
-void chimera_vfs_lock_attempt_reset(
-    struct chimera_vfs_lock_attempt *attempt);
-void chimera_vfs_lock_attempt_free(
-    struct chimera_vfs_lock_attempt *attempt);
-bool chimera_vfs_lock_attempt_cancel(
-    struct chimera_vfs_lock_attempt *attempt);
-void chimera_vfs_lock_attempt_result(
-    struct chimera_vfs_lock_attempt   *attempt,
-    struct chimera_vfs_claim_conflict *conflict,
-    uint32_t                          *pid);
-
-bool chimera_vfs_lock_attempt_retryable(
-    struct chimera_vfs_lock_attempt *attempt);
