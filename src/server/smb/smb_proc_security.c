@@ -26,31 +26,25 @@
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_sid.h"
 
-/* Security information flags (addl_info) */
-#define SMB_OWNER_SECURITY_INFORMATION 0x00000001
-#define SMB_GROUP_SECURITY_INFORMATION 0x00000002
-#define SMB_DACL_SECURITY_INFORMATION  0x00000004
-#define SMB_SACL_SECURITY_INFORMATION  0x00000008
-#define SMB_LABEL_SECURITY_INFORMATION 0x00000010
 
 /* Security descriptor control flags */
-#define SMB_SE_SELF_RELATIVE           0x8000
-#define SMB_SE_DACL_PRESENT            0x0004
-#define SMB_SE_DACL_AUTO_INHERIT_REQ   0x0100
-#define SMB_SE_DACL_AUTO_INHERITED     0x0400
-#define SMB_SE_DACL_PROTECTED          0x1000
+#define SMB_SE_SELF_RELATIVE         0x8000
+#define SMB_SE_DACL_PRESENT          0x0004
+#define SMB_SE_DACL_AUTO_INHERIT_REQ 0x0100
+#define SMB_SE_DACL_AUTO_INHERITED   0x0400
+#define SMB_SE_DACL_PROTECTED        0x1000
 
 /* Size of a SID with 3 sub-authorities: S-1-5-88-X-Y */
-#define SID_UNIX_SIZE                  20 /* 1+1+6+3*4 */
+#define SID_UNIX_SIZE                20   /* 1+1+6+3*4 */
 
 /* Size of an ACE containing a 3-sub-authority SID */
-#define ACE_UNIX_SIZE                  28 /* 1+1+2+4 + SID_UNIX_SIZE */
+#define ACE_UNIX_SIZE                28   /* 1+1+2+4 + SID_UNIX_SIZE */
 
 /* Size of an ACL containing one ACE */
-#define ACL_UNIX_SIZE                  36 /* 2+2+2+2 + ACE_UNIX_SIZE */
+#define ACL_UNIX_SIZE                36   /* 2+2+2+2 + ACE_UNIX_SIZE */
 
 /* Size of the security descriptor header */
-#define SD_HEADER_SIZE                 20
+#define SD_HEADER_SIZE               20
 
 /*
  * True when the `need` bytes at wire offset `off` lie inside a `len`-byte
@@ -246,6 +240,7 @@ SYMBOL_EXPORT int
 chimera_smb_sd_to_acl(
     const uint8_t            *sd_buf,
     uint32_t                  sd_len,
+    uint32_t                  sec_info,
     struct chimera_vfs_attrs *attrs,
     struct chimera_acl       *acl,
     unsigned                  acl_max_aces,
@@ -268,7 +263,8 @@ chimera_smb_sd_to_acl(
     offset_dacl  = sd_buf[16] | (sd_buf[17] << 8) | (sd_buf[18] << 16) | ((uint32_t) sd_buf[19] << 24);
 
     /* Owner SID -> uid (modefromsid first, then general idmap). */
-    if (offset_owner && sd_region_ok(offset_owner, 8, sd_len)) {
+    if ((sec_info & SMB_OWNER_SECURITY_INFORMATION) &&
+        offset_owner && sd_region_ok(offset_owner, 8, sd_len)) {
         struct chimera_principal p;
 
         if (parse_unix_sid(sd_buf + offset_owner, sd_len - offset_owner, 1, &value) == 0) {
@@ -301,7 +297,8 @@ chimera_smb_sd_to_acl(
     }
 
     /* Group SID -> gid (modefromsid first, then general idmap). */
-    if (offset_group && sd_region_ok(offset_group, 8, sd_len)) {
+    if ((sec_info & SMB_GROUP_SECURITY_INFORMATION) &&
+        offset_group && sd_region_ok(offset_group, 8, sd_len)) {
         struct chimera_principal p;
 
         if (parse_unix_sid(sd_buf + offset_group, sd_len - offset_group, 2, &value) == 0) {
@@ -343,8 +340,9 @@ chimera_smb_sd_to_acl(
         }
     }
 
-    /* DACL -> canonical ACL. */
-    if (acl && offset_dacl && sd_region_ok(offset_dacl, 8, sd_len)) {
+    /* DACL -> canonical ACL (the modefromsid mode ACE travels in it too). */
+    if ((sec_info & SMB_DACL_SECURITY_INFORMATION) &&
+        acl && offset_dacl && sd_region_ok(offset_dacl, 8, sd_len)) {
         const uint8_t *acl_buf   = sd_buf + offset_dacl;
         uint16_t       acl_size  = acl_buf[2] | (acl_buf[3] << 8);
         uint16_t       ace_count = acl_buf[4] | (acl_buf[5] << 8);
@@ -886,7 +884,8 @@ chimera_smb_parse_sd_to_acl(
      * the identity cache (the session's own user, for one) resolve to a
      * uid/gid; anything else is kept verbatim as an opaque SID principal.
      * The owner/group SID companions are not seeded at create. */
-    chimera_smb_sd_to_acl(sd_buf, sd_len, attrs, acl, acl_max, vfs, NULL,
+    chimera_smb_sd_to_acl(sd_buf, sd_len, SMB_SD_ALL_SECURITY_INFORMATION,
+                          attrs, acl, acl_max, vfs, NULL,
                           NULL, NULL, canonicalize_inherited);
 } /* chimera_smb_parse_sd_to_acl */
 
@@ -909,8 +908,15 @@ chimera_smb_set_decode_sd(
     vfs_attrs->va_owner_sid = NULL;
     vfs_attrs->va_group_sid = NULL;
 
+    /* Only the components AdditionalInformation names are being set
+     * (MS-FSA 2.1.5.16); the owner, group or DACL a client also carries in
+     * the descriptor for a SACL / label / attribute class set is context, not
+     * a request to replace them.  A Windows copy replays the source file's
+     * resource-attribute class that way, with an Administrators-only DACL
+     * alongside: applying it locked the owner out of its own new file. */
     chimera_smb_sd_to_acl(request->set_info.sec_buf,
                           request->set_info.sec_buf_len,
+                          request->set_info.addl_info,
                           vfs_attrs, acl_buf, acl_max,
                           request->compound->thread->shared->vfs, unres,
                           &request->set_info.owner_sid,

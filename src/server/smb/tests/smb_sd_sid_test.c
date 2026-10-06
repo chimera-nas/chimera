@@ -336,7 +336,8 @@ test_with_identity_authority(void)
     memset(&unres, 0, sizeof(unres));
     owner_out.len = 0;
     group_out.len = 0;
-    assert(chimera_smb_sd_to_acl(sd, sd_len, &attrs, acl, MAX_ACES, vfs, &unres,
+    assert(chimera_smb_sd_to_acl(sd, sd_len, SMB_SD_ALL_SECURITY_INFORMATION,
+                                 &attrs, acl, MAX_ACES, vfs, &unres,
                                  &owner_out, &group_out, 1) == 0);
     assert(unres.count == 1);
     assert(strcmp(unres.sids[0], SID_OPAQUE2) == 0);
@@ -359,7 +360,8 @@ test_with_identity_authority(void)
     memset(&attrs, 0, sizeof(attrs));
     memset(acl_buf, 0, sizeof(acl_buf));
     owner_out.len = 0;
-    assert(chimera_smb_sd_to_acl(sd, sd_len, &attrs, acl, MAX_ACES, vfs, NULL,
+    assert(chimera_smb_sd_to_acl(sd, sd_len, SMB_SD_ALL_SECURITY_INFORMATION,
+                                 &attrs, acl, MAX_ACES, vfs, NULL,
                                  &owner_out, &group_out, 1) == 0);
     assert(acl->num_aces == 2);
     assert(acl->aces[0].who.type == CHIMERA_PRINCIPAL_USER);
@@ -414,6 +416,80 @@ test_with_identity_authority(void)
     prometheus_metrics_destroy(metrics);
 } /* test_with_identity_authority */
 
+/*
+ * SECURITY_INFORMATION selects what a decode applies.  A Windows client that
+ * copies a file replays the source's resource-attribute class with
+ * ATTRIBUTE_SECURITY_INFORMATION alone, in a descriptor that also carries the
+ * owner, the group and an Administrators-only DACL as context; applying that
+ * DACL locked the owner out of its own fresh file.  Only the components the
+ * mask names may reach the attrs.
+ */
+static void
+test_sec_info_selects_components(void)
+{
+    uint8_t                  sd[512];
+    uint8_t                  acl_buf[ACL_BUF_SIZE];
+    struct chimera_acl      *acl = (struct chimera_acl *) acl_buf;
+    struct chimera_vfs_attrs attrs;
+    struct smb_unres_sids    unres;
+    const uint32_t           masks[1] = { 0x001f01ff };
+    const char              *sids[1]  = { "S-1-5-32-544" };
+    uint32_t                 sd_len;
+
+    sd_len = build_sd(sd, sizeof(sd), MBT_SE_SELF_RELATIVE | MBT_SE_DACL_PRESENT,
+                      SID_UNIX_UID1000, SID_UNIX_GID1000, 1, masks, sids);
+
+    /* Attribute class only: nothing chimera models is named, nothing changes. */
+    memset(&attrs, 0, sizeof(attrs));
+    memset(acl_buf, 0, sizeof(acl_buf));
+    memset(&unres, 0, sizeof(unres));
+    assert(chimera_smb_sd_to_acl(sd, sd_len, SMB_ATTRIBUTE_SECURITY_INFORMATION,
+                                 &attrs, acl, MAX_ACES, NULL, &unres,
+                                 NULL, NULL, 1) == 0);
+    assert(attrs.va_set_mask == 0);
+    assert(acl->num_aces == 0);
+    assert(unres.count == 0);
+    TEST_PASS("ATTRIBUTE_SECURITY_INFORMATION alone applies nothing");
+
+    /* DACL only: the ACL lands, the owner and group in the descriptor do not. */
+    memset(&attrs, 0, sizeof(attrs));
+    memset(acl_buf, 0, sizeof(acl_buf));
+    assert(chimera_smb_sd_to_acl(sd, sd_len, SMB_DACL_SECURITY_INFORMATION,
+                                 &attrs, acl, MAX_ACES, NULL, NULL,
+                                 NULL, NULL, 1) == 0);
+    assert(attrs.va_set_mask == CHIMERA_VFS_ATTR_ACL);
+    assert(acl->num_aces == 1);
+    TEST_PASS("DACL_SECURITY_INFORMATION applies only the DACL");
+
+    /* Owner only, then group only. */
+    memset(&attrs, 0, sizeof(attrs));
+    memset(acl_buf, 0, sizeof(acl_buf));
+    assert(chimera_smb_sd_to_acl(sd, sd_len, SMB_OWNER_SECURITY_INFORMATION,
+                                 &attrs, acl, MAX_ACES, NULL, NULL,
+                                 NULL, NULL, 1) == 0);
+    assert(attrs.va_set_mask == CHIMERA_VFS_ATTR_UID);
+    assert(attrs.va_uid == 1000);
+    assert(acl->num_aces == 0);
+    memset(&attrs, 0, sizeof(attrs));
+    assert(chimera_smb_sd_to_acl(sd, sd_len, SMB_GROUP_SECURITY_INFORMATION,
+                                 &attrs, acl, MAX_ACES, NULL, NULL,
+                                 NULL, NULL, 1) == 0);
+    assert(attrs.va_set_mask == CHIMERA_VFS_ATTR_GID);
+    assert(attrs.va_gid == 1000);
+    TEST_PASS("OWNER / GROUP_SECURITY_INFORMATION apply only their section");
+
+    /* The whole model: everything the descriptor carries. */
+    memset(&attrs, 0, sizeof(attrs));
+    memset(acl_buf, 0, sizeof(acl_buf));
+    assert(chimera_smb_sd_to_acl(sd, sd_len, SMB_SD_ALL_SECURITY_INFORMATION,
+                                 &attrs, acl, MAX_ACES, NULL, NULL,
+                                 NULL, NULL, 1) == 0);
+    assert(attrs.va_set_mask == (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID |
+                                 CHIMERA_VFS_ATTR_ACL));
+    assert(acl->num_aces == 1);
+    TEST_PASS("the full mask applies owner, group and DACL");
+} /* test_sec_info_selects_components */
+
 int
 main(
     int    argc,
@@ -423,6 +499,7 @@ main(
 
     test_opaque_roundtrip_no_authority();
     test_with_identity_authority();
+    test_sec_info_selects_components();
 
     fprintf(stderr, "All SMB SD native-SID tests passed\n");
     return 0;

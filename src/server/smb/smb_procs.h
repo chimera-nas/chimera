@@ -232,9 +232,30 @@ void chimera_smb_parse_sd_to_attrs(
     uint32_t                  sd_len,
     struct chimera_vfs_attrs *attrs);
 
+/* SECURITY_INFORMATION bits (MS-DTYP 2.4.7): the AdditionalInformation of a
+ * security QUERY_INFO / SET_INFO names the descriptor components the client
+ * is reading or replacing.  Everything else in the descriptor it sends is
+ * context the server MUST leave alone (MS-FSA 2.1.5.16). */
+#define SMB_OWNER_SECURITY_INFORMATION               0x00000001
+#define SMB_GROUP_SECURITY_INFORMATION               0x00000002
+#define SMB_DACL_SECURITY_INFORMATION                0x00000004
+#define SMB_SACL_SECURITY_INFORMATION                0x00000008
+#define SMB_LABEL_SECURITY_INFORMATION               0x00000010
+#define SMB_ATTRIBUTE_SECURITY_INFORMATION           0x00000020
+#define SMB_SCOPE_SECURITY_INFORMATION               0x00000040
+#define SMB_PROCESS_TRUST_LABEL_SECURITY_INFORMATION 0x00000080
+#define SMB_ACCESS_FILTER_SECURITY_INFORMATION       0x00000100
+#define SMB_BACKUP_SECURITY_INFORMATION              0x00010000
+
+/* The components chimera's model stores: what a whole-descriptor decode (the
+ * create-time SecD context) selects. */
+#define SMB_SD_ALL_SECURITY_INFORMATION \
+        (SMB_OWNER_SECURITY_INFORMATION | SMB_GROUP_SECURITY_INFORMATION | \
+         SMB_DACL_SECURITY_INFORMATION)
+
 /* Collects real (non-algorithmic) SID strings a decode pass could not resolve,
 * so the SET_SECURITY handler can resolve them off the event loop and retry. */
-#define SMB_MAX_UNRES_SIDS 16
+#define SMB_MAX_UNRES_SIDS                           16
 struct smb_unres_sids {
     char sids[SMB_MAX_UNRES_SIDS][CHIMERA_IDMAP_SID_MAX];
     int  count;
@@ -250,12 +271,16 @@ struct chimera_vfs;
  * With `unres` non-NULL (the first SET_SECURITY pass) a real SID that is not
  * yet cached is recorded there and its ACE skipped; with `unres` NULL (the
  * final pass, or the create-time path) it is kept as an opaque
- * CHIMERA_PRINCIPAL_SID.  Returns 0 on success.  Exported for the SMB unit
- * tests.
+ * CHIMERA_PRINCIPAL_SID.  `sec_info` is the SECURITY_INFORMATION mask naming
+ * the components to decode: only the owner (OWNER), the group (GROUP) and the
+ * DACL including its modefromsid mode ACE (DACL) sections it selects are read;
+ * the rest of the descriptor is ignored and leaves attrs untouched.  Returns 0
+ * on success.  Exported for the SMB unit tests.
  */
 SYMBOL_EXPORT int chimera_smb_sd_to_acl(
     const uint8_t            *sd_buf,
     uint32_t                  sd_len,
+    uint32_t                  sec_info,
     struct chimera_vfs_attrs *attrs,
     struct chimera_acl       *acl,
     unsigned                  acl_max_aces,
