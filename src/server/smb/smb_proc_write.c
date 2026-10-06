@@ -9,6 +9,24 @@
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_claim.h"
 
+/* Map a VFS error from a WRITE to the SMB2 status the client expects instead
+ * of collapsing every failure to INTERNAL_ERROR, which Windows reports as "an
+ * internal error occurred" and hides the cause.  A write the access gate
+ * refuses is ACCESS_DENIED, a full filesystem DISK_FULL. */
+static inline uint32_t
+chimera_smb_write_error_status(enum chimera_vfs_error error_code)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_OK:     return SMB2_STATUS_SUCCESS;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:  return SMB2_STATUS_ACCESS_DENIED;
+        case CHIMERA_VFS_ENOSPC:
+        case CHIMERA_VFS_EDQUOT: return SMB2_STATUS_DISK_FULL;
+        case CHIMERA_VFS_EROFS:  return SMB2_STATUS_MEDIA_WRITE_PROTECTED;
+        default:                 return SMB2_STATUS_INTERNAL_ERROR;
+    } /* switch */
+} /* chimera_smb_write_error_status */
+
 /* A write-time-sticky handle needs the pre-write mtime back from the VFS so the
  * write callback can restore it; otherwise no pre-attrs are requested. */
 static inline uint64_t
@@ -140,7 +158,7 @@ chimera_smb_write_callback(
     }
 
     chimera_smb_open_file_release(private_data, request->write.open_file);
-    chimera_smb_complete_request(private_data, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(private_data, chimera_smb_write_error_status(error_code));
 } /* chimera_smb_write_callback */
 
 static void
