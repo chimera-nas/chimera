@@ -1619,6 +1619,48 @@ sec_d12(void)
     smb2_env_stop(&env);
     EXPECT(1, "D12 server and clients shut down with live durable handles");
 } /* sec_d12 */
+/* Removing a share ends its disconnected-handle recovery domain.  Live opens
+ * continue until their connection goes away, then the event-thread sweeper
+ * must release them without waiting for the ordinary 60-second grace timer. */
+static void
+sec_removed_share(int persistent)
+{
+    struct smb2_env         env;
+    struct smb2_env_opts    opts = { .oplocks                 = 1, .leases          = 1,
+                                     .persistent_handles      = 1,
+                                     .continuous_availability = persistent };
+    struct smb2_oplock_req  lease;
+    struct smb2_durable_req dur = { .dh2q = 1 };
+    struct smb2_create_out  out;
+    struct smb2_conn       *holder;
+    uint8_t                 bytes[8];
+    uint32_t                count, len, st;
+
+    smb2_env_start_opts(&env, &opts);
+    holder = smb2_conn_open(&env);
+    smb2_handshake(holder);
+    mk_lease(&lease, 0xb1, SMB2_LEASE_RWH);
+    fill_guid(dur.create_guid, 0xb1);
+    dur.flags = persistent ? SMB2_DHANDLE_FLAG_PERSISTENT : 0;
+    st        = smb2_create_dur(holder, "retired", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                                MBT_FILE_SHARE_RWD, &lease, &dur, &out);
+    EXPECT(st == ST_SUCCESS && out.has_dh2q, "removed-share fixture grants a durable handle");
+    if (st == ST_SUCCESS && out.has_dh2q) {
+        EXPECT(!persistent || (out.dh2q_flags & SMB2_DHANDLE_FLAG_PERSISTENT),
+               "removed-share fixture grants requested persistent recovery");
+        st = smb2_write(holder, out.file_id, 0, "keep", 4, &count);
+        EXPECT(st == ST_SUCCESS && count == 4, "removed-share fixture writes bytes");
+        chimera_server_remove_share(env.server, "share");
+        st = smb2_read(holder, out.file_id, 0, 4, bytes, &len);
+        EXPECT(st == ST_SUCCESS && len == 4 && memcmp(bytes, "keep", 4) == 0,
+               "administrative removal preserves an existing live handle");
+    }
+    smb2_conn_reset(&env);
+    smb2_env_fs_teardown(&env, "fs0");
+    EXPECT(1, "removed-share parked handle drains within the 5-second rmfs budget");
+    smb2_env_fs_setup(&env, "fs0");
+    smb2_env_stop(&env);
+} /* sec_removed_share */
 
 int
 main(
@@ -1667,6 +1709,8 @@ main(
 
     sec_d11();
     sec_d12();
+    sec_removed_share(0);
+    sec_removed_share(1);
 
     printf("\n# summary: %d recorded deviation(s) (see DEVIATIONS-SMB.md)\n",
            ndev);

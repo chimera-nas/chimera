@@ -4,6 +4,28 @@
 
 #include "nfs4_procs.h"
 
+/*
+ * Put the saved filehandle back as the current one.  Shared by the per-op path
+ * below and by the VFS-compound path; the caller has already established that
+ * something was saved.
+ *
+ * Restoring the saved handle also restores its export and re-derives the squash
+ * from the original credential (the saved export may differ from the current
+ * one).
+ */
+void
+chimera_nfs4_restorefh_apply(struct nfs_request *req)
+{
+    memcpy(req->fh, req->saved_fh, req->saved_fhlen);
+    req->fhlen = req->saved_fhlen;
+
+    req->export_id = req->saved_export_id;
+    req->cred      = req->orig_cred;
+    chimera_nfs_squash_cred(&req->cred,
+                            chimera_nfs_get_export_by_id(req->thread->shared,
+                                                         req->export_id));
+} /* chimera_nfs4_restorefh_apply */
+
 void
 chimera_nfs4_restorefh(
     struct chimera_server_nfs_thread *thread,
@@ -19,17 +41,7 @@ chimera_nfs4_restorefh(
         return;
     }
 
-    memcpy(req->fh, req->saved_fh, req->saved_fhlen);
-    req->fhlen = req->saved_fhlen;
-
-    /* Restoring the saved handle also restores its export and re-derives the
-     * squash from the original credential (the saved export may differ from the
-     * current one). */
-    req->export_id = req->saved_export_id;
-    req->cred      = req->orig_cred;
-    chimera_nfs_squash_cred(&req->cred,
-                            chimera_nfs_get_export_by_id(req->thread->shared,
-                                                         req->export_id));
+    chimera_nfs4_restorefh_apply(req);
 
     res->status = NFS4_OK;
 

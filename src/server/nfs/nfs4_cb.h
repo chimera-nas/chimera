@@ -34,16 +34,18 @@ chimera_nfs4_cb_recall_and_wait(
  * Recall the layout `holder` from its client.  The CB_LAYOUTRECALL rides the
  * client's backchannel connection, which is owned by a single thread's evpl
  * (evpl sends are not cross-thread safe).  When called off that owner thread,
- * this self-bounces: it pins `holder` with a ref, queues it on the owner's
- * cb_layoutrecall_queue, and rings cb_doorbell -- the doorbell drain re-enters
- * this function on the owner thread and sends inline.  `holder` is pinned by
- * the caller across the call.
+ * this self-bounces with an independent queue node holding layout and client
+ * pins until RPC completion. `holder` is pinned by the caller across the call.
  */
 struct nfs_layout_state;
 void
 nfs4_cb_recall_holder(
     struct chimera_server_nfs_thread *thread,
     struct nfs_layout_state          *holder);
+
+void
+nfs4_cb_drain_layoutrecall_queue(
+    struct chimera_server_nfs_thread *thread);
 
 /*
  * Run deferred-operation resumes that were bounced to `thread` (their home
@@ -52,3 +54,14 @@ nfs4_cb_recall_holder(
 void
 nfs4_cb_drain_resume_queue(
     struct chimera_server_nfs_thread *thread);
+
+/* Exclude this compound's privately returned exact layout slots while still
+ * recalling every conflicting peer. The view is retained through resume. */
+struct nfs_layout_recall_view;
+void chimera_nfs4_cb_recall_and_wait_view(
+    struct chimera_server_nfs_thread    *thread,
+    const uint8_t                       *fh,
+    uint32_t                             fhlen,
+    void (                              *resume )(void *arg),
+    void                                *resume_arg,
+    const struct nfs_layout_recall_view *view);

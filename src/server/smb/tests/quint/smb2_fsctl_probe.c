@@ -837,6 +837,11 @@ probe_object_id(struct smb2_conn *c)
           "  ... GET_OBJECT_ID returns the ID with the new extended part "
           "(0x%08x, %u bytes)", st, out_len);
 
+    out = smb2_ioctl_out(c, 0x000900C0u, a.file_id, NULL, 0, 64, &st, &out_len);
+    CHECK(st == ST_SUCCESS && out && out_len == 64 && memcmp(out, oid, 16) == 0 &&
+          memcmp(out + 16, ext, 48) == 0,
+          "CREATE_OR_GET returns the persisted ID and extended data (0x%08x)", st);
+
     st = smb2_ioctl(c, SMB2_FSCTL_DELETE_OBJECT_ID, a.file_id, NULL, 0);
     CHECK(st == ST_SUCCESS, "DELETE_OBJECT_ID -> 0x%08x", st);
     st = smb2_ioctl(c, SMB2_FSCTL_SET_OBJECT_ID, b.file_id, oid, sizeof(oid));

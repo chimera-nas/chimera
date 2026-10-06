@@ -33,6 +33,67 @@ static int failures;
             } \
         } while (0)
 
+static void
+test_unlinked_directory(struct fuse_sim *sim)
+{
+    struct fuse_entry_out entry  = { 0 };
+    struct fuse_open_out  opened = { 0 };
+    uint64_t              storage[16];
+    uint8_t              *buf         = (uint8_t *) storage;
+    size_t                dot_size    = FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET + 1);
+    size_t                dotdot_size = FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET + 2);
+    int                   rc;
+
+    /* Root avoids the DAC gate's incidental backend open. No other user or
+     * descriptor may pin this inode: OPENDIR alone must keep it alive. */
+    rc = fuse_sim_mkdir(sim, FUSE_ROOT_ID, "open-removed-dir", 0700, 0, &entry);
+    CHECK(rc == 0 && entry.nodeid != 0, "root creates directory to remove while open (rc %d)", rc);
+    if (rc != 0 || entry.nodeid == 0) {
+        return;
+    }
+    rc = fuse_sim_opendir(sim, entry.nodeid, &opened);
+    CHECK(rc == 0 && opened.fh != 0, "root OPENDIR retains the directory (rc %d)", rc);
+    if (rc != 0 || opened.fh == 0) {
+        fuse_sim_rmdir(sim, FUSE_ROOT_ID, "open-removed-dir");
+        return;
+    }
+    rc = fuse_sim_rmdir(sim, FUSE_ROOT_ID, "open-removed-dir");
+    CHECK(rc == 0, "RMDIR removes an open empty directory (rc %d)", rc);
+
+    /* FUSE rewinds a directory by issuing READDIR at offset zero again. Both
+     * sweeps must return only dot entries, followed by a successful EOF. */
+    for (unsigned int pass = 0; rc == 0 && pass < 2; pass++) {
+        size_t outlen = 0;
+
+        rc = fuse_sim_readdir(sim, entry.nodeid, opened.fh, 0,
+                              buf, sizeof(storage), &outlen);
+        CHECK(rc == 0 && outlen == dot_size + dotdot_size,
+              "unlinked directory READDIR/rewind pass %u succeeds (rc %d, %zu bytes)",
+              pass, rc, outlen);
+        if (rc != 0 || outlen != dot_size + dotdot_size) {
+            break;
+        }
+        const struct fuse_dirent *dot    = (const struct fuse_dirent *) buf;
+        const struct fuse_dirent *dotdot = (const struct fuse_dirent *) (buf + dot_size);
+
+        CHECK(dot->namelen == 1 && dot->name[0] == '.' &&
+              dotdot->namelen == 2 && memcmp(dotdot->name, "..", 2) == 0,
+              "unlinked directory pass %u contains only dot entries", pass);
+        uint64_t                  cookie = dotdot->off;
+        CHECK(cookie != 0, "unlinked directory pass %u advances its cursor", pass);
+        if (cookie == 0) {
+            break;
+        }
+        outlen = 0;
+        rc     = fuse_sim_readdir(sim, entry.nodeid, opened.fh, cookie,
+                                  buf, sizeof(storage), &outlen);
+        CHECK(rc == 0 && outlen == 0,
+              "unlinked directory pass %u reaches EOF (rc %d, %zu bytes)", pass, rc, outlen);
+    }
+    rc = fuse_sim_releasedir(sim, entry.nodeid, opened.fh);
+    CHECK(rc == 0, "RELEASEDIR drops the unlinked directory (rc %d)", rc);
+} /* test_unlinked_directory */
+
 int
 main(
     int   argc,
@@ -64,6 +125,8 @@ main(
     CHECK(sim.proto_minor > 0, "INIT completed over the socketpair (ABI 7.%u)",
           sim.proto_minor);
     CHECK(sim.max_write >= 4096, "negotiated max_write %u", sim.max_write);
+
+    test_unlinked_directory(&sim);
 
     /* --- a file, created and used entirely through the wire --- */
 

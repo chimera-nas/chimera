@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "nfs4_reply.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 
@@ -18,6 +19,15 @@ chimera_nfs4_test_stateid(
     struct TEST_STATEID4resok *resok = &res->tsr_resok4;
     struct nfs_state_table    *table = &thread->shared->nfs4_state_table;
     uint32_t                   i;
+    uint64_t                   bytes = (uint64_t) sizeof(nfsstat4) * args->num_ts_stateids;
+
+    if (!chimera_nfs4_reply_fits(req, bytes)) {
+        resok->num_tsr_status_codes = 0;
+        resok->tsr_status_codes     = NULL;
+        res->tsr_status             = NFS4ERR_REP_TOO_BIG;
+        chimera_nfs4_compound_complete(req, res->tsr_status);
+        return;
+    }
 
     resok->num_tsr_status_codes = args->num_ts_stateids;
     resok->tsr_status_codes     = xdr_dbuf_alloc_space(

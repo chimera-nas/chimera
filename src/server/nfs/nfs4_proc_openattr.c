@@ -3,11 +3,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
-#include "nfs4_status.h"
 #include "nfs4_named_attr.h"
 #include "server/server.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
 
 /*
  * OPENATTR (RFC 7530 §16.21 / RFC 8881 §18.17): set the current filehandle to
@@ -25,66 +22,6 @@
  * empty until a named attribute is written.
  */
 
-static void
-chimera_nfs4_openattr_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request  *req = private_data;
-    struct OPENATTR4res *res = &req->res_compound.resarray[req->index].opopenattr;
-    uint8_t              attrdir_fh[NFS4_FHSIZE];
-    int                  attrdir_len;
-
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-    req->handle = NULL;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    /* The VFS named-stream backend attaches streams only to regular files, so a
-     * named-attribute directory exists only for a regular file. */
-    if (!S_ISREG(attr->va_mode)) {
-        res->status = NFS4ERR_NOTSUPP;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    attrdir_len = chimera_nfs4_make_attrdir_fh(attrdir_fh, req->fh, req->fhlen);
-
-    memcpy(req->fh, attrdir_fh, attrdir_len);
-    req->fhlen = attrdir_len;
-
-    res->status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_openattr_getattr_complete */
-
-static void
-chimera_nfs4_openattr_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request  *req = private_data;
-    struct OPENATTR4res *res = &req->res_compound.resarray[req->index].opopenattr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    req->handle = handle;
-
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        CHIMERA_VFS_ATTR_MODE,
-                        chimera_nfs4_openattr_getattr_complete,
-                        req);
-} /* chimera_nfs4_openattr_open_callback */
 
 void
 chimera_nfs4_openattr(
@@ -94,6 +31,8 @@ chimera_nfs4_openattr(
     struct nfs_resop4                *resop)
 {
     struct OPENATTR4res *res = &resop->opopenattr;
+
+    req->handle = NULL;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -110,21 +49,5 @@ chimera_nfs4_openattr(
         return;
     }
 
-    /* Named streams are one VFS feature shared by SMB ADS and NFSv4 named
-     * attributes: gate on the same switch, and require the backend that owns
-     * this object to support named streams. */
-    if (!chimera_server_config_get_named_streams(thread->shared->config) ||
-        !(chimera_vfs_module_capabilities(thread->vfs_thread, req->fh, req->fhlen) &
-          CHIMERA_VFS_CAP_NAMED_STREAMS)) {
-        res->status = NFS4ERR_NOTSUPP;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_nfs4_openattr_open_callback,
-                        req);
+    chimera_nfs4_compound_single(thread, req);
 } /* chimera_nfs4_openattr */

@@ -2,88 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include <xxhash.h>
-
 #include "nfs4_procs.h"
 #include "nfs4_attr.h"
-#include "server/server.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
-#include "vfs/vfs_claim.h"
-#include "nfs4_status.h"
-
-static void
-chimera_nfs4_link_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *r_attr,
-    struct chimera_vfs_attrs *r_dir_pre_attr,
-    struct chimera_vfs_attrs *r_dir_post_attr,
-    void                     *private_data)
-{
-    struct nfs_request *req = private_data;
-    struct LINK4res    *res = &req->res_compound.resarray[req->index].oplink;
-    nfsstat4            status;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        status      = chimera_nfs4_errno_to_nfsstat4(error_code);
-        res->status = status;
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        chimera_nfs4_compound_complete(req, status);
-        return;
-    }
-
-    res->status = NFS4_OK;
-
-    chimera_nfs4_set_changeinfo(&res->resok4.cinfo, r_dir_pre_attr, r_dir_post_attr);
-
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-
-    chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_link_complete */
-
-static void
-chimera_nfs4_link_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct LINK4args                 *args;
-    struct LINK4res                  *res;
-
-    args = &req->args_compound->argarray[req->index].oplink;
-    res  = &req->res_compound.resarray[req->index].oplink;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = NFS4ERR_IO;
-        chimera_nfs4_compound_complete(req,
-                                       chimera_nfs4_errno_to_nfsstat4(error_code));
-        return;
-    }
-
-    req->handle = handle;
-
-    chimera_vfs_link_at(
-        thread->vfs_thread,
-        &req->cred,
-        req->saved_fh,
-        req->saved_fhlen,
-        req->fh,
-        req->fhlen,
-        args->newname.data,
-        args->newname.len,
-        0,
-        0,
-        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
-        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
-        NULL,
-        NULL,
-        chimera_nfs4_link_complete,
-        req);
-
-} /* chimera_nfs4_link_open_callback */
-
 
 void
 chimera_nfs4_link(
@@ -108,15 +28,5 @@ chimera_nfs4_link(
         return;
     }
 
-    /* RFC 8881 §18.9.4 (hard link to a delegated file must recall the
-     * delegation) is now enforced centrally by chimera_vfs_link_at(), which
-     * recalls any caching lease on the SAVEFH source before linking. */
-    chimera_vfs_open_fh(thread->vfs_thread,
-                        &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs4_link_open_callback,
-                        req);
-
-} /* chimera_nfs4_create */
+    chimera_nfs4_compound_single(thread, req);
+} /* chimera_nfs4_link */

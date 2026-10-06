@@ -22,7 +22,6 @@
 #include "common/macros.h"
 #include "common/common_config.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
 #include "prometheus-c.h"
 
 SYMBOL_EXPORT struct chimera_client_config *

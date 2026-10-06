@@ -119,7 +119,7 @@ nfs4_root_lookup(
  * Enter an export from the namespace root: enforce the export's security
  * policy (NFS4ERR_WRONGSEC on violation), adopt its identity and squash
  * policy, and resolve full_path from the VFS root into the LOOKUP result
- * handle.  Completes the current LOOKUP op.
+ * handle. Runs the LOOKUP and any encodable same-export suffix together.
  *
  * @param nfs_thread Pointer to the NFS server thread context.
  * @param req        Pointer to the NFS request structure.
@@ -157,14 +157,10 @@ nfs4_root_export_fh_get(
     struct nfs_request               *req,
     nfs4_root_export_fh_callback_t    callback);
 
-/**
- * As nfs4_root_export_fh_get, but always resolves the export's path afresh
- * (re-priming the cache) instead of serving the cached FH.  Used by PUTROOTFH
- * so a backend whose root FH changed (e.g. a remount under a live export)
- * heals on the next mount rather than serving a stale handle forever.
- */
-SYMBOL_EXPORT void
-nfs4_root_export_fh_resolve(
+/* Resolve a cold namespace root through the shared builder and finish lifecycle.
+ * The protocol cursor and its credential are preserved for the continuation. */
+void
+chimera_nfs4_compound_root_resolve(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req,
     nfs4_root_export_fh_callback_t    callback);
@@ -186,24 +182,247 @@ nfs4_root_junction_check(
 /**
  * Shared PUTROOTFH/PUTPUBFH implementation: install the NFSv4 namespace root
  * (the "/" export's real backend root when one is configured, the synthetic
- * pseudo-root otherwise) as the current filehandle and complete the op.
+ * pseudo-root otherwise). A real root shares its sequence with an encodable
+ * same-export suffix.
  */
 void
 chimera_nfs4_putrootfh_common(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req);
 
-/**
- * Populate directory entries for the NFSv4 pseudo-root directory.
- *
- * @param thread Pointer to the NFS server thread context.
- * @param req    Pointer to the NFS request structure.
+/* A pseudo-root page contributes operations to the shared sequence. Its
+ * snapshot and reply buffers survive rejected finishes; only fill publishes. */
+struct nfs4_root_readdir_state;
+
+int nfs4_root_readdir_add(
+    struct chimera_vfs_compound     *compound,
+    struct nfs_request              *req,
+    struct READDIR4args             *args,
+    struct nfs4_root_readdir_state **state,
+    nfsstat4                        *input_status,
+    nfsstat4                        *verify_status);
+
+void nfs4_root_readdir_reset(
+    struct nfs4_root_readdir_state *state,
+    uint64_t                        reply_reserve);
+
+void nfs4_root_readdir_fill(
+    const struct nfs4_root_readdir_state *state,
+    struct READDIR4res                   *res);
+
+void nfs4_root_readdir_free(
+    struct nfs4_root_readdir_state *state);
+
+
+/*
+ * Result marshalling shared between the per-operation handlers and the
+ * VFS-compound path (nfs4_compound_vfs.c), which runs the tail of a COMPOUND as
+ * one VFS sequence and fills every result at the end.  Each takes the object's
+ * file handle and export identity explicitly: successive operations can
+ * address different objects under different exports before request publication.
  */
-SYMBOL_EXPORT void
-nfs4_root_readdir(
+nfsstat4
+chimera_nfs4_getattr_fill(
+    struct nfs_request             *req,
+    uint16_t                        export_id,
+    struct GETATTR4args            *args,
+    struct GETATTR4res             *res,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen,
+    bool                            change_projected);
+
+uint32_t
+chimera_nfs4_access_requested(
+    struct nfs_request             *req,
+    const struct ACCESS4args       *args,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen);
+
+void
+chimera_nfs4_access_fill(
+    struct nfs_request             *req,
+    struct ACCESS4res              *res,
+    uint32_t                        requested,
+    uint32_t                        granted,
+    const struct chimera_vfs_attrs *attr);
+
+nfsstat4
+chimera_nfs4_getfh_fill(
+    struct nfs_request *req,
+    struct GETFH4res   *res,
+    const uint8_t      *fh,
+    int                 fhlen);
+
+void
+chimera_nfs4_compound_state(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req);
 
+nfsstat4
+chimera_nfs4_open_nonreg_status(
+    uint8_t minorversion,
+    mode_t  mode);
+
+/* Returns true if the OPEN parked on a CB_NULL probe and will complete itself;
+ * the caller must then not complete it. */
+bool
+chimera_nfs4_open_grant_delegation(
+    struct nfs_request             *req,
+    struct OPEN4res                *res,
+    const struct chimera_vfs_attrs *file_attr,
+    bool                            allow_grant);
+
+nfsstat4
+chimera_nfs4_readlink_fill(
+    struct nfs_request  *req,
+    struct READLINK4res *res,
+    const char          *target,
+    uint32_t             target_len);
+
+bool
+chimera_nfs4_fh_is_vfs_mount_root(
+    struct chimera_vfs *vfs,
+    const uint8_t      *fh,
+    uint32_t            fhlen);
+
+void
+chimera_nfs4_savefh_apply(
+    struct nfs_request *req,
+    const uint8_t      *fh,
+    int                 fhlen);
+
+void
+chimera_nfs4_restorefh_apply(
+    struct nfs_request *req);
+
+/* VERIFY/NVERIFY's whole answer: does the object's state match what the client
+ * sent?  Shared with the sequence path, which asks it as the op finishes so a
+ * mismatch stops what is behind it -- which is what VERIFY is for. */
+nfsstat4
+chimera_nfs4_verify_status(
+    struct nfs_request             *req,
+    uint16_t                        export_id,
+    uint32_t                        index,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen);
+
+nfsstat4
+chimera_nfs4_validate_create(
+    const struct CREATE4args *args);
+
+nfsstat4
+chimera_nfs4_commit_fill(
+    struct nfs_request             *req,
+    struct COMMIT4res              *res,
+    const struct chimera_vfs_attrs *pre_attr);
+
+int
+chimera_nfs4_readdir_entry_fill(
+    struct nfs_request             *req,
+    uint16_t                        export_id,
+    struct READDIR4args            *args,
+    struct nfs_nfs4_readdir_cursor *cursor,
+    const uint8_t                  *dir_fh,
+    int                             dir_fhlen,
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs);
+
+/* The most a GETXATTR value may occupy in the reply (RFC 8276 leaves the bound
+ * to the server). */
+#define CHIMERA_NFS4_GETXATTR_MAX 65536
+
+nfsstat4
+chimera_nfs4_xattr_validate_name(
+    uint32_t wire_len);
+
+nfsstat4
+chimera_nfs4_xattr_stage_name(
+    struct nfs_request *req,
+    const void         *wire_name,
+    uint32_t            wire_len,
+    char              **name,
+    int                *namelen);
+
+uint32_t
+chimera_nfs4_xattr_stage_max(
+    struct nfs_request *req,
+    uint32_t            cap);
+
+nfsstat4
+chimera_nfs4_getxattr_fill(
+    struct nfs_request  *req,
+    struct GETXATTR4res *res,
+    const void          *value,
+    uint32_t             value_len);
+
+void
+chimera_nfs4_setxattr_fill(
+    struct SETXATTR4res   *res,
+    const struct timespec *pre_ctime,
+    const struct timespec *post_ctime);
+
+void
+chimera_nfs4_removexattr_fill(
+    struct REMOVEXATTR4res *res,
+    const struct timespec  *pre_ctime,
+    const struct timespec  *post_ctime);
+
+nfsstat4
+chimera_nfs4_listxattrs_fill(
+    struct nfs_request    *req,
+    struct LISTXATTRS4res *res,
+    const char            *names,
+    uint32_t               count,
+    uint32_t               eof,
+    uint64_t               cookie);
+
+/*
+ * Per-export read-only policy for one operation, as the compound dispatcher
+ * applies it.  Only call after nfs4_op_check_minor has accepted the op.
+ */
+nfsstat4
+nfs4_rofs_policy(
+    const struct nfs_argop4 *argop,
+    bool                     export_ro,
+    bool                     have_saved,
+    bool                     saved_ro);
+
+nfsstat4
+nfs4_rofs_gate(
+    struct nfs_request      *req,
+    const struct nfs_argop4 *argop);
+
+/*
+ * Try to run the whole remainder of this COMPOUND (ops [req->index,
+ * num_resarray)) as one VFS compound.  Returns non-zero if the sequence was
+ * submitted -- in which case the request is now owned by that submission and
+ * the caller must not touch it -- and zero if any part of the remainder is not
+ * expressible, leaving the request exactly as it was for op-by-op dispatch.
+ */
+int
+chimera_nfs4_compound_try_vfs(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req);
+
+/* Execute one operation through the shared builder after protocol validation. */
+void
+chimera_nfs4_compound_single(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req);
+
+/* Resolve an export entry and its same-export suffix through the shared
+ * encoder. export is a caller-owned snapshot; path is copied by the VFS. */
+void
+chimera_nfs4_compound_export(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    const struct chimera_nfs_export *export,
+    const char                       *path);
 
 void
 chimera_nfs4_access(
@@ -218,6 +437,11 @@ chimera_nfs4_getfh(
     struct nfs_request               *req,
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop);
+
+int
+chimera_nfs4_next_op_handles_wrongsec(
+    const struct nfs_request *req,
+    uint32_t                  index);
 
 void
 chimera_nfs4_putrootfh(
@@ -894,6 +1118,9 @@ chimera_nfs4_compound_complete(
     nfsstat4            status)
 {
     struct chimera_server_nfs_thread *thread = req->thread;
+
+    nfs4_change_finish(thread->shared->nfs4_state_table.change_table,
+                       &req->change_observations, true);
 
     if (status != NFS4_OK) {
         req->res_compound.status = status;

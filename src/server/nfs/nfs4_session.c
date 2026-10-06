@@ -1032,11 +1032,13 @@ nfs4_client_confirm(
  * lock while holding a client lock (nfs_client_destroy runs outside it by
  * design). */
 SYMBOL_EXPORT nfsstat4
-nfs4_clients_check_io_denied(
-    struct nfs4_client_table *table,
-    const uint8_t            *fh,
-    uint16_t                  fh_len,
-    uint32_t                  requested_access)
+nfs4_clients_check_io_denied_except(
+    struct nfs4_client_table     *table,
+    const uint8_t                *fh,
+    uint16_t                      fh_len,
+    uint32_t                      requested_access,
+    struct nfs_open_state *const *closed,
+    uint32_t                      num_closed)
 {
     struct nfs4_client *c, *tmp;
     nfsstat4            status = NFS4_OK;
@@ -1048,8 +1050,8 @@ nfs4_clients_check_io_denied(
         if (!c->unified) {
             continue;
         }
-        status = nfs_client_check_io_denied(c->unified, NULL, fh, fh_len,
-                                            requested_access);
+        status = nfs_client_check_io_denied_except(c->unified, NULL, fh, fh_len,
+                                                   requested_access, closed, num_closed);
         if (status != NFS4_OK) {
             break;
         }
@@ -1057,7 +1059,18 @@ nfs4_clients_check_io_denied(
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
     return status;
+} /* nfs4_clients_check_io_denied_except */
+
+SYMBOL_EXPORT nfsstat4
+nfs4_clients_check_io_denied(
+    struct nfs4_client_table *table,
+    const uint8_t            *fh,
+    uint16_t                  fh_len,
+    uint32_t                  requested_access)
+{
+    return nfs4_clients_check_io_denied_except(table, fh, fh_len, requested_access, NULL, 0);
 } /* nfs4_clients_check_io_denied */
+
 
 /* Cross-client analogue of nfs_client_has_open_state_for_fh: true if ANY
  * client holds this file open.  A removed-but-open file keeps its filehandle
@@ -1065,10 +1078,12 @@ nfs4_clients_check_io_denied(
  * §16.26.5), so PUTFH must consult every client's open state, not just the one
  * bound to the querying connection. */
 SYMBOL_EXPORT bool
-nfs4_clients_have_open_state(
-    struct nfs4_client_table *table,
-    const uint8_t            *fh,
-    uint16_t                  fh_len)
+nfs4_clients_have_open_state_except(
+    struct nfs4_client_table     *table,
+    const uint8_t                *fh,
+    uint16_t                      fh_len,
+    struct nfs_open_state *const *closed,
+    uint32_t                      num_closed)
 {
     struct nfs4_client *c, *tmp;
     bool                found = false;
@@ -1080,7 +1095,7 @@ nfs4_clients_have_open_state(
         if (!c->unified) {
             continue;
         }
-        if (nfs_client_has_open_state_for_fh(c->unified, fh, fh_len)) {
+        if (nfs_client_has_open_state_for_fh_except(c->unified, fh, fh_len, closed, num_closed)) {
             found = true;
             break;
         }
@@ -1088,6 +1103,15 @@ nfs4_clients_have_open_state(
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
     return found;
+} /* nfs4_clients_have_open_state_except */
+
+SYMBOL_EXPORT bool
+nfs4_clients_have_open_state(
+    struct nfs4_client_table *table,
+    const uint8_t            *fh,
+    uint16_t                  fh_len)
+{
+    return nfs4_clients_have_open_state_except(table, fh, fh_len, NULL, 0);
 } /* nfs4_clients_have_open_state */
 
 /* Recover the byte-string of an NFSv4 lock-owner from the (clientid,
@@ -1357,6 +1381,36 @@ nfs4_session_find_by_clientid(
     return session;
 } /* nfs4_session_find_by_clientid */
 
+nfsstat4
+nfs4_client_reserve_compound(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    struct nfs_client       **out)
+{
+    struct nfs4_client *client;
+    nfsstat4            status = NFS4ERR_STALE_CLIENTID;
+
+    *out = NULL;
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), client);
+    if (client && client->nfs4_client_confirmed && client->unified) {
+        /* Removal owns this same table lock before dropping the client for
+         * teardown. Acquire its pin before letting removal proceed; taking a
+         * session reference and pinning later leaves a unified-client UAF. */
+        if (nfs_client_reserve_compound(client->unified)) {
+            *out   = client->unified;
+            status = NFS4_OK;
+        } else {
+            evpl_mutex_lock(&client->unified->lock);
+            status = client->unified->expired ? NFS4ERR_EXPIRED : NFS4ERR_DELAY;
+            evpl_mutex_unlock(&client->unified->lock);
+        }
+    }
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+    return status;
+} /* nfs4_client_reserve_compound */
+
 void
 nfs4_destroy_session(
     struct nfs4_client_table *table,
@@ -1518,19 +1572,19 @@ nfs4_session_unbind_conn(struct evpl_rpc2_conn *conn)
  * the capture (only when sa_cachethis was set and the slot is in
  * IN_PROGRESS for this request).
  *
- * If the reply exceeds the per-slot or per-session byte cap, the
- * capture is silently demoted: cached_buf stays NULL and finalize will
- * transition the slot to COMPLETED instead of CACHED.  A future retry
- * will then return NFS4ERR_RETRY_UNCACHED_REP, which RFC 5661 2.10.6.1
- * explicitly permits (the server may override sa_cachethis).
+ * SEQUENCE reserved storage and the full per-slot budget before succeeding.
+ * Per-operation wire admission keeps the logical reply within that budget,
+ * including a REP_TOO_BIG_TO_CACHE error. Capture cannot fail for allocation
+ * or per-session capacity after filesystem operations have executed.
  */
 static void
 nfs4_replay_capture_reply(
-    const struct evpl_iovec *iov,
-    int                      niov,
-    int                      total_length,
-    uint32_t                 body_offset,
-    void                    *private_data)
+    const struct evpl_iovec           *iov,
+    int                                niov,
+    int                                total_length,
+    uint32_t                           body_offset,
+    const struct evpl_rpc2_rdma_chunk *write_chunk,
+    void                              *private_data)
 {
     struct nfs_request      *req     = private_data;
     struct nfs4_session     *session = req->replay_session;
@@ -1538,60 +1592,84 @@ nfs4_replay_capture_reply(
     uint8_t                 *buf;
     uint32_t                 rpc_len;
     size_t                   total;
-    size_t                   cur;
 
     if (!slot || !session || total_length <= (int) body_offset) {
         return;
     }
 
-    /* Store the RPC reply, not the whole outgoing message: body_offset bytes of
-     * transport framing are rebuilt for the retransmit anyway, and keeping them
-     * made a reply captured over RDMA unparseable on replay -- which
-     * nfs4_send_cached_reply's caller turns into a fatal abort. */
+    /* Store the complete procedure results. The capture length includes any
+     * omitted Write payload and padding, which the copy helper restores.
+     * RPC headers, security wrapping and chunk placement belong to each send. */
     rpc_len = (uint32_t) total_length - body_offset;
     total   = rpc_len;
 
-    if (rpc_len > session->replay_maxresp_cached) {
-        return;
-    }
-
-    /* Reserve against the per-session byte cap with a CAS loop -- no lock.
-     * The slot is IN_PROGRESS for this (owning) thread, so no other thread
-     * touches slot->cached_buf concurrently; only the session-wide counter is
-     * shared. */
-    cur = atomic_load_explicit(&session->replay_bytes_in_use, memory_order_relaxed);
-    do {
-        if (cur + total > NFS4_MAX_REPLY_CACHE_BYTES) {
-            return;  /* demote: over the per-session cap */
-        }
-    } while (!atomic_compare_exchange_weak_explicit(
-                 &session->replay_bytes_in_use, &cur, cur + total,
-                 memory_order_relaxed, memory_order_relaxed));
-
-    buf = malloc(rpc_len);
-    if (!buf) {
-        atomic_fetch_sub_explicit(&session->replay_bytes_in_use, total,
-                                  memory_order_relaxed);
-        return;
-    }
+    chimera_nfs_abort_if(!req->replay_buffer || rpc_len > req->replay_capacity,
+                         "NFSv4 reply exceeded admitted cache storage");
+    buf = req->replay_buffer;
 
     /* Concatenate iovecs into a single contiguous buffer.  Loses
      * zerocopy on replay; acceptable since cachethis=true is rare for
      * iovec-heavy ops (READ/READLINK) and replay is rare in general. */
-    if (nfs_drc_copy_rpc_reply(iov, niov, body_offset, buf, rpc_len) != rpc_len) {
-        free(buf);
-        atomic_fetch_sub_explicit(&session->replay_bytes_in_use, total,
-                                  memory_order_relaxed);
-        return;
-    }
+    chimera_nfs_abort_if(nfs_drc_copy_rpc_reply(iov, niov, body_offset, write_chunk, buf, rpc_len) != rpc_len,
+                         "NFSv4 reply capture has incomplete vectors");
 
     /* Same thread runs finalize next, which release-publishes these via the
      * state_word store -- a later reader that observes CACHED sees them. */
-    slot->cached_buf = buf;
-    slot->cached_len = rpc_len;
-
-    nfs4_replay_bytes_delta(req, rpc_len);
+    /* Shrinking is optional: allocation failure cannot discard the answer.
+     * Charge the actual retained allocation when a shrink is declined. */
+    void *compact = realloc(buf, rpc_len);
+    if (compact) {
+        buf = compact;
+    } else {
+        total = req->replay_capacity;
+    }
+    slot->cached_buf      = buf;
+    slot->cached_len      = rpc_len;
+    slot->cached_capacity = total;
+    atomic_fetch_sub_explicit(&session->replay_bytes_in_use, req->replay_capacity - total,
+                              memory_order_relaxed);
+    nfs4_replay_bytes_delta(req, (int64_t) total - req->replay_capacity);
+    req->replay_buffer   = NULL;
+    req->replay_capacity = 0;
 } /* nfs4_replay_capture_reply */
+
+/* Called with the slot exclusively IN_PROGRESS, while its previous answer
+ * is still intact. On failure the caller restores the old state word, so a
+ * SEQUENCE error neither advances the slot nor destroys its cached reply. */
+static nfsstat4
+nfs4_replay_reserve(
+    struct nfs4_session     *session,
+    struct nfs4_replay_slot *slot,
+    struct nfs_request      *req,
+    bool                     cachethis)
+{
+    if (!cachethis || !req->encoding) {
+        return NFS4_OK;
+    }
+    uint32_t capacity = session->replay_maxresp_cached;
+    if (!capacity) {
+        return NFS4ERR_REP_TOO_BIG_TO_CACHE;
+    }
+    void    *buffer = malloc(capacity);
+    if (!buffer) {
+        return NFS4ERR_RESOURCE;
+    }
+    size_t   old_bytes = slot->cached_buf ?
+        (slot->cached_capacity ? slot->cached_capacity : slot->cached_len) : 0;
+    size_t   used = atomic_load_explicit(&session->replay_bytes_in_use, memory_order_relaxed);
+    do {
+        if (used - old_bytes + capacity > NFS4_MAX_REPLY_CACHE_BYTES) {
+            free(buffer);
+            return NFS4ERR_RESOURCE;
+        }
+    } while (!atomic_compare_exchange_weak_explicit(&session->replay_bytes_in_use, &used,
+                                                    used - old_bytes + capacity, memory_order_relaxed,
+                                                    memory_order_relaxed));
+    req->replay_buffer   = buffer;
+    req->replay_capacity = capacity;
+    nfs4_replay_bytes_delta(req, capacity);
+    return NFS4_OK;
+} /* nfs4_replay_reserve */
 
 /*
  * Install the capture callback on the encoding so it fires from inside
@@ -1704,6 +1782,11 @@ nfs4_replay_slot_acquire(
                     memory_order_acq_rel, memory_order_acquire)) {
                 continue;  /* lost the race; re-read and re-evaluate */
             }
+            status = nfs4_replay_reserve(session, slot, req, cachethis);
+            if (status != NFS4_OK) {
+                atomic_store_explicit(&slot->state_word, cur, memory_order_release);
+                break;
+            }
             req->replay_slot        = slot;
             req->replay_session     = session;
             req->replay_slot_id     = slotid;
@@ -1724,16 +1807,24 @@ nfs4_replay_slot_acquire(
                         memory_order_acq_rel, memory_order_acquire)) {
                     continue;
                 }
+                status = nfs4_replay_reserve(session, slot, req, cachethis);
+                if (status != NFS4_OK) {
+                    atomic_store_explicit(&slot->state_word, cur, memory_order_release);
+                    break;
+                }
                 /* We won the transition; reclaim any prior cached reply -- the
                  * client acknowledged it by moving on.  Only the CAS winner
                  * reaches here, so the free is unraced. */
                 if (state == NFS4_SLOT_CACHED && slot->cached_buf) {
-                    freed_bytes = slot->cached_len;
+                    freed_bytes = slot->cached_capacity ? slot->cached_capacity : slot->cached_len;
                     free(slot->cached_buf);
-                    slot->cached_buf = NULL;
-                    slot->cached_len = 0;
-                    atomic_fetch_sub_explicit(&session->replay_bytes_in_use,
-                                              freed_bytes, memory_order_relaxed);
+                    slot->cached_buf      = NULL;
+                    slot->cached_len      = 0;
+                    slot->cached_capacity = 0;
+                    if (!req->replay_buffer) {
+                        atomic_fetch_sub_explicit(&session->replay_bytes_in_use,
+                                                  freed_bytes, memory_order_relaxed);
+                    }
                     /* The client acknowledged the prior seqid by advancing;
                      * drop its persisted reply so the KV store keeps at most
                      * one entry per slot (the in-memory invariant). */
@@ -1893,6 +1984,17 @@ nfs4_replay_slot_finalize(struct nfs_request *req)
 
     if (!slot || !session) {
         return;
+    }
+
+    /* Normally capture transferred the reserved buffer to the slot. Keep
+     * teardown balanced if a transport error produced no procedure results. */
+    if (req->replay_buffer) {
+        free(req->replay_buffer);
+        atomic_fetch_sub_explicit(&session->replay_bytes_in_use, req->replay_capacity,
+                                  memory_order_relaxed);
+        nfs4_replay_bytes_delta(req, -(int64_t) req->replay_capacity);
+        req->replay_buffer   = NULL;
+        req->replay_capacity = 0;
     }
 
     /* NB: at this point req->encoding has already been freed inside

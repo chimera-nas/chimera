@@ -9,6 +9,18 @@ target_link_libraries(fuse_nodeid_test chimera_common pthread)
 
 add_test(chimera/fuse/nodeid_table fuse_nodeid_test)
 
+add_executable(fuse_readdir_staging_test fuse_readdir_staging_test.c ../fuse_node_table.c)
+target_compile_options(fuse_readdir_staging_test PRIVATE -ffunction-sections)
+target_link_options(fuse_readdir_staging_test PRIVATE -Wl,--gc-sections)
+target_link_libraries(fuse_readdir_staging_test chimera_vfs chimera_common evpl pthread)
+add_test(chimera/fuse/readdir_staging fuse_readdir_staging_test)
+
+add_executable(fuse_flush_staging_test fuse_flush_staging_test.c)
+target_compile_options(fuse_flush_staging_test PRIVATE -ffunction-sections)
+target_link_options(fuse_flush_staging_test PRIVATE -Wl,--gc-sections)
+target_link_libraries(fuse_flush_staging_test chimera_vfs chimera_common evpl pthread)
+add_test(chimera/fuse/flush_staging fuse_flush_staging_test)
+
 # End-to-end tests need to actually establish kernel FUSE mounts, which the
 # test environment may not permit (the CI configure and test containers
 # differ, so this is probed at test time): fuse_probe checks /dev/fuse +

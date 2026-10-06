@@ -29,7 +29,7 @@ chimera_posix_dup(int oldfd)
     chimera_dup_handle(worker->client_thread, handle);
 
     /* Allocate a new fd entry pointing to the same handle */
-    newfd = chimera_posix_fd_alloc(posix, handle);
+    newfd = chimera_posix_fd_alloc_description(posix, handle, 0, entry->ofd);
 
     if (newfd < 0) {
         /* Failed to allocate new fd - release the extra reference */
@@ -38,11 +38,6 @@ chimera_posix_dup(int oldfd)
         errno = EMFILE;
         return -1;
     }
-
-    /* POSIX: the duplicate SHARES the open file description -- one file
-     * offset, one set of status flags -- so an lseek or F_SETFL through
-     * either descriptor is visible through the other. */
-    chimera_posix_ofd_adopt(posix, &posix->fds[newfd], entry);
 
     chimera_posix_fd_release(entry, 0);
 

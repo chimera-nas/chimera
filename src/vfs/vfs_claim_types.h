@@ -145,66 +145,81 @@ typedef void (*chimera_vfs_claim_revoked_cb_t)(
 /* -------------------------------------------------------------------- */
 
 struct chimera_vfs_claim {
+    /* Attempt-local admission view. These pinned claims are logically closed
+     * by earlier operations of the same compound. They remain visible to
+     * other probes. Clear this borrowed view before publishing the new claim. */
+    const struct chimera_vfs_claim *const *admit_excluded;
+    uint32_t                               admit_num_excluded;
+    /* Transient typed-execution identity for an ACCESS insertion fence.
+     * Never retain this borrowed cookie on a published claim. */
+    const void                            *admission_cookie;
     enum chimera_claim_construct construct;
     enum chimera_claim_class klass;
 
-    uint8_t                         used;       /* raw granted mode         */
-    uint8_t                         advertised; /* what admission sees; see
-                                                 * chimera_claim_advertise_drop */
-    uint8_t                         denied;     /* ACCESS only: explicit
-                                                 * share-deny bits (R/W/D)  */
+    uint8_t                                used; /* raw granted mode         */
+    uint8_t                                advertised; /* what admission sees; see
+                                                        * chimera_claim_advertise_drop */
+    uint8_t                                denied; /* ACCESS only: explicit
+                                                    * share-deny bits (R/W/D)  */
 
-    uint64_t                        offset;     /* RANGE only; others 0     */
-    uint64_t                        length;     /* UINT64_MAX = to-EOF,
-                                                 * 0 = genuine zero-byte    */
+    uint64_t                               offset; /* RANGE only; others 0     */
+    uint64_t                               length; /* UINT64_MAX = to-EOF,
+                                                    * 0 = genuine zero-byte    */
 
-    struct chimera_claim_owner      owner;
-    struct chimera_vfs_open_handle *op_handle;  /* HOLDER-circle anchor for
-                                                 *  own-handle self-ops      */
+    struct chimera_claim_owner             owner;
+    struct chimera_vfs_open_handle        *op_handle; /* HOLDER-circle anchor for
+                                                       *  own-handle self-ops      */
 
     /* Holder-lite: the same open's cache grant, when this ACCESS claim's
      * open also holds one.  Replaces the old own_lease_key / cb_private
      * three-arm matching: a hard share conflict against this open may park
      * on own_cache's H break instead of denying (the batch escape, R8). */
-    struct chimera_vfs_claim_grant *own_cache;
+    struct chimera_vfs_claim_grant        *own_cache;
 
     /* Cache-class claims embedded in a refcounted grant point back to it;
      * NULL for ACCESS/RANGE claims and the implicit claim. */
-    struct chimera_vfs_claim_grant *grant;
+    struct chimera_vfs_claim_grant        *grant;
 
     /* Parked (disconnected durable) softening: advertised H and the H
      * denial are masked while set.  Maintained by chimera_vfs_claim_park. */
-    uint8_t                         parked;
+    uint8_t                                parked;
+
+    /* The typed lock engine owns backend projection separately from local
+     * admission. Do not automatically project this range on acquire/pump. */
+    uint8_t                                local_only;
+    /* Provisional coverage arbitrates acquisition, but is not a published
+     * record lock that GETLK may report to an application. */
+    uint8_t                                provisional;
 
     /* Break machinery (all guarded by file->lock). */
-    uint8_t                         break_state;
-    uint8_t                         break_needed_mode;
-    uint8_t                         break_floor;
-    uint8_t                         break_notified;
-    uint64_t                        break_deadline; /* stopwatch ticks      */
+    uint8_t                                break_state;
+    uint8_t                                break_needed_mode;
+    uint8_t                                break_floor;
+    uint8_t                                break_notified;
+    uint64_t                               break_deadline; /* stopwatch ticks      */
 
     /* Callbacks (per-claim; a grant's members share the grant's).  A claim
      * with no break_cb is unbreakable (binding). */
-    chimera_vfs_claim_break_cb_t    break_cb;
-    chimera_vfs_claim_is_alive_cb_t is_alive_cb;
-    chimera_vfs_claim_revoked_cb_t  revoked_cb;
-    void                           *cb_private;
+    chimera_vfs_claim_break_cb_t           break_cb;
+    chimera_vfs_claim_is_alive_cb_t        is_alive_cb;
+    chimera_vfs_claim_revoked_cb_t         revoked_cb;
+    void                                  *cb_private;
 
     /* Node-local tag the protocol may stamp for conflict reporting (e.g.
      * the SMB open's pid for the durable-purge loop); copied by value into
      * chimera_vfs_claim_conflict.policy_tag. */
-    uint64_t                        policy_tag;
+    uint64_t                               policy_tag;
 
     /* Backend projection: the CAP_LEASE token behind this claim (RANGE
      * records; 0 = not projected).  Written by the projection layer under
      * file->lock; released fire-and-forget on claim release. */
-    uint64_t                        backend_token;
+    uint64_t                               backend_token;
 
-    struct chimera_vfs_file_state  *file;
+    struct chimera_vfs_file_state         *file;
 
     /* Intrusive linkage on the per-file class list. */
-    struct chimera_vfs_claim       *prev;
-    struct chimera_vfs_claim       *next;
+    struct chimera_vfs_claim              *prev;
+    struct chimera_vfs_claim              *next;
 };
 
 /* -------------------------------------------------------------------- */
@@ -245,6 +260,7 @@ struct chimera_vfs_claim_conflict {
     uint8_t                    used;
     uint8_t                    breaking;     /* holder is mid-break         */
     uint8_t                    revocable;    /* holder could be recalled    */
+    uint8_t                    admission_fenced; /* control conflict, no holder */
     uint64_t                   offset;
     uint64_t                   length;
     uint64_t                   policy_tag;   /* node-local consumer stamp   */

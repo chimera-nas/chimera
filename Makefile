@@ -130,8 +130,12 @@ reuse-lint:
 sdk-include-check:
 	@bash scripts/check_vfs_sdk_includes.sh
 
+.PHONY: northside-api-check
+northside-api-check:
+	@python3 scripts/check_vfs_northside.py
+
 .PHONY: check
-check: syntax-check sdk-include-check build_release test_release build_debug test_debug build_clang reuse-lint copyright-check
+check: syntax-check sdk-include-check northside-api-check build_release test_release build_debug test_debug build_clang reuse-lint copyright-check
 	@echo "All checks passed! (test tier: $(if $(CTEST_TIER),extended,quick))"
 
 # The same sweep as `check` over the full test suite.  Recursive rather than a
@@ -147,4 +151,3 @@ docs:
 	@echo "API documentation: docs/api.html"
 	@echo "OpenAPI spec: docs/openapi.json"
 	@echo "Run 'cd docs && python3 -m http.server' to preview locally"
-

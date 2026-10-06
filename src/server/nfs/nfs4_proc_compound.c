@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "nfs4_reply.h"
 #include "nfs4_session.h"
 #include "nfs4_recovery.h"
 #include "evpl/evpl.h"
@@ -77,22 +78,19 @@ nfs4_release_write_args(
  * Only call this after nfs4_op_check_minor has accepted the op (argop is then a
  * valid matrix index).
  */
-static nfsstat4
-nfs4_rofs_gate(
-    struct nfs_request      *req,
-    const struct nfs_argop4 *argop)
+nfsstat4
+nfs4_rofs_policy(
+    const struct nfs_argop4 *argop,
+    bool                     export_ro,
+    bool                     have_saved,
+    bool                     saved_ro)
 {
-    struct chimera_server_nfs_shared *shared = req->thread->shared;
-    struct nfs4_rofs_input            in     = {
-        .op            = argop->argop,
-        .export_ro     = chimera_nfs_export_id_is_ro(shared, req->export_id),
-        .have_saved_fh = req->saved_fhlen != 0,
+    struct nfs4_rofs_input in = {
+        .op              = argop->argop,
+        .export_ro       = export_ro,
+        .have_saved_fh   = have_saved,
+        .saved_export_ro = saved_ro,
     };
-
-    if (in.have_saved_fh) {
-        in.saved_export_ro = chimera_nfs_export_id_is_ro(shared,
-                                                         req->saved_export_id);
-    }
 
     if (argop->argop == OP_OPEN) {
         in.open_writes =
@@ -103,6 +101,16 @@ nfs4_rofs_gate(
     }
 
     return nfs4_rofs_check(&in);
+} /* nfs4_rofs_policy */
+
+nfsstat4
+nfs4_rofs_gate(
+    struct nfs_request      *req,
+    const struct nfs_argop4 *argop)
+{
+    return nfs4_rofs_policy(argop,
+                            chimera_nfs_export_id_is_ro(req->thread->shared, req->export_id), req->saved_fhlen != 0,
+                            chimera_nfs_export_id_is_ro(req->thread->shared, req->saved_export_id));
 } /* nfs4_rofs_gate */
 
 /*
@@ -143,6 +151,32 @@ nfs4_fail_undispatched_op(
         argop->opwrite.data.niov = 0;
     }
 } /* nfs4_fail_undispatched_op */
+
+/* Most standalone replies occupy only their preallocated result slot. These
+ * are the exceptions which may bypass the shared encoder. TEST_STATEID checks
+ * its variable array in its own handler. The synthetic GETATTR fallback has
+ * no backend ACL: its fixed root/attribute-directory attributes fit in the
+ * same workspace that the old dispatch floor provided. */
+static uint64_t
+nfs4_standalone_reply_bytes(uint32_t opcode)
+{
+    switch (opcode) {
+        case OP_EXCHANGE_ID:
+            return ((sizeof(struct nfs_impl_id4) + 7) & ~UINT64_C(7)) +
+                   ((sizeof("chimera.org") + 7) & ~UINT64_C(7)) +
+                   ((sizeof("chimera") + 7) & ~UINT64_C(7)) +
+                   3 * sizeof(uint64_t); /* server owner, scope, MACH_CRED bitmap */
+        case OP_GETFH:
+            return CHIMERA_NFS_FH_MAX;
+        case OP_GETATTR:
+            return 8192;
+        case OP_SECINFO:
+        case OP_SECINFO_NO_NAME:
+            return 4 * sizeof(struct secinfo4);
+        default:
+            return 0;
+    } /* switch */
+} /* nfs4_standalone_reply_bytes */
 
 void
 chimera_nfs4_compound_process(
@@ -189,20 +223,17 @@ chimera_nfs4_compound_process(
         req->index               = req->res_compound.num_resarray;
     }
 
+    /* A shared span publishes multiple results at once; standalone handlers
+     * publish one. Account each accepted result exactly once in either case. */
+    while (req->reply_accounted < (uint32_t) req->index &&
+           req->reply_accounted < req->res_compound.num_resarray) {
+        req->reply_bytes += marshall_length_nfs_resop4(
+            &req->res_compound.resarray[req->reply_accounted++]);
+    }
+
     if (req->index >= req->res_compound.num_resarray) {
 
         //dump_COMPOUND4res("res", &req->res_compound);
-
-        if (req->session &&
-            req->res_compound.status == NFS4_OK &&
-            req->res_compound.num_resarray > 0 &&
-            req->session->nfs4_session_fore_attrs.ca_maxresponsesize &&
-            marshall_length_COMPOUND4res(&req->res_compound) >
-            (int) req->session->nfs4_session_fore_attrs.ca_maxresponsesize) {
-            req->index = req->res_compound.num_resarray - 1;
-            chimera_nfs4_compound_complete(req, NFS4ERR_REP_TOO_BIG);
-            return;
-        }
 
         rc = shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
@@ -238,9 +269,9 @@ chimera_nfs4_compound_process(
     {
         nfsstat4 gate;
 
-        /* If the response buffer is running low, fail early with RESOURCE
-         * rather than letting individual procs abort on allocation failure */
-        if (req->encoding->dbuf->size - req->encoding->dbuf->used < 8192) {
+        /* Every path must leave the generated reply and RDMA view arrays
+         * available before an operation can change state. */
+        if (!chimera_nfs4_reply_fits(req, 0)) {
             gate = NFS4ERR_RESOURCE;
         } else {
             gate = nfs4_op_check_minor(argop->argop,
@@ -254,6 +285,22 @@ chimera_nfs4_compound_process(
         }
 
         if (gate != NFS4_OK) {
+            nfs4_fail_undispatched_op(thread, argop, resop, gate);
+            chimera_nfs4_compound_complete(req, gate);
+        } else if (chimera_nfs4_compound_try_vfs(thread, req)) {
+            /* A run of the ops left in this COMPOUND was expressible as a
+             * single VFS compound and has been submitted as one; its completion
+             * fills those results and re-enters the reply path -- at the end of
+             * the COMPOUND, or, when the run stopped short, back here for the
+             * op that ended it.  The attempt is made here rather than at
+             * compound entry so that a leading SEQUENCE dispatches normally and
+             * the rest of a 4.1+ COMPOUND is still reachable. */
+        } else if (!chimera_nfs4_reply_fits(req, nfs4_standalone_reply_bytes(argop->argop))) {
+            nfs4_fail_undispatched_op(thread, argop, resop, NFS4ERR_RESOURCE);
+            chimera_nfs4_compound_complete(req, NFS4ERR_RESOURCE);
+        } else if ((gate = chimera_nfs4_reply_check(req, req->index,
+                                                    req->reply_bytes + chimera_nfs4_reply_op_bound(req, argop), req->
+                                                    reply_chunk_bytes, true)) != NFS4_OK) {
             nfs4_fail_undispatched_op(thread, argop, resop, gate);
             chimera_nfs4_compound_complete(req, gate);
         } else {
@@ -585,11 +632,15 @@ chimera_nfs4_compound(
     req->saved_export_id             = 0;
     req->minorversion                = (uint8_t) args->minorversion;
     req->seen_sequence               = false;
+    req->reply_read_iov              = 1; /* The final XDR framing/padding flush. */
+    req->reply_read_seen             = false;
+    req->reply_bytes                 = 12 + chimera_nfs4_reply_pad(args->tag.len);
+    req->reply_chunk_bytes           = 0;
+    req->reply_accounted             = 0;
     req->current_stateid_valid       = false;
     req->saved_current_stateid_valid = false;
-    req->open_4_0_owner              = NULL;
-    req->lock_4_0_open_owner         = NULL;
-    req->lock_4_0_lock_owner         = NULL;
+    req->compound_probe_resume       = NULL;
+    req->compound_probe_private      = NULL;
 
     /* NFSv4.0 duplicate-request caching is handled before the compound is
      * decoded, by the dispatcher wrapper in nfs4_v40_drc.c.  That wrapper cannot
@@ -619,6 +670,7 @@ chimera_nfs4_compound(
         req->res_compound.num_resarray = 0;
         req->res_compound.resarray     = NULL;
 
+        nfs4_release_write_args(thread, req, args);
         rc = thread->shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
             NULL,
@@ -638,6 +690,7 @@ chimera_nfs4_compound(
         req->res_compound.num_resarray = 0;
         req->res_compound.resarray     = NULL;
 
+        nfs4_release_write_args(thread, req, args);
         rc = thread->shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
             NULL,
@@ -649,13 +702,21 @@ chimera_nfs4_compound(
         return;
     }
 
-    rc = xdr_dbuf_alloc_array(&req->res_compound, resarray, args->num_argarray, req->encoding->dbuf);
+    /* Result slots themselves must not consume the send-time reservation.
+    * Widen the product before admission; the wire operation count is not a
+    * trustworthy bound on the decoded response array's in-memory size. */
+    if (chimera_nfs4_reply_fits(req, (uint64_t) args->num_argarray * sizeof(struct nfs_resop4))) {
+        rc = xdr_dbuf_alloc_array(&req->res_compound, resarray, args->num_argarray, req->encoding->dbuf);
+    } else {
+        rc = -1;
+    }
 
     if (rc) {
         req->res_compound.status       = NFS4ERR_RESOURCE;
         req->res_compound.num_resarray = 0;
         req->res_compound.resarray     = NULL;
 
+        nfs4_release_write_args(thread, req, args);
         rc = thread->shared->nfs_v4.send_reply_NFSPROC4_COMPOUND(
             thread->evpl,
             NULL,

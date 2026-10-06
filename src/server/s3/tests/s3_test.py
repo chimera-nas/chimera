@@ -40,6 +40,7 @@ class ChimeraServer:
         self.process = None
         self.temp_dir = None
         self.config_path = None
+        self.log = None
 
     def _find_chimera(self):
         """Find the chimera daemon executable."""
@@ -182,10 +183,24 @@ class ChimeraServer:
 
         print(f"Starting chimera server: {' '.join(cmd)}")
 
+        server_env = os.environ.copy()
+        fixture = server_env.get('CHIMERA_S3_FINISH_FIXTURE')
+        if fixture:
+            preload = server_env.get('LD_PRELOAD', '')
+            libraries = subprocess.check_output(['ldd', self.chimera_path], text=True)
+            asan = next((line.split('=>', 1)[1].split()[0]
+                         for line in libraries.splitlines()
+                         if 'libasan.so' in line and '=>' in line), None)
+            server_env['LD_PRELOAD'] = ':'.join(p for p in (asan, preload, fixture) if p)
+            server_env['CHIMERA_S3_FINISH_LOG'] = os.path.join(self.temp_dir, 'finish-retry.log')
+
+        if not self.debug:
+            self.log = open(os.path.join(self.temp_dir, 'daemon.log'), 'wb')
         self.process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE if not self.debug else None,
-            stderr=subprocess.PIPE if not self.debug else None,
+            env=server_env,
+            stdout=self.log,
+            stderr=self.log,
         )
 
         # Wait for the S3 port to actually accept connections. A fixed sleep
@@ -195,8 +210,8 @@ class ChimeraServer:
         deadline = time.time() + 30
         while True:
             if self.process.poll() is not None:
-                stdout, stderr = self.process.communicate()
-                raise RuntimeError(f"Server failed to start: {stderr.decode() if stderr else 'unknown error'}")
+                self.dump_failure()
+                raise RuntimeError(f"Server failed to start: exit {self.process.returncode}")
             try:
                 with socket.create_connection(('127.0.0.1', s3_port), timeout=1):
                     break
@@ -206,6 +221,32 @@ class ChimeraServer:
                 time.sleep(0.1)
 
         print("Server started successfully")
+
+    def dump_failure(self):
+        for name in ('daemon.log', 'finish-retry.log'):
+            path = os.path.join(self.temp_dir, name)
+            if os.path.exists(path):
+                with open(path, 'rb') as stream:
+                    stream.seek(0, os.SEEK_END)
+                    length = stream.tell()
+                    stream.seek(max(0, length - 65536))
+                    print(f'=== {name} (last 64 KiB) ===', file=sys.stderr)
+                    print(stream.read().decode(errors='replace'), file=sys.stderr)
+
+    def verify_finish_retries(self):
+        if not os.environ.get('CHIMERA_S3_FINISH_FIXTURE'):
+            return
+        with open(os.path.join(self.temp_dir, 'finish-retry.log')) as stream:
+            records = [tuple(map(int, line.split())) for line in stream]
+        assert records, 'finish rejection fixture never exercised'
+        exhausted = int(os.environ.get('CHIMERA_S3_FINISH_REJECTIONS', '2')) >= 9
+        for attempts, rejected, status, vetoed in records:
+            assert (attempts, rejected) == ((9, 9) if exhausted else (3, 2)), records
+            assert (status != 0) == exhausted, records
+        if os.environ.get('CHIMERA_S3_RETRY_VETO_MUTATIONS'):
+            assert any(record[3] for record in records), 'no mutating retry path exercised'
+            assert any(not record[3] for record in records), 'no read-only finish rejection exercised'
+        print(f'Validated {len(records)} compound retry boundaries')
 
     def stop(self):
         """Stop the chimera server and cleanup."""
@@ -219,6 +260,9 @@ class ChimeraServer:
                 self.process.wait()
             self.process = None
 
+        if self.log:
+            self.log.close()
+            self.log = None
         if self.temp_dir and os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir, ignore_errors=True)
             self.temp_dir = None
@@ -251,6 +295,7 @@ def create_s3_client(endpoint_url='http://localhost:5000',
         aws_secret_access_key=secret_key,
         config=Config(
             signature_version=signature_version,
+            retries={'max_attempts': 0} if os.environ.get('CHIMERA_S3_FINISH_FIXTURE') else {},
             s3={'addressing_style': 'path'}
         ),
         region_name='us-east-1'
@@ -441,6 +486,20 @@ def test_delete_objects(client, bucket):
             raise
     print("  Verified quiet-mode delete removed the key - OK")
 
+    # A per-key error must not suppress subsequent independent deletes.
+    client.put_object(Bucket=bucket, Key='batch/nonempty/child', Body=b'x')
+    client.put_object(Bucket=bucket, Key='batch/after-error', Body=b'y')
+    response = client.delete_objects(Bucket=bucket, Delete={'Objects': [
+        {'Key': 'batch/nonempty'}, {'Key': 'batch/after-error'}]})
+    assert [e['Key'] for e in response.get('Errors', [])] == ['batch/nonempty']
+    assert [e['Key'] for e in response.get('Deleted', [])] == ['batch/after-error']
+
+    # Maximum batch exercises dynamic storage and synchronous completion depth.
+    maximum = [{'Key': f'batch/missing-{i}'} for i in range(999)]
+    maximum.append({'Key': 'batch/nonempty/child'})
+    response = client.delete_objects(Bucket=bucket, Delete={'Objects': maximum})
+    assert len(response.get('Deleted', [])) == 1000
+    assert not response.get('Errors'), response.get('Errors')
     print("Batch DeleteObjects tests passed!")
 
 
@@ -601,7 +660,7 @@ def test_multipart(client, bucket):
     ListMultipartUploads / Complete / Abort) and that the assembled object
     matches the concatenation of part bodies. The same test exercises
     different VFS assembly paths depending on backend capabilities:
-    move_range (memfs), copy_range (linux/io_uring), or read+write
+    copy_range (memfs/linux/io_uring), or read+write
     (cairn/diskfs).
     """
     print("Testing multipart upload operations...")
@@ -659,9 +718,7 @@ def test_multipart(client, bucket):
     upload_ids = [u['UploadId'] for u in uploads.get('Uploads', [])]
     assert upload_id not in upload_ids
 
-    # Multi-part roundtrip with varied sizes (block-aligned to keep
-    # memfs move_range happy; backends without alignment requirements
-    # are not picky).
+    # Multi-part roundtrip with varied sizes.
     _multipart_upload_and_verify(
         client, bucket, 'mpdir/varied',
         part_sizes=[5 * 1024 * 1024, 6 * 1024 * 1024, 5 * 1024 * 1024],
@@ -868,7 +925,7 @@ def _canonical_query(query):
 
 
 def streaming_put(host, port, access_key, secret_key, region, bucket, key,
-                  data, chunk_size, query=None):
+                  data, chunk_size, query=None, invalid_final=False):
     """Perform a SigV4 streaming (aws-chunked) PUT by hand.
 
     Mirrors what the AWS CLI / SDKs send when they default to
@@ -960,7 +1017,8 @@ def streaming_put(host, port, access_key, secret_key, region, bucket, key,
         body += c + b'\r\n'
 
     final_sig = chunk_signature(b'')
-    body += f'0;chunk-signature={final_sig}\r\n\r\n'.encode('utf-8')
+    final_size = 'z' if invalid_final else '0'
+    body += f'{final_size};chunk-signature={final_sig}\r\n\r\n'.encode('utf-8')
 
     assert len(body) == content_length, \
         f'content-length mismatch: declared {content_length}, body {len(body)}'
@@ -1036,6 +1094,66 @@ def signed_s3_post_xml(host, port, access_key, secret_key, region, bucket, key,
     return status, resp_body
 
 
+def test_multipart_retry(client, bucket):
+    """A publication failure must not consume the parts needed by Complete retry."""
+    # A child makes the target a nonempty directory. Complete only addresses
+    # this leaf at its final LINK/RENAME, after copying all uploaded parts into
+    # the scratch file; this is a real late failure, not manifest rejection.
+    key = 'multipart-publication-retry'
+    blocker = key + '/keep'
+    client.put_object(Bucket=bucket, Key=blocker, Body=b'keep me')
+    upload_id = client.create_multipart_upload(Bucket=bucket, Key=key)['UploadId']
+    payloads = [bytes(range(256)) * (5 * 1024 * 1024 // 256),
+                bytes(reversed(range(256))) * 256]
+    parts = []
+    for number, payload in enumerate(payloads, 1):
+        response = client.upload_part(Bucket=bucket, Key=key, UploadId=upload_id,
+                                      PartNumber=number, Body=payload)
+        parts.append({'PartNumber': number, 'ETag': response['ETag']})
+
+    # Observe one failed Complete; SDK retries must not conceal where failure
+    # occurred. Both the native range path and buffered multi-compound path
+    # are exercised by registering this test against memfs and cairn.
+    once = boto3.client(
+        's3', endpoint_url=client.meta.endpoint_url,
+        aws_access_key_id='myaccessid', aws_secret_access_key='mysecretkey',
+        config=client.meta.config.merge(Config(retries={'total_max_attempts': 1})),
+        region_name='us-east-1')
+    try:
+        try:
+            once.complete_multipart_upload(
+                Bucket=bucket, Key=key, UploadId=upload_id,
+                MultipartUpload={'Parts': parts})
+            raise AssertionError('Complete unexpectedly replaced a nonempty directory')
+        except ClientError as error:
+            assert error.response['ResponseMetadata']['HTTPStatusCode'] >= 400
+        assert client.get_object(Bucket=bucket, Key=blocker)['Body'].read() == b'keep me'
+        retained = client.list_parts(Bucket=bucket, Key=key, UploadId=upload_id)['Parts']
+        assert [(p['PartNumber'], p['ETag'], p['Size']) for p in retained] == [
+            (p['PartNumber'], p['ETag'], len(payload))
+            for p, payload in zip(parts, payloads)]
+
+        client.delete_object(Bucket=bucket, Key=blocker)
+        # The backing-directory representation remains after its child is
+        # removed; DeleteObject's type-neutral remove can remove the empty dir.
+        client.delete_object(Bucket=bucket, Key=key)
+        once.complete_multipart_upload(
+            Bucket=bucket, Key=key, UploadId=upload_id,
+            MultipartUpload={'Parts': parts})
+        actual = client.get_object(Bucket=bucket, Key=key)['Body'].read()
+        assert actual == b''.join(payloads), 'Complete retry lost uploaded part bytes'
+        client.delete_object(Bucket=bucket, Key=key)
+    finally:
+        once.close()
+        # Harmless if successful Complete already detached the upload.
+        try:
+            client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+        except ClientError as error:
+            if error.response['Error']['Code'] != 'NoSuchUpload':
+                raise
+    print('Multipart late-failure retry preserves every part byte!')
+
+
 def test_streaming(client, bucket):
     """Test SigV4 streaming (aws-chunked) uploads.
 
@@ -1072,6 +1190,21 @@ def test_streaming(client, bucket):
         )
         print(f"  streaming PUT {key} ({len(data)} bytes, "
               f"{chunk_size} chunk) -> content matches")
+
+    # Fail after enough payload to create a scratch file and accept a chunk.
+    # Failed streams must remove named temporaries as well as unnamed files.
+    failed_prefix = 'streamdir/failed/'
+    status, _ = streaming_put('localhost', 5000, 'myaccessid', 'mysecretkey',
+                              'us-east-1', bucket, failed_prefix + 'object',
+                              b'x' * 300000, 64 * 1024, invalid_final=True)
+    assert status == 400, f'malformed streaming PUT returned HTTP {status}'
+    deadline = time.monotonic() + 3
+    while True:
+        remaining = client.list_objects_v2(Bucket=bucket, Prefix=failed_prefix).get('Contents', [])
+        if not remaining or time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    assert not remaining, f'failed upload left object or scratch file: {remaining}'
 
     # Multipart UploadPart also defaults to aws-chunked in the AWS CLI/SDKs for
     # large files. Initiate via boto3, stream the parts by hand, complete via
@@ -1217,7 +1350,162 @@ def test_awscli(client, bucket):
     print("AWS CLI tests passed!")
 
 
+def test_bucket_compounds(client, bucket):
+    """Create/delete publication and cleanup beyond one result-array page."""
+    name = 'compound-bucket-lifecycle'
+    client.create_bucket(Bucket=name)
+    client.put_object(Bucket=name, Key='nested/a/file', Body=b'live')
+    try:
+        client.delete_bucket(Bucket=name)
+        raise AssertionError('nonempty bucket deletion succeeded')
+    except ClientError as error:
+        assert error.response['Error']['Code'] == 'BucketNotEmpty'
+    assert client.get_object(Bucket=name, Key='nested/a/file')['Body'].read() == b'live'
+    client.delete_object(Bucket=name, Key='nested/a/file')
+    # More empty directory paths than the compound's retained-result cap.
+    keys = [f'dir-{i}/object' for i in range(1025)]
+    for key in keys:
+        client.put_object(Bucket=name, Key=key, Body=b'')
+    for start in range(0, len(keys), 1000):
+        result = client.delete_objects(Bucket=name, Delete={
+            'Objects': [{'Key': key} for key in keys[start:start + 1000]]})
+        assert not result.get('Errors'), result.get('Errors')
+    client.delete_bucket(Bucket=name)
+    try:
+        client.head_bucket(Bucket=name)
+        raise AssertionError('deleted bucket is still published')
+    except ClientError as error:
+        assert error.response['ResponseMetadata']['HTTPStatusCode'] == 404
+    # Preserve the filesystem adapter's existing empty-leaf object mapping.
+    # Removing the marker must never remove its directory or descendants.
+    marker_bucket = 'compound-marker-lifecycle'
+    marker = 'marker/'
+    client.create_bucket(Bucket=marker_bucket)
+    client.put_object(Bucket=marker_bucket, Key=marker, Body=b'nonempty marker body')
+    for listing in (client.list_objects, client.list_objects_v2):
+        response = listing(Bucket=marker_bucket, Prefix=marker, Delimiter='/')
+        assert [obj['Key'] for obj in response.get('Contents', [])] == [marker]
+        assert response.get('CommonPrefixes', []) == []
+    child = marker + 'child'
+    client.put_object(Bucket=marker_bucket, Key=child, Body=b'keep descendant')
+    client.delete_object(Bucket=marker_bucket, Key=marker)
+    client.delete_object(Bucket=marker_bucket, Key=marker)  # Missing marker is harmless.
+    assert client.get_object(Bucket=marker_bucket, Key=child)['Body'].read() == b'keep descendant'
+    client.put_object(Bucket=marker_bucket, Key=marker, Body=b'recreated marker')
+    result = client.delete_objects(Bucket=marker_bucket, Delete={
+        'Objects': [{'Key': marker}] + [{'Key': f'missing-{i}/'} for i in range(999)]})
+    assert not result.get('Errors'), result.get('Errors')
+    response = client.list_objects_v2(Bucket=marker_bucket, Prefix=marker)
+    assert [obj['Key'] for obj in response.get('Contents', [])] == [child]
+    assert client.get_object(Bucket=marker_bucket, Key=child)['Body'].read() == b'keep descendant'
+    client.delete_object(Bucket=marker_bucket, Key=child)
+    client.delete_bucket(Bucket=marker_bucket)
+    print('Bucket compound lifecycle tests passed!')
+
+
+def test_compound_boundaries(client, bucket):
+    """Exercise transfer boundaries, retained metadata, and replacement."""
+    limit = 128 * 1024  # Default configured S3 compound chunk size.
+    for size in (0, 1, limit - 1, limit, limit + 1, 3 * limit + 71):
+        key = f'compound/nested/object-{size}'
+        data = bytes((i * 17 + i // 251) % 256 for i in range(size))
+        client.put_object(Bucket=bucket, Key=key, Body=data,
+                          Metadata={'boundary': str(size)},
+                          Tagging='scope=compound&kind=boundary')
+        response = client.get_object(Bucket=bucket, Key=key)
+        assert response['Body'].read() == data, f'payload mismatch at size {size}'
+        assert response['Metadata']['boundary'] == str(size)
+        head = client.head_object(Bucket=bucket, Key=key)
+        assert head['ContentLength'] == size
+        assert head['Metadata']['boundary'] == str(size)
+        assert int(head['ResponseMetadata']['HTTPHeaders']['x-amz-tagging-count']) == 2
+        if size > 1:
+            first = max(0, limit - 9) if size > limit else 0
+            last = min(size - 1, first + 31)
+            result = client.get_object(Bucket=bucket, Key=key,
+                                       Range=f'bytes={first}-{last}')
+            assert result['Body'].read() == data[first:last + 1]
+        # Replacing a multi-chunk object must not leave a stale suffix.
+        client.put_object(Bucket=bucket, Key=key, Body=b'replaced')
+        assert client.get_object(Bucket=bucket, Key=key)['Body'].read() == b'replaced'
+        client.delete_object(Bucket=bucket, Key=key)
+    source = 'compound/copy-source'
+    data = bytes(range(256)) * 2049
+    client.put_object(Bucket=bucket, Key=source, Body=data, Metadata={'source': 'value'})
+    for directive in ('COPY', 'REPLACE'):
+        copied = f'compound/copy-{directive}'
+        client.copy_object(Bucket=bucket, Key=copied,
+                           CopySource={'Bucket': bucket, 'Key': source},
+                           MetadataDirective=directive, Metadata={'replacement': 'value'})
+        response = client.get_object(Bucket=bucket, Key=copied)
+        assert response['Body'].read() == data
+        assert response['Metadata'] == ({'source': 'value'} if directive == 'COPY'
+                                        else {'replacement': 'value'})
+        client.delete_object(Bucket=bucket, Key=copied)
+    copied = 'compound/upload-part-copy'
+    upload = client.create_multipart_upload(Bucket=bucket, Key=copied)['UploadId']
+    part = client.upload_part_copy(Bucket=bucket, Key=copied, UploadId=upload,
+                                   PartNumber=1, CopySource={'Bucket': bucket, 'Key': source})
+    manifest = {'Parts': [{'PartNumber': 1, 'ETag': part['CopyPartResult']['ETag']}]}
+    listed = client.list_parts(Bucket=bucket, Key=copied, UploadId=upload)['Parts']
+    assert len(listed) == 1 and listed[0]['Size'] == len(data)
+    client.complete_multipart_upload(Bucket=bucket, Key=copied, UploadId=upload,
+                                     MultipartUpload=manifest)
+    assert client.get_object(Bucket=bucket, Key=copied)['Body'].read() == data
+    client.delete_object(Bucket=bucket, Key=copied)
+    client.delete_object(Bucket=bucket, Key=source)
+    print('Compound transfer boundary tests passed!')
+
+
+def test_acl_tagging(client, bucket):
+    """ACL and tag mutations resolve and operate within one VFS compound."""
+    key = 'compound-acl-tags/object'
+    client.put_object(Bucket=bucket, Key=key, Body=b'payload', ACL='private')
+    client.put_object_acl(Bucket=bucket, Key=key, ACL='public-read')
+    acl = client.get_object_acl(Bucket=bucket, Key=key)
+    assert any(g['Permission'] == 'READ' and
+               g['Grantee'].get('URI', '').endswith('/AllUsers') for g in acl['Grants'])
+    client.put_object_acl(Bucket=bucket, Key=key, ACL='private')
+    acl = client.get_object_acl(Bucket=bucket, Key=key)
+    assert not any(g['Grantee'].get('URI', '').endswith('/AllUsers') for g in acl['Grants'])
+    tags = [{'Key': f'key-{i}', 'Value': f'value & <{i}>'} for i in range(10)]
+    client.put_object_tagging(Bucket=bucket, Key=key, Tagging={'TagSet': tags})
+    got = client.get_object_tagging(Bucket=bucket, Key=key)['TagSet']
+    assert sorted(got, key=lambda t: t['Key']) == tags
+    assert int(client.head_object(Bucket=bucket, Key=key)['ResponseMetadata']['HTTPHeaders']['x-amz-tagging-count']) == 10
+    replacement = [{'Key': 'replacement', 'Value': 'only'}]
+    client.put_object_tagging(Bucket=bucket, Key=key, Tagging={'TagSet': replacement})
+    assert client.get_object_tagging(Bucket=bucket, Key=key)['TagSet'] == replacement
+    client.delete_object_tagging(Bucket=bucket, Key=key)
+    assert client.get_object_tagging(Bucket=bucket, Key=key)['TagSet'] == []
+    client.put_bucket_tagging(Bucket=bucket, Tagging={'TagSet': replacement})
+    assert client.get_bucket_tagging(Bucket=bucket)['TagSet'] == replacement
+    client.delete_bucket_tagging(Bucket=bucket)
+    try:
+        client.get_bucket_tagging(Bucket=bucket)
+        raise AssertionError('empty bucket tags should report NoSuchTagSet')
+    except ClientError as error:
+        assert error.response['Error']['Code'] == 'NoSuchTagSet'
+    client.delete_object(Bucket=bucket, Key=key)
+    print('ACL and tagging compound tests passed!')
+
+
+def test_finish_exhausted(client, bucket):
+    key = 'finish-exhausted'
+    client.put_object(Bucket=bucket, Key=key, Body=b'must remain private')
+    try:
+        client.get_object(Bucket=bucket, Key=key)
+        raise AssertionError('exhausted finish rejection returned successful object')
+    except ClientError as error:
+        assert error.response['ResponseMetadata']['HTTPStatusCode'] == 500
+    client.delete_object(Bucket=bucket, Key=key)
+
+
+
 TESTS = {
+    'bucket_compounds': test_bucket_compounds,
+    'compound_boundaries': test_compound_boundaries,
+    'acl_tagging': test_acl_tagging,
     'put': test_put,
     'get': test_get,
     'head': test_head,
@@ -1226,6 +1514,7 @@ TESTS = {
     'list': test_list,
     'copy': test_copy,
     'multipart': test_multipart,
+    'multipart_retry': test_multipart_retry,
     'streaming': test_streaming,
     'awscli': test_awscli,
 }
@@ -1234,6 +1523,9 @@ TESTS = {
 def run_tests(test_names, backend, signature_version='s3v4', chimera_path=None, debug=False):
     """Run the specified tests against a chimera server."""
 
+    if 'finish_exhausted' in test_names:
+        assert os.environ.get('CHIMERA_S3_FINISH_FIXTURE')
+        TESTS['finish_exhausted'] = test_finish_exhausted
     sig_name = 'V4' if signature_version == 's3v4' else 'V2'
     print(f"Using AWS Signature {sig_name}")
 
@@ -1251,7 +1543,10 @@ def run_tests(test_names, backend, signature_version='s3v4', chimera_path=None, 
                 print(f"\n=== TEST FAILED: {test_name} - {e} ===", file=sys.stderr)
                 import traceback
                 traceback.print_exc()
+                server.dump_failure()
                 return 1
+
+        server.verify_finish_retries()
 
     print("\n=== ALL TESTS PASSED ===")
     return 0
@@ -1260,7 +1555,7 @@ def run_tests(test_names, backend, signature_version='s3v4', chimera_path=None, 
 def main():
     parser = argparse.ArgumentParser(description='S3 test suite')
     parser.add_argument('--test', '-t', action='append', dest='tests',
-                        choices=list(TESTS.keys()) + ['all'],
+                        choices=list(TESTS.keys()) + ['all', 'finish_exhausted'],
                         help='Test(s) to run (can specify multiple)')
     parser.add_argument('--backend', '-b', default='memfs',
                         choices=['memfs', 'linux', 'io_uring', 'diskfs', 'cairn'],

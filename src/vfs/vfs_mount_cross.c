@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "vfs_procs.h"
+#include "vfs_internal_procs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
 #include "common/macros.h"

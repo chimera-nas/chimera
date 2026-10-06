@@ -157,6 +157,45 @@ child_main(
     /* Tell parent we are done with conflict tests. */
     send_sig(c2p[1]);
 
+    /* Observe the backend from an independent process: a partial unlock must
+     * preserve both outside fragments, then a downgrade must replace only its
+     * own bytes. Pipe handshakes make the observations deterministic. */
+    recv_sig(p2c[0]);
+    for (int i = 0; i < 3; i++) {
+        memset(&fl, 0, sizeof(fl));
+        fl.l_type   = F_WRLCK;
+        fl.l_whence = SEEK_SET;
+        fl.l_start  = i * 2;
+        fl.l_len    = 2;
+        if (chimera_posix_fcntl(fd, F_GETLK, &fl) != 0 ||
+            fl.l_type != (i == 1 ? F_UNLCK : F_WRLCK)) {
+            fprintf(stderr, "child: partial unlock corrupted fragment %d\n", i);
+            return 1;
+        }
+    }
+    send_sig(c2p[1]);
+    recv_sig(p2c[0]);
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type   = F_RDLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = 4;
+    fl.l_len    = 2;
+    if (chimera_posix_fcntl(fd, F_SETLK, &fl) != 0) {
+        fprintf(stderr, "child: downgraded range cannot be shared: %s\n", strerror(errno));
+        return 1;
+    }
+    fl.l_type = F_UNLCK;
+    if (chimera_posix_fcntl(fd, F_SETLK, &fl) != 0) {
+        return 1;
+    }
+    fl.l_type = F_WRLCK;
+    if (chimera_posix_fcntl(fd, F_GETLK, &fl) != 0 || fl.l_type != F_RDLCK) {
+        fprintf(stderr, "child: downgrade did not preserve parent's read lock\n");
+        return 1;
+    }
+    fprintf(stderr, "child: cross-proc partial unlock and downgrade: PASS\n");
+    send_sig(c2p[1]);
+
     /* Wait for parent to release its lock. */
     recv_sig(p2c[0]);
 
@@ -619,8 +658,27 @@ main(
     /* Wait for child to finish conflict tests. */
     recv_sig(c2p[0]);
 
-    /* Release the lock. */
-    fl.l_type = F_UNLCK;
+    fl.l_type  = F_UNLCK;
+    fl.l_start = 2;
+    fl.l_len   = 2;
+    if (chimera_posix_fcntl(fd, F_SETLK, &fl) != 0) {
+        posix_test_fail(&env);
+    }
+    send_sig(p2c[1]);
+    recv_sig(c2p[0]);
+    fl.l_type  = F_RDLCK;
+    fl.l_start = 4;
+    fl.l_len   = 2;
+    if (chimera_posix_fcntl(fd, F_SETLK, &fl) != 0) {
+        posix_test_fail(&env);
+    }
+    send_sig(p2c[1]);
+    recv_sig(c2p[0]);
+
+    /* Release every fragment. */
+    fl.l_start = 0;
+    fl.l_len   = 10;
+    fl.l_type  = F_UNLCK;
     chimera_posix_fcntl(fd, F_SETLK, &fl);
     fprintf(stderr, "parent: cross-proc parent releases lock: PASS\n");
 

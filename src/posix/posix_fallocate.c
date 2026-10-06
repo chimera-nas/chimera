@@ -65,6 +65,7 @@ chimera_posix_do_fallocate(
 
     req.opcode                = CHIMERA_CLIENT_OP_ALLOCATE;
     req.allocate.handle       = entry->handle;
+    req.allocate.open_flags   = chimera_posix_fd_open_flags(entry);
     req.allocate.offset       = (uint64_t) offset;
     req.allocate.length       = (uint64_t) len;
     req.allocate.flags        = vfs_flags;

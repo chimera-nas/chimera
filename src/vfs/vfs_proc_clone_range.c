@@ -2,8 +2,9 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_pnfs.h"
+#include "vfs/vfs_claim.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
 #include "vfs_attr_cache.h"
@@ -13,6 +14,8 @@ static void
 chimera_vfs_clone_range_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_clone_range_callback_t callback = request->proto_callback;
+
+    chimera_vfs_io_claim_release(request);
 
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
@@ -33,7 +36,7 @@ chimera_vfs_clone_range_complete(struct chimera_vfs_request *request)
 } /* chimera_vfs_clone_range_complete */
 
 SYMBOL_EXPORT void
-chimera_vfs_clone_range(
+chimera_vfs_clone_range_view(
     struct chimera_vfs_thread         *thread,
     const struct chimera_vfs_cred     *cred,
     struct chimera_vfs_open_handle    *src_handle,
@@ -43,6 +46,8 @@ chimera_vfs_clone_range(
     uint64_t                           length,
     uint64_t                           pre_attr_mask,
     uint64_t                           post_attr_mask,
+    const struct chimera_claim_actor  *src_owner,
+    const struct chimera_vfs_io_view  *dst_view,
     chimera_vfs_clone_range_callback_t callback,
     void                              *private_data)
 {
@@ -87,5 +92,30 @@ chimera_vfs_clone_range(
     request->proto_callback                      = callback;
     request->proto_private_data                  = private_data;
 
-    chimera_vfs_dispatch(request);
+    /* The caller authorizes the source. Mediate destination mutation through
+     * its private view, including cache invalidation and synchronous victims. */
+    (void) src_owner;
+    request->io_handle = dst_handle;
+    chimera_vfs_io_view_copy(&request->io_view, &request->io_owner, dst_view);
+    request->io_owner_valid = request->io_view.owner != NULL;
+    chimera_vfs_io_claim_acquire(request, request->io_view.owner, chimera_vfs_dispatch);
+} /* chimera_vfs_clone_range */
+
+SYMBOL_EXPORT void
+chimera_vfs_clone_range(
+    struct chimera_vfs_thread         *thread,
+    const struct chimera_vfs_cred     *cred,
+    struct chimera_vfs_open_handle    *src_handle,
+    uint64_t                           src_offset,
+    struct chimera_vfs_open_handle    *dst_handle,
+    uint64_t                           dst_offset,
+    uint64_t                           length,
+    uint64_t                           pre_attr_mask,
+    uint64_t                           post_attr_mask,
+    chimera_vfs_clone_range_callback_t callback,
+    void                              *private_data)
+{
+    chimera_vfs_clone_range_view(thread, cred, src_handle, src_offset,
+                                 dst_handle, dst_offset, length, pre_attr_mask, post_attr_mask,
+                                 NULL, NULL, callback, private_data);
 } /* chimera_vfs_clone_range */

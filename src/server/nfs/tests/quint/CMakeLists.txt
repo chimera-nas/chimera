@@ -53,6 +53,10 @@ target_include_directories(nfs3_mbt_probe PRIVATE
 target_link_libraries(nfs3_mbt_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs3_mbt_probe)
+add_test(NAME chimera/server/nfs/mbt/remove_types_remote
+    COMMAND $<TARGET_FILE:nfs3_mbt_probe> --remove-types-remote)
+set_tests_properties(chimera/server/nfs/mbt/remove_types_remote PROPERTIES
+    LABELS "quint;nfs3_mbt;pnfs;memfs" TIMEOUT 60)
 
 add_executable(nfs_pnfs_probe nfs_pnfs_probe.c)
 target_include_directories(nfs_pnfs_probe PRIVATE
@@ -79,6 +83,34 @@ foreach(backend memfs diskfs cairn)
     set_tests_properties(chimera/server/nfs/pnfs/backing_failure_${backend} PROPERTIES
         LABELS "functional;fault_injection;pnfs;${backend}" TIMEOUT 90)
 endforeach()
+# One real RPC must submit one compound; read-only finish fault injection also
+# covers accepted-only replies, bounded retry, guard reset and directory staging.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(nlm_compound_probe nlm_compound_probe.c)
+    set_target_properties(nlm_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    target_include_directories(nlm_compound_probe PRIVATE ${CMAKE_BINARY_DIR}/src/nfs_common)
+    target_link_libraries(nlm_compound_probe chimera_server chimera_nfs_common chimera_metrics chimera_vfs jansson ${CMAKE_DL_LIBS})
+    mbt_add_krb5(nlm_compound_probe)
+    add_test(NAME chimera/server/nfs/mbtaux/compound_probe COMMAND nlm_compound_probe)
+    set_tests_properties(chimera/server/nfs/mbtaux/compound_probe PROPERTIES LABELS "quint;nfsaux_mbt;memfs" TIMEOUT 120)
+    add_executable(nfs3_compound_probe nfs3_compound_probe.c)
+    set_target_properties(nfs3_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    target_include_directories(nfs3_compound_probe PRIVATE
+        ${CMAKE_BINARY_DIR}/src/nfs_common)
+    target_link_libraries(nfs3_compound_probe
+        chimera_server chimera_nfs_common chimera_metrics chimera_vfs jansson ${CMAKE_DL_LIBS})
+    mbt_add_krb5(nfs3_compound_probe)
+    foreach(cback memfs diskfs cairn)
+        if(cback STREQUAL "cairn" AND NOT CAIRN_ENABLED)
+            continue()
+        endif()
+        add_test(NAME chimera/server/nfs/compound_probe_${cback}
+            COMMAND $<TARGET_FILE:nfs3_compound_probe> -b ${cback})
+        set_tests_properties(chimera/server/nfs/compound_probe_${cback} PROPERTIES
+            ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_compound_probe_${cback}"
+            LABELS "nfs3;compound;${cback}" TIMEOUT 120)
+    endforeach()
+endif()
 
 add_executable(nfs4_deleg_probe nfs4_deleg_probe.c)
 target_include_directories(nfs4_deleg_probe PRIVATE
@@ -213,6 +245,22 @@ set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_probe_memfs"
     LABELS "functional;probe;nfsaux_mbt;memfs"
     TIMEOUT 120)
+
+# Cached READ placement on retransmit, including changed transports/offers.
+add_executable(nfs4_rdma_replay_probe nfs4_rdma_replay_probe.c)
+target_include_directories(nfs4_rdma_replay_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_rdma_replay_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_rdma_replay_probe)
+foreach(minor 0 1 2)
+    add_test(NAME chimera/server/nfs/rdma_replay_v4${minor}
+        COMMAND $<TARGET_FILE:nfs4_rdma_replay_probe> ${minor})
+    set_tests_properties(chimera/server/nfs/rdma_replay_v4${minor} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_rdma_replay_v4${minor}"
+        LABELS "functional;probe;nfsdrc_mbt;rdma;memfs"
+        TIMEOUT 120)
+endforeach()
 
 # Duplicate-request-cache ground truth: pins the properties the nfsdrc model
 # turns into a corpus -- that a retransmit replays, that a different XID,
@@ -649,6 +697,7 @@ foreach(aback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtaux/batch_${aback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_${aback}"
         LABELS "quint;nfsaux_mbt;${aback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 
     # Over RPC-over-RDMA, as the NFS3 corpus runs above.  Only the NFS service
@@ -663,6 +712,7 @@ foreach(aback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtaux/batch_rdma_${aback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_rdma_${aback}"
         LABELS "quint;nfsaux_mbt;rdma;${aback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 endforeach()
 
@@ -734,6 +784,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_${rback}"
         LABELS "quint;nfsdrc_mbt;${rback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 
     add_test(NAME chimera/server/nfs/mbtdrc/batch_nodrc_${rback}
@@ -743,6 +794,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_nodrc_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_nodrc_${rback}"
         LABELS "quint;nfsdrc_mbt;${rback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 
     # Over RPC-over-RDMA.  This suite is the one that most needs the transport
@@ -758,6 +810,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_rdma_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_rdma_${rback}"
         LABELS "quint;nfsdrc_mbt;rdma;${rback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 
     add_test(NAME chimera/server/nfs/mbtdrc/batch_nodrc_rdma_${rback}
@@ -767,6 +820,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_nodrc_rdma_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_nodrc_rdma_${rback}"
         LABELS "quint;nfsdrc_mbt;rdma;${rback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 endforeach()
 
@@ -1020,11 +1074,11 @@ endforeach()
 # inside the test process: the server it already ran becomes the MDS, plus N
 # more chimera servers as flex-files data servers, each on its own inproc
 # service name and in data_server mode so they can share the process.  The MDS
-# reaches them through the nfs client module, also over inproc -- so a LAYOUTGET
-# exercises the real steer / backing-file-create / blob-persist path with no
-# ports, namespaces, daemons or VMs, unlike the KVM pNFS matrix.  Two data
-# servers, so round-robin steering and both arms of the flex-files device
-# encoder (an NFSv3 DS and an NFSv4.1 one) are covered.
+# reaches them through the nfs client module, also over inproc. Each trace
+# exports a fresh subtree of that authoritative DS mount: ordinary MDS and
+# direct DS I/O therefore access the same object. Alternate between two data
+# servers to exercise both arms of the flex-files device encoder (an NFSv3
+# DS and an NFSv4.1 one), without ports, namespaces, daemons or VMs.
 #
 # The two pNFS configs are corpora of their own: they require the server to
 # advertise itself as a metadata server, which the plain nfs4 configs above
@@ -1037,17 +1091,14 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_memfs PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
 
-# The same cluster with an on-disk metadata server: diskfs persists the pNFS
-# layout blob as its own b+tree record, so this is the only test that covers
-# that record's write/read-back path.  The data servers stay memfs -- what is
-# under test here is the MDS.
+# The same coherent cluster with diskfs data servers. Merely storing a layout
+# blob on a separate metadata backend does not make its data coherent with a
+# DS file; that formerly tested topology must not grant layouts.
 #
 # Registered unconditionally, like every other diskfs variant: diskfs takes
 # whichever libevpl block backend the platform has, and libaio is only the
 # Linux-preferred one (see CHIMERA_DISKFS_DEVICE_TYPE at the top level).  This
-# was the last cell still carrying the old if(HAVE_LIBAIO) gate, which had the
-# effect of leaving the layout record untested on every platform without
-# libaio -- macOS among them, where it runs green.
+# keeps the data-server backend exercised on platforms without libaio too.
 add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_diskfs
     COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_PNFS_TRACE_ARGS}
             --pnfs 2 --backend diskfs)
@@ -1056,11 +1107,7 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_diskfs PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
 
-# And with a cairn metadata server, which persists the layout blob as its own
-# keyed record (CAIRN_KEY_PNFS).  Until cairn learned to store it, it did not
-# advertise CHIMERA_VFS_CAP_LAYOUT and every trace here skipped with
-# NFS4ERR_LAYOUTUNAVAILABLE -- the whole suite reported SKIP, which reads the
-# same as "registered and passing" in a ctest summary.
+# And the same authoritative DS topology with cairn storage.
 if(CAIRN_ENABLED)
     add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_cairn
         COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_PNFS_TRACE_ARGS}

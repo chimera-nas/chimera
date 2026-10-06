@@ -18,7 +18,6 @@
 
 struct chimera_posix_fchmodat_ctx {
     struct chimera_posix_completion comp;
-    struct chimera_vfs_open_handle *file_handle;
     struct chimera_vfs_attrs        set_attr;
 };
 
@@ -33,78 +32,41 @@ chimera_posix_fchmodat_callback(
     chimera_posix_complete(comp, status);
 } /* chimera_posix_fchmodat_callback */
 
-/* Callback after setattr completes - release the file handle */
 static void
-chimera_posix_fchmodat_setattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+chimera_posix_fchmodat_sequence_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_posix_fchmodat_ctx *ctx = private_data;
+    struct chimera_posix_fchmodat_ctx *ctx    = private_data;
+    enum chimera_vfs_error             status = chimera_vfs_compound_status(compound);
 
-    chimera_vfs_release(ctx->comp.request->thread->vfs_thread, ctx->file_handle);
-    chimera_posix_complete(&ctx->comp, error_code);
-} /* chimera_posix_fchmodat_setattr_complete */
-
-/* Callback after opening the target file - now call setattr */
-static void
-chimera_posix_fchmodat_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    struct chimera_vfs_attrs       *set_attr,
-    struct chimera_vfs_attrs       *attr,
-    struct chimera_vfs_attrs       *dir_pre_attr,
-    struct chimera_vfs_attrs       *dir_post_attr,
-    void                           *private_data)
-{
-    struct chimera_posix_fchmodat_ctx *ctx     = private_data;
-    struct chimera_client_request     *request = ctx->comp.request;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_posix_complete(&ctx->comp, error_code);
-        return;
-    }
-
-    ctx->file_handle = oh;
-
-    chimera_vfs_setattr(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        oh,
-        &ctx->set_attr,
-        0,  /* pre_attr_mask */
-        0,  /* post_attr_mask */
-        chimera_posix_fchmodat_setattr_complete,
-        ctx);
-} /* chimera_posix_fchmodat_open_complete */
+    chimera_vfs_compound_free(compound);
+    chimera_posix_complete(&ctx->comp, status);
+} /* chimera_posix_fchmodat_sequence_complete */
 
 static void
 chimera_posix_fchmodat_at_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    struct chimera_posix_fchmodat_ctx *ctx = request->setattr.private_data;
+    struct chimera_posix_fchmodat_ctx *ctx      = request->setattr.private_data;
+    struct chimera_vfs_compound       *compound = chimera_vfs_compound_alloc(
+        thread->vfs_thread, chimera_client_req_cred(request));
 
-    /* Set up the set_attr for the VFS call */
-    ctx->set_attr.va_req_mask = 0;
-    ctx->set_attr.va_set_mask = 0;
-
-    /* Open the target file relative to the parent directory */
-    chimera_vfs_open_at(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->setattr.parent_handle,
-        request->setattr.path,
-        request->setattr.path_len,
-        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
-        &ctx->set_attr,
-        0,
-        0,
-        0,
-        chimera_posix_fchmodat_open_complete,
-        ctx);
+    request->compound = compound;
+    chimera_vfs_compound_add_puthandle(compound, request->setattr.parent_handle,
+                                       CHIMERA_VFS_OPEN_INFERRED);
+    int                                opened = chimera_vfs_compound_add_open_at(compound, request->setattr.path,
+                                                                                 request->setattr.path_len,
+                                                                                 CHIMERA_VFS_OPEN_PATH |
+                                                                                 CHIMERA_VFS_OPEN_INFERRED,
+                                                                                 NULL, 0);
+    int                                attr = chimera_vfs_compound_add_setattr(compound, NULL, &ctx->set_attr, 0, 0);
+    if (opened >= 0 && attr >= 0) {
+        chimera_vfs_compound_op_set_handle(compound, opened, request->setattr.parent_handle);
+        chimera_vfs_compound_op_use_handle(compound, attr, opened);
+    }
+    chimera_frontend_compound_submit(compound, chimera_posix_fchmodat_sequence_complete, ctx);
 } /* chimera_posix_fchmodat_at_exec */
 
 static void
@@ -149,7 +111,7 @@ chimera_posix_fchmodat(
         }
 
         req.setattr.path[path_len] = '\0';
-        slash                      = strrchr(req.setattr.path, '/');
+        slash                      = rindex(req.setattr.path, '/');
 
         req.setattr.parent_handle = NULL;
         req.setattr.path_len      = path_len;

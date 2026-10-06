@@ -16,8 +16,9 @@ chimera_stat(
 
     request = chimera_client_request_alloc(thread);
 
-    request->opcode      = CHIMERA_CLIENT_OP_STAT;
-    request->stat.handle = NULL;
+    request->opcode          = CHIMERA_CLIENT_OP_STAT;
+    request->stat.handle     = NULL;
+    request->stat.open_flags = 0;
     /* chimera_stat() is stat(2), not lstat(2): follow the final symlink.
      * flags was previously left uninitialized. */
     request->stat.flags        = CHIMERA_VFS_LOOKUP_FOLLOW;

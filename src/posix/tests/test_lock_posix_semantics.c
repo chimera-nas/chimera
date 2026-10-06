@@ -141,7 +141,13 @@ main(
     fl = lock_desc(F_WRLCK, 2, 1);
     expect(chimera_posix_fcntl(fd, F_SETLK, &fl) == 0,
            "B can take the released range");
-    chimera_posix_close(fd);
+    /* Both simulated processes must close this file before fixture unmount.
+     * Do A's cleanup after observing the unlock, so it cannot mask failure. */
+    chimera_posix_set_lock_owner(&owner_a);
+    fd2 = chimera_posix_dup(fd);
+    expect(fd2 >= 0 && chimera_posix_close(fd2) == 0, "A closes wide-unlock file");
+    chimera_posix_set_lock_owner(&owner_b);
+    expect(chimera_posix_close(fd) == 0, "B closes wide-unlock file");
 
     /* ---- an owner never conflicts with itself -------------------------- */
     chimera_posix_set_lock_owner(&owner_a);
@@ -208,6 +214,57 @@ main(
     expect_getlk(rc, &fl, F_WRLCK,
                  "A still holds the write lock outside the downgrade");
 
+    chimera_posix_set_lock_owner(&owner_a);
+    fd2 = chimera_posix_dup(fd);
+    expect(fd2 >= 0 && chimera_posix_close(fd2) == 0, "A closes downgraded file");
+    chimera_posix_set_lock_owner(&owner_b);
+    expect(chimera_posix_close(fd) == 0, "B closes downgraded file");
+
+    /* ---- closing a duplicate is also a process-wide release point ----- */
+    chimera_posix_set_lock_owner(&owner_a);
+    fd = chimera_posix_open("/test/lock_dup_close", O_RDWR | O_CREAT, 0644);
+    expect(fd >= 0, "open duplicate release test");
+    fd2 = chimera_posix_dup(fd);
+    expect(fd2 >= 0, "duplicate lock descriptor");
+    fl = lock_desc(F_WRLCK, 4, 8);
+    expect(chimera_posix_fcntl(fd, F_SETLK, &fl) == 0, "A locks through original descriptor");
+    expect(chimera_posix_close(fd2) == 0, "close duplicate");
+    chimera_posix_set_lock_owner(&owner_b);
+    fl = lock_desc(F_WRLCK, 4, 8);
+    expect(chimera_posix_fcntl(fd, F_GETLK, &fl) == 0 && fl.l_type == F_UNLCK,
+           "closing duplicate released owner coverage");
+    chimera_posix_close(fd);
+
+    /* ---- signed normalization must never wrap a requested range -------- */
+    chimera_posix_set_lock_owner(&owner_a);
+    fd = chimera_posix_open("/test/lock_overflow", O_RDWR | O_CREAT, 0644);
+    expect(fd >= 0, "open range overflow test");
+    fl    = lock_desc(F_WRLCK, 0, (off_t) INT64_MIN);
+    errno = 0;
+    expect(chimera_posix_fcntl(fd, F_SETLK, &fl) == -1 && errno == EINVAL,
+           "INT64_MIN backward length is before zero");
+    fl    = lock_desc(F_WRLCK, (off_t) INT64_MAX, 2);
+    errno = 0;
+    expect(chimera_posix_fcntl(fd, F_SETLK, &fl) == -1 && errno == EOVERFLOW,
+           "range last byte cannot overflow off_t");
+    expect(chimera_posix_lseek(fd, 1, SEEK_SET) == 1, "set SEEK_CUR base");
+    fl          = lock_desc(F_WRLCK, (off_t) INT64_MAX, 1);
+    fl.l_whence = SEEK_CUR;
+    errno       = 0;
+    expect(chimera_posix_fcntl(fd, F_SETLK, &fl) == -1 && errno == EOVERFLOW,
+           "SEEK_CUR addition cannot overflow");
+    fl          = lock_desc(F_WRLCK, -2, 1);
+    fl.l_whence = SEEK_CUR;
+    errno       = 0;
+    expect(chimera_posix_fcntl(fd, F_SETLK, &fl) == -1 && errno == EINVAL,
+           "negative absolute start rejected");
+    fl = lock_desc(F_WRLCK, 8, -4);
+    expect(chimera_posix_fcntl(fd, F_SETLK, &fl) == 0, "valid backward range accepted");
+    chimera_posix_set_lock_owner(&owner_b);
+    fl = lock_desc(F_RDLCK, 4, 4);
+    expect(chimera_posix_fcntl(fd, F_GETLK, &fl) == 0 && fl.l_type == F_WRLCK &&
+           fl.l_start == 4 && fl.l_len == 4, "backward range normalized to [4,8)");
+    chimera_posix_set_lock_owner(&owner_a);
     chimera_posix_close(fd);
 
     if (fails) {

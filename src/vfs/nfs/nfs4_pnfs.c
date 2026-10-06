@@ -24,6 +24,7 @@
 #include <stdlib.h>
 
 #include "nfs_internal.h"
+#include "nfs_write_payload.h"
 #include "nfs4_open_state.h"
 #include "nfs4_pnfs.h"
 #include "nfs_common/nfs3_status.h"
@@ -1570,10 +1571,12 @@ chimera_nfs4_pnfs_ds_write(
      * message is released) and leave the borrowed originals intact.  Passing the
      * originals lets the marshaller free them out from under that server-side
      * release -> heap-use-after-free in evpl_iovecs_release. */
-    struct evpl_iovec *ds_iov = malloc((size_t) request->write.niov *
-                                       sizeof(*ds_iov));
-    for (int i = 0; i < request->write.niov; i++) {
-        evpl_iovec_clone(&ds_iov[i], &request->write.iov[i]);
+    int                payload_niov = request->write.niov;
+    struct evpl_iovec *ds_iov       = chimera_nfs_write_payload_clone(request->write.iov, payload_niov);
+    if (!ds_iov) {
+        request->status = CHIMERA_VFS_ENOSPC;
+        request->complete(request);
+        return 1;
     }
     args.data.iov    = ds_iov;
     args.data.niov   = request->write.niov;
@@ -1587,8 +1590,7 @@ chimera_nfs4_pnfs_ds_write(
         &shared->nfs_v3.rpc2, thread->evpl, ds_thread->nfs_conn, &rpc2_cred,
         &args, 1, 0, NULL, 0, 0, chimera_nfs4_pnfs_ds_write_callback, request);
 
-    /* The marshaller moved (and invalidated) the clones; free only the array. */
-    free(ds_iov);
+    chimera_nfs_write_payload_discard(thread->evpl, ds_iov, payload_niov);
     return 1;
 } /* chimera_nfs4_pnfs_ds_write */
 

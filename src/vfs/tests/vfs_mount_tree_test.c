@@ -26,7 +26,7 @@
 
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/sdk/vfs_attrs.h"

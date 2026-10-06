@@ -42,14 +42,16 @@ chimera_nfs4_putrootfh_status(struct nfs_request *req)
  * the flavor violation surfaces here, before any FH is installed.  A
  * trailing PUTROOTFH with no next op installs an FH nothing will use.
  */
-static int
-chimera_nfs4_next_op_handles_wrongsec(struct nfs_request *req)
+int
+chimera_nfs4_next_op_handles_wrongsec(
+    const struct nfs_request *req,
+    uint32_t                  index)
 {
-    if ((uint32_t) (req->index + 1) >= req->args_compound->num_argarray) {
+    if ((index + 1) >= req->args_compound->num_argarray) {
         return 1;
     }
 
-    switch (req->args_compound->argarray[req->index + 1].argop) {
+    switch (req->args_compound->argarray[index + 1].argop) {
         case OP_SECINFO:
         case OP_SECINFO_NO_NAME:
         case OP_PUTFH:
@@ -61,37 +63,6 @@ chimera_nfs4_next_op_handles_wrongsec(struct nfs_request *req)
             return 0;
     } /* switch */
 } /* chimera_nfs4_next_op_handles_wrongsec */
-
-static void
-chimera_nfs4_putrootfh_fh_ready(
-    enum chimera_vfs_error            error_code,
-    const uint8_t                    *fh,
-    uint32_t                          fh_len,
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req)
-{
-    nfsstat4 *status = chimera_nfs4_putrootfh_status(req);
-
-    (void) thread;
-
-    if (error_code != CHIMERA_VFS_OK || fh == NULL) {
-        /* The "/" export exists but its backing path did not resolve
-         * (misconfigured path, backend unavailable).  Fail the op rather
-         * than fall back to the synthetic pseudo-root: a "successful" mount
-         * of an empty fake root would silently hide the export's contents. */
-        chimera_nfs_error("PUTROOTFH: failed to resolve the \"/\" export's "
-                          "backing path: error %d", error_code);
-        *status = NFS4ERR_SERVERFAULT;
-        chimera_nfs4_compound_complete(req, *status);
-        return;
-    }
-
-    memcpy(req->fh, fh, fh_len);
-    req->fhlen = fh_len;
-
-    *status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_putrootfh_fh_ready */
 
 void
 chimera_nfs4_putrootfh_common(
@@ -105,18 +76,13 @@ chimera_nfs4_putrootfh_common(
     if (chimera_nfs_get_export_copy(thread->shared, "/", &root_export) == 0) {
 
         if (!chimera_nfs_export_sec_ok(&root_export, req->sec_bit) &&
-            !chimera_nfs4_next_op_handles_wrongsec(req)) {
+            !chimera_nfs4_next_op_handles_wrongsec(req, req->index)) {
             *status = NFS4ERR_WRONGSEC;
             chimera_nfs4_compound_complete(req, *status);
             return;
         }
 
-        /* The namespace root is inside the export: adopt its id (handles
-        * minted for the client carry it) and apply its squash policy. */
-        chimera_nfs_set_export(req, &root_export);
-
-        nfs4_root_export_fh_resolve(thread, req,
-                                    chimera_nfs4_putrootfh_fh_ready);
+        chimera_nfs4_compound_export(thread, req, &root_export, root_export.path);
         return;
     }
 

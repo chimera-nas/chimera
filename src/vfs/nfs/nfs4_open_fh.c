@@ -10,6 +10,7 @@ struct chimera_nfs4_open_fh_ctx {
     struct chimera_nfs_shared        *shared;
     struct chimera_nfs_client_server *server;
     void                             *dispatch_private;
+    uint32_t                          access;
 };
 
 static void
@@ -86,6 +87,7 @@ chimera_nfs4_open_fh_callback(
     state->server_index = server->index;
     state->stateid      = open_res->opopen.resok4.stateid;
     state->open_file    = open_file;
+    state->access       = ctx->access;
 
     request->open_fh.r_vfs_private = (uint64_t) state;
     request->status                = CHIMERA_VFS_OK;
@@ -101,6 +103,7 @@ chimera_vfs_nfs4_open_fh(
 {
     struct chimera_nfs_client_server_thread *server_thread;
     struct chimera_nfs_client_server        *server;
+    struct chimera_nfs4_open_fh_ctx         *ctx = request->plugin_data;
     struct COMPOUND4args                     args;
     struct nfs_argop4                        argarray[3];
     struct evpl_rpc2_cred                    rpc2_cred;
@@ -141,7 +144,6 @@ chimera_vfs_nfs4_open_fh(
 
     server = server_thread->server;
     {
-        struct chimera_nfs4_open_fh_ctx *ctx = request->plugin_data;
 
         ctx->thread           = thread;
         ctx->shared           = shared;
@@ -182,6 +184,7 @@ chimera_vfs_nfs4_open_fh(
             OPEN4_SHARE_ACCESS_WRITE;
     }
     open_args->share_deny = OPEN4_SHARE_DENY_NONE;
+    ctx->access           = open_args->share_access;
 
     open_args->owner.clientid   = server->nfs4_session->clientid;
     open_args->owner.owner.data = (uint8_t *) server->nfs4_owner_id;

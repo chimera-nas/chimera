@@ -6,11 +6,9 @@
  * NFSv4 pseudo-fs root mount ("server:/").
  *
  * Mounts the bare pseudo-fs root instead of an export and exercises the
- * pseudo-root compound handlers, most importantly nfs4_root_readdir: listing
- * the root resolves every export's backing path through an asynchronous VFS
- * lookup per entry, a path that once assumed synchronous completion and
- * crashed with a stack-use-after-return when a lookup completed off the
- * request thread.
+ * pseudo-root compound handlers: each page resolves the listed exports'
+ * backing paths through one shared VFS sequence. Lookups may finish off the
+ * request thread; the export snapshot must remain owned through completion.
  *
  * The listing deliberately spans multiple READDIR pages.  Two separate paths
  * are covered, and they do not depend on each other:
@@ -19,8 +17,8 @@
  *     server pages, because chimera's POSIX readdir consumes one entry per
  *     call and re-issues a fresh READDIR from that entry's cookie.  A
  *     41-entry listing costs 42 READDIR RPCs, each resuming from a cookie.
- *   - The server's mid-walk dbuf overflow -- it fills a page, rolls the
- *     pending entry back and returns short -- needs more exports than one page
+ *   - The builder's dbuf overflow -- it fills a page, rolls the pending entry
+ *     back and returns short -- needs more exports than one page
  *     holds.  The client's maxcount is fixed at 8192 and each entry costs a
  *     256-byte attr_vals allocation plus its entry4, name and attrmask, which
  *     in practice fits 23 entries per page, so the extra exports below drive

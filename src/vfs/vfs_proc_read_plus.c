@@ -2,8 +2,9 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_pnfs.h"
+#include "vfs/vfs_claim.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
 #include "common/macros.h"
@@ -13,6 +14,7 @@ chimera_vfs_read_plus_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_read_plus_callback_t callback = request->proto_callback;
 
+    chimera_vfs_io_claim_release(request);
     chimera_vfs_complete(request);
 
     /* Drop the pNFS backing-file reference the redirect took (no-op when the
@@ -31,15 +33,22 @@ chimera_vfs_read_plus_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_read_plus_complete */
 
+static void
+chimera_vfs_read_plus_dispatch(struct chimera_vfs_request *request)
+{
+    chimera_vfs_pnfs_dispatch(request, 0, CHIMERA_VFS_CAP_READ_PLUS);
+} /* chimera_vfs_read_plus_dispatch */
+
 SYMBOL_EXPORT void
-chimera_vfs_read_plus(
-    struct chimera_vfs_thread       *thread,
-    const struct chimera_vfs_cred   *cred,
-    struct chimera_vfs_open_handle  *handle,
-    uint64_t                         offset,
-    uint64_t                         length,
-    chimera_vfs_read_plus_callback_t callback,
-    void                            *private_data)
+chimera_vfs_read_plus_view(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint64_t                          length,
+    const struct chimera_vfs_io_view *view,
+    chimera_vfs_read_plus_callback_t  callback,
+    void                             *private_data)
 {
     struct chimera_vfs_request *request;
 
@@ -66,5 +75,9 @@ chimera_vfs_read_plus(
     request->proto_callback      = callback;
     request->proto_private_data  = private_data;
 
-    chimera_vfs_pnfs_dispatch(request, 0, CHIMERA_VFS_CAP_READ_PLUS);
-} /* chimera_vfs_read_plus */
+    request->io_handle = handle;
+    chimera_vfs_io_view_copy(&request->io_view, &request->io_owner, view);
+    request->io_owner_valid = request->io_view.owner != NULL;
+    chimera_vfs_io_claim_acquire(request, request->io_view.owner,
+                                 chimera_vfs_read_plus_dispatch);
+} /* chimera_vfs_read_plus_view */

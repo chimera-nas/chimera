@@ -23,6 +23,7 @@ chimera_write_same(
 
     request->opcode                    = CHIMERA_CLIENT_OP_WRITE_SAME;
     request->write_same.handle         = handle;
+    request->write_same.open_flags     = chimera_client_handle_open_flags(handle);
     request->write_same.offset         = offset;
     request->write_same.block_size     = block_size;
     request->write_same.block_count    = block_count;

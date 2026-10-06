@@ -354,7 +354,9 @@ main(
 {
     struct posix_test_env env;
     int                   fd;
+    int                   reader;
     int                   rc;
+    char                  first;
 
     posix_test_init(&env, argv, argc);
 
@@ -373,12 +375,31 @@ main(
         posix_test_fail(&env);
     }
 
-    // Run all tests
+    /* A second access mode requires a distinct backend handle. NFS coalesces
+     * both OPENs into one server state identity, advancing its version; the
+     * first descriptor must remain usable with its older OPEN reply. */
+    reader = chimera_posix_open("/test/pio_test", O_RDONLY);
+    if (reader < 0) {
+        fprintf(stderr, "Failed to reopen test file: %s\n", strerror(errno));
+        posix_test_fail(&env);
+    }
+
+    // Run all tests through the first descriptor after the second OPEN.
     test_pread_pwrite(fd);
     test_readv_writev(fd);
     test_preadv_pwritev(fd);
     test_preadv2_pwritev2(fd);
     test_64bit_variants(fd);
+
+    if (chimera_posix_pread(reader, &first, 1, 0) != 1 || first != 'A') {
+        fprintf(stderr, "Second descriptor lost coalesced OPEN access\n");
+        posix_test_fail(&env);
+    }
+    if (chimera_posix_ftruncate(fd, 64) != 0) {
+        fprintf(stderr, "First descriptor truncate failed: %s\n", strerror(errno));
+        posix_test_fail(&env);
+    }
+    chimera_posix_close(reader);
 
     fprintf(stderr, "All positional I/O tests passed!\n");
 

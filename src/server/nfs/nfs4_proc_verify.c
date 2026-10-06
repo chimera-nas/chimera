@@ -2,14 +2,13 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "server/server.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
 
 /* RFC 7530 §16.31 (VERIFY) and §16.14 (NVERIFY).
  *
@@ -30,6 +29,10 @@
  * chimera_nfs4_marshall_attrs).
  */
 
+static nfsstat4 verify_validate_mask(
+    uint32_t        num,
+    const uint32_t *mask);
+
 static struct fattr4 *
 verify_args_fattr4(struct nfs_request *req)
 {
@@ -43,47 +46,81 @@ verify_args_fattr4(struct nfs_request *req)
     return &argop->opverify.obj_attributes;
 } /* verify_args_fattr4 */
 
-static bool
-verify_is_nverify(struct nfs_request *req)
+/*
+ * Does the object's current state match the attributes the client sent?
+ *
+ * Marshal what the object has into the same on-wire form the request carries,
+ * restricted to the bits it asked about, and compare the bytes -- which is the
+ * only comparison that is guaranteed to mean the same thing to both ends.
+ *
+ * Takes `index` rather than reading req->index because a sequence answers this
+ * while the request's cursor is still somewhere else.  Reads nothing but the
+ * arguments and the attributes handed in, so a sequence may ask it again.
+ */
+SYMBOL_EXPORT nfsstat4
+chimera_nfs4_verify_status(
+    struct nfs_request             *req,
+    uint16_t                        export_id,
+    uint32_t                        index,
+    const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *fh,
+    int                             fhlen)
 {
-    return req->args_compound->argarray[req->index].argop == OP_NVERIFY;
-} /* verify_is_nverify */
-
-static void
-chimera_nfs4_verify_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request      *req = private_data;
-    /* VERIFY4res and NVERIFY4res are layout-identical (status only). */
-    struct VERIFY4res       *res        = &req->res_compound.resarray[req->index].opverify;
-    struct fattr4           *args       = verify_args_fattr4(req);
-    bool                     is_nverify = verify_is_nverify(req);
+    struct fattr4           *args = (req->args_compound->argarray[index].argop == OP_NVERIFY) ?
+        &req->args_compound->argarray[index].opnverify.obj_attributes :
+        &req->args_compound->argarray[index].opverify.obj_attributes;
+    bool                     is_nverify = req->args_compound->argarray[index].argop == OP_NVERIFY;
     struct chimera_vfs_attrs marshall_attr;
     nfsstat4                 status;
 
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+    status = verify_validate_mask(args->num_attrmask, args->attrmask);
+    if (status != NFS4_OK) {
+        return status;
     }
 
     /* Marshal current attrs into the same on-wire format the client sent
      * us, restricted to the bits in the request mask. */
     uint32_t out_mask[3] = { 0, 0, 0 };
     uint32_t num_out_mask;
-    uint8_t  out_buf[4096];
+    uint8_t  fixed_buf[4096];
+    uint8_t *out_buf = fixed_buf;
+    uint32_t out_cap = sizeof(fixed_buf);
     uint32_t out_len = 0;
 
+    /* ACL attributes are variable sized. A fixed comparison buffer can cause
+    * the marshaller to omit a valid stored ACL and incorrectly report a
+    * mismatch. Match GETATTR's allocation policy using the owned snapshot.
+    * This scratch buffer never consumes reply-arena space across retries. */
+    if (args->num_attrmask && (args->attrmask[0] & (1U << FATTR4_ACL))) {
+        if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+            out_cap += chimera_nfs4_acl_wire_size(attr->va_acl);
+        } else {
+            out_cap += chimera_nfs4_acl_wire_size(NULL) +
+                8 * (4 * sizeof(uint32_t) + ((CHIMERA_IDMAP_WHO_MAX + 3) & ~3u));
+        }
+        out_buf = malloc(out_cap);
+        if (!out_buf) {
+            return NFS4ERR_RESOURCE;
+        }
+    }
+
     marshall_attr = *attr;
+    if (args->num_attrmask && (args->attrmask[0] & (1U << FATTR4_CHANGE))) {
+        struct nfs4_change_observation *observation;
+        status = nfs4_change_project(req->thread->shared->nfs4_state_table.change_table,
+                                     fh, fhlen, &marshall_attr, &req->change_observations, &observation);
+        if (status != NFS4_OK) {
+            if (out_buf != fixed_buf) {
+                free(out_buf);
+            }
+            return status;
+        }
+    }
     chimera_nfs4_attrs_fill_filehandle(&marshall_attr,
                                        args->num_attrmask,
                                        args->attrmask,
-                                       req->fh,
-                                       req->fhlen);
+                                       fh,
+                                       fhlen);
 
     chimera_nfs4_marshall_attrs(&marshall_attr,
                                 args->num_attrmask,
@@ -93,17 +130,17 @@ chimera_nfs4_verify_complete(
                                 3,
                                 out_buf,
                                 &out_len,
-                                sizeof(out_buf),
+                                out_cap,
                                 req->minorversion,
                                 chimera_nfs4_pnfs_layout_type(req->thread->vfs_thread,
                                                               req->thread->shared->vfs,
-                                                              req->fh, req->fhlen),
+                                                              fh, fhlen),
                                 chimera_nfs4_xattr_supported(req->thread->vfs_thread,
-                                                             req->fh, req->fhlen),
+                                                             fh, fhlen),
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
                                 req->thread->shared->nfs_lease_time_s,
-                                req->export_id,
+                                export_id,
                                 req->thread->shared->fh_key,
                                 req->thread->shared->fh_sign,
                                 0);
@@ -114,43 +151,18 @@ chimera_nfs4_verify_complete(
         (out_len == args->attr_vals.len) &&
         (memcmp(out_buf, args->attr_vals.data, out_len) == 0);
 
+    if (out_buf != fixed_buf) {
+        free(out_buf);
+    }
+
     if (is_nverify) {
         status = match ? NFS4ERR_SAME : NFS4_OK;
     } else {
         status = match ? NFS4_OK : NFS4ERR_NOT_SAME;
     }
 
-    res->status = status;
-    chimera_nfs4_compound_complete(req, status);
-} /* chimera_nfs4_verify_complete */
-
-static void
-chimera_nfs4_verify_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request *req  = private_data;
-    struct VERIFY4res  *res  = &req->res_compound.resarray[req->index].opverify;
-    struct fattr4      *args = verify_args_fattr4(req);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    req->handle = handle;
-
-    uint64_t attr_mask = chimera_nfs4_attr2mask(args->attrmask,
-                                                args->num_attrmask);
-
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        attr_mask,
-                        chimera_nfs4_verify_complete,
-                        req);
-} /* chimera_nfs4_verify_open_callback */
+    return status;
+} /* chimera_nfs4_verify_status */
 
 static nfsstat4
 verify_validate_mask(
@@ -227,12 +239,7 @@ chimera_nfs4_verify_dispatch(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_nfs4_verify_open_callback,
-                        req);
+    chimera_nfs4_compound_single(thread, req);
 } /* chimera_nfs4_verify_dispatch */
 
 void

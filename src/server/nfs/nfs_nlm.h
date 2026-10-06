@@ -193,8 +193,7 @@ void chimera_nfs_nlm4_free_all(
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
 
-/* Per-thread NLM setup: arms the doorbell that carries deferred
- * lock-acquire completions back to their home thread. */
+/* Track compound completions so teardown drains their original RPC/VFS worker. */
 void chimera_nfs_nlm4_thread_init(
     struct chimera_server_nfs_thread *thread);
 

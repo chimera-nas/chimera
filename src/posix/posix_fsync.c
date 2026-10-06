@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -46,6 +46,7 @@ chimera_posix_fsync(int fd)
 
     req.opcode              = CHIMERA_CLIENT_OP_COMMIT;
     req.commit.handle       = entry->handle;
+    req.commit.open_flags   = chimera_posix_fd_open_flags(entry);
     req.commit.callback     = chimera_posix_fsync_callback;
     req.commit.private_data = &comp;
 

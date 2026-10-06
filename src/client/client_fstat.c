@@ -17,6 +17,7 @@ chimera_fstat(
 
     request->opcode             = CHIMERA_CLIENT_OP_FSTAT;
     request->fstat.handle       = handle;
+    request->fstat.open_flags   = chimera_client_handle_open_flags(handle);
     request->fstat.callback     = callback;
     request->fstat.private_data = private_data;
 

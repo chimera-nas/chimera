@@ -13,6 +13,7 @@
 #include <uthash.h>
 
 #include "common/platform.h"
+#include "common/macros.h"
 #include "nfs4_xdr.h"
 #include "nfs_internal.h"
 
@@ -64,7 +65,8 @@ enum nfs4_slot_state {
 struct nfs4_replay_slot {
     _Atomic uint64_t state_word;       /* (seqid << NFS4_SLOT_SEQID_SHIFT) | state */
     uint32_t         cached_len;       /* bytes in cached_buf (CACHED only) */
-    void            *cached_buf;       /* RPC reply (header+body); malloc'd */
+    uint32_t         cached_capacity;  /* allocated bytes; zero for hydrated/older entries */
+    void            *cached_buf;       /* procedure results; malloc'd */
     /* Who sent the request this slot holds.  RFC 8881 Section 2.10.6.1.3.1: a
      * retry "that uses a different principal in the RPC request's credential
      * field that translates to a different user" is a false retry, and "if the
@@ -480,6 +482,17 @@ nfs4_client_destroy_clientid(
  * such client exists (caller maps to NFS4ERR_STALE_CLIENTID). */
 struct nfs_open_owner;
 
+struct nfs_open_state;
+/* Pending CLOSE exclusions are private to this request, never global. */
+SYMBOL_EXPORT nfsstat4
+nfs4_clients_check_io_denied_except(
+    struct nfs4_client_table     *table,
+    const uint8_t                *fh,
+    uint16_t                      fh_len,
+    uint32_t                      requested_access,
+    struct nfs_open_state *const *closed,
+    uint32_t                      num_closed);
+
 SYMBOL_EXPORT nfsstat4
 nfs4_clients_check_io_denied(
     struct nfs4_client_table *table,
@@ -494,6 +507,14 @@ nfs4_clients_have_open_state(
     struct nfs4_client_table *table,
     const uint8_t            *fh,
     uint16_t                  fh_len);
+struct nfs_open_state;
+bool
+nfs4_clients_have_open_state_except(
+    struct nfs4_client_table     *table,
+    const uint8_t                *fh,
+    uint16_t                      fh_len,
+    struct nfs_open_state *const *closed,
+    uint32_t                      num_closed);
 /* Recover an NFSv4 lock-owner byte-string from the (clientid, XXH3 owner
  * hash) the VFS range-lease layer records, for a LOCK/LOCKT DENIED reply.
  * Returns true and fills out_owner/out_len on a hit. */
@@ -655,6 +676,15 @@ struct nfs4_session *
 nfs4_session_find_by_clientid(
     struct nfs4_client_table *table,
     uint64_t                  client_id);
+
+/* Atomically find a published confirmed client and pin its compound lifetime.
+ * Session references alone do not retain the unified client. Release success
+ * with nfs_client_finish_compound after the request's callbacks are done. */
+SYMBOL_EXPORT nfsstat4
+nfs4_client_reserve_compound(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    struct nfs_client       **out);
 
 /*
  * Reference counting for nfs4_session.

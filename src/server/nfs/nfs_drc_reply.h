@@ -9,6 +9,7 @@
 
 struct chimera_server_nfs_thread;
 struct evpl_rpc2_encoding;
+struct evpl_rpc2_rdma_chunk;
 struct evpl_iovec;
 
 /*
@@ -33,20 +34,22 @@ struct evpl_iovec;
 
 /*
  * Copy the procedure results out of what the capture callback was shown,
- * skipping body_offset bytes of reserved headroom.  See
- * evpl_rpc2_reply_capture_cb_t.  Returns bytes written, or 0 if buf_len is too
- * small.
+ * skipping body_offset bytes of reserved headroom and restoring an omitted
+ * Write-chunk payload and its padding. See evpl_rpc2_reply_capture_cb_t.
+ * Returns bytes written, or 0 on insufficient storage or incomplete vectors.
  */
 uint32_t
 nfs_drc_copy_rpc_reply(
-    const struct evpl_iovec *iov,
-    int                      niov,
-    uint32_t                 body_offset,
-    uint8_t                 *buf,
-    uint32_t                 buf_len);
+    const struct evpl_iovec           *iov,
+    int                                niov,
+    uint32_t                           body_offset,
+    const struct evpl_rpc2_rdma_chunk *write_chunk,
+    uint8_t                           *buf,
+    uint32_t                           buf_len);
 
-/* Send the cached results as the reply for `encoding`'s request.  Returns 0 on
- * success. */
+/* Send cached results using this request's chunk offers. Resource or cached
+ * decode failure sends RPC SYSTEM_ERR; a cache hit must never re-execute.
+ * Returns 0 once the request has been completed. */
 int
 nfs_drc_send_cached_reply(
     struct chimera_server_nfs_thread *thread,

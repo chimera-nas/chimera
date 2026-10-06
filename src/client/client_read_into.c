@@ -17,12 +17,17 @@ chimera_read_into(
 {
     struct chimera_client_request *request;
 
+    if (niov < 0 || niov > CHIMERA_CLIENT_IOV_MAX || (niov && !iov)) {
+        callback(thread, CHIMERA_VFS_EINVAL, 0, 0, private_data);
+        return;
+    }
     request = chimera_client_request_alloc(thread);
 
     request->opcode                 = CHIMERA_CLIENT_OP_READ;
     request->read_into.callback     = callback;
     request->read_into.private_data = private_data;
     request->read_into.handle       = handle;
+    request->read_into.open_flags   = chimera_client_handle_open_flags(handle);
     request->read_into.offset       = offset;
     request->read_into.length       = length;
     request->read_into.dest_niov    = niov;

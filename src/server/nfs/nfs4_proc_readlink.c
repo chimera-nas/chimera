@@ -4,108 +4,29 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
 
-#include <sys/stat.h>
-#ifdef _WIN32
-#include "common/platform.h"
-#endif /* ifdef _WIN32 */
-
-static void
-chimera_nfs4_readlink_complete(
-    enum chimera_vfs_error    error_code,
-    int                       targetlen,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+/* Copy the compound-owned link target into the accepted reply. */
+nfsstat4
+chimera_nfs4_readlink_fill(
+    struct nfs_request  *req,
+    struct READLINK4res *res,
+    const char          *target,
+    uint32_t             target_len)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct READLINK4res              *res    = &req->res_compound.resarray[req->index].opreadlink;
-
-    if (error_code == CHIMERA_VFS_OK) {
-        res->status          = NFS4_OK;
-        res->resok4.link.len = targetlen;
-    } else {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    }
-
-    chimera_vfs_release(thread->vfs_thread, req->handle);
-
-    chimera_nfs4_compound_complete(req, res->status);
-} /* chimera_nfs4_readlink_complete */
-
-static void
-chimera_nfs4_readlink_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request  *req = private_data;
-    struct READLINK4res *res = &req->res_compound.resarray[req->index].opreadlink;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    /* RFC 7530 §16.22: READLINK is valid only on a symbolic link; a
-     * non-symlink current filehandle is NFS4ERR_INVAL.  The type comes from the
-     * getattr we just issued -- if a backend completed getattr without
-     * reporting MODE we cannot prove the object is a link, so fail closed
-     * (NFS4ERR_SERVERFAULT) rather than reading a non-symlink. */
-    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
-        res->status = NFS4ERR_SERVERFAULT;
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    if (!S_ISLNK(attr->va_mode)) {
-        res->status = NFS4ERR_INVAL;
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
     res->resok4.link.data = xdr_dbuf_alloc_space(4096, req->encoding->dbuf);
-    chimera_nfs_abort_if(res->resok4.link.data == NULL, "Failed to allocate space");
-    res->resok4.link.len = 4096;
 
-    chimera_vfs_readlink(req->thread->vfs_thread, &req->cred,
-                         req->handle,
-                         res->resok4.link.data,
-                         res->resok4.link.len,
-                         0,
-                         chimera_nfs4_readlink_complete,
-                         req);
-} /* chimera_nfs4_readlink_getattr_complete */
-
-static void
-chimera_nfs4_readlink_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request  *req = private_data;
-    struct READLINK4res *res = &req->res_compound.resarray[req->index].opreadlink;
-
-    req->handle = handle;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
+    if (!res->resok4.link.data) {
+        return NFS4ERR_RESOURCE;
     }
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        CHIMERA_VFS_ATTR_MODE,
-                        chimera_nfs4_readlink_getattr_complete,
-                        req);
-} /* chimera_nfs4_readlink_open_callback */
+    if (target_len > 4096) {
+        target_len = 4096;
+    }
+    memcpy(res->resok4.link.data, target, target_len);
+    res->resok4.link.len = target_len;
+
+    return NFS4_OK;
+} /* chimera_nfs4_readlink_fill */
 
 void
 chimera_nfs4_readlink(
@@ -122,10 +43,5 @@ chimera_nfs4_readlink(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
-                        chimera_nfs4_readlink_open_callback,
-                        req);
+    chimera_nfs4_compound_single(thread, req);
 } /* chimera_nfs4_readlink */

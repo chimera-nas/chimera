@@ -6,6 +6,17 @@
 
 #include "vfs_open_cache.h"
 
+/*
+ * Release an open handle returned by chimera_vfs_open_fh()/open_at().  This is
+ * a non-inline export of the internal inline chimera_vfs_release(); out-of-tree
+ * consumers that link libchimera_vfs (e.g. in-process VFS module tests) use it
+ * to avoid pulling in the internal open-cache headers.
+ */
+void
+chimera_vfs_release_handle(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle);
+
 static inline void
 chimera_vfs_populate_handle(
     struct chimera_vfs_thread      *thread,

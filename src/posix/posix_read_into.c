@@ -72,6 +72,7 @@ chimera_posix_read_into_common(
     req.read_into.callback     = chimera_posix_read_into_callback;
     req.read_into.private_data = &comp;
     req.read_into.handle       = entry->handle;
+    req.read_into.open_flags   = chimera_posix_fd_open_flags(entry);
     req.read_into.offset       = use_fd_offset ? entry->ofd->offset : (uint64_t) offset;
     req.read_into.length       = count;
     req.read_into.dest_niov    = niov;

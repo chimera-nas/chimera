@@ -18,7 +18,7 @@
 #include "nfs_internal.h"
 #include "nfs_kv_keys.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_kv.h"
 
 /* Record magics (little-endian first word of each value blob). */
 #define NFS_RECOVERY_RECORD_MAGIC_V1 0x3152464Eu /* "NFR1": no renewal stamp */
@@ -420,6 +420,10 @@ nfs_recovery_forget(
 
     ctx          = malloc(sizeof(*ctx));
     ctx->key_len = nfs_kv_recovery_key(ctx->key, rec->node_id, owner, owner_len);
+    /* A key-value delete is not a file-system operation and has no compound op --
+     * it addresses none of the four cursors, drops a record from a backend's KV
+     * band rather than unlinking a name from a directory, and takes a key where
+     * every sequence op takes an object. */
     chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
                            nfs_recovery_kv_done, ctx);
 } /* nfs_recovery_forget */

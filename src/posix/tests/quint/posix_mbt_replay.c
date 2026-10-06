@@ -3589,9 +3589,10 @@ main(
         return 1;
     }
 
-    if (posix_env_setup(backend, NULL) != 0) {
+    int setup_result = posix_env_setup(backend, NULL);
+    if (setup_result != 0) {
         mbt_free_traces(traces, ntraces);
-        return 1;
+        return setup_result;
     }
 
     for (i = 0; i < ntraces; i++) {

@@ -3,12 +3,16 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
-#include "nfs4_status.h"
-#include "vfs/vfs_procs.h"
-#include "vfs/vfs_release.h"
 #include "vfs/vfs_mount_table.h"
 
-static bool
+/*
+ * True iff `fh` is the root of a mounted share.  Such a handle is an export
+ * root in the NFSv4 namespace, so LOOKUPP from it must answer with the
+ * namespace root rather than the backend's physical parent -- which is why the
+ * VFS-compound credential selector asks this against its private execution
+ * cursor, then executes the parent transition in that same finish scope.
+ */
+bool
 chimera_nfs4_fh_is_vfs_mount_root(
     struct chimera_vfs *vfs,
     const uint8_t      *fh,
@@ -39,64 +43,6 @@ chimera_nfs4_fh_is_vfs_mount_root(
     return is_root;
 } /* chimera_nfs4_fh_is_vfs_mount_root */
 
-static void
-chimera_nfs4_lookupp_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_attr,
-    void                     *private_data)
-{
-    struct nfs_request *req    = private_data;
-    nfsstat4            status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    struct LOOKUPP4res *res    = &req->res_compound.resarray[req->index].oplookupp;
-
-    if (error_code == CHIMERA_VFS_OK) {
-        if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
-            status = NFS4ERR_SERVERFAULT;
-        } else {
-            memcpy(req->fh, attr->va_fh, attr->va_fh_len);
-            req->fhlen = attr->va_fh_len;
-        }
-    }
-
-    res->status = status;
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-    chimera_nfs4_compound_complete(req, status);
-} /* chimera_nfs4_lookupp_complete */
-
-static void
-chimera_nfs4_lookupp_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request *req    = private_data;
-    nfsstat4            status = chimera_nfs4_errno_to_nfsstat4(error_code);
-    struct LOOKUPP4res *res    = &req->res_compound.resarray[req->index].oplookupp;
-
-    if (error_code == CHIMERA_VFS_OK) {
-        req->handle = handle;
-
-        /*
-         * Resolve parent via lookup_at(handle, "..").  Backends that
-         * understand directory structure (memfs, cairn, diskfs) handle
-         * ".." natively; pass-through backends (linux, io_uring) get
-         * parent attrs from fstatat(parent_fd, "..").
-         */
-        chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
-                              handle,
-                              "..",
-                              2,
-                              CHIMERA_VFS_ATTR_FH,
-                              0,
-                              chimera_nfs4_lookupp_complete,
-                              req);
-    } else {
-        res->status = status;
-        chimera_nfs4_compound_complete(req, status);
-    }
-} /* chimera_nfs4_lookupp_open_callback */
-
 /*
  * Continuation once the "/" export's root FH is known (root_fh == NULL when
  * there is no "/" export, or when its path failed to resolve).
@@ -111,7 +57,11 @@ chimera_nfs4_lookupp_continue(
 {
     struct LOOKUPP4res *res = &req->res_compound.resarray[req->index].oplookupp;
 
-    (void) error_code;
+    if (error_code == CHIMERA_VFS_EAGAIN) {
+        res->status = NFS4ERR_DELAY;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
 
     /*
      * RFC 7530 §16.10.5: LOOKUPP with the current filehandle at the root of
@@ -172,12 +122,7 @@ chimera_nfs4_lookupp_continue(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs4_lookupp_open_callback,
-                        req);
+    chimera_nfs4_compound_single(thread, req);
 } /* chimera_nfs4_lookupp_continue */
 
 void

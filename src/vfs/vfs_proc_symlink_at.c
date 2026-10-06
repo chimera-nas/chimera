@@ -5,7 +5,7 @@
 #include "common/macros.h"
 #include <string.h>
 #include <stdlib.h>
-#include "vfs_procs.h"
+#include "vfs_internal_procs.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
@@ -26,13 +26,15 @@ chimera_vfs_symlink_at_complete(struct chimera_vfs_request *request)
     if (request->status == CHIMERA_VFS_OK) {
         /* A new symlink is a directory content change, observable by change
          * watchers and directory-lease holders like any other create. */
-        chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                request->fh,
-                                request->fh_len,
-                                CHIMERA_VFS_NOTIFY_FILE_ADDED,
-                                request->symlink_at.name,
-                                request->symlink_at.namelen,
-                                NULL, 0);
+        if (!(request->symlink_at.flags & CHIMERA_VFS_SYMLINK_NO_NOTIFY)) {
+            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                    request->fh,
+                                    request->fh_len,
+                                    CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                    request->symlink_at.name,
+                                    request->symlink_at.namelen,
+                                    NULL, 0);
+        }
 
         chimera_vfs_name_cache_insert(thread, name_cache,
                                       request->fh_hash,
@@ -80,6 +82,7 @@ chimera_vfs_symlink_at_dispatch(
     const char                       *target,
     int                               targetlen,
     struct chimera_vfs_attrs         *set_attr,
+    uint32_t                          flags,
     uint64_t                          attr_mask,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
@@ -104,6 +107,7 @@ chimera_vfs_symlink_at_dispatch(
     request->symlink_at.target                      = target;
     request->symlink_at.targetlen                   = targetlen;
     request->symlink_at.set_attr                    = set_attr;
+    request->symlink_at.flags                       = flags;
     request->symlink_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->symlink_at.r_attr.va_set_mask          = 0;
     request->symlink_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
@@ -127,6 +131,7 @@ struct chimera_vfs_symlink_at_gate {
     struct chimera_vfs_open_handle   *handle;
     const char                       *name;
     int                               namelen;
+    uint32_t                          flags;
     const char                       *target;
     int                               targetlen;
     struct chimera_vfs_attrs         *set_attr;
@@ -155,7 +160,7 @@ chimera_vfs_symlink_at_gate_complete(
 
     chimera_vfs_symlink_at_dispatch(gate->thread, gate->cred, gate->handle,
                                     gate->name, gate->namelen, gate->target,
-                                    gate->targetlen, gate->set_attr,
+                                    gate->targetlen, gate->set_attr, gate->flags,
                                     gate->attr_mask, gate->pre_attr_mask,
                                     gate->post_attr_mask, gate->callback,
                                     gate->private_data);
@@ -177,7 +182,7 @@ chimera_vfs_symlink_at_toolong(
 } /* chimera_vfs_symlink_at_toolong */
 
 SYMBOL_EXPORT void
-chimera_vfs_symlink_at(
+chimera_vfs_symlink_at_flags(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
@@ -186,6 +191,7 @@ chimera_vfs_symlink_at(
     const char                       *target,
     int                               targetlen,
     struct chimera_vfs_attrs         *set_attr,
+    uint32_t                          flags,
     uint64_t                          attr_mask,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
@@ -215,6 +221,7 @@ chimera_vfs_symlink_at(
         gate->target         = target;
         gate->targetlen      = targetlen;
         gate->set_attr       = set_attr;
+        gate->flags          = flags;
         gate->attr_mask      = attr_mask;
         gate->pre_attr_mask  = pre_attr_mask;
         gate->post_attr_mask = post_attr_mask;
@@ -232,7 +239,27 @@ chimera_vfs_symlink_at(
     }
 
     chimera_vfs_symlink_at_dispatch(thread, cred, handle, name, namelen, target,
-                                    targetlen, set_attr, attr_mask,
+                                    targetlen, set_attr, flags, attr_mask,
                                     pre_attr_mask, post_attr_mask, callback,
                                     private_data);
+} /* chimera_vfs_symlink_at_flags */
+
+SYMBOL_EXPORT void
+chimera_vfs_symlink_at(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    const char                       *name,
+    int                               namelen,
+    const char                       *target,
+    int                               targetlen,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          attr_mask,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    chimera_vfs_symlink_at_callback_t callback,
+    void                             *private_data)
+{
+    chimera_vfs_symlink_at_flags(thread, cred, handle, name, namelen, target, targetlen, set_attr, 0,
+                                 attr_mask, pre_attr_mask, post_attr_mask, callback, private_data);
 } /* chimera_vfs_symlink_at */

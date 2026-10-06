@@ -77,6 +77,8 @@ chimera_nfs4_link_callback(
         return;
     }
 
+    chimera_nfs4_unmarshall_cinfo(&link_res->oplink.resok4.cinfo,
+                                  &request->link_at.r_dir_pre_attr, &request->link_at.r_dir_post_attr);
     /* The directory's post-mutation snapshot (op 7). */
     chimera_nfs4_unmarshall_dir_attr(res, 7, &request->link_at.r_dir_post_attr);
 

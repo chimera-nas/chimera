@@ -3,17 +3,10 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
-#include "nfs4_status.h"
-#include "nfs4_session.h"
-#include "nfs4_state.h"
-#include "vfs/vfs_claim.h"
 
-/*
- * DELEGRETURN (RFC 7530 §16.6 / RFC 8881 §18.5).  The client returns a
- * delegation -- voluntarily or in response to a CB_RECALL.  We release the
- * backing cache claim (which lets any conflicting acquirer that
- * triggered a recall make progress) and tear the delegation state down.
- */
+#include "nfs4_protocol.h"
+
+/* Claim release and delegation teardown publish only after accepted finish. */
 void
 chimera_nfs4_delegreturn(
     struct chimera_server_nfs_thread *thread,
@@ -21,71 +14,11 @@ chimera_nfs4_delegreturn(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct DELEGRETURN4args  *args      = &argop->opdelegreturn;
-    struct DELEGRETURN4res   *res       = &resop->opdelegreturn;
-    struct nfs_state_table   *table     = &thread->shared->nfs4_state_table;
-    struct chimera_vfs_state *vfs_state = thread->vfs->vfs_state;
-    void                     *state_void;
-    uint8_t                   state_type;
-    struct nfs_delegation    *deleg;
-    nfsstat4                  status;
-
-    status = nfs_state_table_acquire(table,
-                                     &args->deleg_stateid,
-                                     NFS4_SLOT_TYPE_DELEG,
-                                     &state_void,
-                                     &state_type);
-
-    if (status != NFS4_OK) {
-        res->status = status;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    /* A delegation stateid designates state held only by the client it was
-     * granted to, so presenting it from another client names no valid state
-     * and must not tear the delegation down (RFC 7530 §9.1.4 / §16.6). */
-    status = nfs_state_check_client(
-        state_void, state_type,
-        req->session ? req->session->client_unified : NULL);
-    if (status != NFS4_OK) {
-        nfs_state_table_release(table, state_void, state_type,
-                                thread->vfs_thread);
-        res->status = status;
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    deleg = state_void;
-
-    /* Release the claim now so a conflicting open/IO awaiting the recall can
-     * proceed on its next attempt.  Clearing lease_held first keeps the
-     * delegation cleanup (and any racing recall completion) from touching it
-     * again.  All of these run on this client's connection thread. */
-    if (deleg->lease_held) {
-        chimera_vfs_claim_release(vfs_state, deleg->file_state, &deleg->claim);
-        deleg->lease_held = false;
-    }
-    atomic_store_explicit(&deleg->cb_recall_state, NFS4_DELEG_RETURNED,
-                          memory_order_release);
-
-    /* Destroy under the acquire-ref (pins it across teardown), then drop the
-     * ref; final cleanup (state_put on file_state, free) runs on the last
-     * ref, deferred if an in-flight recall still holds one. */
-    nfs_delegation_destroy(deleg, table, thread->vfs_thread);
-    nfs_state_table_release(table, deleg, NFS4_SLOT_TYPE_DELEG,
-                            thread->vfs_thread);
-
-    res->status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    (void) argop;
+    (void) resop;
+    chimera_nfs4_compound_state(thread, req);
 } /* chimera_nfs4_delegreturn */
 
-/*
- * DELEGPURGE (RFC 7530 §16.5).  Purges delegations the client may reclaim
- * after its own reboot (CLAIM_DELEGATE_PREV).  This server does not persist
- * delegations across a client reboot, so there is never anything to purge --
- * acknowledge success.
- */
 void
 chimera_nfs4_delegpurge(
     struct chimera_server_nfs_thread *thread,
@@ -93,34 +26,7 @@ chimera_nfs4_delegpurge(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct DELEGPURGE4res *res = &resop->opdelegpurge;
-
     (void) thread;
-    (void) argop;
-
-    /* DELEGPURGE is in the spo_must_enforce set EXCHANGE_ID advertises, so a
-     * client that negotiated SP4_MACH_CRED must send it with the machine
-     * credential (RFC 8881 §2.10.8.3; NFS4ERR_WRONG_CRED is a listed
-     * DELEGPURGE error).  §18.5.3 requires the client be derived from the
-     * preceding SEQUENCE's session and the clientid argument ignored; state
-     * protection exists only in 4.1+, so a sessionless (4.0) request has none
-     * to enforce. */
-    if (req->session) {
-        const struct nfs4_client_principal p = {
-            .flavor          = req->principal_flavor,
-            .uid             = req->principal_uid,
-            .gid             = req->principal_gid,
-            .machinename     = req->principal_machinename,
-            .machinename_len = req->principal_machinename_len,
-        };
-
-        if (!nfs4_client_mach_cred_ok(req->session->nfs4_session_client, &p)) {
-            res->status = NFS4ERR_WRONG_CRED;
-            chimera_nfs4_compound_complete(req, NFS4ERR_WRONG_CRED);
-            return;
-        }
-    }
-
-    res->status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    resop->opdelegpurge.status = chimera_nfs4_protocol_status(req, argop);
+    chimera_nfs4_compound_complete(req, resop->opdelegpurge.status);
 } /* chimera_nfs4_delegpurge */

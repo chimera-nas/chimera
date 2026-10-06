@@ -37,7 +37,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_pnfs.h"
-#include "vfs/vfs_procs.h"
+#include "vfs/vfs_internal_procs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
 #include "common/macros.h"
@@ -620,6 +620,7 @@ chimera_vfs_pnfs_io_possible(
     const struct chimera_vfs_open_handle *handle)
 {
     return chimera_vfs_pnfs_enabled(thread->vfs) &&
+           (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_LAYOUT) &&
            !chimera_vfs_pnfs_fh_is_ds_backing(thread->vfs, handle->fh,
                                               handle->fh_len);
 } /* chimera_vfs_pnfs_io_possible */
@@ -635,12 +636,11 @@ chimera_vfs_pnfs_resolve_io(
 {
     struct chimera_vfs_pnfs_io_ctx *ctx;
 
-    /* Fast path.  No data servers configured means no file can be DS-resident,
-     * and nothing under a data server's own backing mount ever is (that mount
-     * IS the storage -- redirecting there would re-enter this path). */
-    if (!chimera_vfs_pnfs_enabled(thread->vfs) ||
-        chimera_vfs_pnfs_fh_is_ds_backing(thread->vfs, handle->fh,
-                                          handle->fh_len)) {
+    /* Only layout-capable backends can persist the residency mapping. A
+     * backend that ignores PNFS_LAYOUT must never redirect a first write:
+     * subsequent reads would use its local inode and lose the written data.
+     * A data server's own backing mount is already the storage. */
+    if (!chimera_vfs_pnfs_io_possible(thread, handle)) {
         callback(CHIMERA_VFS_OK, handle, 0, private_data);
         return;
     }
