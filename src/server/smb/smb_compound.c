@@ -447,12 +447,16 @@ smb_vfs_reset(
         if (state->producer) {
             state->range_owner_from = -1;
         }
-        state->position        = state->producer ? 0 : open->position;
-        state->flags           = open->flags;
-        state->flags_dirty     = 0;
-        state->integrity_algo  = open->integrity_algo;
-        state->integrity_flags = open->integrity_flags;
-        state->integrity_dirty = 0;
+        state->position           = state->producer ? 0 : open->position;
+        state->flags              = open->flags;
+        state->flags_dirty        = 0;
+        state->sticky_atime       = open->sticky_atime;
+        state->sticky_atime_dirty = 0;
+        state->next_ea_index      = open->next_ea_index;
+        state->ea_index_dirty     = 0;
+        state->integrity_algo     = open->integrity_algo;
+        state->integrity_flags    = open->integrity_flags;
+        state->integrity_dirty    = 0;
         memcpy(state->lock_seq_valid, open->lock_seq_valid, sizeof(state->lock_seq_valid));
         memcpy(state->lock_seq_index, open->lock_seq_index, sizeof(state->lock_seq_index));
         memcpy(state->lock_seq_status, open->lock_seq_status, sizeof(state->lock_seq_status));
@@ -640,6 +644,12 @@ smb_vfs_terminal(struct chimera_smb_vfs_batch *batch)
                 if (state->integrity_dirty) {
                     open->integrity_algo  = state->integrity_algo;
                     open->integrity_flags = state->integrity_flags;
+                }
+                if (state->ea_index_dirty) {
+                    open->next_ea_index = state->next_ea_index;
+                }
+                if (state->sticky_atime_dirty) {
+                    open->sticky_atime = state->sticky_atime;
                 }
                 if (state->position_dirty) {
                     open->position = state->position;

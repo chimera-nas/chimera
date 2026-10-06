@@ -84,7 +84,7 @@ target_include_directories(test_replay_slot PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_SOURCE_DIR}/src
     ${NFS_COMMON_INCLUDE_DIR})
-target_link_libraries(test_replay_slot chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
+target_link_libraries(test_replay_slot chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
 add_dependencies(test_replay_slot chimera_nfs_common)
 add_test(NAME chimera/server/nfs/replay_slot COMMAND test_replay_slot)
 

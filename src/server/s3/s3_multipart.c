@@ -1435,8 +1435,7 @@ chimera_s3_upc_submit(struct chimera_s3_upload_copy_ctx *ctx)
         } else {
             compound                = chimera_s3_compound_alloc(request);
             ctx->destination_bucket = chimera_vfs_compound_add_getfh(compound);
-            chimera_vfs_compound_add_putfh(compound, request->thread->shared->root_fh,
-                                           request->thread->shared->root_fh_len);
+            chimera_vfs_compound_add_putroot(compound);
             ctx->source_bucket = chimera_vfs_compound_add_lookup_path(
                 compound, ctx->src_path, strlen(ctx->src_path),
                 CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW);

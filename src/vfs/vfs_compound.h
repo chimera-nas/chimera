@@ -222,6 +222,7 @@ enum chimera_vfs_compound_op_type {
     CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM,
     CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS,
     CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM,
+    CHIMERA_VFS_COMPOUND_OP_RENAME_STREAM,
     CHIMERA_VFS_COMPOUND_OP_ALLOCATE,
     CHIMERA_VFS_COMPOUND_OP_SEEK,
     CHIMERA_VFS_COMPOUND_OP_COPY_RANGE,
@@ -1854,6 +1855,17 @@ chimera_vfs_compound_add_open_stream(
  * Callers that need the entire list must check eof and continue, or report
  * their protocol's buffer limit rather than silently accepting a partial list. */
 
+
+/* Rename a data fork on the current base object. Empty names select the
+ * unnamed data fork. Both names are copied; flags are CHIMERA_VFS_RENAME_STREAM_*. */
+int
+chimera_vfs_compound_add_rename_stream(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen,
+    const char                  *new_name,
+    int                          new_namelen,
+    uint32_t                     flags);
 
 /* Remove the fork `name` from the base the op addresses, which stays
  * current.  The ctime pair lands in pre_ctime / post_ctime as REMOVEXATTR's

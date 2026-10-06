@@ -990,7 +990,7 @@ struct chimera_smb_request {
             struct chimera_vfs_claim_owner *range_retire_owner;
             struct chimera_smb_attrs        r_attrs;
             uint8_t                         attr_failed;
-            struct chimera_vfs_attrs trim_attrs;
+            struct chimera_vfs_attrs        trim_attrs;
         } close;
 
         struct {
@@ -1213,6 +1213,9 @@ struct chimera_smb_request {
             uint8_t                         oid_in[64];
             struct chimera_smb_open_file   *oid_open_file;
             struct chimera_vfs_open_handle *oid_root;
+            struct chimera_vfs_open_handle *oid_other_handle;
+            uint8_t                         oid_fh[CHIMERA_VFS_FH_SIZE];
+            uint32_t                        oid_fh_len;
             char                            oid_index_name[48];
             /* FSCTL_LMR_REQUEST_RESILIENCY (NETWORK_RESILIENCY_REQUEST,
              * MS-SMB2 2.2.31.3): requested resiliency Timeout in milliseconds. */
@@ -1259,11 +1262,11 @@ struct chimera_smb_request {
             uint32_t                        ii_flags;
         } ioctl;
         struct {
-            uint8_t                       info_type;
-            uint8_t                       info_class;
-            uint32_t                      addl_info;
-            uint32_t                      flags;
-            uint32_t                      output_length;
+            uint8_t                         info_type;
+            uint8_t                         info_class;
+            uint32_t                        addl_info;
+            uint32_t                        flags;
+            uint32_t                        output_length;
             /* Client-supplied OutputBufferLength (max bytes the client will
              * accept) and the info level's fixed minimum size, used to answer
              * INFO_LENGTH_MISMATCH / BUFFER_OVERFLOW before marshalling. */
@@ -1278,23 +1281,23 @@ struct chimera_smb_request {
             struct chimera_smb_open_file   *open_file;
             /* Security descriptor built in the getattr callback and emitted by
              * the reply builder (SMB2_INFO_SECURITY). */
-            uint8_t                       sec_buf[4096];
-            uint32_t                      sec_buf_len;
+            uint8_t                         sec_buf[4096];
+            uint32_t                        sec_buf_len;
             /* When the SD references identities not yet in the cache, the
              * getattr'd owner/group/mode + ACL are copied here so the SD can be
              * built after an async identity resolve completes (the live attrs
              * are only valid during the getattr callback). */
-            uint32_t                      sd_uid;
-            uint32_t                      sd_gid;
-            uint32_t                      sd_mode;
-            int                           sd_has_acl;
-            int                           sd_pending;
-            uint8_t                       sd_acl_storage[sizeof(struct chimera_acl) +
-                                                         64 * sizeof(struct chimera_ace)];
+            uint32_t                        sd_uid;
+            uint32_t                        sd_gid;
+            uint32_t                        sd_mode;
+            int                             sd_has_acl;
+            int                             sd_pending;
+            uint8_t                         sd_acl_storage[sizeof(struct chimera_acl) +
+                                                           64 * sizeof(struct chimera_ace)];
             /* The stored native owner / group SIDs, copied out with the rest
              * (len 0 = none stored). */
-            struct chimera_sid            sd_owner_sid;
-            struct chimera_sid            sd_group_sid;
+            struct chimera_sid              sd_owner_sid;
+            struct chimera_sid              sd_group_sid;
             /* FileStreamInformation: the packed VFS list_streams records are
              * held here from the list_streams callback until the reply builder
              * emits them as MS-FSCC FILE_STREAM_INFORMATION entries.

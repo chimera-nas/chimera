@@ -370,7 +370,7 @@ smb_query_directory_emit(
     } /* switch */
 
     page->last_entry_end = (uint32_t) ((char *) namebuf -
-                                                          (char *) evpl_iovec_data(page->iov)) +
+                                       (char *) evpl_iovec_data(page->iov)) +
         name_utf16_len;
     page->output_length += expected_length;
 
@@ -399,13 +399,13 @@ chimera_smb_query_directory_readdir_callback(
         .output_length     = request->query_directory.output_length,
         .max_output_length = request->query_directory.max_output_length,
         .last_file_offset  = request->query_directory.last_file_offset,
-        .last_entry_end = request->query_directory.last_entry_end,
+        .last_entry_end    = request->query_directory.last_entry_end,
     };
     int                         rc = smb_query_directory_emit(inum, cookie, name, namelen, attrs, &page);
 
     request->query_directory.flags            = page.flags;
     request->query_directory.output_length    = page.output_length;
-    request->query_directory.last_entry_end = page.last_entry_end;
+    request->query_directory.last_entry_end   = page.last_entry_end;
     request->query_directory.last_file_offset = page.last_file_offset;
     request->query_directory.staged_position  = page.cookie;
     return rc;
@@ -789,7 +789,7 @@ smb_query_directory_stream_reset(
     page->cookie           = command->state->position;
     page->flags            = command->request->query_directory.flags;
     page->output_length    = 0;
-    page->last_entry_end = 0;
+    page->last_entry_end   = 0;
     page->last_file_offset = NULL;
     page->stopped          = 0;
 } /* smb_query_directory_stream_reset */
@@ -931,7 +931,7 @@ smb_query_directory_compound_complete(
     }
     if (page->last_file_offset) {
         *page->last_file_offset = 0;
-        page->output_length = page->last_entry_end;
+        page->output_length     = page->last_entry_end;
     }
     command->state->position       = op->eof && !page->stopped ? UINT64_MAX : page->cookie;
     command->state->position_dirty = 1;

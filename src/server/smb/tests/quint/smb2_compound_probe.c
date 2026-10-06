@@ -338,7 +338,7 @@ check_reply(
             if (cmd[i].offset & 0x100) {
                 /* memfs capabilities with named streams disabled, including
                  * QUERY_INFO through a just-created private handle. */
-                assert(g32(h + g16(b, 2), 0) == 0x080000cf);
+                assert(g32(h + g16(b, 2), 0) == 0x080100cf);
             } else if (cmd[i].offset == 14) {
                 /* Earlier READ advanced to four; a later SET_POSITION must
                  * not overwrite this command's private response snapshot. */

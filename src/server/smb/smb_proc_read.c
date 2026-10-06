@@ -72,18 +72,17 @@ static void chimera_smb_read_send(
  * restore leaves the access time advanced but is not worth failing it over. */
 static void
 chimera_smb_read_sticky_restore_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
 
+    enum chimera_vfs_error      error_code = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
     (void) error_code;
-    (void) pre_attr;
-    (void) set_attr;
-    (void) post_attr;
 
     chimera_smb_open_file_release(request, request->read.open_file);
     chimera_smb_read_send(request);
@@ -202,14 +201,14 @@ chimera_smb_read_callback(
         request->read.restore_attrs.va_set_mask = CHIMERA_VFS_ATTR_ATIME;
         request->read.restore_attrs.va_atime    = open_file->sticky_atime;
 
-        chimera_vfs_setattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            open_file->handle,
-                            &request->read.restore_attrs,
-                            0,
-                            0,
-                            chimera_smb_read_sticky_restore_callback,
-                            request);
+        {
+            struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(thread->vfs_thread, &request->
+                                                                               session_handle->session->cred);
+            request->vfs_compound = sequence;
+            chimera_vfs_compound_add_puthandle(sequence, open_file->handle, CHIMERA_VFS_OPEN_PATH);
+            chimera_vfs_compound_add_setattr(sequence, open_file->handle, &request->read.restore_attrs, 0, 0);
+            chimera_frontend_compound_submit(sequence, chimera_smb_read_sticky_restore_callback, request);
+        }
         return;
     }
 
@@ -651,6 +650,20 @@ smb_read_compound_prepare(
 } /* smb_read_compound_prepare */
 
 static void
+smb_read_restore_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    (void) compound;
+    (void) index;
+    (void) private_data;
+    /* Restoring an explicitly set atime is best effort, as on standalone READ. */
+    *status = CHIMERA_VFS_OK;
+} /* smb_read_restore_complete */
+
+static void
 smb_read_compound_complete(
     struct chimera_vfs_compound *compound,
     uint32_t                     index,
@@ -669,6 +682,13 @@ smb_read_compound_complete(
     if ((request->read.length && !op->read_len) || op->read_len < request->read.minimum) {
         command->status = SMB2_STATUS_END_OF_FILE;
         *status         = CHIMERA_VFS_EINVAL;
+    } else if (command->state->flags & CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY) {
+        struct chimera_vfs_attrs restore = {
+            .va_set_mask = CHIMERA_VFS_ATTR_ATIME,
+            .va_atime    = command->state->sticky_atime,
+        };
+        int                      op_index = chimera_vfs_compound_add_setattr(compound, command->handle, &restore, 0, 0);
+        chimera_vfs_compound_set_op_callbacks(compound, op_index, NULL, smb_read_restore_complete, command);
     }
 } /* smb_read_compound_complete */
 

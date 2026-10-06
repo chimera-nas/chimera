@@ -126,7 +126,7 @@ main(void)
         };
         int                     bodylen = smb2c_build_create_full(conn, name,
                                                                   MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, 0,
-                                                                  MBT_FILE_NON_DIRECTORY_FILE,
+                                                                  MBT_FILE_NON_DIRECTORY_FILE, 0,
                                                                   NULL, contexts, count);
         atomic_store(&deleted, 0);
         if (parked) {
@@ -146,8 +146,8 @@ main(void)
         uint32_t               result_len;
         assert(smb2_query_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
                                opened.file_id, 0, result, sizeof(result), &result_len) == ST_SUCCESS);
-        uint32_t               want = ea_encode(expected, "Prefix", "ok", true);
-        assert(result_len == ((want + 3) & ~3u));
+        uint32_t               want = ea_encode(expected, "PREFIX", "ok", true);
+        assert(result_len == want);
         assert(!memcmp(result, expected, want));
         assert(smb2_close(conn, opened.file_id) == ST_SUCCESS);
     }

@@ -339,12 +339,12 @@ struct nfs_client {
      * one of this courtesy client's leases.  The client has lost its lease;
      * the next lease sweep tears its state down (tombstoning its stateids).
      * A reclaimed client is not revived by a returning op. */
-    _Atomic uint8_t          reclaim_pending;
-    uint64_t                 last_touch_ns;
+    _Atomic uint8_t                  reclaim_pending;
+    uint64_t                         last_touch_ns;
     /* Monotonic ns of the last time this client's recovery record was written
      * to the KV store (nfs_recovery_persist).  Read by the lease sweeper to
      * decide when the record's renewal stamp is due a refresh. */
-    _Atomic uint64_t         recovery_stamp_ns;
+    _Atomic uint64_t                 recovery_stamp_ns;
     /* Request-level reservations protect unpublished compound OPEN state from
      * lease teardown until the compound has accepted or discarded its attempt. */
     _Atomic uint32_t                 compound_pins;

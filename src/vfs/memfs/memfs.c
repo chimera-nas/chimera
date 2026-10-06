@@ -7122,7 +7122,7 @@ memfs_open_stream(
         stream->next = NULL;
         for (tail = &inode->streams; *tail; tail = &(*tail)->next) {
         }
-        *tail        = stream;
+        *tail = stream;
         inode->stream_change++;
         inode->mtime = now;
         inode->ctime = now;

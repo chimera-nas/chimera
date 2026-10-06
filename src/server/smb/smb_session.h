@@ -217,8 +217,8 @@ struct chimera_smb_open_file {
     /* Explicit FileDispositionInformationEx POSIX delete: unlink on this
      * handle's CLOSE even while other opens retain the inode. */
     uint8_t                                   doc_posix;
-    uint32_t next_ea_index;
-    struct timespec sticky_atime;
+    uint32_t                                  next_ea_index;
+    struct timespec                           sticky_atime;
     uint64_t                                  position;
     uint32_t                                  parent_fh_len;
     _Atomic uint32_t                          refcnt;

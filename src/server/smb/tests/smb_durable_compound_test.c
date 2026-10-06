@@ -108,7 +108,7 @@ main(void)
     wait_done(evpl, &done);
     uint8_t                               root[CHIMERA_VFS_FH_SIZE];
     uint32_t                              root_len;
-    chimera_vfs_get_root_fh(root, &root_len);
+    chimera_vfs_get_root_fh(vfs, root, &root_len);
     struct chimera_vfs_compound          *cp = chimera_vfs_compound_alloc(vthread, cred);
     chimera_vfs_compound_add_putfh(cp, root, root_len);
     chimera_vfs_compound_add_lookup(cp, "mem", 3, CHIMERA_VFS_ATTR_FH, 0);

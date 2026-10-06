@@ -2538,7 +2538,7 @@ main(void)
     chimera_vfs_mount(f.thread, &root, "/mem", "memfs", "groups", NULL, mounted, &f);
     wait_done(&f);
     assert(f.mount_status == CHIMERA_VFS_OK);
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    chimera_vfs_get_root_fh(f.vfs, root_fh, &root_fh_len);
     chimera_vfs_lookup(f.thread, &root, root_fh, root_fh_len, "mem", 3,
                        CHIMERA_VFS_ATTR_FH, 0, looked_up, &f);
     wait_done(&f);

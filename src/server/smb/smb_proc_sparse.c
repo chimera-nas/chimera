@@ -126,7 +126,8 @@ chimera_smb_ioctl_set_sparse(struct chimera_smb_request *request)
      * open already knows what it opened -- which is what every SET_INFO class
      * with the same "a directory has no data stream" rule asks -- so the type
      * is settled here rather than vetoed from a mode the sequence read. */
-    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+    if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) &&
+        !(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
@@ -496,14 +497,22 @@ chimera_smb_ioctl_query_allocated_ranges(struct chimera_smb_request *request)
  * network file system anyway. */
 static void
 chimera_smb_get_retrieval_pointers_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
-    uint64_t                    clusters, lcn, start = 0;
-    uint32_t                    count = 1;
-    uint8_t                    *out   = request->ioctl.rpt_out;
+    struct chimera_smb_request           *request = private_data;
+
+    enum chimera_vfs_error                error_code = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *result     = chimera_vfs_compound_op(compound, chimera_vfs_compound_num_ops(
+                                                                                   compound) - 1);
+    struct chimera_vfs_attrs              snapshot = result->attr;
+    struct chimera_vfs_attrs             *attr     = &snapshot;
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+    uint64_t                              clusters, lcn, start = 0;
+    uint32_t                              count = 1;
+    uint8_t                              *out   = request->ioctl.rpt_out;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
@@ -552,13 +561,15 @@ chimera_smb_ioctl_get_retrieval_pointers(struct chimera_smb_request *request)
     }
     request->ioctl.sp_open_file = open_file;
 
-    chimera_vfs_getattr(request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred,
-                        open_file->handle,
-                        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES |
-                        CHIMERA_VFS_ATTR_ALLOC_SIZE,
-                        chimera_smb_get_retrieval_pointers_cb,
-                        request);
+    {
+        struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
+                                                                           request->session_handle->session->cred);
+        request->vfs_compound = sequence;
+        chimera_vfs_compound_add_puthandle(sequence, open_file->handle, CHIMERA_VFS_OPEN_PATH);
+        chimera_vfs_compound_add_getattr(sequence, CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES |
+                                         CHIMERA_VFS_ATTR_ALLOC_SIZE);
+        chimera_frontend_compound_submit(sequence, chimera_smb_get_retrieval_pointers_cb, request);
+    }
 } /* chimera_smb_ioctl_get_retrieval_pointers */
 /* Coalesced sparse commands keep scans and their wire results private to one
  * attempt. Dynamic SEEKs are inserted before the next SMB command group. */
@@ -642,7 +653,7 @@ smb_sparse_set_prepare(
     const struct chimera_vfs_attrs *attrs   = &chimera_vfs_compound_op(compound, index - 1)->attr;
     struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op_args(compound, index);
 
-    if (S_ISDIR(attrs->va_mode)) {
+    if (S_ISDIR(attrs->va_mode) && !(command->state->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
         command->status = SMB2_STATUS_INVALID_PARAMETER;
         *status         = CHIMERA_VFS_EINVAL;
         return;

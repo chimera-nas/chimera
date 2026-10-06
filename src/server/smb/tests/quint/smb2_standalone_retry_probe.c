@@ -135,7 +135,7 @@ static void
 doc_chain(struct smb2_conn *conn)
 {
     int          length = smb2c_build_create_full(conn, "doc-chain", MBT_FILE_CREATE,
-                                                  MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, MBT_FILE_DELETE_ON_CLOSE,
+                                                  MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, MBT_FILE_DELETE_ON_CLOSE, 0,
                                                   NULL, NULL, 0);
     uint8_t     *wire   = conn->sbuf + 4;
     uint64_t     mid    = g64(wire, 24);
@@ -262,13 +262,11 @@ main(void)
     assert(smb2_set_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
                          file.file_id, ea, 15) == ST_SUCCESS);
     arm(CHIMERA_VFS_COMPOUND_OP_GETXATTR, 2, CHIMERA_VFS_EAGAIN, false);
-    assert(smb2_query_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
-                           file.file_id, 0, out, sizeof(out), &length) == ST_SUCCESS);
-    assert(length >= 15 && !memcmp(out + 8, "key", 3) && !memcmp(out + 12, "val", 3));
+    assert(smb2_query_eas_restart(conn, file.file_id, out, sizeof(out), &length) == ST_SUCCESS);
+    assert(length >= 15 && !memcmp(out + 8, "KEY", 3) && !memcmp(out + 12, "val", 3));
     check(3);
     arm(CHIMERA_VFS_COMPOUND_OP_GETXATTR, 100, CHIMERA_VFS_EAGAIN, false);
-    assert(smb2_query_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
-                           file.file_id, 0, out, sizeof(out), &length) != ST_SUCCESS);
+    assert(smb2_query_eas_restart(conn, file.file_id, out, sizeof(out), &length) != ST_SUCCESS);
     assert(!length); check(CHIMERA_FRONTEND_COMPOUND_RETRIES + 1);
 
     arm(CHIMERA_VFS_COMPOUND_OP_RENAME, 2, CHIMERA_VFS_EAGAIN, true);

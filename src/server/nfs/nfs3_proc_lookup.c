@@ -81,7 +81,7 @@ chimera_nfs3_lookup(
     struct nfs_request               *req;
     struct LOOKUP3res                 res;
     int                               rc;
-    const char                       *name = args->what.name.str;
+    const char                       *name    = args->what.name.str;
     int                               namelen = args->what.name.len;
 
     req = nfs_request_alloc(thread, conn, encoding);
@@ -106,7 +106,7 @@ chimera_nfs3_lookup(
     /* Keep export-root ".." inside the export. */
     if (namelen == 2 && name[0] == '.' && name[1] == '.' &&
         chimera_nfs_dotdot_stays(req, req->fh, req->fhlen)) {
-        name = ".";
+        name    = ".";
         namelen = 1;
     }
 

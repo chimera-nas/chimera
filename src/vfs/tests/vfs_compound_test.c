@@ -3089,7 +3089,7 @@ main(
         uint32_t mroot_fh_len;
         int      i_fh, i_lk;
 
-        chimera_vfs_get_root_fh(mroot_fh, &mroot_fh_len);
+        chimera_vfs_get_root_fh(ctx.vfs_thread->vfs, mroot_fh, &mroot_fh_len);
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putroot(cp);

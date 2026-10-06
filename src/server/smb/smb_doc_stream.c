@@ -212,9 +212,15 @@ stream_doc_compound_done(
                                                  .proto = CHIMERA_CLAIM_PROTO_SMB2, .client_key = action->client_key,
                                              } };
         memcpy(actor.owner.key, action->parent_lease_key, 16);
+        char                       notify_name[CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX];
+        uint32_t                   notify_len = action->base_name_len + 1 + action->name_len;
+        memcpy(notify_name, action->base_name, action->base_name_len);
+        notify_name[action->base_name_len] = ':';
+        memcpy(notify_name + action->base_name_len + 1, action->name, action->name_len);
         chimera_vfs_notify_emit_actor(action->thread->vfs->vfs_notify,
-                                      action->parent_fh, action->parent_fh_len, CHIMERA_VFS_NOTIFY_STREAM_NAME,
-                                      action->base_name, action->base_name_len, NULL, 0,
+                                      action->parent_fh, action->parent_fh_len, CHIMERA_VFS_NOTIFY_STREAM_NAME |
+                                      CHIMERA_VFS_NOTIFY_STREAM_REMOVED,
+                                      notify_name, notify_len, NULL, 0,
                                       chimera_claim_owner_has_key(&actor.owner) ? &actor : NULL);
     }
     chimera_vfs_compound_free(compound);

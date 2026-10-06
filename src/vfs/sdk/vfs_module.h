@@ -28,8 +28,8 @@ struct chimera_vfs_request;
  * chimera_vfs_register() refuses a module built against a different
  * version, so a stale out-of-tree binary fails loudly at load time
  * instead of corrupting memory. */
-/* Version 5 adds the VFS-owned creation outcome to handle-state descriptors. */
-#define CHIMERA_VFS_SDK_VERSION            5
+/* Version 6 combines compound identity results with named-stream rename. */
+#define CHIMERA_VFS_SDK_VERSION            6
 
 /* If set, module requires open handles for path operations
  * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open
@@ -194,7 +194,7 @@ struct chimera_vfs_handle_state {
 #define CHIMERA_VFS_XATTR_REPLACE              2 /* must already exist */
 
 /* rename_stream flags */
-#define CHIMERA_VFS_RENAME_STREAM_REPLACE     0x1 /* replace an empty stream */
+#define CHIMERA_VFS_RENAME_STREAM_REPLACE      0x1 /* replace an empty stream */
 
 /* Module persists the opaque CHIMERA_VFS_ATTR_PNFS_LAYOUT attribute. This
  * storage capability alone does not imply coherent pNFS data routing and must
@@ -248,7 +248,7 @@ struct chimera_vfs_handle_state {
  * mode, is the authority, so the engine's open gates refuse (EIO) a reply
  * that omits it rather than fall back to the mode bits; see
  * chimera_vfs_gate_attrs_missing(). */
-#define CHIMERA_VFS_CAP_ACL_NATIVE            (1U << 23)
+#define CHIMERA_VFS_CAP_ACL_NATIVE             (1U << 23)
 
 /* If set, the module delegates discretionary access control to a real
  * underlying enforcer (e.g. the host kernel, via the seteuid/setegid
@@ -269,7 +269,7 @@ struct chimera_vfs_handle_state {
  * refuse with EIO an open whose reply lacks them, and chimera_vfs_access_check
  * grants nothing on such attrs: a zero read in place of a missing uid or gid
  * would evaluate the object as if owned by root:root. */
-#define CHIMERA_VFS_CAP_DELEGATES_DAC         (1U << 21)
+#define CHIMERA_VFS_CAP_DELEGATES_DAC          (1U << 21)
 
 /* Refinement of CHIMERA_VFS_CAP_DELEGATES_DAC for PROXY modules (nfs, smb):
  * the real enforcer is a remote server that authorizes every operation with

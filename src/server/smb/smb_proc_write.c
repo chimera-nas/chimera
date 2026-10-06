@@ -158,13 +158,13 @@ chimera_smb_write_gate(
     if ((request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) &&
         (op->pre_attr.va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
         edit->set_attr.va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
-        edit->set_attr.va_mtime = op->pre_attr.va_mtime;
+        edit->set_attr.va_mtime     = op->pre_attr.va_mtime;
     }
     if (chimera_smb_write_post_attr_mask(request->write.open_file) &&
         (op->attr.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
         !(op->attr.va_dos_attributes &
           (SMB2_FILE_ATTRIBUTE_ARCHIVE | SMB2_FILE_ATTRIBUTE_DIRECTORY))) {
-        edit->set_attr.va_set_mask |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        edit->set_attr.va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
         edit->set_attr.va_dos_attributes =
             (op->attr.va_dos_attributes & ~SMB2_FILE_ATTRIBUTE_NORMAL) |
             SMB2_FILE_ATTRIBUTE_ARCHIVE;
@@ -748,13 +748,24 @@ smb_write_sticky_prepare(
 
     (void) status;
 
-    if (!(command->state->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) ||
-        !(write->dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
-        chimera_vfs_compound_op_skip(compound, index);
-        return;
+    memset(&restore->set_attr, 0, sizeof(restore->set_attr));
+    if ((command->state->flags & CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY) &&
+        (write->dir_pre_attr.va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+        restore->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MTIME;
+        restore->set_attr.va_mtime    = write->dir_pre_attr.va_mtime;
     }
-    restore->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MTIME;
-    restore->set_attr.va_mtime    = write->dir_pre_attr.va_mtime;
+    if (!(command->state->flags & (CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED |
+                                   CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) &&
+        (write->attr.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+        !(write->attr.va_dos_attributes & (SMB2_FILE_ATTRIBUTE_ARCHIVE | SMB2_FILE_ATTRIBUTE_DIRECTORY))) {
+        restore->set_attr.va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        restore->set_attr.va_dos_attributes =
+            (write->attr.va_dos_attributes & ~SMB2_FILE_ATTRIBUTE_NORMAL) | SMB2_FILE_ATTRIBUTE_ARCHIVE;
+    }
+    if (!restore->set_attr.va_set_mask) {
+        chimera_vfs_compound_op_skip(compound, index);
+    }
+
 } /* smb_write_sticky_prepare */
 
 static void
@@ -764,9 +775,14 @@ smb_write_sticky_complete(
     enum chimera_vfs_error      *status,
     void                        *private_data)
 {
+    struct smb_vfs_command *command = private_data;
+
     (void) compound;
     (void) index;
-    (void) private_data;
+    if (*status == CHIMERA_VFS_OK) {
+        command->state->flags       |= CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED;
+        command->state->flags_dirty |= CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED;
+    }
     /* Preserve the existing best-effort timestamp-restore policy. */
     *status = CHIMERA_VFS_OK;
 } /* smb_write_sticky_complete */
@@ -796,7 +812,7 @@ smb_write_compound_build(
                                                request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH), request->write.iov,
                                            request->write.niov, 0, 0, &command->actor);
     /* An earlier SET_INFO in this compound can turn sticky time on. */
-    chimera_vfs_compound_set_result_masks(compound, write, 0, CHIMERA_VFS_ATTR_MTIME, 0);
+    chimera_vfs_compound_set_result_masks(compound, write, 0, CHIMERA_VFS_ATTR_MTIME, CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
     sticky = chimera_vfs_compound_add_setattr(compound, command->handle, &restore, 0, 0);
     chimera_vfs_compound_set_op_callbacks(compound, sticky, smb_write_sticky_prepare,
                                           smb_write_sticky_complete, command);
@@ -875,11 +891,13 @@ smb_write_compound_publish(
         return;
     }
     if (request->write.length && open->parent_fh_len) {
+        char     notify_name[CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX];
+        uint32_t notify_len = chimera_smb_open_file_notify_name(open, notify_name);
         chimera_vfs_notify_emit_nobreak(request->compound->thread->shared->vfs->vfs_notify,
                                         open->parent_fh, open->parent_fh_len,
                                         CHIMERA_VFS_NOTIFY_FILE_MODIFIED | CHIMERA_VFS_NOTIFY_STREAM_WRITE |
                                         CHIMERA_VFS_NOTIFY_STREAM_SIZE,
-                                        open->name, open->name_len, NULL, 0);
+                                        notify_name, notify_len, NULL, 0);
     }
     /* Report the bytes actually accepted, including a backend short write. */
     request->write.length = write->written;

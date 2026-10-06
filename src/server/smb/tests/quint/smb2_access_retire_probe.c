@@ -85,7 +85,8 @@ app_open(
     memset(app + 4, 0x39, 16);
     struct smb2_cctx context = { app_guid, sizeof(app_guid), app, sizeof(app) };
     smb2c_send(conn, smb2c_build_create_full(conn, name, disposition,
-                                             MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE, NULL, &context, 1));
+                                             MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &context, 1))
+    ;
     smb2c_wait(conn);
     smb2c_parse_create(conn, result);
     return result->status;

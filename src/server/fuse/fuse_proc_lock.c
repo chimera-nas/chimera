@@ -60,6 +60,12 @@ chimera_fuse_lock_complete(
 } /* chimera_fuse_lock_complete */
 
 static void
+chimera_fuse_lock_parked(void *private_data)
+{
+    chimera_fuse_uring_parked(private_data);
+} /* chimera_fuse_lock_parked */
+
+static void
 chimera_fuse_lock_submit(
     struct chimera_fuse_request *req,
     const struct fuse_lk_in     *in,
@@ -105,6 +111,8 @@ chimera_fuse_lock_submit(
     lock.offset          = in->lk.start;
     lock.length          = CHIMERA_FUSE_LOCK_LEN(in->lk.start, in->lk.end);
     lock.wait            = req->opcode == FUSE_SETLKW;
+    lock.on_wait         = chimera_fuse_lock_parked;
+    lock.wait_private    = req;
     lock.project_backend = false;
     lock.generation      = chimera_vfs_lock_domain_admit(mount->lock_domain,
                                                          file->handle, &lock.owner);

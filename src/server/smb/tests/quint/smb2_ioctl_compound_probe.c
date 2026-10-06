@@ -1177,7 +1177,7 @@ main(void)
     ioctl_send(&p, c);
     assert(atomic_load(&attempts) == 3);
     out = result(c, 0, &length);
-    assert(length >= 14 && !memcmp(out + 8, "Foo\0ok", 6));
+    assert(length >= 14 && !memcmp(out + 8, "FOO\0ok", 6));
     out = result(c, 1, &length);
     assert(length >= 20 && out[0] == 1);
     out = result(c, 2, &length);
@@ -1248,10 +1248,11 @@ main(void)
 
     /* A grant can target an unpublished related CREATE in the same compound. */
     memset(&p, 0, sizeof(p));
-    int     create_size = smb2c_build_create_full(c, "private-resilient", MBT_FILE_CREATE,
-                                                  MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE,
-                                                  NULL, NULL,
-                                                  0);
+    int create_size = smb2c_build_create_full(c, "private-resilient", MBT_FILE_CREATE,
+                                              MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE,
+                                              0,
+                                              NULL, NULL,
+                                              0);
     p.length    = SMB2_HDR_SIZE + create_size;
     p.count     = 1;
     p.first_mid = g64(c->sbuf + 4, 24);

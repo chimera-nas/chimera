@@ -31,9 +31,8 @@ chimera_s3_remove_temp(
     const char                *name,
     int                        name_len)
 {
-    struct chimera_s3_temp_cleanup  *ctx;
-    struct chimera_vfs_compound     *compound;
-    struct chimera_server_s3_shared *shared = request->thread->shared;
+    struct chimera_s3_temp_cleanup *ctx;
+    struct chimera_vfs_compound    *compound;
 
     if (name_len <= 0) {
         return;
@@ -45,7 +44,7 @@ chimera_s3_remove_temp(
     ctx->cred = request->cred;
     compound  = chimera_vfs_compound_alloc(request->thread->vfs, &ctx->cred);
     if (request->bucket_path) {
-        chimera_vfs_compound_add_putfh(compound, shared->root_fh, shared->root_fh_len);
+        chimera_vfs_compound_add_putroot(compound);
         chimera_vfs_compound_add_lookup_path(compound, request->bucket_path,
                                              strlen(request->bucket_path),
                                              CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW);

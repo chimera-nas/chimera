@@ -32,12 +32,11 @@ chimera_s3_compound_chunk_size(struct chimera_s3_request *request)
 static inline struct chimera_vfs_compound *
 chimera_s3_compound_alloc(struct chimera_s3_request *request)
 {
-    struct chimera_vfs_compound     *compound;
-    struct chimera_server_s3_shared *shared = request->thread->shared;
+    struct chimera_vfs_compound *compound;
 
     compound = chimera_vfs_compound_alloc(request->thread->vfs, &request->cred);
     if (request->bucket_path) {
-        chimera_vfs_compound_add_putfh(compound, shared->root_fh, shared->root_fh_len);
+        chimera_vfs_compound_add_putroot(compound);
         chimera_vfs_compound_add_lookup_path(compound, request->bucket_path,
                                              strlen(request->bucket_path),
                                              CHIMERA_VFS_ATTR_FH,

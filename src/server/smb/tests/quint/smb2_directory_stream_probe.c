@@ -63,7 +63,7 @@ chain(
 {
     fprintf(stderr, "# directory stream %s disposition %u write %u\n", name, disposition, write);
     int          length = smb2c_build_create_full(conn, name, disposition, MBT_FILE_ALL_ACCESS,
-                                                  MBT_FILE_SHARE_RWD, options, NULL, contexts, count);
+                                                  MBT_FILE_SHARE_RWD, options, 0, NULL, contexts, count);
     uint8_t     *wire   = conn->sbuf + 4;
     uint64_t     mid    = g64(wire, 24);
     unsigned int offset = (SMB2_HDR_SIZE + length + 7) & ~7u;
@@ -222,22 +222,21 @@ main(void)
     struct smb2_cctx ctx = { (const uint8_t *) "ExtA", 4, eas, length };
     chain(conn, "directory:ea", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE, 2, 0, false, &ctx, 1);
     uint32_t         result_len;
-    assert(smb2_query_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
-                           base.file_id, 0, result, sizeof(result), &result_len) == ST_SUCCESS);
-    uint32_t         want = ea_encode(expected, "DirEA", "two", true);
-    assert(result_len == ((want + 3) & ~3u) && !memcmp(result, expected, want));
+    assert(smb2_query_eas_restart(conn, base.file_id, result, sizeof(result), &result_len) == ST_SUCCESS);
+    uint32_t         want = ea_encode(expected, "DIREA", "two", true);
+    assert(result_len == want && !memcmp(result, expected, want));
     length  = ea_encode(eas, "DirEA", "ok", false);
     length += ea_encode(eas + length, "bad:name", "x", true); ctx.data_len = length;
     int              body = smb2c_build_create_full(conn, "directory:failed-ea", MBT_FILE_CREATE,
-                                                    MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE, NULL, &ctx, 1);
+                                                    MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &ctx,
+                                                    1);
     assert(smb2c_xfer(conn, body) == 0x80000013u);
     assert(smb2_create(conn, "directory:failed-ea", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
                        MBT_FILE_SHARE_RWD, NULL, &seed) == ST_SUCCESS);
     assert(smb2_close(conn, seed.file_id) == ST_SUCCESS);
-    assert(smb2_query_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
-                           base.file_id, 0, result, sizeof(result), &result_len) == ST_SUCCESS);
-    want = ea_encode(expected, "DirEA", "ok", true);
-    assert(result_len == ((want + 3) & ~3u) && !memcmp(result, expected, want));
+    assert(smb2_query_eas_restart(conn, base.file_id, result, sizeof(result), &result_len) == ST_SUCCESS);
+    want = ea_encode(expected, "DIREA", "ok", true);
+    assert(result_len == want && !memcmp(result, expected, want));
 
     /* Reparse-option and CREATE-time DOC still use their legacy boundaries.
      * They must agree with native stream type/size and preserve the directory. */

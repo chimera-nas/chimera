@@ -177,7 +177,7 @@ chimera_s3_create_bucket(
     attributes.va_uid = request->cred.uid;
     attributes.va_gid = request->cred.gid;
     compound          = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-    chimera_vfs_compound_add_putfh(compound, shared->root_fh, shared->root_fh_len);
+    chimera_vfs_compound_add_putroot(compound);
     chimera_vfs_compound_add_lookup_path(compound, shared->bucket_root_path,
                                          shared->bucket_root_pathlen, CHIMERA_VFS_ATTR_FH,
                                          CHIMERA_VFS_LOOKUP_FOLLOW);
@@ -313,9 +313,8 @@ chimera_s3_delbucket_find_done(
     enum chimera_vfs_error      *status,
     void                        *private_data)
 {
-    struct s3_delbucket_ctx         *ctx    = private_data;
-    struct chimera_server_s3_shared *shared = ctx->request->thread->shared;
-    int                              removal;
+    struct s3_delbucket_ctx *ctx = private_data;
+    int                      removal;
 
     if (*status) {
         return;
@@ -327,7 +326,7 @@ chimera_s3_delbucket_find_done(
     qsort(ctx->dirs, ctx->ndirs, sizeof(char *), chimera_s3_delbucket_depth_cmp);
     chimera_vfs_compound_add_remove_paths(compound, (const char *const *) ctx->dirs,
                                           ctx->ndirs, CHIMERA_VFS_REMOVE_ISDIR, 1);
-    chimera_vfs_compound_add_putfh(compound, shared->root_fh, shared->root_fh_len);
+    chimera_vfs_compound_add_putroot(compound);
     removal = chimera_vfs_compound_add_remove_path(compound, ctx->bucket_path,
                                                    ctx->bucket_path_len, CHIMERA_VFS_REMOVE_ISDIR);
     chimera_vfs_compound_set_op_callbacks(compound, removal, NULL, chimera_s3_delbucket_root_status, ctx);
@@ -417,7 +416,7 @@ chimera_s3_delete_bucket(
                                     request->bucket_namelen, request->bucket_name);
 
     struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(thread->vfs, &request->cred);
-    chimera_vfs_compound_add_putfh(compound, shared->root_fh, shared->root_fh_len);
+    chimera_vfs_compound_add_putroot(compound);
     chimera_vfs_compound_add_lookup_path(compound, ctx->bucket_path, ctx->bucket_path_len,
                                          CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW);
     int                          find = chimera_vfs_compound_add_find(compound,

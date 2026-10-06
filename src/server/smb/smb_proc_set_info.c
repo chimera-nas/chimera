@@ -34,10 +34,60 @@
 #define CHIMERA_SMB_SET_INFO_OP_SETATTR 2
 
 static void
+smb_set_basic_time_flags(
+    const struct chimera_smb_request *request,
+    uint32_t                         *flags,
+    struct timespec                  *atime)
+{
+    if (request->set_info.attrs.smb_mtime == UINT64_MAX - 1) {
+        *flags &= ~CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY;
+    } else if (request->set_info.attrs.smb_mtime != 0) {
+        *flags |= CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY;
+    }
+    if (request->set_info.attrs.smb_atime == UINT64_MAX - 1) {
+        *flags &= ~CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY;
+    } else if (!chimera_smb_time_is_omit(request->set_info.attrs.smb_atime)) {
+        struct chimera_vfs_attrs attrs;
+        chimera_smb_unmarshal_basic_info(&request->set_info.attrs, &attrs);
+        *flags |= CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY;
+        *atime  = attrs.va_atime;
+    }
+} /* smb_set_basic_time_flags */
+
+static void
+smb_set_merge_metadata(
+    uint8_t                         info_class,
+    uint32_t                        flags,
+    struct chimera_vfs_attrs       *attrs,
+    const struct chimera_vfs_attrs *before)
+{
+    if (info_class == SMB2_FILE_BASIC_INFO &&
+        (attrs->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+        (before->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES)) {
+        attrs->va_dos_attributes |= before->va_dos_attributes &
+            ~(SMB_DOS_ATTR_SETTABLE | SMB2_FILE_ATTRIBUTE_NORMAL);
+    }
+    if (info_class == SMB2_FILE_ENDOFFILE_INFO &&
+        !(flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) &&
+        (before->va_set_mask & CHIMERA_VFS_ATTR_SIZE) && attrs->va_size < before->va_size) {
+        uint64_t alloc = chimera_smb_alloc_size(before);
+        if (alloc > chimera_smb_round_cluster(attrs->va_size)) {
+            attrs->va_alloc_size = alloc;
+            attrs->va_req_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
+            attrs->va_set_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
+        }
+    }
+} /* smb_set_merge_metadata */
+
+static void
 chimera_smb_set_info_finish(
     struct chimera_smb_request *request,
     enum chimera_vfs_error      error_code)
 {
+    if (!error_code && request->set_info.info_class == SMB2_FILE_BASIC_INFO) {
+        smb_set_basic_time_flags(request, &request->set_info.open_file->flags,
+                                 &request->set_info.open_file->sticky_atime);
+    }
     if (!error_code && request->set_info.open_file->parent_fh_len > 0) {
         struct chimera_server_smb_thread *thread = request->compound->thread;
         uint32_t                          mask   = request->set_info.notify_mask ?
@@ -82,10 +132,16 @@ chimera_smb_set_info_setattr_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
-    enum chimera_vfs_error      status;
+    struct chimera_smb_request           *request = private_data;
+    enum chimera_vfs_error                status;
 
     status = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *last = chimera_vfs_compound_op(
+        compound, chimera_vfs_compound_num_ops(compound) - 1);
+    if (status == CHIMERA_VFS_OK && request->set_info.info_class == SMB2_FILE_ENDOFFILE_INFO &&
+        (last->set_attr.va_set_mask & CHIMERA_VFS_ATTR_ALLOC_SIZE)) {
+        request->set_info.open_file->flags |= CHIMERA_SMB_OPEN_FILE_TRUNCATED;
+    }
 
     chimera_vfs_compound_free(compound);
     request->vfs_compound = NULL;
@@ -124,6 +180,10 @@ chimera_smb_set_info_owner_gate(
         op->io_owner.owner = open_file->grant->claim.owner;
     }
     op->have_io_owner = 1;
+    if (index == 1 && chimera_vfs_compound_op(compound, index)->type == CHIMERA_VFS_COMPOUND_OP_GETATTR) {
+        smb_set_merge_metadata(request->set_info.info_class, open_file->flags,
+                               &op->set_attr, &chimera_vfs_compound_op(compound, index)->attr);
+    }
 } /* chimera_smb_set_info_owner_gate */
 
 /* PUTHANDLE, SETATTR(in_handle): FileBasicInformation and
@@ -142,6 +202,12 @@ chimera_smb_set_info_size(struct chimera_smb_request *request)
                                        open_file->handle,
                                        open_file->open_flags);
 
+    if (request->set_info.info_class == SMB2_FILE_BASIC_INFO ||
+        request->set_info.info_class == SMB2_FILE_ENDOFFILE_INFO) {
+        chimera_vfs_compound_add_getattr(request->vfs_compound,
+                                         CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_SPACE_USED |
+                                         CHIMERA_VFS_ATTR_ALLOC_SIZE | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
+    }
     chimera_vfs_compound_add_setattr(request->vfs_compound,
                                      open_file->handle,
                                      &request->set_info.vfs_attrs,
@@ -273,60 +339,6 @@ chimera_smb_set_info_link_process(struct chimera_smb_request *request)
                                      request);
 } /* chimera_smb_set_info_link_process */
 
-/* Merge a FileBasicInformation attribute change into the stored DOS set. */
-static void
-chimera_smb_set_info_basic_getattr_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request = private_data;
-
-    if (!error_code && (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES)) {
-        request->set_info.vfs_attrs.va_dos_attributes |=
-            attr->va_dos_attributes & ~(SMB_DOS_ATTR_SETTABLE | SMB2_FILE_ATTRIBUTE_NORMAL);
-    }
-
-    chimera_vfs_setattr(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->set_info.open_file->handle,
-        &request->set_info.vfs_attrs,
-        0,
-        0,
-        chimera_smb_set_info_callback,
-        request);
-} /* chimera_smb_set_info_basic_getattr_callback */
-
-/* An EndOfFile set that truncates a data file leaves its AllocationSize where
- * it was until the handle closes: NTFS gives back the clusters past the new EOF
- * at cleanup, not at the set (IFSTest EndOfFileInformationTest reads the old
- * allocation back through the open handle).  Keep the old allocation as the
- * backend's reservation and have the close drop it. */
-static void
-chimera_smb_set_info_eof_getattr_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request *request  = private_data;
-    uint64_t                    new_size = request->set_info.vfs_attrs.va_size;
-
-    if (!error_code && (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
-        new_size < attr->va_size) {
-        uint64_t alloc = chimera_smb_alloc_size(attr);
-
-        if (alloc > chimera_smb_round_cluster(new_size)) {
-            request->set_info.vfs_attrs.va_alloc_size = alloc;
-            request->set_info.vfs_attrs.va_req_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
-            request->set_info.vfs_attrs.va_set_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
-            request->set_info.open_file->flags       |= CHIMERA_SMB_OPEN_FILE_TRUNCATED;
-        }
-    }
-
-    chimera_smb_set_info_size(request);
-} /* chimera_smb_set_info_eof_getattr_callback */
-
 /*
  * FileAllocationInformation: the size to set is a function of the size just
  * read, which is what the gate's argument edit is for.  Truncate (and advance
@@ -365,8 +377,8 @@ chimera_smb_set_info_allocation_gate(
     cur_size   = getattr->attr.va_size;
 
     memset(&setattr->set_attr, 0, sizeof(setattr->set_attr));
-    setattr->set_attr.va_req_mask = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE;
-    setattr->set_attr.va_set_mask = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE;
+    setattr->set_attr.va_req_mask   = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE;
+    setattr->set_attr.va_set_mask   = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE;
     setattr->set_attr.va_alloc_size = chimera_smb_round_cluster(alloc_size);
 
     if (alloc_size < cur_size) {
@@ -856,41 +868,6 @@ smb_set_info_admitted(struct chimera_smb_request *request)
 
                     chimera_smb_unmarshal_basic_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
-                    /* An explicit write-time set -- or the -1 "freeze" value --
-                     * hands control of the LastWriteTime to this handle: its own
-                     * subsequent writes and size-sets must stop advancing it
-                     * (MS-FSA Open.UserSetModificationTime); -2 hands it back.
-                     * A zero leaves it as it was: setting only the attributes
-                     * must not freeze the write time. */
-                    if (request->set_info.attrs.smb_mtime == UINT64_MAX - 1) {
-                        request->set_info.open_file->flags &= ~CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY;
-                    } else if (request->set_info.attrs.smb_mtime != 0) {
-                        request->set_info.open_file->flags |= CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY;
-                    }
-
-                    /* The same for the LastAccessTime, whose explicit value is
-                     * put back after a read (Open.UserSetAccessTime). */
-                    if (request->set_info.attrs.smb_atime == UINT64_MAX - 1) {
-                        request->set_info.open_file->flags &= ~CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY;
-                    } else if (!chimera_smb_time_is_omit(request->set_info.attrs.smb_atime)) {
-                        request->set_info.open_file->flags       |= CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY;
-                        request->set_info.open_file->sticky_atime = request->set_info.vfs_attrs.va_atime;
-                    }
-
-                    /* New attributes replace only the bits a client may set:
-                     * read the stored set first so SPARSE and REPARSE_POINT,
-                     * which the FSCTLs own, survive. */
-                    if (request->set_info.vfs_attrs.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) {
-                        chimera_vfs_getattr(
-                            request->compound->thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            request->set_info.open_file->handle,
-                            CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
-                            chimera_smb_set_info_basic_getattr_callback,
-                            request);
-                        break;
-                    }
-
                     chimera_smb_set_info_size(request);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
@@ -936,20 +913,7 @@ smb_set_info_admitted(struct chimera_smb_request *request)
                         request->set_info.vfs_attrs.va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
                     }
 
-                    /* A data file's truncation keeps its clusters until the
-                     * handle closes, which needs the size it had. */
-                    if (request->set_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
-                        chimera_smb_set_info_size(request);
-                        break;
-                    }
-                    chimera_vfs_getattr(
-                        request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred,
-                        request->set_info.open_file->handle,
-                        CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_SPACE_USED |
-                        CHIMERA_VFS_ATTR_ALLOC_SIZE | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
-                        chimera_smb_set_info_eof_getattr_callback,
-                        request);
+                    chimera_smb_set_info_size(request);
                     break;
                 case SMB2_FILE_ALLOCATION_INFO:
 
@@ -1406,6 +1370,16 @@ smb_set_info_result_prepare(
             ctx->attrs.va_req_mask &= ~CHIMERA_VFS_ATTR_MTIME;
         }
     }
+    if (request->set_info.info_class == SMB2_FILE_ALLOCATION_INFO) {
+        ctx->attrs.va_alloc_size = chimera_smb_round_cluster(request->set_info.attrs.smb_size);
+        ctx->attrs.va_set_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
+        ctx->attrs.va_req_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
+    }
+    if (request->set_info.info_class == SMB2_FILE_BASIC_INFO ||
+        request->set_info.info_class == SMB2_FILE_ENDOFFILE_INFO) {
+        smb_set_merge_metadata(request->set_info.info_class, command->state->flags,
+                               &ctx->attrs, &chimera_vfs_compound_op(compound, ctx->allocation_getattr)->attr);
+    }
     op->set_attr = ctx->attrs;
     if (ctx->attrs.va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
         op->io_owner      = command->actor;
@@ -1499,7 +1473,7 @@ smb_set_info_compound_build(
         /* A related CREATE may resolve a cold tree's root only at execution. */
         uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
         uint32_t                        root_fh_len;
-        chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+        chimera_vfs_get_root_fh(request->compound->thread->vfs_thread->vfs, root_fh, &root_fh_len);
         int                             root = chimera_vfs_compound_add_putfh(compound, root_fh, root_fh_len);
         chimera_vfs_compound_set_op_prepare(compound, root, smb_set_link_root_prepare, command);
         if (link->new_parent_len) {
@@ -1530,8 +1504,12 @@ smb_set_info_compound_build(
         request->set_info.info_class == SMB2_FILE_MODE_INFO) {
         return chimera_vfs_compound_add_checkpoint(compound);
     }
-    if (request->set_info.info_class == SMB2_FILE_ALLOCATION_INFO) {
-        int get = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_SIZE);
+    if (request->set_info.info_class == SMB2_FILE_ALLOCATION_INFO ||
+        request->set_info.info_class == SMB2_FILE_BASIC_INFO ||
+        request->set_info.info_class == SMB2_FILE_ENDOFFILE_INFO) {
+        int get = chimera_vfs_compound_add_getattr(compound,
+                                                   CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_SPACE_USED |
+                                                   CHIMERA_VFS_ATTR_ALLOC_SIZE | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
         chimera_vfs_compound_op_set_handle(compound, get, command->handle);
         if (ctx) {
             ctx->allocation_getattr = get;
@@ -1690,10 +1668,16 @@ smb_set_info_compound_complete(
     if (*status != CHIMERA_VFS_OK) {
         return;
     }
-    if (request->set_info.info_class == SMB2_FILE_BASIC_INFO &&
-        (ctx->attrs.va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
-        command->state->flags       |= CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY;
-        command->state->flags_dirty |= CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY;
+    if (request->set_info.info_class == SMB2_FILE_BASIC_INFO) {
+        smb_set_basic_time_flags(request, &command->state->flags, &command->state->sticky_atime);
+        command->state->flags_dirty |= CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY |
+            CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY;
+        command->state->sticky_atime_dirty = 1;
+    }
+    if (request->set_info.info_class == SMB2_FILE_ENDOFFILE_INFO &&
+        (ctx->attrs.va_set_mask & CHIMERA_VFS_ATTR_ALLOC_SIZE)) {
+        command->state->flags       |= CHIMERA_SMB_OPEN_FILE_TRUNCATED;
+        command->state->flags_dirty |= CHIMERA_SMB_OPEN_FILE_TRUNCATED;
     }
     if (request->set_info.info_class == SMB2_FILE_POSITION_INFO) {
         command->state->position       = request->set_info.attrs.smb_position;

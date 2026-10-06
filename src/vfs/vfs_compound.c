@@ -3094,6 +3094,44 @@ chimera_vfs_compound_add_list_streams(
 } /* chimera_vfs_compound_add_list_streams */
 
 SYMBOL_EXPORT int
+chimera_vfs_compound_add_rename_stream(
+    struct chimera_vfs_compound *compound,
+    const char                  *name,
+    int                          namelen,
+    const char                  *new_name,
+    int                          new_namelen,
+    uint32_t                     flags)
+{
+    int index;
+
+    if (namelen < 0 || new_namelen < 0 ||
+        namelen > CHIMERA_VFS_COMPOUND_NAME_MAX ||
+        new_namelen > CHIMERA_VFS_COMPOUND_NAME_MAX ||
+        (namelen && !name) || (new_namelen && !new_name)) {
+        compound->build_failed = 1;
+        compound->build_error  = CHIMERA_VFS_EINVAL;
+        return -1;
+    }
+    struct chimera_vfs_compound_op *op = chimera_vfs_compound_next_op(
+        compound, CHIMERA_VFS_COMPOUND_OP_RENAME_STREAM, &index);
+    if (!op) {
+        return -1;
+    }
+    if (namelen) {
+        memcpy(op->name, name, namelen);
+    }
+    if (new_namelen) {
+        memcpy(op->new_name, new_name, new_namelen);
+    }
+    op->name[namelen]         = 0;
+    op->name_len              = namelen;
+    op->new_name[new_namelen] = 0;
+    op->new_name_len          = new_namelen;
+    op->rename_flags          = flags;
+    return index;
+} /* chimera_vfs_compound_add_rename_stream */
+
+SYMBOL_EXPORT int
 chimera_vfs_compound_add_remove_stream(
     struct chimera_vfs_compound *compound,
     const char                  *name,
@@ -6057,6 +6095,7 @@ chimera_vfs_compound_op_open_flags(const struct chimera_vfs_compound_op *op)
         case CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM:
         case CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS:
         case CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM:
+        case CHIMERA_VFS_COMPOUND_OP_RENAME_STREAM:
             return CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH;
         case CHIMERA_VFS_COMPOUND_OP_GET_LAYOUT:
         case CHIMERA_VFS_COMPOUND_OP_GETATTR:
@@ -7486,7 +7525,7 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
             uint8_t  root_fh[CHIMERA_VFS_FH_SIZE];
             uint32_t root_fh_len = 0;
 
-            chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+            chimera_vfs_get_root_fh(compound->thread->vfs, root_fh, &root_fh_len);
 
             chimera_vfs_compound_set_current(compound, root_fh, root_fh_len);
             chimera_vfs_compound_op_done(compound, CHIMERA_VFS_OK);
@@ -8144,6 +8183,13 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
             chimera_vfs_list_streams(compound->thread, compound->cred, target,
                                      op->cookie, op->verifier, op->buffer, op->buffer_max, op->stream_want_fh,
                                      chimera_vfs_compound_list_streams_callback, compound);
+            break;
+
+        case CHIMERA_VFS_COMPOUND_OP_RENAME_STREAM:
+            chimera_vfs_rename_stream(compound->thread, compound->cred, target,
+                                      op->name, op->name_len, op->new_name, op->new_name_len,
+                                      op->rename_flags,
+                                      chimera_vfs_compound_remove_stream_callback, compound);
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_REMOVE_STREAM:

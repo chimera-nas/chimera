@@ -356,7 +356,7 @@ main(void)
     mbt_nlm_free_all(env, "blocker", 1);
     mbt_aux_drain_us(env, 10000);
     assert(test(env, &fh, 8, 0) == NLM4_DENIED);
-    assert(mbt_aux(env)->r.holder_offset == 8 && mbt_aux(env)->r.holder_length == UINT64_MAX);
+    assert(mbt_aux(env)->r.holder_offset == 8 && mbt_aux(env)->r.holder_length == 0);
     assert(unlock(env, &fh, 0, 0, 0)->nlm_stat == NLM4_GRANTED);
 
     /* NM_LOCK is non-monitored, but may still request blocking admission.

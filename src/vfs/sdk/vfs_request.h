@@ -102,26 +102,34 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_ALLOCATE            25
 #define CHIMERA_VFS_OP_SEEK                26
 /* 27 was CHIMERA_VFS_OP_LOCK; byte ranges now ride the claim wire. */
-#define CHIMERA_VFS_OP_GETPARENT                28
-#define CHIMERA_VFS_OP_COPY_RANGE               29
-#define CHIMERA_VFS_OP_CLONE_RANGE              30
-#define CHIMERA_VFS_OP_MOVE_RANGE               31
-#define CHIMERA_VFS_OP_GET_XATTR                32
-#define CHIMERA_VFS_OP_SET_XATTR                33
-#define CHIMERA_VFS_OP_LIST_XATTRS              34
-#define CHIMERA_VFS_OP_REMOVE_XATTR             35
-#define CHIMERA_VFS_OP_GET_LAYOUT               36
-#define CHIMERA_VFS_OP_OPEN_STREAM              37
-#define CHIMERA_VFS_OP_LIST_STREAMS             38
-#define CHIMERA_VFS_OP_REMOVE_STREAM            39
-#define CHIMERA_VFS_OP_MKFS                     40
-#define CHIMERA_VFS_OP_RMFS                     41
-#define CHIMERA_VFS_OP_CLAIM_ACQUIRE            42
-#define CHIMERA_VFS_OP_CLAIM_RELEASE            43
-#define CHIMERA_VFS_OP_READ_PLUS                44
-#define CHIMERA_VFS_OP_WRITE_SAME               45
-#define CHIMERA_VFS_OP_RENAME_STREAM            46
-#define CHIMERA_VFS_OP_NUM                      47
+#define CHIMERA_VFS_OP_GETPARENT           28
+#define CHIMERA_VFS_OP_COPY_RANGE          29
+#define CHIMERA_VFS_OP_CLONE_RANGE         30
+#define CHIMERA_VFS_OP_MOVE_RANGE          31
+#define CHIMERA_VFS_OP_GET_XATTR           32
+#define CHIMERA_VFS_OP_SET_XATTR           33
+#define CHIMERA_VFS_OP_LIST_XATTRS         34
+#define CHIMERA_VFS_OP_REMOVE_XATTR        35
+#define CHIMERA_VFS_OP_GET_LAYOUT          36
+#define CHIMERA_VFS_OP_OPEN_STREAM         37
+#define CHIMERA_VFS_OP_LIST_STREAMS        38
+#define CHIMERA_VFS_OP_REMOVE_STREAM       39
+#define CHIMERA_VFS_OP_MKFS                40
+#define CHIMERA_VFS_OP_RMFS                41
+#define CHIMERA_VFS_OP_CLAIM_ACQUIRE       42
+#define CHIMERA_VFS_OP_CLAIM_RELEASE       43
+#define CHIMERA_VFS_OP_READ_PLUS           44
+#define CHIMERA_VFS_OP_WRITE_SAME          45
+#define CHIMERA_VFS_OP_RENAME_STREAM       46
+#define CHIMERA_VFS_OP_NUM                 47
+#define CHIMERA_VFS_OPEN_CREATE            (1U << 0)
+#define CHIMERA_VFS_OPEN_PATH              (1U << 1)
+#define CHIMERA_VFS_OPEN_INFERRED          (1U << 2)
+#define CHIMERA_VFS_OPEN_DIRECTORY         (1U << 3)
+#define CHIMERA_VFS_OPEN_READ_ONLY         (1U << 4)
+#define CHIMERA_VFS_OPEN_EXCLUSIVE         (1U << 5)
+#define CHIMERA_VFS_OPEN_NOFOLLOW          (1U << 6)
+
 /* Strict identity check for REMOVE_STREAM; requires the matching capability. */
 #define CHIMERA_VFS_REMOVE_STREAM_MATCH_FH (1U << 0)
 

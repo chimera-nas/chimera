@@ -108,6 +108,9 @@ run_case(
     const uint8_t *reply       = conn->rbuf + 4 + SMB2_HDR_SIZE;
     unsigned       data_offset = ea ? g16(reply, 2) : reply[2];
     assert(ea ? g32(reply, 4) >= 15 : g32(reply, 4) == 8);
+    if (ea) {
+        memcpy(value + 8, "KEY", 3);
+    }
     assert(!memcmp(conn->rbuf + 4 + data_offset, ea ? value : (const uint8_t *) "original",
                    ea ? 15 : 8));
     assert(atomic_load(&lifetime_attempts) == (retry ? 2 : 1));

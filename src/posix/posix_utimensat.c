@@ -173,7 +173,7 @@ struct chimera_posix_utimensat_ctx {
     /* Both timestamps omitted: validate the path resolution, change
      * nothing (see chimera_posix_utimes_noop). */
     int                             validate_only;
-    int                             start_fh_len;
+    uint32_t                        start_fh_len;
     uint8_t                         start_fh[CHIMERA_VFS_FH_SIZE + 16];
     char                            path[CHIMERA_VFS_PATH_MAX];
     int                             path_len;
@@ -275,11 +275,9 @@ chimera_posix_utimensat(
     if (dirfd == AT_FDCWD || pathname[0] == '/') {
         /* Resolve relative to the namespace root.  chimera_vfs_lookup strips
          * leading slashes, so an absolute path works as-is. */
-        struct chimera_client *client = worker->client_thread->client;
-
-        memcpy(ctx.start_fh, client->root_fh, client->root_fh_len);
-        ctx.start_fh_len = client->root_fh_len;
-        ctx.dir_handle   = NULL;
+        chimera_vfs_get_root_fh(worker->client_thread->client->vfs,
+                                ctx.start_fh, &ctx.start_fh_len);
+        ctx.dir_handle = NULL;
     } else {
         dir_entry = chimera_posix_fd_acquire(posix, dirfd, 0);
         if (!dir_entry) {

@@ -588,16 +588,17 @@ static void chimera_smb_close_finish(
  * leaves the allocation reported larger, so the close goes on regardless. */
 static void
 chimera_smb_close_trim_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
+    struct chimera_smb_request *request = private_data;
+
+    enum chimera_vfs_error      error_code = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
     (void) error_code;
-    (void) pre_attr;
-    (void) set_attr;
-    (void) post_attr;
 
     chimera_smb_close_finish(private_data);
 } /* chimera_smb_close_trim_callback */
@@ -689,14 +690,15 @@ chimera_smb_close(struct chimera_smb_request *request)
         request->close.trim_attrs.va_req_mask   = CHIMERA_VFS_ATTR_ALLOC_SIZE;
         request->close.trim_attrs.va_set_mask   = CHIMERA_VFS_ATTR_ALLOC_SIZE;
         request->close.trim_attrs.va_alloc_size = 0;
-        chimera_vfs_setattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            request->close.open_file->handle,
-                            &request->close.trim_attrs,
-                            0,
-                            0,
-                            chimera_smb_close_trim_callback,
-                            request);
+        {
+            struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(thread->vfs_thread, &request->
+                                                                               session_handle->session->cred);
+            request->vfs_compound = sequence;
+            chimera_vfs_compound_add_puthandle(sequence, request->close.open_file->handle, CHIMERA_VFS_OPEN_PATH);
+            chimera_vfs_compound_add_setattr(sequence, request->close.open_file->handle, &request->close.trim_attrs, 0,
+                                             0);
+            chimera_frontend_compound_submit(sequence, chimera_smb_close_trim_callback, request);
+        }
         return;
     }
 
@@ -1178,6 +1180,39 @@ smb_close_record_deleted(
     *status                       = CHIMERA_VFS_OK;
 } /* smb_close_record_deleted */
 
+static void
+smb_close_trim_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+
+    (void) status;
+    if (!(command->state->flags & CHIMERA_SMB_OPEN_FILE_TRUNCATED)) {
+        chimera_vfs_compound_op_skip(compound, index);
+    } else {
+        chimera_vfs_compound_op_args(compound, index)->in_handle = command->handle;
+    }
+} /* smb_close_trim_prepare */
+
+static void
+smb_close_trim_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct smb_vfs_command *command = private_data;
+
+    (void) compound;
+    (void) index;
+    command->state->flags       &= ~CHIMERA_SMB_OPEN_FILE_TRUNCATED;
+    command->state->flags_dirty |= CHIMERA_SMB_OPEN_FILE_TRUNCATED;
+    *status                      = CHIMERA_VFS_OK;
+} /* smb_close_trim_complete */
+
 static int
 smb_close_compound_build(
     struct chimera_vfs_compound *compound,
@@ -1206,13 +1241,20 @@ smb_close_compound_build(
         chimera_vfs_compound_set_op_callbacks(compound, coord, NULL,
                                               smb_close_coordinate_complete, command);
     }
+    struct chimera_vfs_attrs trim = {
+        .va_req_mask   = CHIMERA_VFS_ATTR_ALLOC_SIZE,
+        .va_set_mask   = CHIMERA_VFS_ATTR_ALLOC_SIZE,
+        .va_alloc_size = 0,
+    };
+    int                      trim_op = chimera_vfs_compound_add_setattr(compound, command->handle, &trim, 0, 0);
+    chimera_vfs_compound_set_op_callbacks(compound, trim_op, smb_close_trim_prepare, smb_close_trim_complete, command);
     if (command->request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) {
         int attrs = chimera_vfs_compound_add_getattr(compound,
                                                      CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME);
         chimera_vfs_compound_set_op_callbacks(compound, attrs, NULL,
                                               smb_close_attrs_complete, command);
     }
-    int retire = chimera_vfs_compound_add_retire_open_claims(compound, NULL, NULL, NULL);
+    int                      retire = chimera_vfs_compound_add_retire_open_claims(compound, NULL, NULL, NULL);
     chimera_vfs_compound_set_op_callbacks(compound, retire, smb_close_access_prepare,
                                           smb_close_retire_complete, command);
     if (attempt->doc_mode) {

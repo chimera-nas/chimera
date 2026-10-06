@@ -982,7 +982,7 @@ probe_set_info_access(struct smb2_conn *c)
         len = 0;
         st  = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
                               owner.file_id, 0, after, sizeof(after), &len);
-        CHECK(st == ST_SUCCESS && len == 0, "denied EA left attribute list empty");
+        CHECK(st == 0xc0000052u && len == 0, "denied EA left attribute list empty");
         smb2_close(c, limited.file_id);
     }
     smb2_close(c, owner.file_id);

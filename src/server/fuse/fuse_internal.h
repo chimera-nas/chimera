@@ -125,7 +125,7 @@ struct chimera_fuse_request;
 struct chimera_fuse_mount;
 
 /* Linux's inclusive POSIX byte-range end-of-file sentinel. */
-#define CHIMERA_FUSE_LOCK_EOF        0x7fffffffffffffffULL
+#define CHIMERA_FUSE_LOCK_EOF 0x7fffffffffffffffULL
 
 /*
  * Per-(mount, file) caching lease whose break drives kernel cache

@@ -68,6 +68,10 @@ struct smb_vfs_open_state {
     uint64_t                               lock_seq_needed, lock_seq_admitted;
     uint16_t                               channel_sequence;
     uint8_t                                channel_sequence_valid;
+    uint32_t                               next_ea_index;
+    uint8_t                                ea_index_dirty;
+    struct timespec                        sticky_atime;
+    uint8_t                                sticky_atime_dirty;
     uint8_t                                position_dirty;
     uint8_t                                sequence_dirty;
     uint8_t                                end_replay;

@@ -101,8 +101,8 @@ chimera_vfs_notify_emit_lease(
         atomic_fetch_add(&stream_close_notifications, 1);
     }
     if (atomic_load(&stream_test_mode) && (action & CHIMERA_VFS_NOTIFY_STREAM_NAME)) {
-        assert(action == CHIMERA_VFS_NOTIFY_STREAM_NAME);
-        assert(name_len == strlen("checked-stream") && !memcmp(name, "checked-stream", name_len));
+        assert(action == (CHIMERA_VFS_NOTIFY_STREAM_NAME | CHIMERA_VFS_NOTIFY_STREAM_REMOVED));
+        assert(name_len == strlen("checked-stream:fork") && !memcmp(name, "checked-stream:fork", name_len));
         atomic_fetch_add(&stream_test_notifications, 1);
     }
     next(notify, fh, fh_len, action, name, name_len, old_name, old_name_len, skip_lo, skip_hi, has_skip);
@@ -138,8 +138,8 @@ chimera_vfs_notify_emit_actor(
         atomic_fetch_add(&stream_close_notifications, 1);
     }
     if (atomic_load(&stream_test_mode) && (action & CHIMERA_VFS_NOTIFY_STREAM_NAME)) {
-        assert(action == CHIMERA_VFS_NOTIFY_STREAM_NAME);
-        assert(name_len == strlen("checked-stream") && !memcmp(name, "checked-stream", name_len));
+        assert(action == (CHIMERA_VFS_NOTIFY_STREAM_NAME | CHIMERA_VFS_NOTIFY_STREAM_REMOVED));
+        assert(name_len == strlen("checked-stream:fork") && !memcmp(name, "checked-stream:fork", name_len));
         atomic_fetch_add(&stream_test_notifications, 1);
     }
     next(notify, fh, fh_len, action, name, name_len, old_name, old_name_len, actor);
@@ -888,7 +888,7 @@ static void
 probe_dir_stream(struct smb2_conn *c)
 {
     struct smb2_create_out d, s1;
-    uint8_t                rd[16], out[64];
+    uint8_t                rd[16], out[64] = { 0 };
     uint32_t               st, cnt = 0, rlen = 0, len = 0;
 
     printf("# --- directory stream ---\n");

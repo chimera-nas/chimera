@@ -549,15 +549,16 @@ chimera_smb_reparse_match_existing(
 
 static void
 chimera_smb_reparse_setattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    (void) pre_attr;
-    (void) set_attr;
-    (void) post_attr;
+    struct chimera_smb_request *request = private_data;
+
+    enum chimera_vfs_error      error_code = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
 
     chimera_smb_reparse_finish(private_data, chimera_smb_reparse_vfs_status(error_code));
 } /* chimera_smb_reparse_setattr_cb */
@@ -585,27 +586,28 @@ chimera_smb_reparse_set_dos(
     attr->va_set_mask       = CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
     attr->va_dos_attributes = dos;
 
-    chimera_vfs_setattr(request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred,
-                        request->ioctl.rp_open_file->handle,
-                        attr,
-                        0,
-                        0,
-                        chimera_smb_reparse_setattr_cb,
-                        request);
+    {
+        struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
+                                                                           request->session_handle->session->cred);
+        request->vfs_compound = sequence;
+        chimera_vfs_compound_add_puthandle(sequence, request->ioctl.rp_open_file->handle, CHIMERA_VFS_OPEN_PATH);
+        chimera_vfs_compound_add_setattr(sequence, request->ioctl.rp_open_file->handle, attr, 0, 0);
+        chimera_frontend_compound_submit(sequence, chimera_smb_reparse_setattr_cb, request);
+    }
 } /* chimera_smb_reparse_set_dos */
 
 static void
 chimera_smb_reparse_set_xattr_cb(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
 
-    (void) pre_attr;
-    (void) post_attr;
+    enum chimera_vfs_error      error_code = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_reparse_finish(request, chimera_smb_reparse_vfs_status(error_code));
@@ -617,28 +619,37 @@ chimera_smb_reparse_set_xattr_cb(
 static void
 chimera_smb_reparse_set_store(struct chimera_smb_request *request)
 {
-    chimera_vfs_set_xattr(request->compound->thread->vfs_thread,
-                          &request->session_handle->session->cred,
-                          request->ioctl.rp_open_file->handle,
-                          0,
-                          CHIMERA_SMB_REPARSE_XATTR,
-                          CHIMERA_SMB_REPARSE_XATTR_LEN,
-                          request->ioctl.rp_response,
-                          request->ioctl.rp_generic_len,
-                          chimera_smb_reparse_set_xattr_cb,
-                          request);
+    {
+        struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
+                                                                           request->session_handle->session->cred);
+        request->vfs_compound = sequence;
+        chimera_vfs_compound_add_puthandle(sequence, request->ioctl.rp_open_file->handle, CHIMERA_VFS_OPEN_PATH);
+        chimera_vfs_compound_add_setxattr(sequence, 0, CHIMERA_SMB_REPARSE_XATTR, CHIMERA_SMB_REPARSE_XATTR_LEN, request
+                                          ->ioctl.rp_response, request->ioctl.rp_generic_len);
+        chimera_frontend_compound_submit(sequence, chimera_smb_reparse_set_xattr_cb, request);
+    }
 } /* chimera_smb_reparse_set_store */
 
 /* A reparse point is already on the file: it may only be replaced by one of
  * the same tag (and, for a non-Microsoft tag, the same GUID). */
 static void
 chimera_smb_reparse_set_existing_cb(
-    enum chimera_vfs_error error_code,
-    uint32_t               value_len,
-    void                  *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
-    uint32_t                    status;
+    struct chimera_smb_request           *request = private_data;
+
+    enum chimera_vfs_error                error_code = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *result     = chimera_vfs_compound_op(compound, chimera_vfs_compound_num_ops(
+                                                                                   compound) - 1);
+    uint32_t                              value_len = error_code == CHIMERA_VFS_OK ? result->buffer_len : 0;
+
+    if (value_len) {
+        memcpy(request->ioctl.rp_existing, result->buffer, value_len);
+    }
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+    uint32_t                              status;
 
     if (error_code == CHIMERA_VFS_OK) {
         status = chimera_smb_reparse_match_existing(request, value_len);
@@ -662,58 +673,40 @@ chimera_smb_reparse_set_check_existing(struct chimera_smb_request *request)
     }
 
     request->ioctl.rp_existing = malloc(CHIMERA_SMB_REPARSE_READ_MAX);
-    chimera_vfs_get_xattr(request->compound->thread->vfs_thread,
-                          &request->session_handle->session->cred,
-                          request->ioctl.rp_open_file->handle,
-                          CHIMERA_SMB_REPARSE_XATTR,
-                          CHIMERA_SMB_REPARSE_XATTR_LEN,
-                          request->ioctl.rp_existing,
-                          CHIMERA_SMB_REPARSE_READ_MAX,
-                          chimera_smb_reparse_set_existing_cb,
-                          request);
+    {
+        struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
+                                                                           request->session_handle->session->cred);
+        request->vfs_compound = sequence;
+        chimera_vfs_compound_add_puthandle(sequence, request->ioctl.rp_open_file->handle, CHIMERA_VFS_OPEN_PATH);
+        chimera_vfs_compound_add_getxattr(sequence, CHIMERA_SMB_REPARSE_XATTR, CHIMERA_SMB_REPARSE_XATTR_LEN,
+                                          CHIMERA_SMB_REPARSE_READ_MAX);
+        chimera_frontend_compound_submit(sequence, chimera_smb_reparse_set_existing_cb, request);
+    }
 } /* chimera_smb_reparse_set_check_existing */
 
 /* Directory emptiness: a reparse point may only be set on an empty one. */
-static int
-chimera_smb_reparse_dir_entry_cb(
-    uint64_t                        inum,
-    uint64_t                        cookie,
-    const char                     *name,
-    int                             namelen,
-    const struct chimera_vfs_attrs *attrs,
-    void                           *arg)
-{
-    struct chimera_smb_request *request = arg;
-
-    (void) inum;
-    (void) cookie;
-    (void) attrs;
-
-    if ((namelen == 1 && name[0] == '.') ||
-        (namelen == 2 && name[0] == '.' && name[1] == '.')) {
-        return 0;
-    }
-    request->ioctl.rp_dir_nonempty = 1;
-    return 1;
-} /* chimera_smb_reparse_dir_entry_cb */
-
 static void
 chimera_smb_reparse_dir_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        cookie,
-    uint64_t                        verifier,
-    uint32_t                        eof,
-    struct chimera_vfs_attrs       *attr,
-    void                           *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request           *request    = private_data;
+    enum chimera_vfs_error                error_code = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *op         = chimera_vfs_compound_op(compound, 1);
 
-    (void) handle;
-    (void) cookie;
-    (void) verifier;
-    (void) eof;
-    (void) attr;
+    request->ioctl.rp_dir_nonempty = 0;
+    if (error_code == CHIMERA_VFS_OK) {
+        for (uint32_t i = 0; i < op->num_entries; i++) {
+            const struct chimera_vfs_compound_dirent *entry = &op->entries[i];
+            if (!((entry->name_len == 1 && entry->name[0] == '.') ||
+                  (entry->name_len == 2 && entry->name[0] == '.' && entry->name[1] == '.'))) {
+                request->ioctl.rp_dir_nonempty = 1;
+                break;
+            }
+        }
+    }
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_reparse_finish(request, chimera_smb_reparse_vfs_status(error_code));
@@ -728,11 +721,19 @@ chimera_smb_reparse_dir_complete(
 
 static void
 chimera_smb_reparse_set_getattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request           *request = private_data;
+
+    enum chimera_vfs_error                error_code = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *result     = chimera_vfs_compound_op(compound, chimera_vfs_compound_num_ops(
+                                                                                   compound) - 1);
+    struct chimera_vfs_attrs              snapshot = result->attr;
+    struct chimera_vfs_attrs             *attr     = &snapshot;
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_reparse_finish(request, chimera_smb_reparse_vfs_status(error_code));
@@ -758,13 +759,14 @@ chimera_smb_reparse_set_getattr_cb(
 
     if (request->ioctl.rp_isdir) {
         request->ioctl.rp_dir_nonempty = 0;
-        chimera_vfs_readdir(request->compound->thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            request->ioctl.rp_open_file->handle,
-                            0, 0, 0, 0, 0, NULL, 0,
-                            chimera_smb_reparse_dir_entry_cb,
-                            chimera_smb_reparse_dir_complete,
-                            request);
+        request->vfs_compound          = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread,
+                                                                    &request->session_handle->session->cred);
+        chimera_vfs_compound_add_puthandle(request->vfs_compound,
+                                           request->ioctl.rp_open_file->handle,
+                                           request->ioctl.rp_open_file->open_flags);
+        /* At most two dot entries can precede the first real child. */
+        chimera_vfs_compound_add_readdir(request->vfs_compound, 0, 0, 0, 0, 3, 0, 0);
+        chimera_frontend_compound_submit(request->vfs_compound, chimera_smb_reparse_dir_complete, request);
         return;
     }
 
@@ -790,28 +792,31 @@ chimera_smb_reparse_generic_set(struct chimera_smb_request *request)
         memcpy(request->ioctl.rp_guid, request->ioctl.rp_response + 8, 16);
     }
 
-    chimera_vfs_getattr(request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred,
-                        open_file->handle,
-                        CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES |
-                        CHIMERA_VFS_ATTR_EA_SIZE,
-                        chimera_smb_reparse_set_getattr_cb,
-                        request);
+    {
+        struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
+                                                                           request->session_handle->session->cred);
+        request->vfs_compound = sequence;
+        chimera_vfs_compound_add_puthandle(sequence, open_file->handle, CHIMERA_VFS_OPEN_PATH);
+        chimera_vfs_compound_add_getattr(sequence, CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES |
+                                         CHIMERA_VFS_ATTR_EA_SIZE);
+        chimera_frontend_compound_submit(sequence, chimera_smb_reparse_set_getattr_cb, request);
+    }
 } /* chimera_smb_reparse_generic_set */
 
 /* ---- DELETE_REPARSE_POINT (MS-FSA 2.1.5.10.3) ---- */
 
 static void
 chimera_smb_reparse_delete_removed_cb(
-    enum chimera_vfs_error          error_code,
-    const struct chimera_vfs_attrs *pre_attr,
-    const struct chimera_vfs_attrs *post_attr,
-    void                           *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
 
-    (void) pre_attr;
-    (void) post_attr;
+    enum chimera_vfs_error      error_code = chimera_vfs_compound_status(compound);
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+
 
     if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_ENODATA) {
         chimera_smb_reparse_finish(request, chimera_smb_reparse_vfs_status(error_code));
@@ -822,12 +827,22 @@ chimera_smb_reparse_delete_removed_cb(
 
 static void
 chimera_smb_reparse_delete_existing_cb(
-    enum chimera_vfs_error error_code,
-    uint32_t               value_len,
-    void                  *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
-    uint32_t                    status;
+    struct chimera_smb_request           *request = private_data;
+
+    enum chimera_vfs_error                error_code = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *result     = chimera_vfs_compound_op(compound, chimera_vfs_compound_num_ops(
+                                                                                   compound) - 1);
+    uint32_t                              value_len = error_code == CHIMERA_VFS_OK ? result->buffer_len : 0;
+
+    if (value_len) {
+        memcpy(request->ioctl.rp_existing, result->buffer, value_len);
+    }
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
+    uint32_t                              status;
 
     if (error_code == CHIMERA_VFS_ENODATA) {
         chimera_smb_reparse_finish(request, SMB2_STATUS_NOT_A_REPARSE_POINT);
@@ -844,22 +859,31 @@ chimera_smb_reparse_delete_existing_cb(
         return;
     }
 
-    chimera_vfs_remove_xattr(request->compound->thread->vfs_thread,
-                             &request->session_handle->session->cred,
-                             request->ioctl.rp_open_file->handle,
-                             CHIMERA_SMB_REPARSE_XATTR,
-                             CHIMERA_SMB_REPARSE_XATTR_LEN,
-                             chimera_smb_reparse_delete_removed_cb,
-                             request);
+    {
+        struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
+                                                                           request->session_handle->session->cred);
+        request->vfs_compound = sequence;
+        chimera_vfs_compound_add_puthandle(sequence, request->ioctl.rp_open_file->handle, CHIMERA_VFS_OPEN_PATH);
+        chimera_vfs_compound_add_removexattr(sequence, CHIMERA_SMB_REPARSE_XATTR, CHIMERA_SMB_REPARSE_XATTR_LEN);
+        chimera_frontend_compound_submit(sequence, chimera_smb_reparse_delete_removed_cb, request);
+    }
 } /* chimera_smb_reparse_delete_existing_cb */
 
 static void
 chimera_smb_reparse_delete_getattr_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request           *request = private_data;
+
+    enum chimera_vfs_error                error_code = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *result     = chimera_vfs_compound_op(compound, chimera_vfs_compound_num_ops(
+                                                                                   compound) - 1);
+    struct chimera_vfs_attrs              snapshot = result->attr;
+    struct chimera_vfs_attrs             *attr     = &snapshot;
+
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_reparse_finish(request, chimera_smb_reparse_vfs_status(error_code));
@@ -876,15 +900,15 @@ chimera_smb_reparse_delete_getattr_cb(
     }
 
     request->ioctl.rp_existing = malloc(CHIMERA_SMB_REPARSE_READ_MAX);
-    chimera_vfs_get_xattr(request->compound->thread->vfs_thread,
-                          &request->session_handle->session->cred,
-                          request->ioctl.rp_open_file->handle,
-                          CHIMERA_SMB_REPARSE_XATTR,
-                          CHIMERA_SMB_REPARSE_XATTR_LEN,
-                          request->ioctl.rp_existing,
-                          CHIMERA_SMB_REPARSE_READ_MAX,
-                          chimera_smb_reparse_delete_existing_cb,
-                          request);
+    {
+        struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
+                                                                           request->session_handle->session->cred);
+        request->vfs_compound = sequence;
+        chimera_vfs_compound_add_puthandle(sequence, request->ioctl.rp_open_file->handle, CHIMERA_VFS_OPEN_PATH);
+        chimera_vfs_compound_add_getxattr(sequence, CHIMERA_SMB_REPARSE_XATTR, CHIMERA_SMB_REPARSE_XATTR_LEN,
+                                          CHIMERA_SMB_REPARSE_READ_MAX);
+        chimera_frontend_compound_submit(sequence, chimera_smb_reparse_delete_existing_cb, request);
+    }
 } /* chimera_smb_reparse_delete_getattr_cb */
 
 void
@@ -927,12 +951,14 @@ chimera_smb_ioctl_delete_reparse(struct chimera_smb_request *request)
         return;
     }
 
-    chimera_vfs_getattr(request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred,
-                        open_file->handle,
-                        CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
-                        chimera_smb_reparse_delete_getattr_cb,
-                        request);
+    {
+        struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
+                                                                           request->session_handle->session->cred);
+        request->vfs_compound = sequence;
+        chimera_vfs_compound_add_puthandle(sequence, open_file->handle, CHIMERA_VFS_OPEN_PATH);
+        chimera_vfs_compound_add_getattr(sequence, CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
+        chimera_frontend_compound_submit(sequence, chimera_smb_reparse_delete_getattr_cb, request);
+    }
 } /* chimera_smb_ioctl_delete_reparse */
 
 /* ---- GET_REPARSE_POINT of a reparse point kept verbatim ---- */
@@ -964,11 +990,21 @@ chimera_smb_get_reparse_finish(struct chimera_smb_request *request)
 
 static void
 chimera_smb_get_reparse_xattr_cb(
-    enum chimera_vfs_error error_code,
-    uint32_t               value_len,
-    void                  *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    struct chimera_smb_request           *request = private_data;
+
+    enum chimera_vfs_error                error_code = chimera_vfs_compound_status(compound);
+    const struct chimera_vfs_compound_op *result     = chimera_vfs_compound_op(compound, chimera_vfs_compound_num_ops(
+                                                                                   compound) - 1);
+    uint32_t                              value_len = error_code == CHIMERA_VFS_OK ? result->buffer_len : 0;
+
+    if (value_len) {
+        memcpy(request->ioctl.rp_response, result->buffer, value_len);
+    }
+    chimera_vfs_compound_free(compound);
+    request->vfs_compound = NULL;
 
     if (error_code != CHIMERA_VFS_OK || value_len < SMB2_REPARSE_DATA_HEADER_SIZE) {
         chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
@@ -1445,15 +1481,17 @@ chimera_smb_get_reparse_sequence_complete(
         default:
             if ((attr.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
                 (attr.va_dos_attributes & SMB2_FILE_ATTRIBUTE_REPARSE_POINT)) {
-                chimera_vfs_get_xattr(request->compound->thread->vfs_thread,
-                                      &request->session_handle->session->cred,
-                                      request->ioctl.rp_open_file->handle,
-                                      CHIMERA_SMB_REPARSE_XATTR,
-                                      CHIMERA_SMB_REPARSE_XATTR_LEN,
-                                      request->ioctl.rp_response,
-                                      sizeof(request->ioctl.rp_response),
-                                      chimera_smb_get_reparse_xattr_cb,
-                                      request);
+                {
+                    struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->
+                                                                                       vfs_thread, &request->
+                                                                                       session_handle->session->cred);
+                    request->vfs_compound = sequence;
+                    chimera_vfs_compound_add_puthandle(sequence, request->ioctl.rp_open_file->handle,
+                                                       CHIMERA_VFS_OPEN_PATH);
+                    chimera_vfs_compound_add_getxattr(sequence, CHIMERA_SMB_REPARSE_XATTR, CHIMERA_SMB_REPARSE_XATTR_LEN
+                                                      , sizeof(request->ioctl.rp_response));
+                    chimera_frontend_compound_submit(sequence, chimera_smb_get_reparse_xattr_cb, request);
+                }
                 return;
             }
             chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
@@ -1508,6 +1546,30 @@ smb_get_reparse_complete(
     struct chimera_smb_request           *request = command->request;
     const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
 
+    if (op->type == CHIMERA_VFS_COMPOUND_OP_GETXATTR) {
+        if (*status == CHIMERA_VFS_ENODATA || (*status == CHIMERA_VFS_OK &&
+                                               op->buffer_len < SMB2_REPARSE_DATA_HEADER_SIZE)) {
+            *status         = CHIMERA_VFS_OK;
+            command->status = SMB2_STATUS_NOT_A_REPARSE_POINT;
+        } else if (*status == CHIMERA_VFS_OK) {
+            uint32_t tag, header, max = request->ioctl.max_output_response;
+            memcpy(&tag, op->buffer, sizeof(tag));
+            header = SMB2_IO_REPARSE_TAG_IS_MICROSOFT(tag) ?
+                SMB2_REPARSE_DATA_HEADER_SIZE : SMB2_REPARSE_GUID_DATA_HEADER_SIZE;
+            if (max < header) {
+                command->status = SMB2_STATUS_BUFFER_TOO_SMALL;
+            } else {
+                uint32_t length = op->buffer_len;
+                if (length > max) {
+                    length          = max;
+                    command->status = SMB2_STATUS_BUFFER_OVERFLOW;
+                }
+                memcpy(request->ioctl.rp_response, op->buffer, length);
+                request->ioctl.rp_response_len = length;
+            }
+        }
+        return;
+    }
     if (*status != CHIMERA_VFS_OK) {
         return;
     }
@@ -1538,7 +1600,20 @@ smb_get_reparse_complete(
             break;
         case S_IFIFO: chimera_smb_get_reparse_build_simple(request, SMB2_NFS_SPECFILE_FIFO); break;
         case S_IFSOCK: chimera_smb_get_reparse_build_simple(request, SMB2_NFS_SPECFILE_SOCK); break;
-        default: command->status = SMB2_STATUS_NOT_A_REPARSE_POINT; break;
+        default:
+            if ((op->attr.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+                (op->attr.va_dos_attributes & SMB2_FILE_ATTRIBUTE_REPARSE_POINT)) {
+                int next = chimera_vfs_compound_add_getxattr(compound, CHIMERA_SMB_REPARSE_XATTR,
+                                                             CHIMERA_SMB_REPARSE_XATTR_LEN, sizeof(request->ioctl.
+                                                                                                   rp_response));
+                if (next >= 0) {
+                    chimera_vfs_compound_op_set_handle(compound, next, command->handle);
+                    chimera_vfs_compound_set_op_callbacks(compound, next, NULL, smb_get_reparse_complete, command);
+                }
+            } else {
+                command->status = SMB2_STATUS_NOT_A_REPARSE_POINT;
+            }
+            break;
     } /* switch */
 } /* smb_get_reparse_complete */
 
@@ -1547,7 +1622,8 @@ smb_get_reparse_build(
     struct chimera_vfs_compound *compound,
     struct smb_vfs_command      *command)
 {
-    int op = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV);
+    int op = chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV |
+                                              CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
 
     chimera_vfs_compound_op_set_handle(compound, op, command->handle);
     return op;

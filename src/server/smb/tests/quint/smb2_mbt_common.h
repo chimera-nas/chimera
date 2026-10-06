@@ -3190,12 +3190,13 @@ smb2_set_disposition(
  * (MS-SMB2 3.3.5.20.1), which is a different behavior from the one the model
  * predicts and must not be reached by accident. */
 static inline uint32_t
-smb2_query_info_len(
+smb2_query_info_flags_len(
     struct smb2_conn *c,
     uint8_t           info_type,
     uint8_t           info_class,
     const uint8_t     file_id[16],
     uint32_t          addl_info,
+    uint32_t          flags,
     uint32_t          out_buf_len,
     uint8_t          *out,
     uint32_t          out_cap,
@@ -3216,7 +3217,7 @@ smb2_query_info_len(
     p16(body, 10, 0);                  /* Reserved */
     p32(body, 12, 0);                  /* InputBufferLength */
     p32(body, 16, addl_info);          /* AdditionalInformation */
-    p32(body, 20, 0);                  /* Flags */
+    p32(body, 20, flags);              /* Flags */
     memcpy(body + 24, file_id, 16);    /* FileId */
 
     st = smb2c_xfer(c, 40);
@@ -3239,6 +3240,22 @@ smb2_query_info_len(
         }
     }
     return st;
+} /* smb2_query_info_flags_len */
+
+static inline uint32_t
+smb2_query_info_len(
+    struct smb2_conn *c,
+    uint8_t           info_type,
+    uint8_t           info_class,
+    const uint8_t     file_id[16],
+    uint32_t          addl_info,
+    uint32_t          out_buf_len,
+    uint8_t          *out,
+    uint32_t          out_cap,
+    uint32_t         *out_len)
+{
+    return smb2_query_info_flags_len(c, info_type, info_class, file_id, addl_info, 0,
+                                     out_buf_len, out, out_cap, out_len);
 } /* smb2_query_info_len */
 
 /* The common case: ask for a generous output buffer so the class's own size is
@@ -3257,6 +3274,19 @@ smb2_query_info(
     return smb2_query_info_len(c, info_type, info_class, file_id, addl_info,
                                65536, out, out_cap, out_len);
 } /* smb2_query_info */
+
+/* Request a fresh EA snapshot instead of resuming the open's enumeration. */
+static inline uint32_t
+smb2_query_eas_restart(
+    struct smb2_conn *c,
+    const uint8_t     file_id[16],
+    uint8_t          *out,
+    uint32_t          out_cap,
+    uint32_t         *out_len)
+{
+    return smb2_query_info_flags_len(c, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
+                                     file_id, 0, 1, 65536, out, out_cap, out_len);
+} // smb2_query_eas_restart
 
 /* ---- security descriptors (MS-DTYP 2.4.6) -------------------------------
  *

@@ -152,7 +152,7 @@ chimera_smb_create_overwrite_complete(
     chimera_vfs_compound_free(compound);
     if (!request->create.r_is_directory &&
         request->create.r_attrs.smb_alloc_size < request->create.alsi_alloc_size) {
-        request->create.r_attrs.smb_alloc_size = request->create.alsi_alloc_size;
+        request->create.r_attrs.smb_alloc_size = chimera_smb_round_cluster(request->create.alsi_alloc_size);
     }
     chimera_smb_create_finish_with_eas(request, open_file);
 } /* chimera_smb_create_overwrite_complete */
@@ -2186,7 +2186,7 @@ chimera_smb_create_open_finish(
              * reported is the BASE file's -- the entry the directory actually
              * holds, since the stream is not one of its entries. */
             action = request->create.r_created ?
-                CHIMERA_VFS_NOTIFY_STREAM_NAME : 0;
+                CHIMERA_VFS_NOTIFY_STREAM_NAME | CHIMERA_VFS_NOTIFY_STREAM_ADDED : 0;
         } else if (request->create.r_created) {
             action = request->create.r_is_directory ?
                 CHIMERA_VFS_NOTIFY_DIR_ADDED :
@@ -2232,12 +2232,14 @@ chimera_smb_create_open_finish(
                 request->create.dir_break_skip_hi  = skip_hi;
                 request->create.dir_break_has_skip = has_skip;
             } else if (parent_fh) {
+                char     notify_name[CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX];
+                uint32_t notify_len = chimera_smb_open_file_notify_name(open_file, notify_name);
                 smb_create_notify_lease(request,
                                         parent_fh,
                                         parent_fh_len,
                                         action,
-                                        request->create.name,
-                                        request->create.name_len,
+                                        notify_name,
+                                        notify_len,
                                         NULL, 0,
                                         skip_lo, skip_hi, has_skip);
             }
@@ -3138,7 +3140,7 @@ chimera_smb_create_stamp_create_attrs(
          * 2.2.13.2 "AlSi"; smb2.create.blob).  Backends that do not persist a
          * reservation simply ignore the mask. */
         if (request->create.alsi_alloc_size > 0) {
-            request->create.set_attr.va_alloc_size = request->create.alsi_alloc_size;
+            request->create.set_attr.va_alloc_size = chimera_smb_round_cluster(request->create.alsi_alloc_size);
             request->create.set_attr.va_req_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
             request->create.set_attr.va_set_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
         }
@@ -3373,7 +3375,7 @@ chimera_smb_create_seq_marshal_attrs(
              request->create.create_disposition)) &&
         request->create.r_attrs.smb_alloc_size <
         request->create.alsi_alloc_size) {
-        request->create.r_attrs.smb_alloc_size = request->create.alsi_alloc_size;
+        request->create.r_attrs.smb_alloc_size = chimera_smb_round_cluster(request->create.alsi_alloc_size);
     }
 } /* chimera_smb_create_seq_marshal_attrs */
 
@@ -3675,6 +3677,12 @@ chimera_smb_create_gate_rules(
         return SMB2_STATUS_STOPPED_ON_SYMLINK;
     }
 
+    if (!created && (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+        (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_REPARSE_POINT) &&
+        !S_ISLNK(attr->va_mode) && !(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
+        return SMB2_STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+    }
+
     /* 2. Enforce the requested access against the object's ACL for every
      * disposition that can open an existing object.  Pure FILE_CREATE always
      * makes a new object (and fails with a collision otherwise), so the creator
@@ -3745,7 +3753,8 @@ chimera_smb_create_gate_rules(
             ? attr->va_dos_attributes : 0;
         uint32_t requested = request->create.file_attributes;
 
-        if ((existing & SMB2_FILE_ATTRIBUTE_READONLY) ||
+        if (((existing & SMB2_FILE_ATTRIBUTE_READONLY) &&
+             request->create.create_disposition != SMB2_FILE_SUPERSEDE) ||
             ((existing & SMB2_FILE_ATTRIBUTE_HIDDEN) &&
              !(requested & SMB2_FILE_ATTRIBUTE_HIDDEN)) ||
             ((existing & SMB2_FILE_ATTRIBUTE_SYSTEM) &&
@@ -4269,6 +4278,11 @@ chimera_smb_create_run_complete(
     if (chimera_vfs_compound_finish_status(compound) != CHIMERA_VFS_OK) {
         chimera_smb_create_seq_fail(request, request->create.seq_abandoned ?
                                     SMB2_STATUS_CANCELLED : SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+
+    if (chimera_smb_create_conn_gone(request)) {
+        chimera_smb_create_seq_fail(request, SMB2_STATUS_CONNECTION_DISCONNECTED);
         return;
     }
 
@@ -8080,6 +8094,9 @@ smb_create_compound_initialize(struct smb_vfs_command *command)
         open->doc_from_create    = true;
         open->stream_delete_cred = request->session_handle->session->cred;
     }
+    if (request->create.create_options & SMB2_FILE_OPEN_FOR_BACKUP_INTENT) {
+        open->flags |= CHIMERA_SMB_OPEN_FILE_BACKUP_INTENT;
+    }
     open->tree          = request->tree;
     open->refcnt        = 1;          /* Reply/slot reference; tree reference is acquired at publication. */
     open->create_action = request->create.create_disposition == SMB2_FILE_CREATE ?
@@ -8123,7 +8140,7 @@ smb_create_compound_initialize(struct smb_vfs_command *command)
     attempt->set_attr.va_req_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
     attempt->set_attr.va_set_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
     if (request->create.alsi_alloc_size) {
-        attempt->set_attr.va_alloc_size = request->create.alsi_alloc_size;
+        attempt->set_attr.va_alloc_size = chimera_smb_round_cluster(request->create.alsi_alloc_size);
         attempt->set_attr.va_req_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
         attempt->set_attr.va_set_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
     }
@@ -8154,9 +8171,22 @@ smb_create_compound_prepare(
     enum chimera_vfs_error      *status,
     void                        *private_data)
 {
-    struct smb_vfs_command *command = private_data;
+    struct smb_vfs_command     *command = private_data;
 
     (void) compound; (void) index; (void) status;
+    struct chimera_smb_request *request = command->request;
+    if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
+        (request->create.file_attributes & SMB2_FILE_ATTRIBUTE_TEMPORARY)) {
+        command->status = SMB2_STATUS_INVALID_PARAMETER;
+        return;
+    }
+    if ((request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) &&
+        (request->create.file_attributes & SMB2_FILE_ATTRIBUTE_READONLY) &&
+        (request->create.create_disposition == SMB2_FILE_CREATE ||
+         chimera_smb_disposition_overwrites(request->create.create_disposition))) {
+        command->status = SMB2_STATUS_CANNOT_DELETE;
+        return;
+    }
     if (!command->open->desired_access) {
         command->status = SMB2_STATUS_ACCESS_DENIED;
         return;
@@ -8679,7 +8709,8 @@ smb_create_overwrite_attrs_allowed(
     uint32_t old = (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) ?
         attr->va_dos_attributes : 0;
 
-    return !(old & SMB2_FILE_ATTRIBUTE_READONLY) &&
+    return (!(old & SMB2_FILE_ATTRIBUTE_READONLY) ||
+            request->create.create_disposition == SMB2_FILE_SUPERSEDE) &&
            (!(old & SMB2_FILE_ATTRIBUTE_HIDDEN) ||
             (request->create.file_attributes & SMB2_FILE_ATTRIBUTE_HIDDEN)) &&
            (!(old & SMB2_FILE_ATTRIBUTE_SYSTEM) ||
@@ -8760,6 +8791,14 @@ smb_create_open_complete(
         return;
     }
     attempt->created |= handle->r_created;
+    if (!attempt->created && (op->attr.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+        (op->attr.va_dos_attributes & SMB2_FILE_ATTRIBUTE_REPARSE_POINT) &&
+        !S_ISLNK(op->attr.va_mode) && !(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
+        command->status = SMB2_STATUS_IO_REPARSE_TAG_NOT_HANDLED;
+        *status         = CHIMERA_VFS_EINVAL;
+        return;
+    }
+
     if (smb_create_lease_request(request) &&
         S_ISDIR(op->attr.va_mode) && !smb_create_directory_lease_supported(request)) {
         /* Revalidate actual type after name lookup. Unsupported directory
@@ -8818,7 +8857,8 @@ smb_create_open_complete(
         }
         /* The READONLY DOS bit is independent of ACL access. A new object
          * carrying READONLY does not revoke its creating handle's access. */
-        if (!attempt->created && !S_ISDIR(op->attr.va_mode) &&
+        if (!attempt->created && request->create.create_disposition != SMB2_FILE_SUPERSEDE &&
+            !S_ISDIR(op->attr.va_mode) &&
             (op->attr.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
             (op->attr.va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY) &&
             (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE)) {
@@ -8826,7 +8866,8 @@ smb_create_open_complete(
             *status         = CHIMERA_VFS_EACCES;
             return;
         }
-        if (!attempt->created && !S_ISDIR(op->attr.va_mode) &&
+        if (!attempt->created && request->create.create_disposition != SMB2_FILE_SUPERSEDE &&
+            !S_ISDIR(op->attr.va_mode) &&
             (op->attr.va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
             (op->attr.va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY) &&
             (smb_create_desired_access(request) & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA))) {
@@ -8866,7 +8907,7 @@ smb_create_open_complete(
     attempt->reply_handle.fh_hash = handle->fh_hash;
     chimera_smb_marshal_open_attrs(&op->attr, attempt->stream, &attempt->attrs);
     if (attempt->created && request->create.alsi_alloc_size > attempt->attrs.smb_alloc_size) {
-        attempt->attrs.smb_alloc_size = request->create.alsi_alloc_size;
+        attempt->attrs.smb_alloc_size = chimera_smb_round_cluster(request->create.alsi_alloc_size);
     }
     open->granted_access = chimera_smb_create_granted_access(command->request, &op->attr);
     open->maximal_access = chimera_vfs_access_check(&op->attr,
@@ -9022,7 +9063,7 @@ smb_create_overwrite_result(
     chimera_smb_marshal_open_attrs(&chimera_vfs_compound_op(compound, index)->attr,
                                    attempt->stream, &attempt->attrs);
     if (command->request->create.alsi_alloc_size > attempt->attrs.smb_alloc_size) {
-        attempt->attrs.smb_alloc_size = command->request->create.alsi_alloc_size;
+        attempt->attrs.smb_alloc_size = chimera_smb_round_cluster(command->request->create.alsi_alloc_size);
     }
 } /* smb_create_overwrite_result */
 
@@ -9599,7 +9640,7 @@ smb_create_build_pipeline(
      * not acquire a backend handle. Real share/path resolution follows admission. */
     uint8_t                     admission_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                    admission_fh_len;
-    chimera_vfs_get_root_fh(admission_fh, &admission_fh_len);
+    chimera_vfs_get_root_fh(request->compound->thread->vfs_thread->vfs, admission_fh, &admission_fh_len);
     chimera_vfs_compound_add_putfh(compound, admission_fh, admission_fh_len);
     int                         admission = chimera_vfs_compound_add_coordinate(compound,
                                                                                 smb_create_admission_coordinate, command
@@ -9640,7 +9681,7 @@ smb_create_build_pipeline(
     if (chimera_timespec_cmp(&now, &request->tree->fh_expiration) > 0) {
         uint8_t  root_fh[CHIMERA_VFS_FH_SIZE];
         uint32_t root_fh_len;
-        chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+        chimera_vfs_get_root_fh(request->compound->thread->vfs_thread->vfs, root_fh, &root_fh_len);
         chimera_vfs_compound_add_putfh(compound, root_fh, root_fh_len);
         int      root = chimera_vfs_compound_add_lookup_path(compound,
                                                              request->tree->share->path, strlen(request->tree->share->
@@ -9965,19 +10006,23 @@ smb_create_compound_publish(
     }
     if (attempt->created || attempt->overwritten) {
         uint32_t action = attempt->created ?
-            (attempt->stream ? CHIMERA_VFS_NOTIFY_STREAM_NAME :
+            (attempt->stream ? CHIMERA_VFS_NOTIFY_STREAM_NAME | CHIMERA_VFS_NOTIFY_STREAM_ADDED :
              (request->create.create_options & SMB2_FILE_DIRECTORY_FILE) ?
              CHIMERA_VFS_NOTIFY_DIR_ADDED :
              CHIMERA_VFS_NOTIFY_FILE_ADDED | CHIMERA_VFS_NOTIFY_STREAM_NAME) :
             CHIMERA_VFS_NOTIFY_FILE_MODIFIED | CHIMERA_VFS_NOTIFY_SIZE_CHANGED |
             CHIMERA_VFS_NOTIFY_ATTRS_CHANGED | CHIMERA_VFS_NOTIFY_STREAM_SIZE;
+        char     notify_name[CHIMERA_SMB_STREAM_NOTIFY_NAME_MAX];
+        uint32_t notify_len = chimera_smb_open_file_notify_name(open, notify_name);
         smb_create_notify_lease(request,
                                 attempt->created && !attempt->stream ? open->parent_fh : attempt->overwrite_path.
                                 parent_fh,
                                 attempt->created && !attempt->stream ? open->parent_fh_len : attempt->overwrite_path.
                                 parent_fh_len, action,
-                                attempt->created && !attempt->stream ? open->name : attempt->overwrite_path.name,
-                                attempt->created && !attempt->stream ? open->name_len : attempt->overwrite_path.name_len
+                                attempt->stream ? notify_name : attempt->created ? open->name : attempt->overwrite_path.
+                                name,
+                                attempt->stream ? notify_len : attempt->created ? open->name_len : attempt->
+                                overwrite_path.name_len
                                 , NULL, 0, skip_lo, skip_hi, has_skip);
     }
     if (command->status != SMB2_STATUS_SUCCESS) {

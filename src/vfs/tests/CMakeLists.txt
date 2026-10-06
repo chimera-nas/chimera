@@ -115,12 +115,12 @@ add_executable(vfs_inode_scoped_remove_test vfs_inode_scoped_remove_test.c)
 target_link_libraries(vfs_inode_scoped_remove_test chimera_vfs evpl)
 add_test(chimera/vfs/inode_scoped_remove_test vfs_inode_scoped_remove_test)
 if(HAVE_LIBAIO)
-    target_link_libraries(vfs_inode_scoped_remove_test chimera_vfs_diskfs)
+    add_dependencies(vfs_inode_scoped_remove_test chimera_vfs_diskfs)
     add_test(NAME chimera/vfs/inode_scoped_remove_diskfs
         COMMAND vfs_inode_scoped_remove_test diskfs)
 endif()
 if(CAIRN_ENABLED)
-    target_link_libraries(vfs_inode_scoped_remove_test chimera_vfs_cairn)
+    add_dependencies(vfs_inode_scoped_remove_test chimera_vfs_cairn)
     add_test(NAME chimera/vfs/inode_scoped_remove_cairn
         COMMAND vfs_inode_scoped_remove_test cairn)
 endif()
@@ -163,8 +163,7 @@ add_test(chimera/vfs/umount_wait_test vfs_umount_wait_test)
 # stop-at-first-failure rule.  memfs only -- what is under test is the
 # executor, not any backend.
 add_executable(vfs_compound_test vfs_compound_test.c)
-target_link_libraries(vfs_compound_test chimera_vfs chimera_vfs_memfs
-    chimera_vfs_memkv evpl)
+target_link_libraries(vfs_compound_test chimera_vfs evpl)
 # Quick tier: this is the executor's only direct coverage, and everything that
 # drives it (the NFS4 encoder) is quick-tier too.  Registered in the extended
 # tier it would sit unrun while the code under it changed.
@@ -172,8 +171,7 @@ set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/vfs/compound COMMAND vfs_compound_test)
 set_tests_properties(chimera/vfs/compound PROPERTIES LABELS "vfs" TIMEOUT 60)
 add_executable(vfs_compound_groups_test vfs_compound_groups_test.c)
-target_link_libraries(vfs_compound_groups_test chimera_vfs chimera_vfs_memfs
-    chimera_vfs_memkv evpl)
+target_link_libraries(vfs_compound_groups_test chimera_vfs evpl)
 add_test(NAME chimera/vfs/compound_groups COMMAND vfs_compound_groups_test)
 add_executable(vfs_claim_journal_test vfs_claim_journal_test.c)
 target_link_libraries(vfs_claim_journal_test chimera_vfs)
@@ -265,7 +263,7 @@ if(_vfs_tests)
 endif()
 
 add_executable(vfs_compound_retry_test vfs_compound_retry_test.c)
-target_link_libraries(vfs_compound_retry_test chimera_vfs chimera_vfs_memfs chimera_vfs_memkv evpl)
+target_link_libraries(vfs_compound_retry_test chimera_vfs evpl)
 add_test(NAME chimera/vfs/compound_retry COMMAND vfs_compound_retry_test)
 if(Python3_EXECUTABLE)
     add_test(NAME chimera/vfs/northside_api

@@ -466,4 +466,4 @@ SYMBOL_EXPORT void chimera_smb_oplock_break_reply(
 
 SYMBOL_EXPORT void chimera_smb_open_file_drain_locks_nopump(
     struct chimera_server_smb_thread *thread,
-    struct chimera_smb_open_file *open_file);
+    struct chimera_smb_open_file     *open_file);

@@ -362,9 +362,10 @@ chimera_vfs_notify_emit_lease(
             memcpy(pending_doc_parent_fh, fh, fh_len);
         }
         if (action & CHIMERA_VFS_NOTIFY_STREAM_NAME) {
-            assert(action == CHIMERA_VFS_NOTIFY_STREAM_NAME);
-            assert(name_len == strlen(pending_doc_expected_name) &&
-                   !memcmp(name, pending_doc_expected_name, name_len));
+            assert(action == (CHIMERA_VFS_NOTIFY_STREAM_NAME | CHIMERA_VFS_NOTIFY_STREAM_REMOVED));
+            size_t base_len = strlen(pending_doc_expected_name);
+            assert(name_len == base_len + 5 &&
+                   !memcmp(name, pending_doc_expected_name, base_len) && !memcmp(name + base_len, ":fork", 5));
             assert(pending_doc_parent_fh_len == fh_len &&
                    !memcmp(fh, pending_doc_parent_fh, fh_len));
             atomic_fetch_add(&pending_doc_notifications, 1);
@@ -411,9 +412,10 @@ chimera_vfs_notify_emit_actor(
             memcpy(pending_doc_parent_fh, fh, fh_len);
         }
         if (action & CHIMERA_VFS_NOTIFY_STREAM_NAME) {
-            assert(action == CHIMERA_VFS_NOTIFY_STREAM_NAME);
-            assert(name_len == strlen(pending_doc_expected_name) &&
-                   !memcmp(name, pending_doc_expected_name, name_len));
+            assert(action == (CHIMERA_VFS_NOTIFY_STREAM_NAME | CHIMERA_VFS_NOTIFY_STREAM_REMOVED));
+            size_t base_len = strlen(pending_doc_expected_name);
+            assert(name_len == base_len + 5 &&
+                   !memcmp(name, pending_doc_expected_name, base_len) && !memcmp(name + base_len, ":fork", 5));
             assert(pending_doc_parent_fh_len == fh_len &&
                    !memcmp(fh, pending_doc_parent_fh, fh_len));
             atomic_fetch_add(&pending_doc_notifications, 1);
@@ -780,6 +782,9 @@ check_replies(
         assert(off + SMB2_HDR_SIZE <= (unsigned int) c->rlen);
         const uint8_t *h = c->rbuf + off;
         fprintf(stderr, "DOC response %u command %u status %08x\n", i, g16(h, 12), g32(h, 8));
+        if (g32(h, 8) != p->expected[i]) {
+            fprintf(stderr, "expected %08x mid %llu\n", p->expected[i], (unsigned long long) p->first_mid);
+        }
         assert(g64(h, 24) == p->first_mid + i);
         assert(g32(h, 8) == p->expected[i]);
         uint32_t       next = g32(h, 20);
@@ -2104,11 +2109,11 @@ main(void)
     assert(smb2_create(c, "rename-next", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &probe) ==
            ST_OBJECT_NAME_NOT_FOUND);
 
-    /* Existing destination errors do not abort an independent later command,
-     * while exact same-link rename remains a successful no-op. */
+    /* An existing hardlink to this same inode, like the exact same link,
+     * is a successful no-op and leaves later independent commands intact. */
     memset(&p, 0, sizeof(p));
     rename_op(&p, c, a.file_id, "rename-alias");
-    p.expected[0] = 0xC0000035u;
+    p.expected[0] = ST_SUCCESS;
     query(&p, c, b.file_id, 1, 0x30);
     rename_op(&p, c, b.file_id, "rename-final");
     close_op(&p, c, a.file_id);

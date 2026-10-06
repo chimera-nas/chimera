@@ -1320,7 +1320,7 @@ legacy_namespace_parent_key(
         int                     size = smb2c_build_create_full(c, source, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                                                                MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE | (doc ?
                                                                                                                   MBT_FILE_DELETE_ON_CLOSE
-        : 0),
+        : 0), 0,
                                                                &child_lease, contexts, nctx);
         uint8_t                *header = c->sbuf + 4;
         uint8_t                *ctx    = header + g32(header + SMB2_HDR_SIZE, 48);

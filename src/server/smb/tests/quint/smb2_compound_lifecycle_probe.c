@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #undef NDEBUG
 #include <assert.h>
+#include <ctype.h>
 #include "smb2_mbt_common.h"
 #include "vfs/vfs_compound.h"
 #include "common/compound_retry.h"
@@ -367,7 +368,7 @@ data_open_chain(
 {
     const char  *name     = data_chain_name ? data_chain_name : "contexts.txt";
     int          body_len = smb2c_build_create_full(conn, name, MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
-                                                    MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE, NULL, NULL, 0);
+                                                    MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, NULL, 0);
     uint8_t      create[2048];
     unsigned int create_len = (SMB2_HDR_SIZE + body_len + 7) & ~7u;
 
@@ -518,7 +519,7 @@ create_query_close(
                                                 disposition == MBT_FILE_CREATE || data_open_access ? MBT_FILE_ALL_ACCESS
     :
                                                 MBT_FILE_READ_ATTRIBUTES,
-                                                MBT_FILE_SHARE_RWD, options, NULL, contexts, count);
+                                                MBT_FILE_SHARE_RWD, options, 0, NULL, contexts, count);
     uint8_t *first     = conn->sbuf + 4;
     uint64_t mid       = g64(first, 24);
     uint32_t first_len = (SMB2_HDR_SIZE + body_len + 7) & ~7u;
@@ -576,19 +577,31 @@ create_query_close(
     assert(g32(header, 8) == ST_SUCCESS);
     const uint8_t *reply           = header + SMB2_HDR_SIZE;
     const uint8_t *data            = header + g16(reply, 2);
-    uint32_t       expected_length = expected_ea ? (expected_ea_len + 3) & ~3u : directory ? 40u : 8u;
+    uint32_t       expected_length = expected_ea ? expected_ea_len : directory ? 40u : 8u;
     if (g32(reply, 4) != expected_length) {
         fprintf(stderr, "CREATE lifecycle %s QUERY length %u expected %u\n",
                 name, g32(reply, 4), expected_length);
     }
     assert(g32(reply, 4) == expected_length);
     if (expected_ea) {
-        /* EA enumeration aligns every record then clears the final NextEntry
-         * offset; its trailing padding is retained in OutputBufferLength. */
-        assert(!memcmp(data, expected_ea, expected_ea_len));
-        for (uint32_t i = expected_ea_len; i < expected_length; i++) {
-            assert(data[i] == 0);
+        /* Names are normalized to uppercase on the wire; the last entry has
+         * no trailing padding. Preserve mixed-case SET inputs in the fixture. */
+        uint8_t *normalized = malloc(expected_ea_len);
+        assert(normalized);
+        memcpy(normalized, expected_ea, expected_ea_len);
+        for (uint32_t off = 0;;) {
+            for (uint32_t i = 0; i < normalized[off + 5]; i++) {
+                normalized[off + 8 + i] = toupper(normalized[off + 8 + i]);
+            }
+            uint32_t next = g32(normalized + off, 0);
+            if (!next) {
+                break;
+            }
+            off += next;
+            assert(off + 8 <= expected_ea_len);
         }
+        assert(!memcmp(data, normalized, expected_ea_len));
+        free(normalized);
     } else if (directory) {
         assert(g32(data, 32) & SMB2_FILE_ATTRIBUTE_DIRECTORY);
     } else if (qfid) {
@@ -615,7 +628,7 @@ existing_query_close(
                             MBT_FILE_SHARE_RWD, 0, NULL, &opened) == ST_SUCCESS);
     /* Build a normal QUERY followed by a related CLOSE of the existing FID. */
     int                    body_len = smb2c_build_create_full(conn, name, MBT_FILE_OPEN, MBT_FILE_READ_ATTRIBUTES,
-                                                              MBT_FILE_SHARE_RWD, 0, NULL, NULL, 0);
+                                                              MBT_FILE_SHARE_RWD, 0, 0, NULL, NULL, 0);
     (void) body_len;
     uint8_t               *query = conn->sbuf + 4;
     uint64_t               mid   = g64(query, 24);
@@ -681,7 +694,7 @@ overwrite_denied(
     uint32_t          share)
 {
     int          length = smb2c_build_create_full(conn, name, disposition, desired,
-                                                  share, MBT_FILE_NON_DIRECTORY_FILE, NULL, NULL, 0);
+                                                  share, MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, NULL, 0);
     uint8_t     *header    = conn->sbuf + 4;
     uint64_t     mid       = g64(header, 24);
     unsigned int first_len = (SMB2_HDR_SIZE + length + 7) & ~7u;
@@ -739,7 +752,8 @@ overwrite_failure_continuation(
     };
     int                    first_body = smb2c_build_create_full(conn, name, disposition,
                                                                 desired, failure_phase ? MBT_FILE_SHARE_READ :
-                                                                MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE, NULL,
+                                                                MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE, 0, NULL
+                                                                ,
                                                                 NULL, 0
                                                                 );
     uint64_t               mid       = g64(conn->sbuf + 4, 24);
@@ -751,7 +765,7 @@ overwrite_failure_continuation(
                                                                  MBT_FILE_READ_ACCESS,
                                                                  failure_phase ? MBT_FILE_SHARE_RWD :
                                                                  MBT_FILE_SHARE_READ,
-                                                                 MBT_FILE_NON_DIRECTORY_FILE, NULL, NULL, 0);
+                                                                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, NULL, 0);
     unsigned int           second_len = (SMB2_HDR_SIZE + second_body + 7) & ~7u;
     uint8_t               *second     = packet + first_len;
     memcpy(second, conn->sbuf + 4, SMB2_HDR_SIZE + second_body);
@@ -837,8 +851,14 @@ overwrite_cases(struct smb2_conn *conn)
         }; p32(basic, 32, 1); /* READONLY */
         assert(smb2_set_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
                              held.file_id, basic, sizeof(basic)) == ST_SUCCESS);
-        overwrite_denied(conn, name, dispositions[i], held.file_id, ST_ACCESS_DENIED,
-                         MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD);
+        if (dispositions[i] != MBT_FILE_SUPERSEDE) {
+            overwrite_denied(conn, name, dispositions[i], held.file_id, ST_ACCESS_DENIED,
+                             MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD);
+        } else {
+            assert(smb2_create(conn, name, MBT_FILE_SUPERSEDE, MBT_FILE_ALL_ACCESS,
+                               MBT_FILE_SHARE_RWD, NULL, &seed) == ST_SUCCESS);
+            assert(smb2_close(conn, seed.file_id) == ST_SUCCESS);
+        }
         p32(basic, 32, 0x80); /* NORMAL */
         assert(smb2_set_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
                              held.file_id, basic, sizeof(basic)) == ST_SUCCESS);
@@ -905,12 +925,12 @@ create_ea_cases(struct smb2_conn *conn)
     create_query_close(conn, "create-ea-dir", MBT_FILE_CREATE, MBT_FILE_DIRECTORY_FILE, &ctx, 1, 0);
     /* Existing OPEN also applies ExtA, retaining the stored spelling. */
     small_len       = ea_encode(small, "fOo", "two", 3, true);
-    expected_ea_len = ea_encode(expect, "Foo", "two", 3, true); expected_ea = expect;
+    expected_ea_len = ea_encode(expect, "FOO", "two", 3, true); expected_ea = expect;
     ctx.data_len    = small_len;
     create_query_close(conn, "create-ea.txt", MBT_FILE_OPEN, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
     /* OVERWRITE updates bytes first and then installs the supplied EAs. */
     small_len       = ea_encode(small, "FOO", "new", 3, true); ctx.data_len = small_len;
-    expected_ea_len = ea_encode(expect, "Foo", "new", 3, true);
+    expected_ea_len = ea_encode(expect, "FOO", "new", 3, true);
     create_query_close(conn, "create-ea.txt", MBT_FILE_OVERWRITE, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
     ctx.data = large; ctx.data_len = large_len; expected_ea = large; expected_ea_len = large_len;
     create_query_close(conn, "create-large-ea.txt", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
@@ -933,11 +953,11 @@ create_ea_cases(struct smb2_conn *conn)
     pos         = ea_encode(list, "NewName", "first", 5, false);
     pos        += ea_encode(list + pos, "newname", "second", 6, true);
     ctx.data    = list; ctx.data_len = pos;
-    expected_ea = expect; expected_ea_len = ea_encode(expect, "NewName", "second", 6, true);
+    expected_ea = expect; expected_ea_len = ea_encode(expect, "NEWNAME", "second", 6, true);
     create_query_close(conn, "create-case-ea.txt", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
     pos          = ea_encode(list, "NEWNAME", NULL, 0, false);
     pos         += ea_encode(list + pos, "newNAME", "third", 5, true);
-    ctx.data_len = pos; expected_ea_len = ea_encode(expect, "newNAME", "third", 5, true);
+    ctx.data_len = pos; expected_ea_len = ea_encode(expect, "NEWNAME", "third", 5, true);
     create_query_close(conn, "create-case-ea.txt", MBT_FILE_OPEN, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
     pos          = ea_encode(list, "Fresh", "one", 3, false);
     pos         += ea_encode(list + pos, "fresh", NULL, 0, false);
@@ -952,7 +972,7 @@ create_ea_cases(struct smb2_conn *conn)
     ctx.data_len = pos;
     int                    len = smb2c_build_create_full(conn, "create-error-ea.txt", MBT_FILE_CREATE,
                                                          MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
-                                                         MBT_FILE_NON_DIRECTORY_FILE, NULL,
+                                                         MBT_FILE_NON_DIRECTORY_FILE, 0, NULL,
                                                          &ctx, 1);
     expected_groups = 1; atomic_store(&submissions, 0); atomic_store(&armed, 1);
     uint32_t               status = smb2c_xfer(conn, len);
@@ -965,8 +985,8 @@ create_ea_cases(struct smb2_conn *conn)
     uint8_t                result[128]; uint32_t result_len;
     assert(smb2_query_info(conn, 1, SMB2_FILE_FULL_EA_INFO_T, opened.file_id, 0,
                            result, sizeof(result), &result_len) == ST_SUCCESS);
-    uint32_t               want = ea_encode(expect, "Prefix", "ok", 2, true);
-    assert(result_len == ((want + 3) & ~3u) && !memcmp(result, expect, want));
+    uint32_t               want = ea_encode(expect, "PREFIX", "ok", 2, true);
+    assert(result_len == want && !memcmp(result, expect, want));
     for (uint32_t i = want; i < result_len; i++) {
         assert(result[i] == 0);
     }
@@ -1013,7 +1033,7 @@ legacy_create_ea_cases(struct smb2_conn *conn)
                                                                   MBT_FILE_ALL_ACCESS,
                                                                   MBT_FILE_SHARE_RWD,
                                                                   MBT_FILE_NON_DIRECTORY_FILE | 0x00010000u /* FILE_OPEN_REQUIRING_OPLOCK */
-                                                                  , &caching, &ctx, 1);
+                                                                  , 0, &caching, &ctx, 1);
         expected_groups = 0; legacy_ea_adapter = 1;
         atomic_store(&submissions, 0); atomic_store(&armed, 1);
         uint32_t               status = smb2c_xfer(conn, body_len);
@@ -1025,9 +1045,9 @@ legacy_create_ea_cases(struct smb2_conn *conn)
         uint32_t               actual_len;
         assert(smb2_query_info(conn, 1, SMB2_FILE_FULL_EA_INFO_T, opened.file_id, 0,
                                actual, sizeof(actual), &actual_len) == ST_SUCCESS);
-        uint32_t               expected_len = phase ? ea_encode(expected, "leGacy", "four", 4, true) :
-            ea_encode(expected, "Legacy", "two", 3, true);
-        assert(actual_len == ((expected_len + 3) & ~3u) && !memcmp(actual, expected, expected_len));
+        uint32_t               expected_len = phase ? ea_encode(expected, "LEGACY", "four", 4, true) :
+            ea_encode(expected, "LEGACY", "two", 3, true);
+        assert(actual_len == expected_len && !memcmp(actual, expected, expected_len));
         for (uint32_t j = expected_len; j < actual_len; j++) {
             assert(actual[j] == 0);
         }
@@ -1046,7 +1066,7 @@ legacy_create_ea_cases(struct smb2_conn *conn)
     int                    body_len = smb2c_build_create_full(conn, "legacy-error-ea.txt", MBT_FILE_CREATE,
                                                               MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE |
                                                               0x00010000u                                                       /* FILE_OPEN_REQUIRING_OPLOCK */
-                                                              , &caching, &ctx, 1);
+                                                              , 0, &caching, &ctx, 1);
     expected_groups = 0; legacy_ea_adapter = 1;
     atomic_store(&submissions, 0); atomic_store(&armed, 1);
     uint32_t               status = smb2c_xfer(conn, body_len);
@@ -1058,8 +1078,8 @@ legacy_create_ea_cases(struct smb2_conn *conn)
     uint32_t               actual_len;
     assert(smb2_query_info(conn, 1, SMB2_FILE_FULL_EA_INFO_T, opened.file_id, 0,
                            actual, sizeof(actual), &actual_len) == ST_SUCCESS);
-    uint32_t               expected_len = ea_encode(expected, "Prefix", "kept", 4, true);
-    assert(actual_len == ((expected_len + 3) & ~3u) && !memcmp(actual, expected, expected_len));
+    uint32_t               expected_len = ea_encode(expected, "PREFIX", "kept", 4, true);
+    assert(actual_len == expected_len && !memcmp(actual, expected, expected_len));
     assert(smb2_close(conn, opened.file_id) == ST_SUCCESS);
 } /* legacy_create_ea_cases */
 
@@ -1084,7 +1104,8 @@ create_ea_budget_case(
         length
     };
     int                    body_len = smb2c_build_create_full(conn, name, MBT_FILE_CREATE,
-                                                              MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE, NULL,
+                                                              MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE, 0,
+                                                              NULL,
                                                               &ctx, 1
                                                               );
     ea_budget_boundary = 1;
@@ -1096,8 +1117,8 @@ create_ea_budget_case(
     uint8_t                actual[64], expected[64]; uint32_t actual_len;
     assert(smb2_query_info(conn, 1, SMB2_FILE_FULL_EA_INFO_T, opened.file_id, 0,
                            actual, sizeof(actual), &actual_len) == ST_SUCCESS);
-    uint32_t               expected_len = ea_encode(expected, "Budget", "last", 4, true);
-    assert(actual_len == ((expected_len + 3) & ~3u) && !memcmp(actual, expected, expected_len));
+    uint32_t               expected_len = ea_encode(expected, "BUDGET", "last", 4, true);
+    assert(actual_len == expected_len && !memcmp(actual, expected, expected_len));
     assert(smb2_close(conn, opened.file_id) == ST_SUCCESS);
     free(list);
 } /* create_ea_budget_case */
@@ -1223,6 +1244,9 @@ stream_extended_cases(struct smb2_conn *conn)
         assert(smb2_set_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
                              base.file_id, basic, sizeof(basic)) == ST_SUCCESS);
         for (unsigned int i = 0; i < 3; i++) {
+            if (bit == MBT_FILE_ATTRIBUTE_READONLY && dispositions[i] == MBT_FILE_SUPERSEDE) {
+                continue;
+            }
             expected_groups = 1; atomic_store(&submissions, 0); atomic_store(&armed, 1);
             assert(smb2_create(conn, "stream-overwrite:protected-new", dispositions[i],
                                MBT_FILE_READ_ATTRIBUTES, MBT_FILE_SHARE_RWD, NULL, &rejected) == ST_ACCESS_DENIED);
@@ -1235,6 +1259,12 @@ stream_extended_cases(struct smb2_conn *conn)
         assert(smb2_query_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
                                base.file_id, 0, attrs, sizeof(attrs), &attr_len) == ST_SUCCESS);
         assert(attr_len == sizeof(attrs) && (g32(attrs, 32) & bit));
+        if (bit == MBT_FILE_ATTRIBUTE_READONLY) {
+            /* Supersede is main's exception to the read-only overwrite veto. */
+            assert(smb2_create(conn, "stream-overwrite:readonly-supersede", MBT_FILE_SUPERSEDE,
+                               MBT_FILE_READ_ATTRIBUTES, MBT_FILE_SHARE_RWD, NULL, &rejected) == ST_SUCCESS);
+            assert(smb2_close(conn, rejected.file_id) == ST_SUCCESS);
+        }
     }
     assert(smb2_close(conn, sibling.file_id) == ST_SUCCESS);
     assert(smb2_close(conn, base.file_id) == ST_SUCCESS);
@@ -1251,12 +1281,12 @@ stream_extended_cases(struct smb2_conn *conn)
         list,
         length
     };
-    expected_ea = expected; expected_ea_len = ea_encode(expected, "ForkEA", "two", 3, true);
+    expected_ea = expected; expected_ea_len = ea_encode(expected, "FORKEA", "two", 3, true);
     create_query_close(conn, "stream-ea:fork", MBT_FILE_CREATE, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
     length          = ea_encode(list, "FORKEA", NULL, 0, false);
     length         += ea_encode(list + length, "forkEA", "new", 3, true);
     ctx.data_len    = length;
-    expected_ea_len = ea_encode(expected, "forkEA", "new", 3, true);
+    expected_ea_len = ea_encode(expected, "FORKEA", "new", 3, true);
     create_query_close(conn, "stream-ea:fork", MBT_FILE_OVERWRITE, MBT_FILE_NON_DIRECTORY_FILE, &ctx, 1, 0);
     expected_ea = NULL; expected_ea_len = 0;
     assert(smb2_create(conn, "stream-ea", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
@@ -1264,8 +1294,8 @@ stream_extended_cases(struct smb2_conn *conn)
     uint32_t result_len;
     assert(smb2_query_info(conn, 1, SMB2_FILE_FULL_EA_INFO_T, base.file_id, 0,
                            result, sizeof(result), &result_len) == ST_SUCCESS);
-    uint32_t want = ea_encode(expected, "forkEA", "new", 3, true);
-    assert(result_len == ((want + 3) & ~3u) && !memcmp(result, expected, want));
+    uint32_t want = ea_encode(expected, "FORKEA", "new", 3, true);
+    assert(result_len == want && !memcmp(result, expected, want));
     assert(smb2_close(conn, base.file_id) == ST_SUCCESS);
 
     /* A later EA error preserves created forks and the successful EA prefix,
@@ -1274,15 +1304,15 @@ stream_extended_cases(struct smb2_conn *conn)
     length      += ea_encode(list + length, "bad:name", "x", 1, true);
     ctx.data_len = length;
     int body = smb2c_build_create_full(conn, "stream-ea-failed:fork", MBT_FILE_CREATE,
-                                       MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE, NULL, &ctx, 1);
+                                       MBT_FILE_ALL_ACCESS, 0, MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &ctx, 1);
     expected_groups = 1; atomic_store(&submissions, 0); atomic_store(&armed, 1);
     assert(smb2c_xfer(conn, body) == 0x80000013u);
     atomic_store(&armed, 0); assert(atomic_load(&submissions) == 1);
     assert(smb2_create(conn, "stream-ea-failed", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, 0, NULL, &base) == ST_SUCCESS);
     assert(smb2_query_info(conn, 1, SMB2_FILE_FULL_EA_INFO_T, base.file_id, 0,
                            result, sizeof(result), &result_len) == ST_SUCCESS);
-    want = ea_encode(expected, "Prefix", "ok", 2, true);
-    assert(result_len == ((want + 3) & ~3u) && !memcmp(result, expected, want));
+    want = ea_encode(expected, "PREFIX", "ok", 2, true);
+    assert(result_len == want && !memcmp(result, expected, want));
     assert(smb2_close(conn, base.file_id) == ST_SUCCESS);
     assert(smb2_create(conn, "stream-ea-failed:fork", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS, 0, NULL, &seed) == ST_SUCCESS)
     ;
@@ -1311,7 +1341,7 @@ unbuffered_create_cases(struct smb2_conn *conn)
     for (unsigned int i = 0; i < sizeof(access) / sizeof(access[0]); i++) {
         char                   name[64]; snprintf(name, sizeof(name), "unbuffered-%u.txt", i);
         int                    length = smb2c_build_create_full(conn, name, MBT_FILE_CREATE, access[i],
-                                                                MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE | 8u,
+                                                                MBT_FILE_SHARE_RWD, MBT_FILE_NON_DIRECTORY_FILE | 8u, 0,
                                                                 NULL, NULL
                                                                 , 0);
         uint8_t               *first     = conn->sbuf + 4;
@@ -1430,7 +1460,7 @@ related_creates(struct smb2_conn *conn)
     };
     int          first_body = smb2c_build_create_full(conn, "related-first.txt", MBT_FILE_CREATE,
                                                       MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
-                                                      MBT_FILE_NON_DIRECTORY_FILE, NULL,
+                                                      MBT_FILE_NON_DIRECTORY_FILE, 0, NULL,
                                                       NULL, 0);
     uint64_t     mid       = g64(conn->sbuf + 4, 24);
     unsigned int first_len = (SMB2_HDR_SIZE + first_body + 7) & ~7u;
@@ -1439,7 +1469,7 @@ related_creates(struct smb2_conn *conn)
     p32(packet, 20, first_len);
     int          second_body = smb2c_build_create_full(conn, "related-second.txt", MBT_FILE_CREATE,
                                                        MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
-                                                       MBT_FILE_NON_DIRECTORY_FILE, NULL,
+                                                       MBT_FILE_NON_DIRECTORY_FILE, 0, NULL,
                                                        NULL, 0);
     unsigned int second_len = (SMB2_HDR_SIZE + second_body + 7) & ~7u;
     uint8_t     *second     = packet + first_len;

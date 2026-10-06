@@ -251,6 +251,9 @@ query(
     b[2] = type;
     b[3] = level;
     p32(b, 4, 2048);
+    if (type == 1 && level == 0x0f) {
+        p32(b, 20, 1);
+    }                                 /* RESTART_SCAN: independent snapshot */
     if (type == 3) {
         p32(b, 16, 7);
     }                                 /* owner/group/DACL */
@@ -689,7 +692,7 @@ main(void)
     metadata_send(&p, c);
     out = result(c, 1, &length);
     assert(length >= 14 && out[5] == 3 && g16(out, 6) == 2);
-    assert(!memcmp(out + 8, "Foo\0ok", 6));
+    assert(!memcmp(out + 8, "FOO\0ok", 6));
     out = result(c, 2, &length);
     assert(length >= 20 && out[0] == 1);
 
@@ -704,7 +707,7 @@ main(void)
     query(&p, c, opened.file_id, 1, 0x0f);
     metadata_send(&p, c);
     out = result(c, 1, &length);
-    assert(length == 16 && !g32(out, 0) && out[5] == 3 && g16(out, 6) == 3);
+    assert(length == 15 && !g32(out, 0) && out[5] == 3 && g16(out, 6) == 3);
     assert(!memcmp(out + 8, "NEW\0two", 7));
 
     /* A deletion shadows the original spelling. A later recreation introduces
@@ -717,8 +720,8 @@ main(void)
     query(&p, c, opened.file_id, 1, 0x0f);
     metadata_send(&p, c);
     out = result(c, 1, &length);
-    assert(length == 16 && !g32(out, 0) && out[5] == 3 && g16(out, 6) == 3);
-    assert(!memcmp(out + 8, "new\0end", 7));
+    assert(length == 15 && !g32(out, 0) && out[5] == 3 && g16(out, 6) == 3);
+    assert(!memcmp(out + 8, "NEW\0end", 7));
 
     /* An invalid later entry fails its command, retaining the successful
      * deletion/recreation prefix for the independent query group. */
@@ -732,7 +735,7 @@ main(void)
     metadata_send(&p, c);
     out = result(c, 1, &length);
     assert(length == 16 && !g32(out, 0) && out[5] == 5 && g16(out, 6) == 2);
-    assert(!memcmp(out + 8, "Fresh\0ok", 8));
+    assert(!memcmp(out + 8, "FRESH\0ok", 8));
 
     /* A full 255-byte VFS key (250-byte SMB name) remains in bounds when
      * reused from private history. ASan guards the canonicalization buffer. */
@@ -747,7 +750,7 @@ main(void)
     query(&p, c, opened.file_id, 1, 0x0f);
     metadata_send(&p, c);
     out = result(c, 1, &length);
-    assert(length == 264 && !g32(out, 0) && out[5] == 250 && g16(out, 6) == 3);
+    assert(length == 262 && !g32(out, 0) && out[5] == 250 && g16(out, 6) == 3);
     assert(!memcmp(out + 8, long_name, sizeof(long_name)) && out[258] == 0);
     assert(!memcmp(out + 259, "end", 3));
 
@@ -786,8 +789,8 @@ main(void)
     query(&p, c, many.file_id, 1, 0x0f);
     metadata_send(&p, c);
     out = result(c, 0, &length);
-    assert(length == 20 && !g32(out, 0) && out[5] == 7 && g16(out, 6) == 3);
-    assert(!memcmp(out + 8, "Key0000\0end", 11));
+    assert(length == 19 && !g32(out, 0) && out[5] == 7 && g16(out, 6) == 3);
+    assert(!memcmp(out + 8, "KEY0000\0end", 11));
     assert(smb2_close(c, many.file_id) == ST_SUCCESS);
 
     assert(smb2_close(c, opened.file_id) == ST_SUCCESS);
