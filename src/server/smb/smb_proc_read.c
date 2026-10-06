@@ -67,154 +67,84 @@ chimera_smb_rdma_write_callback(
 static void chimera_smb_read_send(
     struct chimera_smb_request *request);
 
-/* Completion for putting a handle's explicitly set LastAccessTime back after
- * the backend stamped it on a read.  The read itself succeeded; a failed
- * restore leaves the access time advanced but is not worth failing it over. */
+/* A failed atime restore is best effort; a rejected finish still rejects the
+ * entire read, including its buffers and position update. */
 static void
-chimera_smb_read_sticky_restore_callback(
+smb_read_restore_complete(
     struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
     void                        *private_data)
 {
-    struct chimera_smb_request *request = private_data;
+    (void) compound; (void) index; (void) private_data;
+    *status = CHIMERA_VFS_OK;
+} /* smb_read_restore_complete */
 
-    enum chimera_vfs_error      error_code = chimera_vfs_compound_status(compound);
+static void
+smb_read_restore(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_open_handle *handle,
+    struct timespec                 atime)
+{
+    struct chimera_vfs_attrs attr = { .va_set_mask = CHIMERA_VFS_ATTR_ATIME, .va_atime = atime };
+    int                      next = chimera_vfs_compound_add_setattr(compound, handle, &attr, 0, 0);
 
-    chimera_vfs_compound_free(compound);
-    request->vfs_compound = NULL;
+    chimera_vfs_compound_set_op_callbacks(compound, next, NULL, smb_read_restore_complete, NULL);
+} /* smb_read_restore */
 
-    (void) error_code;
+static void
+chimera_smb_read_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct chimera_smb_request           *request = private_data;
+    struct chimera_smb_open_file         *open    = request->read.open_file;
+    const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, index);
 
-    chimera_smb_open_file_release(request, request->read.open_file);
-    chimera_smb_read_send(request);
-} /* chimera_smb_read_sticky_restore_callback */
+    if (*status == CHIMERA_VFS_OK && (!request->read.length || op->read_len) &&
+        op->read_len >= request->read.minimum && (open->flags & CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY)) {
+        smb_read_restore(compound, op->in_handle, open->sticky_atime);
+    }
+} /* chimera_smb_read_complete */
 
-static void chimera_smb_read_callback(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  count,
-    uint32_t                  eof,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data);
-
-/*
- * PUTHANDLE, READ.
- *
- * The FileId's handle is LENT: SMB bound granted_access to it at CREATE and
- * the byte-range check above ran against that same handle, so the sequence
- * must act on it and not on one of its own.  The PUTHANDLE says what that
- * handle was really opened with (open_file->open_flags), not what the READ
- * happens to want.  The descriptor array is the
- * request's and stays the request's -- an evpl_iovec records the address of
- * the struct that owns it, so it cannot be written into the sequence and
- * copied out afterwards.
- */
+/* PUTHANDLE, READ, optional atime restore. Only accepted completion may take
+ * buffers for the response or publish the open's new position. */
 static void
 chimera_smb_read_sequence_complete(
     struct chimera_vfs_compound *compound,
     void                        *private_data)
 {
-    struct chimera_smb_request           *request = private_data;
-    const struct chimera_vfs_compound_op *op;
-    struct evpl_iovec                    *iov  = NULL;
-    int                                   niov = 0;
-    enum chimera_vfs_error                status;
-    uint32_t                              last, count = 0, eof = 0;
+    struct chimera_smb_request   *request = private_data;
+    struct chimera_smb_open_file *open    = request->read.open_file;
+    enum chimera_vfs_error        error   = chimera_vfs_compound_status(compound);
+    struct evpl_iovec            *iov     = NULL;
+    int                           niov    = 0;
+    uint32_t                      count   = 0;
 
-    status = chimera_vfs_compound_status(compound);
-    last   = chimera_vfs_compound_num_ops(compound) - 1;
-
-    if (status == CHIMERA_VFS_OK) {
-        op    = chimera_vfs_compound_op(compound, last);
+    if (error == CHIMERA_VFS_OK) {
+        const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, request->read.result_op);
         count = op->read_len;
-        eof   = op->eof_read;
-
-        /* The buffers go to the reply, which releases them, so they leave the
-         * sequence's ownership before it is torn down. */
-        chimera_vfs_compound_take_iov(compound, last, &iov, &niov);
+        chimera_vfs_compound_take_iov(compound, request->read.result_op, &iov, &niov);
+        open->position = request->read.offset + count;
     }
-
     chimera_vfs_compound_free(compound);
-    request->vfs_compound = NULL;
-
-    chimera_smb_read_callback(status, count, eof, iov, niov, NULL, request);
-} /* chimera_smb_read_sequence_complete */
-
-static void
-chimera_smb_read_callback(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  count,
-    uint32_t                  eof,
-    struct evpl_iovec        *iov,
-    int                       niov,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_smb_request       *request   = private_data;
-    struct chimera_server_smb_thread *thread    = request->compound->thread;
-    struct evpl                      *evpl      = thread->evpl;
-    struct chimera_smb_open_file     *open_file = request->read.open_file;
-
-    if (!error_code) {
-        open_file->position = request->read.offset + count;
-    }
-
+    request->vfs_compound  = NULL;
     request->read.niov     = niov;
     request->read.r_length = count;
-
-    (void) eof;
-    (void) iov;
-    (void) attr;
-
-    /* The data iovecs the VFS filled into request->read.iov are injected into
-     * the reply (and so released) only on the SUCCESS path below.  Any path
-     * that completes with an error status emits a bare SMB2 error response
-     * instead, so those iovecs must be released here to avoid a leak. */
-    if (error_code) {
-        chimera_smb_open_file_release(request, open_file);
-        evpl_iovecs_release(evpl, request->read.iov, niov);
-        chimera_smb_complete_request(private_data, chimera_smb_read_error_status(error_code));
+    unsigned int status = chimera_smb_read_error_status(error);
+    if (error == CHIMERA_VFS_OK && ((request->read.length && !count) || count < request->read.minimum)) {
+        status = SMB2_STATUS_END_OF_FILE;
+    }
+    chimera_smb_open_file_release(request, open);
+    if (status != SMB2_STATUS_SUCCESS) {
+        evpl_iovecs_release(request->compound->thread->evpl, request->read.iov, niov);
+        chimera_smb_complete_request(request, status);
         return;
     }
-
-    if (count == 0 && request->read.length > 0) {
-        chimera_smb_open_file_release(request, open_file);
-        evpl_iovecs_release(evpl, request->read.iov, niov);
-        chimera_smb_complete_request(private_data, SMB2_STATUS_END_OF_FILE);
-        return;
-    }
-
-    /* MS-SMB2 §3.3.5.12: if MinimumCount is set and the actual bytes read
-     * is less than MinimumCount, return STATUS_END_OF_FILE. */
-    if (request->read.minimum > 0 && count < request->read.minimum) {
-        chimera_smb_open_file_release(request, open_file);
-        evpl_iovecs_release(evpl, request->read.iov, niov);
-        chimera_smb_complete_request(private_data, SMB2_STATUS_END_OF_FILE);
-        return;
-    }
-
-    /* A handle that explicitly set its access time keeps it: the backend
-     * stamped atime on this read, so put the set value back before replying
-     * (MS-FSA Open.UserSetAccessTime; IFSTest FileDirectoryInformationTest). */
-    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY) {
-        request->read.restore_attrs.va_req_mask = 0;
-        request->read.restore_attrs.va_set_mask = CHIMERA_VFS_ATTR_ATIME;
-        request->read.restore_attrs.va_atime    = open_file->sticky_atime;
-
-        {
-            struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(thread->vfs_thread, &request->
-                                                                               session_handle->session->cred);
-            request->vfs_compound = sequence;
-            chimera_vfs_compound_add_puthandle(sequence, open_file->handle, CHIMERA_VFS_OPEN_PATH);
-            chimera_vfs_compound_add_setattr(sequence, open_file->handle, &request->read.restore_attrs, 0, 0);
-            chimera_frontend_compound_submit(sequence, chimera_smb_read_sticky_restore_callback, request);
-        }
-        return;
-    }
-
-    chimera_smb_open_file_release(request, open_file);
     chimera_smb_read_send(request);
-} /* chimera_smb_read_callback */
+} /* chimera_smb_read_sequence_complete */
 
 /* Send a successful read's data: by RDMA Write when the client gave buffer
  * descriptors, otherwise in the READ response. */
@@ -444,14 +374,16 @@ chimera_smb_read(struct chimera_smb_request *request)
                                        request->read.open_file->handle,
                                        request->read.open_file->open_flags);
 
-    chimera_vfs_compound_add_read(request->vfs_compound, NULL,
-                                  request->read.offset,
-                                  request->read.length,
-                                  request->read.iov,
-                                  request->read.niov,
-                                  0,
-                                  &io_owner, NULL, 0);
+    request->read.result_op = chimera_vfs_compound_add_read(request->vfs_compound, request->read.open_file->handle,
+                                                            request->read.offset,
+                                                            request->read.length,
+                                                            request->read.iov,
+                                                            request->read.niov,
+                                                            0,
+                                                            &io_owner, NULL, 0);
 
+    chimera_vfs_compound_set_op_callbacks(request->vfs_compound, request->read.result_op,
+                                          NULL, chimera_smb_read_complete, request);
     chimera_frontend_compound_submit(request->vfs_compound,
                                      chimera_smb_read_sequence_complete, request);
 } /* chimera_smb_read */
@@ -650,20 +582,6 @@ smb_read_compound_prepare(
 } /* smb_read_compound_prepare */
 
 static void
-smb_read_restore_complete(
-    struct chimera_vfs_compound *compound,
-    uint32_t                     index,
-    enum chimera_vfs_error      *status,
-    void                        *private_data)
-{
-    (void) compound;
-    (void) index;
-    (void) private_data;
-    /* Restoring an explicitly set atime is best effort, as on standalone READ. */
-    *status = CHIMERA_VFS_OK;
-} /* smb_read_restore_complete */
-
-static void
 smb_read_compound_complete(
     struct chimera_vfs_compound *compound,
     uint32_t                     index,
@@ -683,12 +601,7 @@ smb_read_compound_complete(
         command->status = SMB2_STATUS_END_OF_FILE;
         *status         = CHIMERA_VFS_EINVAL;
     } else if (command->state->flags & CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY) {
-        struct chimera_vfs_attrs restore = {
-            .va_set_mask = CHIMERA_VFS_ATTR_ATIME,
-            .va_atime    = command->state->sticky_atime,
-        };
-        int                      op_index = chimera_vfs_compound_add_setattr(compound, command->handle, &restore, 0, 0);
-        chimera_vfs_compound_set_op_callbacks(compound, op_index, NULL, smb_read_restore_complete, command);
+        smb_read_restore(compound, command->handle, command->state->sticky_atime);
     }
 } /* smb_read_compound_complete */
 

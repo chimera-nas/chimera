@@ -5385,3 +5385,77 @@ lock executor. No frontend protocol handler rewrite was necessary.
   unchanged analyzer signature/occurrence counts. Follow-up publication targets
   draft PR #1692 on compound-boilerplate.
   Review: docs/reviews/nlm-fuse-compound-followup-2026-10-06.md.
+
+
+## 2026-10-06 — SMB metadata/standalone compound consolidation
+
+User requested as much remaining SMB conversion work as practical, followed by
+publication to draft PR #1692 and an updated description. No agents were spawned
+in this pass. This consolidation follows `1e1bde7a` on `compound-boilerplate`.
+
+- All five object-ID FSCTLs now share one replayable builder across native SMB
+  batches and standalone dispatch, including root index discovery, indexed-file
+  uniqueness lookup, file mutation and index update. Temporary VFS handles stay
+  compound-owned. Native CREATE_OR_GET previously fabricated an ID even after a
+  different persisted SET_OBJECT_ID: fixed and wire-tested. The new assertion
+  fails against an isolated pre-pass library and passes on the current code.
+- Stored generic SET/DELETE_REPARSE now keep attributes, directory emptiness,
+  tag/GUID validation, xattrs and DOS bits in one group. Generic SET is dispatched
+  before the NFS special-file discriminator; old fallback could consume stale
+  rp_nfs_type from recycled requests. Standalone GET_REPARSE uses the native
+  builder, removing split GETATTR/READLINK/GETXATTR completions and duplicate
+  symlink encoding. Special-node GET buffer sizing now follows the prior
+  standalone policy. Identity-replacing SET_REPARSE remains separate.
+- Fallback READ restores sticky atime inside its READ compound, shares the
+  native restore helper, records the READ index and publishes position/buffers
+  only after accepted finish. A best-effort restore cannot swallow finish error.
+- Fallback CLOSE combines allocation trimming and post-query attributes, keeps
+  cleanup running on exhausted metadata finish, but returns that failure. Early
+  open unpublication, claim retirement and later DOC/stream cleanup remain
+  lifecycle boundaries; do not describe fallback CLOSE as fully transactional.
+- Stream rename opens its base and renames in one standalone compound, with
+  compound-owned temporary handle and accepted-only notification/name update.
+  Joining following commands still needs a provisional stream-name overlay.
+- Production code is 640 lines smaller. New quick wire assertions cover a
+  seven-command object-ID batch, dynamically opened duplicate-ID target, generic
+  reparse batches and standalone retry/exhaustion, sticky READ optional failure,
+  CLOSE trim/query retry/exhaustion, and one-submission stream rename retries.
+  Mutating memfs attempts are rejected before effects; tests do not assume rollback.
+
+Validation: Debug/Release builds pass. The full required `make -k check
+CTEST_PARALLEL=8` sweep reports 286/289 quick tests passing in each configuration;
+only established remote pNFS memfs/diskfs/cairn failures remain (status/fileid and
+zero FSSTAT mismatch families, not just FSSTAT). Final rebuilt SMB-only quick
+runs after the stream change pass 81/81 in both configurations. Syntax, VFS
+SDK/northside guards, REUSE, copyright and whitespace checks pass. Formatting
+idempotence of two multi-field initializers was corrected after the first syntax
+check. Clang diagnostics match the pre-pass baseline exactly: 40 signatures /112
+occurrences, no additions or increases. Both analysis/model-generation stages
+completed (35 Debug /36 Release scan-build reports, matching the baseline).
+The full check command finished with exit 2 for the known pNFS/analyzer failures;
+the initial formatting failure was fixed and the final syntax check passed.
+
+Extended compound/compound_async/compound_find: memfs 3/3 pass, Linux 3/3 fail
+with the same seven DOC/cleanup failures. Broader IOCTL: named-stream suite passes,
+memfs and Linux suites fail. An isolated library built from all 54 SMB objects
+at pre-pass commit `1e1bde7ab35735a6dc802808c6dc79f8a2069804` reproduces exactly the
+same 10 IOCTL failure signatures /12 occurrences. Both backends reject dup-extents
+under source/destination byte-range locks; Linux additionally fails sparse copy,
+beyond-EOF/zero-length copy and clone, range reporting, and hole punching. These
+predate this pass; do not claim they predate the whole PR without comparing main.
+
+Still open: Linux identity-matched DOC removal (plain unlinkat cannot supply the
+advertised atomic contract); durable reconnect/recovery and AppInstance state;
+cache/durable/DOC publication boundaries; fallback CREATE live CLAIM retry
+barrier; reparse identity migration and following-command overlay; complex
+rename/stream-name composition; general command-scoped cancellation. Backend
+transactions/rollback and object-ID cross-request atomicity remain deferred.
+
+Review: `docs/reviews/smb-metadata-compounds-2026-10-06.md`.
+Logs: `/tmp/chimera-smb-metadata-{check,final-smb-debug,final-smb-release,
+extended-compounds,extended-ioctl,baseline-ioctl,baseline-fsctl}.log`,
+`/tmp/chimera-smb-metadata-{warning,ioctl}-compare.txt`, and
+`/tmp/chimera-smb-metadata-final-checks.log`. Isolated baseline source/library is
+under `/tmp/chimera-smb-metadata-baseline/`; it never replaced the current build.
+Removed idle generated Clang trees and 62 stale generated NFS scratch directories
+predating this pass to relieve disk pressure; current fixtures/logs were kept.

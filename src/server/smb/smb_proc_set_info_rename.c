@@ -768,9 +768,6 @@ chimera_smb_set_info_rename_stream_done(
     uint32_t                        status;
 
 
-    chimera_vfs_release(request->compound->thread->vfs_thread, request->set_info.parent_handle);
-    request->set_info.parent_handle = NULL;
-
     switch (error_code) {
         case CHIMERA_VFS_OK:
             status = SMB2_STATUS_SUCCESS;
@@ -820,42 +817,6 @@ chimera_smb_set_info_rename_stream_done(
     chimera_smb_open_file_release(request, open_file);
     chimera_smb_complete_request(request, status);
 } /* chimera_smb_set_info_rename_stream_done */
-
-static void
-chimera_smb_set_info_rename_stream_base_cb(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct chimera_smb_request     *request = private_data;
-
-    enum chimera_vfs_error          error_code = chimera_vfs_compound_status(compound);
-    struct chimera_vfs_open_handle *oh         = error_code == CHIMERA_VFS_OK ? chimera_vfs_compound_take_handle(
-        compound, chimera_vfs_compound_num_ops(compound) - 1) : NULL;
-
-    chimera_vfs_compound_free(compound);
-    request->vfs_compound = NULL;
-    struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
-    struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-    request->set_info.parent_handle = oh;
-
-    {
-        struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
-                                                                           request->session_handle->session->cred);
-        request->vfs_compound = sequence;
-        chimera_vfs_compound_add_puthandle(sequence, oh, CHIMERA_VFS_OPEN_PATH);
-        chimera_vfs_compound_add_rename_stream(sequence, open_file->stream_name, open_file->stream_name_len, rename_info
-                                               ->new_name + 1, rename_info->new_name_len - 1, rename_info->
-                                               replace_if_exist ?
-                                               CHIMERA_VFS_RENAME_STREAM_REPLACE : 0);
-        chimera_frontend_compound_submit(sequence, chimera_smb_set_info_rename_stream_done, request);
-    }
-} /* chimera_smb_set_info_rename_stream_base_cb */
 
 /* Returns 1 if the rename was a stream rename (and has been dispatched or
  * answered), 0 if it is an ordinary rename. */
@@ -923,27 +884,21 @@ chimera_smb_set_info_rename_stream(struct chimera_smb_request *request)
         return 1;
     }
 
+    /* Opening the base is discovery within this operation. Keep it owned by
+     * the compound so a rejected finish repeats discovery and rename together. */
+    struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread,
+                                                                       &request->session_handle->session->cred);
+    request->vfs_compound = sequence;
     if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
-        {
-            struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
-                                                                               request->session_handle->session->cred);
-            request->vfs_compound = sequence;
-            chimera_vfs_compound_add_putfh(sequence, open_file->base_fh, open_file->base_fh_len);
-            chimera_vfs_compound_add_open_current(sequence, CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED, 0);
-            chimera_vfs_compound_add_gethandle(sequence);
-            chimera_frontend_compound_submit(sequence, chimera_smb_set_info_rename_stream_base_cb, request);
-        }
+        chimera_vfs_compound_add_putfh(sequence, open_file->base_fh, open_file->base_fh_len);
     } else {
-        {
-            struct chimera_vfs_compound *sequence = chimera_vfs_compound_alloc(request->compound->thread->vfs_thread, &
-                                                                               request->session_handle->session->cred);
-            request->vfs_compound = sequence;
-            chimera_vfs_compound_add_putfh(sequence, open_file->handle->fh, open_file->handle->fh_len);
-            chimera_vfs_compound_add_open_current(sequence, CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED, 0);
-            chimera_vfs_compound_add_gethandle(sequence);
-            chimera_frontend_compound_submit(sequence, chimera_smb_set_info_rename_stream_base_cb, request);
-        }
+        chimera_vfs_compound_add_putfh(sequence, open_file->handle->fh, open_file->handle->fh_len);
     }
+    chimera_vfs_compound_add_open_current(sequence, CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED, 0);
+    chimera_vfs_compound_add_rename_stream(sequence, open_file->stream_name, open_file->stream_name_len,
+                                           rename_info->new_name + 1, rename_info->new_name_len - 1,
+                                           rename_info->replace_if_exist ? CHIMERA_VFS_RENAME_STREAM_REPLACE : 0);
+    chimera_frontend_compound_submit(sequence, chimera_smb_set_info_rename_stream_done, request);
     return 1;
 } /* chimera_smb_set_info_rename_stream */
 

@@ -1157,7 +1157,9 @@ chimera_smb_parse_ioctl(
     return 0;
 } /* chimera_smb_parse_ioctl */
 extern const struct smb_vfs_command_ops chimera_smb_sparse_compound_ops;
+extern const struct smb_vfs_command_ops chimera_smb_object_id_compound_ops;
 extern const struct smb_vfs_command_ops chimera_smb_get_reparse_compound_ops;
+extern const struct smb_vfs_command_ops chimera_smb_stored_reparse_compound_ops;
 extern const struct smb_vfs_command_ops chimera_smb_offload_read_compound_ops;
 extern const struct smb_vfs_command_ops chimera_smb_copychunk_compound_ops;
 extern const struct smb_vfs_command_ops chimera_smb_copyoffload_compound_ops;
@@ -1192,25 +1194,6 @@ smb_ioctl_simple_prepare(
             if (request->ioctl.max_output_response < 12) {
                 command->status = SMB2_STATUS_INVALID_PARAMETER;
             }
-            break;
-        case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
-            if (command->state->channel_sequence_valid &&
-                (uint16_t) (request->channel_sequence - command->state->channel_sequence) >= 0x8000) {
-                command->status = SMB2_STATUS_FILE_NOT_AVAILABLE;
-                return;
-            }
-            command->state->channel_sequence       = request->channel_sequence;
-            command->state->channel_sequence_valid = command->state->sequence_dirty = 1;
-            if (request->ioctl.max_output_response < 64) {
-                command->status = SMB2_STATUS_BUFFER_TOO_SMALL;
-                return;
-            }
-            memset(request->ioctl.oid_buffer, 0, 64);
-            memcpy(request->ioctl.oid_buffer, &command->handle->fh_hash, 8);
-            memcpy(request->ioctl.oid_buffer + 8, &command->handle->fh_hash, 8);
-            request->ioctl.oid_buffer[8] ^= 0xa5;
-            memcpy(request->ioctl.oid_buffer + 16, request->compound->thread->shared->guid, 16);
-            memcpy(request->ioctl.oid_buffer + 32, request->ioctl.oid_buffer, 16);
             break;
         case SMB2_FSCTL_GET_INTEGRITY_INFORMATION:
             if (request->ioctl.max_output_response < 16) {
@@ -1376,8 +1359,16 @@ chimera_smb_ioctl_compound_ops_for(struct chimera_smb_request *request)
             return &chimera_smb_offload_read_compound_ops;
         case SMB2_FSCTL_GET_REPARSE_POINT:
             return &chimera_smb_get_reparse_compound_ops;
-        case SMB2_FSCTL_SRV_REQUEST_RESUME_KEY:
+        case SMB2_FSCTL_SET_REPARSE_POINT:
+        case SMB2_FSCTL_DELETE_REPARSE_POINT:
+            return &chimera_smb_stored_reparse_compound_ops;
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
+        case SMB2_FSCTL_GET_OBJECT_ID:
+        case SMB2_FSCTL_SET_OBJECT_ID:
+        case SMB2_FSCTL_SET_OBJECT_ID_EXTENDED:
+        case SMB2_FSCTL_DELETE_OBJECT_ID:
+            return &chimera_smb_object_id_compound_ops;
+        case SMB2_FSCTL_SRV_REQUEST_RESUME_KEY:
         case SMB2_FSCTL_GET_INTEGRITY_INFORMATION:
         case SMB2_FSCTL_SET_INTEGRITY_INFORMATION:
         case SMB2_FSCTL_FILE_LEVEL_TRIM:

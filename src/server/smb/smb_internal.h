@@ -989,8 +989,7 @@ struct chimera_smb_request {
             struct evpl_timer               range_retire_timer;
             struct chimera_vfs_claim_owner *range_retire_owner;
             struct chimera_smb_attrs        r_attrs;
-            uint8_t                         attr_failed;
-            struct chimera_vfs_attrs        trim_attrs;
+            enum chimera_vfs_error metadata_status;
         } close;
 
         struct {
@@ -1036,8 +1035,8 @@ struct chimera_smb_request {
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
             struct chimera_smb_rdma_element rdma_elements[8];
-            /* Puts back an explicitly set access time after the read. */
-            struct chimera_vfs_attrs        restore_attrs;
+            /* READ result precedes any dynamically appended atime restore. */
+            int                             result_op;
             struct evpl_iovec               iov[256];
             struct evpl_iovec               chunk_iov[256];
         } read;
@@ -1121,7 +1120,6 @@ struct chimera_smb_request {
             uint32_t                        rp_device_minor;
             int                             rp_target_len;
             char                            rp_target[CHIMERA_VFS_PATH_MAX];
-            struct chimera_vfs_attrs        rp_set_attr;
             /* SET_REPARSE replaces the original object with a freshly-created
              * special file (symlink/device) and re-opens it in the same
              * sequence, so the client's open can be re-bound to the new inode.
@@ -1136,17 +1134,14 @@ struct chimera_smb_request {
             int                             rp_response_len;
             /* A reparse point of any other tag is kept verbatim (the whole
              * REPARSE_[GUID_]DATA_BUFFER, staged in rp_response by the parser)
-             * as the file's chimera.reparse xattr.  rp_existing holds the one
-             * already on the file while a SET/DELETE checks it; rp_dos and
-             * rp_isdir carry the file's state between the async steps. */
+             * as the file's chimera.reparse xattr. rp_dos and rp_isdir are
+             * attempt-private results of the compound's attribute lookup. */
             uint8_t                         rp_generic;
             uint32_t                        rp_generic_len;
             uint8_t                         rp_guid[16];
             uint16_t                        rp_data_len;
-            uint8_t                        *rp_existing;
             uint32_t                        rp_dos;
             uint8_t                         rp_isdir;
-            uint8_t                         rp_dir_nonempty;
             /* SET_SPARSE / SET_ZERO_DATA / QUERY_ALLOCATED_RANGES fields */
             struct chimera_smb_open_file   *sp_open_file;
             /* Borrowed by every scan compound; sp_open_file retains it
@@ -1203,19 +1198,13 @@ struct chimera_smb_request {
              * FILE_OBJECTID_BUFFER, type 1): ObjectId(16) + BirthVolumeId(16)
              * + BirthObjectId(16) + DomainId(16) = 64 bytes. */
             uint8_t                         oid_buffer[64];
-            /* SET_OBJECT_ID / SET_OBJECT_ID_EXTENDED input (64 / 48 bytes), the
-             * file's open handle and the share root's (which indexes the
-             * volume's object IDs) while the request runs. */
             /* FSCTL_GET_RETRIEVAL_POINTERS: STARTING_VCN_INPUT_BUFFER and the
              * RETRIEVAL_POINTERS_BUFFER answer (one extent). */
             uint64_t                        rpt_vcn;
             uint8_t                         rpt_out[32];
+            /* Immutable SET input; index name/FH are attempt-private scratch. */
             uint8_t                         oid_in[64];
-            struct chimera_smb_open_file   *oid_open_file;
-            struct chimera_vfs_open_handle *oid_root;
-            struct chimera_vfs_open_handle *oid_other_handle;
             uint8_t                         oid_fh[CHIMERA_VFS_FH_SIZE];
-            uint32_t                        oid_fh_len;
             char                            oid_index_name[48];
             /* FSCTL_LMR_REQUEST_RESILIENCY (NETWORK_RESILIENCY_REQUEST,
              * MS-SMB2 2.2.31.3): requested resiliency Timeout in milliseconds. */

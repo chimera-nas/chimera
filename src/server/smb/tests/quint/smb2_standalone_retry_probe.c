@@ -16,8 +16,33 @@
  * tests do not assume memfs can roll back filesystem changes. */
 struct chimera_smb_compound;
 static atomic_int   bypass, armed, attempts, submissions, speculative_write;
+static atomic_int   all_submissions, restore_seen, fail_restore;
+static int          expect_restore;
 static int          target_type, reject_count, reject_error, stop_mutation;
 static unsigned int expected_groups;
+
+/* Optional atime restoration must not turn a successful READ into an error. */
+__attribute__((visibility("default"))) void
+chimera_vfs_fsetattr_view(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *attrs,
+    uint64_t                          pre_mask,
+    uint64_t                          post_mask,
+    const struct chimera_vfs_io_view *view,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *arg)
+{
+    if (atomic_load(&fail_restore) && attrs->va_set_mask == CHIMERA_VFS_ATTR_ATIME) {
+        atomic_fetch_add(&fail_restore, 1);
+        callback(CHIMERA_VFS_EIO, NULL, attrs, NULL, arg);
+        return;
+    }
+    __typeof__(&chimera_vfs_fsetattr_view) next = dlsym(RTLD_NEXT, "chimera_vfs_fsetattr_view");
+    assert(next);
+    next(thread, cred, handle, attrs, pre_mask, post_mask, view, callback, arg);
+} /* chimera_vfs_fsetattr_view */
 
 /* A minimal transactional WRITE provider: the speculative operation succeeds
  * without publishing data, and finish aborts it. This exercises success at the
@@ -79,6 +104,18 @@ finish(
 {
     (void) arg;
     int attempt = atomic_fetch_add(&attempts, 1);
+    if (expect_restore && attempt >= reject_count) {
+        bool found = false;
+        for (unsigned i = 0; i < chimera_vfs_compound_num_ops(cp); ++i) {
+            const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(cp, i);
+            if (op->type == CHIMERA_VFS_COMPOUND_OP_SETATTR && op->set_attr.va_set_mask == CHIMERA_VFS_ATTR_ATIME) {
+                assert(op->completed);
+                found = true;
+            }
+        }
+        assert(found);
+        atomic_fetch_add(&restore_seen, 1);
+    }
     chimera_vfs_compound_finish_result(cp,
                                        attempt < reject_count ? reject_error : CHIMERA_VFS_OK);
 } /* finish */
@@ -96,6 +133,7 @@ chimera_vfs_compound_submit(
     submit_fn next = dlsym(RTLD_NEXT, "chimera_vfs_compound_submit");
     assert(next);
     if (atomic_load(&armed)) {
+        atomic_fetch_add(&all_submissions, 1);
         for (unsigned int i = 0; i < chimera_vfs_compound_num_ops(cp); i++) {
             if (chimera_vfs_compound_op(cp, i)->type != target_type) {
                 continue;
@@ -125,6 +163,7 @@ arm(
     stop_mutation   = mutation;
     expected_groups = 0;
     atomic_store(&attempts, 0); atomic_store(&submissions, 0);
+    atomic_store(&all_submissions, 0); atomic_store(&restore_seen, 0);
     atomic_store(&armed, 1);
 } /* arm */
 
@@ -213,6 +252,79 @@ doc_notify_only(struct smb2_conn *conn)
                        MBT_FILE_SHARE_RWD, NULL, &holder) == ST_OBJECT_NAME_NOT_FOUND);
 } /* doc_notify_only */
 
+static uint32_t
+close_postquery(
+    struct smb2_conn *conn,
+    const uint8_t     fid[16])
+{
+    int      offset = smb2c_begin(conn, SMB2_CLOSE, 0);
+    uint8_t *body   = conn->sbuf + offset;
+
+    p16(body, 0, 24); p16(body, 2, 1); memcpy(body + 8, fid, 16);
+    return smb2c_xfer(conn, 24);
+} /* close_postquery */
+
+static void
+metadata_io_checks(
+    struct smb2_conn *conn,
+    const uint8_t     fid[16])
+{
+    uint8_t  basic[40] = { 0 }, out[64], allocation[8];
+    uint32_t length;
+    uint64_t atime = UINT64_C(133000000000000000);
+
+    p64(basic, 8, atime);
+    assert(smb2_set_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, fid, basic, sizeof(basic)) == ST_SUCCESS);
+    expect_restore = 1;
+    arm(CHIMERA_VFS_COMPOUND_OP_READ, 2, CHIMERA_VFS_EAGAIN, true);
+    assert(smb2_read(conn, fid, 0, sizeof(out), out, &length) == ST_SUCCESS);
+    assert(length == 8 && !memcmp(out, "original", 8));
+    assert(atomic_load(&restore_seen) == 1 && atomic_load(&all_submissions) == 1);
+    check(3);
+    assert(smb2_query_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
+                           fid, 0, out, sizeof(out), &length) == ST_SUCCESS);
+    assert(length == 40 && g64(out, 8) == atime);
+
+    atomic_store(&fail_restore, 1);
+    arm(CHIMERA_VFS_COMPOUND_OP_READ, 0, CHIMERA_VFS_OK, false);
+    assert(smb2_read(conn, fid, 0, sizeof(out), out, &length) == ST_SUCCESS);
+    assert(length == 8 && !memcmp(out, "original", 8));
+    assert(atomic_load(&restore_seen) == 1 && atomic_load(&all_submissions) == 1);
+    check(1); assert(atomic_load(&fail_restore) == 2);
+    atomic_store(&fail_restore, 0); expect_restore = 0;
+
+    /* Exhausted READ finish must retain/release its buffers without a reply. */
+    arm(CHIMERA_VFS_COMPOUND_OP_READ, 100, CHIMERA_VFS_EAGAIN, true);
+    assert(smb2_read(conn, fid, 0, sizeof(out), out, &length) != ST_SUCCESS);
+    assert(atomic_load(&all_submissions) == 1);
+    check(CHIMERA_FRONTEND_COMPOUND_RETRIES + 1);
+
+    struct smb2_create_out truncated;
+    assert(smb2_create(conn, "close-metadata", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                       MBT_FILE_SHARE_RWD, NULL, &truncated) == ST_SUCCESS);
+    for (int exhaustion = 0; exhaustion < 2; exhaustion++) {
+        if (exhaustion) {
+            assert(smb2_create(conn, "close-metadata", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                               MBT_FILE_SHARE_RWD, NULL, &truncated) == ST_SUCCESS);
+        }
+        assert(smb2_set_eof(conn, truncated.file_id, 8192) == ST_SUCCESS);
+        p64(allocation, 0, 16384);
+        assert(smb2_set_info(conn, SMB2_INFO_FILE_T, SMB2_FILE_ALLOCATION_INFO_T,
+                             truncated.file_id, allocation, sizeof(allocation)) == ST_SUCCESS);
+        assert(smb2_set_eof(conn, truncated.file_id, 8) == ST_SUCCESS);
+        arm(CHIMERA_VFS_COMPOUND_OP_SETATTR, exhaustion ? 100 : 2, CHIMERA_VFS_EAGAIN, true);
+        uint32_t status = close_postquery(conn, truncated.file_id);
+        assert(status == (exhaustion ? ST_INTERNAL_ERROR : ST_SUCCESS));
+        assert(atomic_load(&all_submissions) == 1);
+        check(exhaustion ? CHIMERA_FRONTEND_COMPOUND_RETRIES + 1 : 3);
+        if (!exhaustion) {
+            const uint8_t *body = conn->rbuf + 4 + SMB2_HDR_SIZE;
+            assert(g64(body, 40) < 16384 && g64(body, 48) == 8);
+        }
+        assert(smb2_close(conn, truncated.file_id) == ST_FILE_CLOSED);
+    }
+} /* metadata_io_checks */
+
 int
 main(void)
 {
@@ -231,6 +343,10 @@ main(void)
     assert(smb2_create_opts(conn, "retry-dir", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
                             MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &dir) == ST_SUCCESS);
     atomic_store(&bypass, 1);
+    metadata_io_checks(conn, file.file_id);
+    assert(smb2_close(conn, file.file_id) == ST_SUCCESS);
+    assert(smb2_create(conn, "retry-file", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                       MBT_FILE_SHARE_RWD, NULL, &file) == ST_SUCCESS);
 
     /* A fallback CREATE can retry before its live CLAIM barrier. Once that
     * barrier executes, rejected finish must discard admission and fail. */

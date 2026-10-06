@@ -30,6 +30,7 @@
 #include "smb2_mbt_common.h"
 #include "vfs/vfs_compound.h"
 #include "vfs/vfs_notify.h"
+#include "common/compound_retry.h"
 
 /* Interpose only the checked stream-DOC compound, not surrounding legacy
  * CLOSE work. Mutation is never rejected: mode 1 holds acceptance; mode 2
@@ -38,6 +39,7 @@ static atomic_int stream_test_mode, stream_test_held, stream_test_release;
 static atomic_int stream_test_submissions, stream_test_notifications;
 static atomic_int stream_close_armed, stream_close_submissions, stream_close_finishes;
 static atomic_int stream_close_notifications;
+static atomic_int stream_rename_armed, stream_rename_submissions, stream_rename_finishes;
 static            _Thread_local struct chimera_vfs_thread *stream_test_thread;
 static            _Thread_local struct chimera_vfs_cred stream_test_cred;
 
@@ -214,15 +216,80 @@ stream_test_rebound(
     next(ctx->compound, stream_test_done, ctx);
 } /* stream_test_rebound */
 
+struct stream_rename_ctx {
+    chimera_vfs_compound_callback_t callback;
+    void                           *private_data;
+    unsigned                        finishes;
+};
+
+static void
+stream_rename_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct stream_rename_ctx *ctx = private_data;
+
+    (void) compound; (void) index;
+    if (ctx->finishes < 2) {
+        *status = CHIMERA_VFS_EIO;
+    }
+} /* stream_rename_prepare */
+
+static void
+stream_rename_finish(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct stream_rename_ctx *ctx    = private_data;
+    bool                      reject = ctx->finishes++ < 2;
+
+    atomic_fetch_add(&stream_rename_finishes, 1);
+    if (reject) {
+        assert(!chimera_vfs_compound_op(compound, 2)->completed);
+    }
+    chimera_vfs_compound_finish_result(compound, reject ? CHIMERA_VFS_EAGAIN : CHIMERA_VFS_OK);
+} /* stream_rename_finish */
+
+static void
+stream_rename_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct stream_rename_ctx       *ctx      = private_data;
+    chimera_vfs_compound_callback_t callback = ctx->callback;
+    void                           *arg      = ctx->private_data;
+
+    if (chimera_vfs_compound_finish_status(compound) != CHIMERA_VFS_EAGAIN ||
+        ctx->finishes == CHIMERA_FRONTEND_COMPOUND_RETRIES + 1) {
+        free(ctx);
+    }
+    callback(compound, arg);
+} /* stream_rename_complete */
+
 __attribute__((visibility("default"))) void
 chimera_vfs_compound_submit(
     struct chimera_vfs_compound    *cp,
     chimera_vfs_compound_callback_t callback,
     void                           *private_data)
 {
-    stream_submit_fn                      next = (stream_submit_fn) dlsym(RTLD_NEXT, "chimera_vfs_compound_submit");
+    stream_submit_fn next = (stream_submit_fn) dlsym(RTLD_NEXT, "chimera_vfs_compound_submit");
 
     assert(next);
+    if (atomic_load(&stream_rename_armed)) {
+        assert(chimera_vfs_compound_num_ops(cp) == 3);
+        assert(chimera_vfs_compound_op(cp, 0)->type == CHIMERA_VFS_COMPOUND_OP_PUTFH);
+        assert(chimera_vfs_compound_op(cp, 1)->type == CHIMERA_VFS_COMPOUND_OP_OPEN_CURRENT);
+        assert(chimera_vfs_compound_op(cp, 2)->type == CHIMERA_VFS_COMPOUND_OP_RENAME_STREAM);
+        struct stream_rename_ctx *ctx = calloc(1, sizeof(*ctx)); assert(ctx);
+        ctx->callback = callback; ctx->private_data = private_data;
+        atomic_fetch_add(&stream_rename_submissions, 1);
+        chimera_vfs_compound_set_op_prepare(cp, 0, stream_rename_prepare, ctx);
+        chimera_vfs_compound_set_finish_handler(cp, stream_rename_finish, ctx);
+        next(cp, stream_rename_complete, ctx);
+        return;
+    }
     if (atomic_load(&stream_close_armed)) {
         assert(chimera_vfs_compound_num_groups(cp) == 3);
         atomic_fetch_add(&stream_close_submissions, 1);
@@ -796,7 +863,11 @@ probe_stream_rename(struct smb2_conn *c)
     }
     smb2_write(c, s1.file_id, 0, "ONE", 3, &cnt);
 
+    atomic_store(&stream_rename_armed, 1);
     st = smb2_rename(c, s1.file_id, ":two:$DATA", 0);
+    atomic_store(&stream_rename_armed, 0);
+    assert(atomic_load(&stream_rename_submissions) == 1);
+    assert(atomic_load(&stream_rename_finishes) == 3);
     CHECK(st == ST_SUCCESS, "rename :one -> :two:$DATA -> 0x%08x", st);
     st = smb2_read(c, s1.file_id, 0, sizeof(rd), rd, &rlen);
     CHECK(st == ST_SUCCESS && rlen == 3, "  ... the open handle still reads it "

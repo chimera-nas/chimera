@@ -335,11 +335,45 @@ chimera_vfs_open_fh(
     next(thread, cred, fh, fhlen, flags, callback, private_data);
 } /* chimera_vfs_open_fh */
 
+/* Exercise the common builder through the standalone dispatch too. */
+static atomic_int force_standalone;
+
+__attribute__((visibility("default"))) int
+chimera_smb_vfs_compound_try(void *wire)
+{
+    typedef int (*try_fn)(
+        void *);
+    try_fn next = (try_fn) dlsym(RTLD_NEXT, "chimera_smb_vfs_compound_try");
+    assert(next);
+    return atomic_load(&force_standalone) ? 0 : next(wire);
+} /* chimera_smb_vfs_compound_try */
+
+static int reject_before_effects;
+
 struct finish_injection {
-    chimera_vfs_compound_callback_t callback;
-    void                           *private_data;
-    unsigned int                    seen;
+    chimera_vfs_compound_callback_t    callback;
+    void                              *private_data;
+    unsigned int                       seen;
+    chimera_vfs_compound_op_callback_t prepare;
+    void                              *prepare_private;
 };
+
+static void
+metadata_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct finish_injection *ctx = private_data;
+
+    if (ctx->seen < (unsigned int) reject_count) {
+        *status = CHIMERA_VFS_EIO;
+    } else if (ctx->prepare) {
+        ctx->prepare(compound, index, status, ctx->prepare_private);
+    }
+} /* metadata_prepare */
+
 
 static void
 readonly_finish(
@@ -415,6 +449,12 @@ chimera_vfs_compound_submit(
             assert(ctx);
             ctx->callback     = callback;
             ctx->private_data = private_data;
+            if (reject_before_effects) {
+                const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(cp, 0);
+                ctx->prepare         = op->prepare;
+                ctx->prepare_private = op->prepare_private;
+                chimera_vfs_compound_set_op_prepare(cp, 0, metadata_prepare, ctx);
+            }
             chimera_vfs_compound_set_finish_handler(cp, readonly_finish, ctx);
             next(cp, readonly_complete, ctx);
             return;
@@ -501,7 +541,7 @@ ioctl_send(
     int replies = c->nreply_app;
 
     atomic_store(&submissions, 0);
-    atomic_store(&expected_groups, p->count);
+    atomic_store(&expected_groups, atomic_load(&force_standalone) ? 0 : p->count);
     atomic_store(&attempts, 0);
     atomic_store(&armed, 1);
     memcpy(c->sbuf + 4, p->data, p->length);
@@ -1047,6 +1087,123 @@ reparse_identity_checks(struct smb2_conn *c)
     assert(atomic_load(&reparse_fault_seen) == 2);
 } /* reparse_identity_checks */
 
+/* Persisted metadata, including dynamically discovered index handles, remains
+ * in its wire group's single submission. Backend mutation is never rejected
+ * by these memfs tests: mutating retries stop before the first operation. */
+static void
+metadata_compound_checks(struct smb2_conn *c)
+{
+    const uint32_t         oid_set = 0x00090098u, oid_get = 0x0009009cu;
+    const uint32_t         oid_delete = 0x000900a0u, oid_extended = 0x000900bcu;
+    const uint32_t         oid_create = 0x000900c0u;
+    struct smb2_create_out a, b;
+    struct packet          p = { 0 };
+    uint8_t                oid[64], ext[48], input[28] = { 0 };
+    uint32_t               length, status;
+    const uint8_t         *out;
+
+    for (unsigned i = 0; i < sizeof(oid); i++) {
+        oid[i] = 0x80 + i;
+    }
+    memset(ext, 0x07, sizeof(ext));
+    assert(smb2_create_opts(c, "metadata-a", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                            MBT_FILE_SHARE_RWD, 0x00004000u, NULL, &a) == ST_SUCCESS);
+    assert(smb2_create_opts(c, "metadata-b", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                            MBT_FILE_SHARE_RWD, 0x00004000u, NULL, &b) == ST_SUCCESS);
+    ioctl_append(&p, c, a.file_id, oid_set, oid, sizeof(oid));
+    ioctl_append(&p, c, a.file_id, oid_get, NULL, 0);
+    ioctl_append(&p, c, a.file_id, oid_extended, ext, sizeof(ext));
+    ioctl_append(&p, c, a.file_id, oid_create, NULL, 0);
+    ioctl_append(&p, c, a.file_id, oid_delete, NULL, 0);
+    ioctl_append(&p, c, b.file_id, oid_set, oid, sizeof(oid));
+    ioctl_append(&p, c, b.file_id, oid_get, NULL, 0);
+    ioctl_send(&p, c);
+    out = ioctl_result(c, 1, &length);
+    assert(length == 64 && !memcmp(out, oid, 64));
+    out = ioctl_result(c, 3, &length);
+    assert(length == 64 && !memcmp(out, oid, 16) && !memcmp(out + 16, ext, 48));
+    out = ioctl_result(c, 6, &length);
+    assert(length == 64 && !memcmp(out, oid, 64));
+    assert(smb2_ioctl(c, oid_set, a.file_id, oid, sizeof(oid)) == 0xc00000bdu); /* DUPLICATE_NAME */
+
+    /* The indexed second file is opened inside the compound to reject this
+     * duplicate, even after a finish rejection and retry. */
+    memset(&p, 0, sizeof(p));
+    ioctl_append(&p, c, a.file_id, oid_set, oid, sizeof(oid));
+    expected_status = 0xc00000bdu; reject_count = 1;
+    ioctl_send(&p, c);
+    assert(atomic_load(&attempts) == 2);
+    expected_status = ST_SUCCESS; reject_count = 0;
+
+    /* A standalone CREATE_OR_GET must read the same stored ID. */
+    atomic_store(&force_standalone, 1);
+    memset(&p, 0, sizeof(p));
+    ioctl_append(&p, c, b.file_id, oid_create, NULL, 0);
+    reject_count = 1; ioctl_send(&p, c); reject_count = 0;
+    out          = ioctl_result(c, 0, &length);
+    assert(length == 64 && !memcmp(out, oid, 64));
+    atomic_store(&force_standalone, 0);
+
+    /* Put a generic tag before any symlink SET: stale rp_nfs_type in a recycled
+    * request must not determine whether generic reparse points are accepted. */
+    p32(input, 0, 0x00000123u); p16(input, 4, 4);
+    memset(input + 8, 0x12, 16); memcpy(input + 24, "data", 4);
+    memset(&p, 0, sizeof(p));
+    ioctl_append(&p, c, a.file_id, SMB2_FSCTL_SET_REPARSE_POINT, input, sizeof(input));
+    ioctl_append(&p, c, a.file_id, SMB2_FSCTL_GET_REPARSE_POINT, NULL, 0);
+    query(&p, c, a.file_id, 1, 4);
+    reject_count = 1; reject_before_effects = 1;
+    ioctl_send(&p, c);
+    reject_count = reject_before_effects = 0;
+    assert(atomic_load(&attempts) == 2);
+    out = ioctl_result(c, 1, &length);
+    assert(length == sizeof(input) && !memcmp(out, input, length));
+    out = result(c, 2, &length);
+    assert(length >= 36 && (g32(out, 32) & 0x400u));
+
+    /* SET and DELETE reject mismatched tags/GUIDs before any mutation. */
+    input[8] ^= 1;
+    assert(smb2_ioctl(c, SMB2_FSCTL_SET_REPARSE_POINT, a.file_id, input, sizeof(input)) == 0xc00002b2u);
+    p16(input, 4, 0);
+    assert(smb2_ioctl(c, 0x000900acu, a.file_id, input, 24) == 0xc00002b2u);
+    input[8] ^= 1;
+    memset(&p, 0, sizeof(p));
+    ioctl_append(&p, c, a.file_id, 0x000900acu, input, 24);
+    query(&p, c, a.file_id, 1, 4);
+    ioctl_send(&p, c);
+    out = result(c, 1, &length);
+    assert(length >= 36 && !(g32(out, 32) & 0x400u));
+
+    /* Exhaustion of a rejected standalone mutation cannot report success. */
+    atomic_store(&force_standalone, 1);
+    p16(input, 4, 4);
+    memset(&p, 0, sizeof(p));
+    ioctl_append(&p, c, a.file_id, SMB2_FSCTL_SET_REPARSE_POINT, input, sizeof(input));
+    reject_before_effects = 1; reject_count = CHIMERA_FRONTEND_COMPOUND_RETRIES + 1;
+    expected_status       = ST_INTERNAL_ERROR;
+    ioctl_send(&p, c);
+    assert(atomic_load(&attempts) == CHIMERA_FRONTEND_COMPOUND_RETRIES + 1);
+    expected_status = ST_SUCCESS; reject_count = reject_before_effects = 0;
+    (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, a.file_id, NULL, 0, 2048, &status, &length);
+    assert(status == 0xc0000275u);
+    memset(&p, 0, sizeof(p));
+    ioctl_append(&p, c, a.file_id, SMB2_FSCTL_SET_REPARSE_POINT, input, sizeof(input));
+    ioctl_send(&p, c);
+    memset(&p, 0, sizeof(p));
+    ioctl_append(&p, c, a.file_id, SMB2_FSCTL_GET_REPARSE_POINT, NULL, 0);
+    reject_count = 1; ioctl_send(&p, c); reject_count = 0;
+    out          = ioctl_result(c, 0, &length);
+    assert(length == sizeof(input) && !memcmp(out, input, length));
+    assert(atomic_load(&attempts) == 2);
+    p16(input, 4, 0);
+    memset(&p, 0, sizeof(p));
+    ioctl_append(&p, c, a.file_id, 0x000900acu, input, 24);
+    ioctl_send(&p, c);
+    atomic_store(&force_standalone, 0);
+    assert(smb2_close(c, a.file_id) == ST_SUCCESS);
+    assert(smb2_close(c, b.file_id) == ST_SUCCESS);
+} /* metadata_compound_checks */
+
 int
 main(void)
 {
@@ -1060,6 +1217,7 @@ main(void)
     smb2_env_start_opts(&env, &opts);
     struct smb2_conn      *c = smb2_conn_open(&env);
     smb2_handshake(c);
+    metadata_compound_checks(c);
     assert(smb2_create(c, "copy-src", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &src) ==
            ST_SUCCESS);
     assert(smb2_create(c, "copy-dst", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &dst) ==
