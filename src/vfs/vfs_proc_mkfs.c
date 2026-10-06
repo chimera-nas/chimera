@@ -54,6 +54,17 @@ chimera_vfs_mkfs(
         return;
     }
 
+    /* Registered but its init failed (e.g. a diskfs block backend such as
+    * io_uring is unavailable in this process): the module is unavailable.
+    * ENXIO keeps that distinct from ENOENT (no such module) and ENOTSUP (the
+    * module cannot mkfs), matching the same gate in chimera_vfs_mount. */
+    if (!vfs->module_private[module->fh_magic]) {
+        chimera_vfs_error("chimera_vfs_mkfs: module %s is unavailable "
+                          "(module init failed)", module_name);
+        callback(thread, CHIMERA_VFS_ENXIO, private_data);
+        return;
+    }
+
     if (!(module->capabilities & CHIMERA_VFS_CAP_MKFS)) {
         callback(thread, CHIMERA_VFS_ENOTSUP, private_data);
         return;

@@ -942,8 +942,31 @@ diskfs_device_open_complete(
 {
     struct diskfs_device *device = private_data;
 
+    /* Treat only the capability-absent errnos as "backend unavailable here":
+    * ENXIO/ENOTSUP (what the libevpl open-boundary guard produces when a
+    * framework-backed backend such as io_uring has no usable framework),
+    * ENOSYS (the syscall is blocked, e.g. io_uring_setup under a container's
+    * seccomp profile) and ENODEV (no such backend device).  For these we
+    * record the status device-side and leave bdev NULL; the device init loop
+    * stops waiting and diskfs_init unwinds to a NULL module init, which
+    * surfaces as ENXIO at mount/mkfs instead of deferring a NULL-context
+    * crash to the first read.
+    *
+    * Any other non-zero status is a real device failure the operator must see
+    * -- a genuine misconfiguration or I/O error (EACCES, EINVAL, EROFS, EIO,
+    * an O_DIRECT-unsupported backing fs, ...).  Keep the original loud
+    * fail-fast abort for those rather than masking them as a silent skip. */
+    if (status == ENXIO || status == ENOTSUP || status == EOPNOTSUPP ||
+        status == ENOSYS || status == ENODEV) {
+        chimera_diskfs_info("Device %s unavailable: %s (open status %d)",
+                            device->name, strerror(status), status);
+        device->open_status = status;
+        return;
+    }
+
     chimera_diskfs_abort_if(status != 0, "Failed to open device %s: %s",
                             device->name, strerror(status));
+
     device->bdev             = bdev;
     device->size             = evpl_block_size(bdev);
     device->max_request_size = evpl_block_max_request_size(bdev);
@@ -970,7 +993,7 @@ diskfs_device_thread_init(
         }
         evpl_block_open_device(evpl, device->protocol_id, shared->device_paths[i],
                                diskfs_device_open_complete, device);
-        while (!device->bdev) {
+        while (!device->bdev && !device->open_status) {
             evpl_continue(evpl);
         }
     }
@@ -1148,6 +1171,41 @@ diskfs_init(
 
     shared->device_thread = evpl_thread_create(NULL, diskfs_device_thread_init,
                                                diskfs_device_thread_shutdown, shared);
+
+    /* evpl_thread_create blocks until device init has finished opening (or
+     * failing to open) every local device.  If any backend was unavailable
+     * here, treat the whole module as unavailable: unwind exactly what has been
+     * built to this point and return NULL.  chimera_vfs_register records the
+     * NULL as module_private == NULL, so mount and mkfs answer ENXIO (the
+     * capability-availability path) instead of the daemon aborting or crashing
+     * on the first block op.  Only device_paths/devices/device0_path, cfg and
+     * the device thread exist yet -- the mutexes, metrics and space map below
+     * are not created, so they must not be torn down here. */
+    {
+        int dev_unavailable = 0;
+
+        for (i = 0; i < shared->num_devices; i++) {
+            if (shared->devices[i].open_status != 0) {
+                dev_unavailable = 1;
+            }
+        }
+
+        if (dev_unavailable) {
+            chimera_diskfs_info(
+                "diskfs: a block backend is unavailable here; module "
+                "unavailable (mount/mkfs will return ENXIO)");
+            evpl_thread_destroy(shared->device_thread);
+            for (i = 0; i < shared->num_devices; i++) {
+                free(shared->device_paths[i]);
+            }
+            free(shared->device_paths);
+            free(shared->devices);
+            free(device0_path);
+            json_decref(cfg);
+            free(shared);
+            return NULL;
+        }
+    }
 
     /* Opt-in unsafe async I/O: when set, block writes are submitted without
      * FUA/sync, so diskfs runs lighter at the cost of crash safety.  Off by
