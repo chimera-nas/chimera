@@ -16,6 +16,15 @@
  * ordinary per-operation requests; transactional backend integration is a
  * separate step.
  *
+ * NORTHSIDE API. Filesystem operations enter here; vfs_internal_procs.h is
+ * restricted to the VFS implementation and explicit white-box test fixtures.
+ * Lifecycle/configuration and synchronous queries (vfs.h), reference drops
+ * (vfs_release.h), claim/lock lifetime and peer coordination (vfs_claim.h,
+ * vfs_lock.h), notify subscriptions, and the object-independent persistence
+ * store (vfs_kv.h) remain separate. These control APIs are not permission to
+ * publish effects from replayable operation callbacks. Object-scoped KV and
+ * filesystem mutations belong in the compound.
+ *
  * EXECUTION AND FRONTEND CALLOUTS. Build the known prefix before submission.
  * An operation's prepare callback can bind inputs from earlier results, skip
  * that operation, or reject it before its filesystem action. Its complete
@@ -54,8 +63,8 @@
  *
  * OWNERSHIP. Primary attribute ACL snapshots, staged directory entries,
  * buffers, open handles, claims, and READ iovecs belong to the compound until
- * freed, retried, or explicitly taken after accepted finish. A struct copy of
- * a result does not extend the lifetime of its pointers. Auxiliary directory
+ * freed, restarted, or explicitly taken after accepted finish. A struct copy
+ * of a result does not extend the lifetime of its pointers. Auxiliary directory
  * attributes do not retain ACLs; staged READDIR entries omit their ACLs.
  * GETHANDLE acquires an
  * independent reference, including when the current reference was borrowed;
@@ -260,10 +269,10 @@ enum chimera_vfs_compound_op_type {
      * queued and later answered DENIED.  The actor is derived from the
      * claim: {claim->owner, claim->op_handle}.  That expresses the KEY-circle
      * self-exemption directly, because the trigger engine keys it on
-     * owner.key (chimera_claim_owner_same_lease: key + client), which the
+     * owner.key (chimera_claim_owner_same_cache: SMB ClientLeaseId), which the
      * caller's claim already carries -- SMB stamps the LeaseKey on the share
      * claim's owner exactly so.  The lo/hi rewrite SMB's own break_for_open
-     * does is redundant for exemption (same_key covers it wherever same_owner
+     * does is redundant for exemption (same_cache covers it wherever same_owner
      * would have), so there is no separate actor argument.
      *
      * OP_HANDLE.  Before the acquire, a CACHE-class claim (a grant template,
@@ -1011,6 +1020,7 @@ struct chimera_vfs_compound_op {
 
     struct chimera_vfs_lock_request             lock_request;
     struct chimera_vfs_lock_attempt            *lock_attempt;
+    bool                                        lock_from_fh;
     uint8_t                                     nonretryable;
     uint32_t                                    lock_pid;
 
@@ -1303,9 +1313,9 @@ struct chimera_vfs_compound_op {
  * second time: the gate is consulted, and re-applies its edits, on EVERY
  * execution of the sequence, so it must compute them from what the CALLER
  * ALREADY HAD -- the size in the op as the caller wrote it, plus what the
- * earlier op just reported -- and never accumulate onto what it wrote last
- * time.  A gate that adds a delta to an op's offset gets a different sequence
- * the second time round; one that assigns the offset gets the same one.
+ * earlier op just reported. Restart restores the original op arguments before
+ * any gate runs; frontend attempt-private state must likewise be reset through
+ * attempt_reset, and borrowed caller inputs must never be modified.
  */
 typedef void (*chimera_vfs_compound_gate_t)(
     struct chimera_vfs_compound *compound,
@@ -1412,14 +1422,26 @@ chimera_vfs_compound_alloc(
  * Group registration is construction-only. Retry discards dynamic suffixes and
  * resets group statuses/links, retaining the original immutable descriptors.
  */
+/* Select a borrowed immutable credential at group entry, after cursor reset
+ * and dependency checks, before any operation prepares. Called again on every
+ * attempt. NULL selects config.cred (or the allocation credential). The callout
+ * may only update attempt-private frontend state: no publication, submission,
+ * operation/group edits, or ownership transfer. Inputs/results must outlive the
+ * compound. Report protocol authorization errors from operation prepare. */
+typedef const struct chimera_vfs_cred *(*chimera_vfs_compound_group_cred_t)(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     group,
+    void                        *context);
+
 struct chimera_vfs_compound_group_config {
-    uint32_t                       first_op;
-    uint32_t                       num_ops;
-    const struct chimera_vfs_cred *cred;
-    void                          *context;
-    int32_t                        dependency;
+    uint32_t                          first_op;
+    uint32_t                          num_ops;
+    const struct chimera_vfs_cred    *cred;
+    chimera_vfs_compound_group_cred_t select_cred;
+    void                             *context;
+    int32_t                           dependency;
     enum chimera_vfs_error dependency_error;
-    bool                           continue_on_error;
+    bool                              continue_on_error;
 };
 
 int
@@ -1813,8 +1835,8 @@ chimera_vfs_compound_add_open_stream(
  * `max_bytes` the compound allocates and owns.  The page is what
  * chimera_vfs_list_streams produces, verbatim:
  *
- *   buffer_count records, each a struct chimera_vfs_stream_entry (size,
- *   alloc, name_len, fh_len) followed by name_len bytes of un-terminated
+ *   buffer_count records, each a struct chimera_vfs_stream_entry (cookie,
+ *   size, alloc, name_len, fh_len) followed by name_len bytes of un-terminated
  *   name, then fh_len bytes of the stream's file handle -- fh_len is 0 unless
  *   `want_fh` was set -- with the next record at the following 8-byte-aligned
  *   offset; buffer_len is where the last one ends.  The unnamed data fork is
@@ -1822,8 +1844,15 @@ chimera_vfs_compound_add_open_stream(
  *   (and, with want_fh, the base's own fh), on every backend that has one --
  *   memfs reports it for a regular file and nothing for a directory.
  *
- * eof and r_cookie are as for LISTXATTRS.  A page too small for its first
- * record is the backend's ERANGE. */
+ * Cookie zero starts a fresh enumeration and ignores the input verifier.
+ * Every record has a strictly increasing cookie >= 3. Resume after any record
+ * with its cookie and r_verifier; r_cookie is the last record's cookie, or the
+ * final position on an empty EOF page. eof describes the backend page, which
+ * may be smaller than the entire list. A stale verifier is EBADCOOKIE. A page
+ * too small for its first record is ERANGE; earlier complete records instead
+ * return OK with eof false. max_bytes bounds one page, not the directory.
+ * Callers that need the entire list must check eof and continue, or report
+ * their protocol's buffer limit rather than silently accepting a partial list. */
 
 
 /* Remove the fork `name` from the base the op addresses, which stays
@@ -2608,9 +2637,11 @@ chimera_vfs_compound_set_attempt_reset(
  * have been taken and no result may have been published. Backend transaction
  * integration calls this on finish-time EAGAIN; ordinary op errors preserve
  * successful-prefix semantics and must not trigger an automatic retry.
- * Returns false without starting if still running, ownership was taken, or no
- * submitted input snapshot exists. True means started; synchronous completion
- * may already have called the final callback and freed the compound. */
+ * Returns false without starting if still running, canceled (or a cross-thread
+ * cancel is pending), ownership was taken/published, a borrowed CLOSE was
+ * accepted, an operation was nonretryable, or no input snapshot exists. True
+ * means started; synchronous completion may already have called the final
+ * callback and freed the compound. */
 bool
 chimera_vfs_compound_retry(
     struct chimera_vfs_compound *compound);
@@ -2627,7 +2658,16 @@ chimera_vfs_compound_set_gate(
 /* Execute an attempt. The callback fires once per attempt, on the submitting
  * thread, after operations stop and the finish adapter resolves acceptance.
  * A finish adapter may complete asynchronously. Retrying starts a new attempt
- * with another completion; the compound remains valid until explicitly freed. */
+ * with another completion; the compound remains valid until explicitly freed.
+ * A completed compound may be submitted again using the ORIGINAL construction
+ * snapshot: previous results are released, dynamic suffixes discarded, and
+ * prepare/complete/gate callbacks run afresh. Borrowed inputs must still live.
+ * Like retry, this never rolls back earlier filesystem effects. It obeys the
+ * same replay barriers as retry; in particular, published results/journals and
+ * accepted borrowed CLOSEs cannot be resubmitted. Refusal calls callback with
+ * compound_status EINVAL without executing or invoking the finish adapter;
+ * prior results and their ownership/finish status remain intact for teardown.
+ * Submitting a running compound is a programming error. */
 void
 chimera_vfs_compound_submit(
     struct chimera_vfs_compound    *compound,
@@ -3159,7 +3199,7 @@ chimera_vfs_compound_add_remove_paths(
  * out_handle under the ordinary OPEN rules. LIST/REMOVE address the current
  * base object (or explicit op handle); list results are compound-owned packed
  * chimera_vfs_stream_entry records in buffer with buffer_len/buffer_count,
- * eof/r_cookie. Names and attribute inputs follow the ordinary builder rules. */
+ * eof/r_cookie/r_verifier. Names and attribute inputs follow the ordinary builder rules. */
 int chimera_vfs_compound_add_open_stream(
     struct chimera_vfs_compound    *compound,
     const char                     *name,
@@ -3205,6 +3245,7 @@ chimera_vfs_compound_add_find(
 int chimera_vfs_compound_add_list_streams(
     struct chimera_vfs_compound *compound,
     uint64_t                     cookie,
+    uint64_t                     verifier,
     uint32_t                     max_bytes,
     bool                         want_fh);
 

@@ -17,7 +17,6 @@
 #include "fuse_internal.h"
 #include "fuse_attr.h"
 #include "common/compound_retry.h"
-#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 
 static unsigned int
@@ -216,8 +215,8 @@ chimera_fuse_op_open(
     /* The handle is what the kernel's fh will name, so it outlives us. */
     chimera_vfs_compound_add_gethandle(req->compound);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_open_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_open_sequence_complete, req);
 } /* chimera_fuse_op_open */
 
 /* --- CREATE --- */
@@ -324,8 +323,8 @@ chimera_fuse_op_create(
     chimera_vfs_compound_add_open(req->compound, name, (int) strlen(name), flags, 0, &req->u.create.set_attr,
                                   CHIMERA_FUSE_ATTR_MASK, 0, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_create_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_create_sequence_complete, req);
 } /* chimera_fuse_op_create */
 
 /* --- READ --- */
@@ -408,8 +407,8 @@ chimera_fuse_op_read(
     chimera_vfs_compound_add_read(req->compound, file->handle, in->offset, in->size, req->u.read.iov,
                                   CHIMERA_FUSE_IOV_MAX, 0, &actor, NULL, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_read_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_read_sequence_complete, req);
 } /* chimera_fuse_op_read */
 
 /* --- WRITE --- */
@@ -503,8 +502,8 @@ chimera_fuse_op_write(
     chimera_vfs_compound_add_write(req->compound, file->handle, in->offset, in->size, sync, &req->u.write.iov, 1, 0, 0,
                                    &actor);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_write_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_write_sequence_complete, req);
 } /* chimera_fuse_op_write */
 
 /* --- FLUSH / FSYNC --- */
@@ -670,8 +669,8 @@ chimera_fuse_op_fallocate(
                                       in->offset, in->length, flags,
                                       0, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_status_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_status_sequence_complete, req);
 } /* chimera_fuse_op_fallocate */
 
 /* --- LSEEK (SEEK_DATA / SEEK_HOLE) --- */
@@ -747,8 +746,8 @@ chimera_fuse_op_lseek(
 
     chimera_vfs_compound_add_seek(req->compound, NULL, in->offset, what);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_lseek_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_lseek_sequence_complete, req);
 } /* chimera_fuse_op_lseek */
 
 /* --- COPY_FILE_RANGE --- */
@@ -818,7 +817,7 @@ chimera_fuse_op_copy_file_range(
                                         dst->handle, in->off_out,
                                         in->len, 0, 0, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_copy_range_sequence_complete,
-                                req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_copy_range_sequence_complete,
+                                     req);
 } /* chimera_fuse_op_copy_file_range */

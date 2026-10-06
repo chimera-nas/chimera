@@ -175,13 +175,14 @@ nfs4_cb_drain_layoutrecall_queue(struct chimera_server_nfs_thread *thread)
 } /* nfs4_cb_drain_layoutrecall_queue */
 
 void
-chimera_nfs4_cb_recall_and_wait(
-    struct chimera_server_nfs_thread *thread,
-    const uint8_t                    *fh,
-    uint32_t                          fhlen,
-    void (                           *resume )(
+chimera_nfs4_cb_recall_and_wait_view(
+    struct chimera_server_nfs_thread    *thread,
+    const uint8_t                       *fh,
+    uint32_t                             fhlen,
+    void (                              *resume )(
         void *arg),
-    void                             *resume_arg)
+    void                                *resume_arg,
+    const struct nfs_layout_recall_view *view)
 {
     struct nfs_layout_recall_waiter *waiter;
     struct nfs4_cb_resume_ctx       *rctx;
@@ -200,9 +201,9 @@ chimera_nfs4_cb_recall_and_wait(
     waiter->resume = nfs4_cb_resume_bounce;
     waiter->arg    = rctx;
 
-    n = nfs_layout_table_recall_prepare(&thread->shared->nfs4_layout_table,
-                                        fh, (uint16_t) fhlen, waiter,
-                                        &holders);
+    n = nfs_layout_table_recall_prepare_view(&thread->shared->nfs4_layout_table,
+                                             fh, (uint16_t) fhlen, waiter,
+                                             &holders, view);
 
     if (n == 0) {
         /* No layouts held for this file: nothing to recall, proceed now (we are
@@ -222,4 +223,15 @@ chimera_nfs4_cb_recall_and_wait(
         nfs_layout_state_put(holders[i]);
     }
     free(holders);
+} /* chimera_nfs4_cb_recall_and_wait_view */
+
+void
+chimera_nfs4_cb_recall_and_wait(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *fh,
+    uint32_t                          fhlen,
+    void (                           *resume )(void *arg),
+    void                             *resume_arg)
+{
+    chimera_nfs4_cb_recall_and_wait_view(thread, fh, fhlen, resume, resume_arg, NULL);
 } /* chimera_nfs4_cb_recall_and_wait */

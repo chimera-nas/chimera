@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
+#include "common/compound_retry.h"
 #include "smb_procs.h"
 #include "smb_common/smb2.h"
 #include "vfs/vfs.h"
@@ -151,9 +152,9 @@ chimera_smb_ioctl_set_sparse(struct chimera_smb_request *request)
     chimera_vfs_compound_set_gate(request->vfs_compound,
                                   chimera_smb_set_sparse_gate, request);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_set_sparse_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_set_sparse_sequence_complete,
+                                     request);
 } /* chimera_smb_ioctl_set_sparse */
 
 /* ------------------------------------------------------------------ */
@@ -232,9 +233,9 @@ chimera_smb_ioctl_set_zero_data(struct chimera_smb_request *request)
                                       CHIMERA_VFS_ALLOCATE_DEALLOCATE,
                                       0, 0);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_set_zero_data_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_set_zero_data_sequence_complete,
+                                     request);
 } /* chimera_smb_ioctl_set_zero_data */
 
 /* ------------------------------------------------------------------ */
@@ -271,7 +272,7 @@ chimera_smb_qar_submit_seek(
 
     chimera_vfs_compound_add_seek(request->vfs_compound, NULL, offset, what);
 
-    chimera_vfs_compound_submit(request->vfs_compound, callback, request);
+    chimera_frontend_compound_submit(request->vfs_compound, callback, request);
 } /* chimera_smb_qar_submit_seek */
 
 static void chimera_smb_qar_seek_data(
@@ -460,9 +461,8 @@ chimera_smb_ioctl_query_allocated_ranges(struct chimera_smb_request *request)
     request->ioctl.sp_open_file = open_file;
     request->ioctl.sp_qar_count = 0;
 
-    /* The scan is a run of sequences built one after another; a pipelined
-     * CLOSE on this FileId NULLs open_file->handle between them, so the handle
-     * every one of them borrows is the one captured here. */
+    /* Every scan sequence borrows this admitted handle. The open reference
+    * keeps it alive even if CLOSE retires the FileId between sequences. */
     request->ioctl.sp_handle = open_file->handle;
 
     /* FileOffset + Length must not overflow (MS-FSCC 2.3.20.1): a wrapping

@@ -14,7 +14,6 @@
 #include "smb_common/smb2.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_claim.h"
 
 #define SMB2_LOCK_REQUEST_SIZE    48
@@ -75,12 +74,12 @@ chimera_smb_open_file_revoke_cache(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file)
 {
-    (void) thread;
     if (!open_file->grant) {
         return;
     }
     chimera_smb_grant_remove_member(open_file->grant, open_file);
     chimera_vfs_claim_grant_revoke_empty(open_file->grant);
+    chimera_smb_create_resume_parked_broadcast(thread);
 } /* chimera_smb_open_file_revoke_cache */
 
 /* Called by the serialized CLOSE/finalize owner while it still pins the open.
@@ -104,6 +103,9 @@ chimera_smb_open_file_drain_cache(
     open_file->caching_file_state     = NULL;
     if (grant) {
         chimera_vfs_claim_grant_release(state, grant, true /* pump */);
+        /* CLOSE can satisfy a peer's break without an ACK. Resume that
+         * peer on its own worker after the cache has actually been dropped. */
+        chimera_smb_create_resume_parked_broadcast(thread);
     }
     if (file) {
         chimera_vfs_state_put(state, file);
@@ -130,10 +132,6 @@ chimera_smb_open_file_drain_claims(
                              "ACCESS teardown before journal retirement");
         chimera_vfs_claim_access_owner_put(open_file->access_owner);
         open_file->access_owner         = NULL;
-        open_file->share_lease_inserted = false;
-    } else if (open_file->share_lease_inserted) {
-        chimera_vfs_claim_release(vfs_state, open_file->share_file_state,
-                                  &open_file->share_lease);
         open_file->share_lease_inserted = false;
     }
     if (!pump) {
@@ -409,6 +407,8 @@ smb_lock_compound_prepare(
         uint32_t bucket = chimera_smb_lock_seq_bucket(request->lock.lock_sequence);
         lock->seq_index = chimera_smb_lock_seq_index(request->lock.lock_sequence);
         if (chimera_smb_lock_replay_active(request, command->open) && bucket >= 1 && bucket <= 64) {
+            chimera_smb_abort_if(!(command->state->lock_seq_admitted & (UINT64_C(1) << (bucket - 1))),
+                                 "LOCK replay lookup without sequence admission");
             lock->seq_bucket = bucket;
             if (command->state->lock_seq_valid[bucket - 1] &&
                 command->state->lock_seq_index[bucket - 1] == lock->seq_index) {
@@ -614,6 +614,12 @@ smb_lock_compound_wait(
     }
 } /* smb_lock_compound_wait */
 
+void
+chimera_smb_lock_compound_admission_wait(struct smb_vfs_command *command)
+{
+    smb_lock_compound_wait(NULL, 0, command);
+} /* chimera_smb_lock_compound_admission_wait */
+
 static void
 smb_lock_compound_complete(
     struct chimera_vfs_compound *compound,
@@ -699,9 +705,9 @@ static void
 smb_lock_compound_release(struct smb_vfs_command *command)
 {
     struct chimera_smb_request   *request = command->request;
-    struct chimera_smb_open_file *open    = command->open;
+    struct chimera_smb_open_file *open    = request->lock.open_file;
 
-    if (request->lock.vfs_compound && open) {
+    if (request->lock.parked && open) {
         unsigned bucket = open->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
         evpl_mutex_lock(&open->tree->open_files_lock[bucket]);
         if (open->parked_lock_req == request) {

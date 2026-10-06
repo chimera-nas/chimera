@@ -1540,7 +1540,8 @@ posix_env_setup(
                         "SKIP: %s backend needs a name_to_handle_at-capable "
                         "scratch fs; %s is not one (set CHIMERA_MBT_SCRATCH)\n",
                         module, dir);
-                exit(77);
+                posix_env_setup_unwind(server, metrics);
+                return 77;
             }
             if (mrc != 0) {
                 fprintf(stderr, "posix_driver: share mount %s failed: %d\n",
@@ -1654,7 +1655,8 @@ posix_env_setup(
                             "SKIP: %s backend needs a name_to_handle_at-capable "
                             "scratch fs; %s is not one (set CHIMERA_MBT_SCRATCH)\n",
                             module, dir);
-                    exit(77);
+                    posix_env_setup_unwind(server, metrics);
+                    return 77;
                 }
                 fprintf(stderr, "posix_driver: %s mount failed: %s\n",
                         backend, strerror(errno));
@@ -1752,8 +1754,9 @@ main(
         return 1;
     }
 
-    if (posix_env_setup(backend, storage) != 0) {
-        return 1;
+    int         setup_result = posix_env_setup(backend, storage);
+    if (setup_result != 0) {
+        return setup_result;
     }
 
     fprintf(proto_out, "{\"ready\": true, \"blocksize\": %d}\n",

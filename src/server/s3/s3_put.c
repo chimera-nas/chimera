@@ -4,7 +4,6 @@
 
 #include <stdio.h>
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_internal_procs.h"
 #include "s3_compound.h"
 #include "s3_temp.h"
 #include "s3_acl.h"

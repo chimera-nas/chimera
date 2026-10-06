@@ -92,6 +92,7 @@ struct nfs_nfs3_readdirplus_cursor {
 
 struct nfs_nfs4_readdir_cursor {
     uint64_t       count;
+    uint64_t       reply_reserve;
     struct entry4 *entries;
     struct entry4 *last;
     nfsstat4       change_status;
@@ -154,6 +155,14 @@ struct nfs_request {
     uint8_t                           nfs3_guard_failed;
     uint8_t                           minorversion;     /* COMPOUND4args.minorversion */
     bool                              seen_sequence;    /* set once OP_SEQUENCE has run in this compound */
+    /* Accepted READ response vectors across every VFS span of this wire COMPOUND. */
+    uint32_t                          reply_read_iov;
+    bool                              reply_read_seen;
+    /* Encoded accepted prefix, excluding RPC framing. Updated only by the
+     * dispatcher after results are published; VFS attempts use private copies. */
+    uint64_t                          reply_bytes;
+    uint64_t                          reply_chunk_bytes;
+    uint32_t                          reply_accounted;
     /* NFS4.1 "current stateid" (RFC 8881 §16.2.3.1.2): a per-COMPOUND value
      * set by stateid-returning ops (OPEN/LOCK/...) and substituted into
      * later ops that present the special current-stateid value. */
@@ -163,51 +172,10 @@ struct nfs_request {
      * current filehandle (RFC 8881 §16.2.3.1.2). */
     bool                              saved_current_stateid_valid;
     struct stateid4                   saved_current_stateid;
-    /* In-flight state ref for ops that acquire from the unified state table.
-     * Released by the completion handler.  Phase 2.  Type is one of
-     * NFS4_SLOT_TYPE_OPEN / NFS4_SLOT_TYPE_LOCK. */
-    void                             *nfs_state_ref;
-    uint8_t                           nfs_state_type;
-    /* Set when a READ/WRITE authorized by a delegation stateid is served via an
-     * on-the-fly open: the on-the-fly I/O must carry the delegation holder's
-     * own lease owner so the VFS I/O path does not treat the client's own I/O
-     * as a foreign actor and recall the client's own delegation. */
-    bool                              io_owner_from_deleg;
-    /* In-flight vfs_state byte-range lease for an async NFSv4 LOCK.
-     * Allocated at lock dispatch, linked onto the lock_state on grant,
-     * freed on denial.  See nfs4_proc_lock.c. */
-    struct nfs4_range_lease          *nfs_inflight_range;
-    /* Per-owner seqid bookkeeping for the 4.0 OPEN flow.  Populated at
-     * entry to chimera_nfs4_open after the seqid is classified NEW; nil on
-     * 4.1+ and on replay/bad-seqid short-circuits.  All OPEN response
-     * paths route through chimera_nfs4_open_complete, which advances the
-     * owner seqid + caches the reply iff this is non-NULL and the status
-     * is in nfs4_seqid_should_advance(). */
-    struct nfs_open_owner            *open_4_0_owner;
     /* Accepted compound publication may wait for the delegation probe. */
     void                              (*compound_probe_resume)(
         struct nfs_request *req);
     void                             *compound_probe_private;
-    /* An OPEN/UNCHECKED of an existing file asked for size 0.  The truncate
-     * is held back until the share reservation is granted (see
-     * chimera_nfs4_open_complete) so a denied OPEN cannot destroy the
-     * file's contents. */
-    bool                              open_trunc_pending;
-    struct chimera_vfs_attrs          open_trunc_attr;
-    /* Per-owner seqid bookkeeping for the 4.0 LOCK flow.  For
-     * new_lock_owner=true both open_owner (open_seqid) and lock_owner
-     * (lock_seqid) advance; for new_lock_owner=false only the lock_owner
-     * advances.  Set in chimera_nfs4_lock after classification; consumed
-     * by chimera_nfs4_lock_finish. */
-    struct nfs_open_owner            *lock_4_0_open_owner;
-    struct nfs_lock_owner            *lock_4_0_lock_owner;
-    /* A new_lock_owner (open_to_lock_owner) LOCK that re-establishes an
-     * existing but emptied lock stateid reuses that stateid rather than
-     * minting a fresh one (RFC 7530 §9.1.4.2: the stateid "other" is stable
-     * for its life).  When set, the LOCK's error/seqid paths treat the
-     * lock_state as pre-existing (bump its seqid, do not destroy it) even
-     * though new_lock_owner is true. */
-    bool                              lock_reused;
     struct evpl_rpc2_conn            *conn;
     struct evpl_rpc2_encoding        *encoding;
     struct nlm_lock_entry            *nlm_pending_entry; /* in-flight NLM lock/test */
@@ -221,6 +189,8 @@ struct nfs_request {
      * it creates -- the reply capture and slot finalize must keep charging
      * the slot's owner. */
     struct nfs4_session              *replay_session;
+    void                             *replay_buffer;
+    uint32_t                          replay_capacity;
     uint32_t                          replay_slot_id;
     uint8_t                           replay_action;
     /* Continuation parked while nfs4_root_junction_check resolves the "/"
@@ -467,7 +437,6 @@ struct chimera_server_nfs_shared {
 /* Forward decl for the per-thread lease sweeper (defined in nfs4_lease.h). */
 struct nfs_lease_sweeper;
 
-struct nlm_lock_resume;
 
 struct chimera_server_nfs_thread {
     struct evpl_rpc2_thread          *rpc2_thread;
@@ -512,17 +481,8 @@ struct chimera_server_nfs_thread {
     struct nfs4_cb_client            *cb_teardown_queue;
     uint8_t                           cb_doorbell_armed;
 
-    /* NLM deferred lock-acquire completions bounced back to their home
-     * thread.  A blocking LOCK's grant lands on whichever thread released
-     * the conflict (or on the claim core's service thread), but the reply
-     * rides the connection's evpl and the teardown uses this thread's VFS
-     * thread -- neither is cross-thread safe.  Its own doorbell rather than
-     * cb_doorbell, so NLM does not pull the NFSv4 callback machinery into
-     * targets that link one without the other.  See nfs_nlm.c. */
-    struct evpl_doorbell              nlm_doorbell;
-    evpl_mutex_t                      nlm_resume_lock;
-    struct nlm_lock_resume           *nlm_resume_queue;
-    uint8_t                           nlm_doorbell_armed;
+    /* Compound completions must drain before this worker's RPC/VFS pools. */
+    unsigned int                      nlm_active;
 };
 
 static inline struct nfs_request *
@@ -545,10 +505,12 @@ nfs_request_alloc(
     req->conn     = conn;
     req->encoding = encoding;
 
-    req->replay_slot    = NULL;
-    req->replay_session = NULL;
-    req->replay_slot_id = 0;
-    req->replay_action  = NFS4_REPLAY_ACTION_NONE;
+    req->replay_slot     = NULL;
+    req->replay_session  = NULL;
+    req->replay_buffer   = NULL;
+    req->replay_capacity = 0;
+    req->replay_slot_id  = 0;
+    req->replay_action   = NFS4_REPLAY_ACTION_NONE;
 
     /* Root span for this NFS request (a single NFSv3 op, or a whole NFSv4
      * COMPOUND).  Parent the VFS ops it issues under it; propagation in

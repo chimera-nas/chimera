@@ -222,8 +222,8 @@ send_compound(
                 break;
             case SMB2_QUERY_INFO:
                 p16(b, 0, 41);
-                b[2] = SMB2_INFO_FILE_T;
-                b[3] = cmd[i].offset ? cmd[i].offset : SMB2_FILE_BASIC_INFO_T;
+                b[2] = cmd[i].offset & 0x100 ? SMB2_INFO_FILESYSTEM_T : SMB2_INFO_FILE_T;
+                b[3] = cmd[i].offset ? cmd[i].offset & 0xff : SMB2_FILE_BASIC_INFO_T;
                 p32(b, 4, 4096);
                 memcpy(b + 24, cmd[i].fid, 16);
                 body_len = 40;
@@ -333,9 +333,13 @@ check_reply(
         }
         if (expected == ST_SUCCESS && cmd[i].opcode == SMB2_QUERY_INFO) {
             assert(limit >= SMB2_HDR_SIZE + 8);
-            assert(g32(b, 4) == (cmd[i].offset == 14 ? 8 : 40));
+            assert(g32(b, 4) == (cmd[i].offset & 0x100 ? 16 : cmd[i].offset == 14 ? 8 : 40));
             assert(g16(b, 2) + g32(b, 4) <= limit);
-            if (cmd[i].offset == 14) {
+            if (cmd[i].offset & 0x100) {
+                /* memfs capabilities with named streams disabled, including
+                 * QUERY_INFO through a just-created private handle. */
+                assert(g32(h + g16(b, 2), 0) == 0x080000cf);
+            } else if (cmd[i].offset == 14) {
                 /* Earlier READ advanced to four; a later SET_POSITION must
                  * not overwrite this command's private response snapshot. */
                 assert(g64(h + g16(b, 2), 0) == 4);
@@ -540,7 +544,7 @@ main(
     };
 /* *INDENT-ON* */
     run(c, "query/read/flush coalesced", ordinary, 3, 0, 0, 0);
-    struct command         created[] = {
+    struct command created[] = {
 
         {
             SMB2_CREATE,
@@ -589,13 +593,22 @@ main(
 
     };
     run(c, "create/write/query/read/close coalesced with provisional handle", created, 5, 0, 0, 0);
-    struct command         create_failed[6];
+    struct command create_failed[6];
     memcpy(create_failed, created, sizeof(created));
     for (unsigned int i = 0; i < 5; i++) {
         create_failed[i].status = ST_OBJECT_NAME_COLLISION;
     }
     create_failed[5] = (struct command) { SMB2_QUERY_INFO, opened.file_id, 0, 0, ST_SUCCESS };
     run(c, "failed create propagates related error and independent group continues", create_failed, 6, 0, 0, 0);
+/* *INDENT-OFF* */
+    struct command fs_attributes[] = {
+        { SMB2_CREATE, NULL, 0, 1, ST_SUCCESS },
+        { SMB2_QUERY_INFO, related, SMB2_FLAGS_RELATED_OPERATIONS,
+          0x100 | SMB2_FS_ATTRIBUTE_INFO_T, ST_SUCCESS },
+        { SMB2_CLOSE, related, SMB2_FLAGS_RELATED_OPERATIONS, 0, ST_SUCCESS },
+    };
+/* *INDENT-ON* */
+    run(c, "filesystem attributes resolve the private CREATE handle", fs_attributes, 3, 0, 0, 0);
     struct command         metadata_open[] = {
 
         {

@@ -112,7 +112,7 @@ struct chimera_claim_range_conflict {
  * separately by the protocol layer for projection serialization.  key[16] is
  * the KEY circle (SMB LeaseKey / ParentLeaseKey); all-zero means "no key".
  *
- * same_key compares the object-store caching context. Windows Server 2012+
+ * same_cache compares the object-store caching context. Windows Server 2012+
  * uses LeaseKey as ClientLeaseId (MS-SMB2 3.3.1.4, product behavior 211), so
  * caching compatibility spans ClientGuids. Protocol lease-record identity
  * additionally includes the client; use owner_equal / same_lease for that. */
@@ -145,6 +145,22 @@ struct chimera_vfs_io_view {
     const struct chimera_vfs_claim *const *excluded;
     uint32_t                               num_excluded;
 };
+
+/* Exclusion pointers name pinned claims retired only in this attempt. */
+static inline bool
+chimera_vfs_io_view_excludes(
+    const struct chimera_vfs_io_view *view,
+    const struct chimera_vfs_claim   *claim)
+{
+    if (view) {
+        for (uint32_t i = 0; i < view->num_excluded; i++) {
+            if (view->excluded[i] == claim) {
+                return true;
+            }
+        }
+    }
+    return false;
+} // chimera_vfs_io_view_excludes
 
 static inline void
 chimera_vfs_io_view_copy(
@@ -184,9 +200,9 @@ chimera_claim_owner_has_key(const struct chimera_claim_owner *o)
     return memcmp(o->key, zero, 16) != 0;
 } /* chimera_claim_owner_has_key */
 
-/* Keys are scoped by protocol and client identity (SMB LeaseTable.ClientGuid
- * then LeaseKey), never shared between independent clients. A zero key never matches anything,
- * including itself -- keyless holders fall back to the HOLDER/OWNER circles. */
+/* Protocol keys are scoped by client (SMB LeaseTable.ClientGuid, then
+ * LeaseKey). A zero key never matches, including itself; keyless holders
+ * fall back to the HOLDER/OWNER circles. */
 static inline bool
 chimera_claim_owner_same_key(
     const struct chimera_claim_owner *a,
@@ -205,18 +221,28 @@ chimera_claim_owner_same_client(
     return a->proto == b->proto && a->client_key == b->client_key;
 } /* chimera_claim_owner_same_client */
 
-/* Protocol lease identity, distinct from object-store caching equivalence.
- * MS-SMB2 3.3.5.9.8 locates the LeaseTable by ClientGuid, then LeaseKey.
- * Retain the zero-client wildcard for key-only synthetic actors. Admission
- * and break self-exemptions use same_key, not this client-qualified identity. */
+/* SMB object-store caching equivalence is wider than lease-record identity:
+ * Windows uses LeaseKey as ClientLeaseId across clients (MS-SMB2 3.3.1.4,
+ * product behavior 211). This is ONLY a caching/recall exemption, never an
+ * ACCESS or byte-range ownership test. Other protocols remain client-scoped. */
+static inline bool
+chimera_claim_owner_same_cache(
+    const struct chimera_claim_owner *a,
+    const struct chimera_claim_owner *b)
+{
+    return a->proto == b->proto &&
+           (a->proto == CHIMERA_CLAIM_PROTO_SMB2 || a->client_key == b->client_key) &&
+           chimera_claim_owner_has_key(a) && memcmp(a->key, b->key, 16) == 0;
+} /* chimera_claim_owner_same_cache */
+
+/* Protocol lease identity: MS-SMB2 3.3.5.9.8 locates the LeaseTable by
+ * ClientGuid, then LeaseKey. No wildcard client may bypass a RANGE claim. */
 static inline bool
 chimera_claim_owner_same_lease(
     const struct chimera_claim_owner *a,
     const struct chimera_claim_owner *b)
 {
-    return chimera_claim_owner_same_key(a, b) &&
-           (a->client_key == 0 || b->client_key == 0 ||
-            a->client_key == b->client_key);
+    return chimera_claim_owner_same_key(a, b);
 } /* chimera_claim_owner_same_lease */
 
 /* -------------------------------------------------------------------- */

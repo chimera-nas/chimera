@@ -54,3 +54,14 @@ nfs4_cb_drain_layoutrecall_queue(
 void
 nfs4_cb_drain_resume_queue(
     struct chimera_server_nfs_thread *thread);
+
+/* Exclude this compound's privately returned exact layout slots while still
+ * recalling every conflicting peer. The view is retained through resume. */
+struct nfs_layout_recall_view;
+void chimera_nfs4_cb_recall_and_wait_view(
+    struct chimera_server_nfs_thread    *thread,
+    const uint8_t                       *fh,
+    uint32_t                             fhlen,
+    void (                              *resume )(void *arg),
+    void                                *resume_arg,
+    const struct nfs_layout_recall_view *view);

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "fuse_internal.h"
+#include "common/compound_retry.h"
 #include "fuse_attr.h"
 
 static void
@@ -84,8 +85,8 @@ chimera_fuse_op_lookup(
     chimera_vfs_compound_add_lookup(req->compound, name, (int) strlen(name),
                                     CHIMERA_FUSE_ATTR_MASK, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_lookup_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_lookup_sequence_complete, req);
 } /* chimera_fuse_op_lookup */
 
 void

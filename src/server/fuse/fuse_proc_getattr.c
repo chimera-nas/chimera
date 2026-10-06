@@ -14,6 +14,7 @@
 #endif /* ifdef _WIN32 */
 
 #include "fuse_internal.h"
+#include "common/compound_retry.h"
 #include "fuse_attr.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_acl.h"
@@ -133,9 +134,9 @@ chimera_fuse_op_getattr(
         chimera_vfs_compound_add_getattr(req->compound,
                                          CHIMERA_VFS_ATTR_MASK_STAT);
 
-        chimera_vfs_compound_submit(req->compound,
-                                    chimera_fuse_getattr_sequence_complete,
-                                    req);
+        chimera_frontend_compound_submit(req->compound,
+                                         chimera_fuse_getattr_sequence_complete,
+                                         req);
         return;
     }
 
@@ -161,8 +162,8 @@ chimera_fuse_op_getattr(
     chimera_vfs_compound_add_getattr(req->compound,
                                      CHIMERA_VFS_ATTR_MASK_STAT);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_getattr_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_getattr_sequence_complete, req);
 } /* chimera_fuse_op_getattr */
 
 /* --- SETATTR --- */
@@ -221,9 +222,9 @@ chimera_fuse_op_setattr(
                                                0, CHIMERA_VFS_ATTR_MASK_STAT);
         (void) idx;
 
-        chimera_vfs_compound_submit(req->compound,
-                                    chimera_fuse_setattr_sequence_complete,
-                                    req);
+        chimera_frontend_compound_submit(req->compound,
+                                         chimera_fuse_setattr_sequence_complete,
+                                         req);
         return;
     }
 
@@ -250,8 +251,8 @@ chimera_fuse_op_setattr(
                                      &req->u.setattr.set_attr,
                                      0, CHIMERA_VFS_ATTR_MASK_STAT);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_setattr_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_setattr_sequence_complete, req);
 } /* chimera_fuse_op_setattr */
 
 /* --- READLINK --- */
@@ -310,8 +311,8 @@ chimera_fuse_op_readlink(
 
     chimera_vfs_compound_add_readlink(req->compound);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_readlink_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_readlink_sequence_complete, req);
 } /* chimera_fuse_op_readlink */
 
 /* --- STATFS --- */
@@ -365,8 +366,8 @@ chimera_fuse_op_statfs(
     chimera_vfs_compound_add_getattr(req->compound,
                                      CHIMERA_VFS_ATTR_MASK_STATFS);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_statfs_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_statfs_sequence_complete, req);
 } /* chimera_fuse_op_statfs */
 
 /* --- ACCESS --- */
@@ -479,6 +480,6 @@ chimera_fuse_op_access(
     chimera_vfs_compound_add_access(req->compound,
                                     chimera_fuse_access_requested(arg));
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_access_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_access_sequence_complete, req);
 } /* chimera_fuse_op_access */

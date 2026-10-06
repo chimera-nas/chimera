@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
+#include "common/compound_retry.h"
 #include "smb_doc_stream.h"
-#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_notify.h"
 
@@ -239,5 +239,5 @@ chimera_smb_stream_doc_run(
                                           CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH, 0);
     chimera_vfs_compound_add_remove_stream_checked(compound, action->name, action->name_len,
                                                    action->target_fh, action->target_fh_len);
-    chimera_vfs_compound_submit(compound, stream_doc_compound_done, action);
+    chimera_frontend_compound_submit(compound, stream_doc_compound_done, action);
 } /* chimera_smb_stream_doc_run */

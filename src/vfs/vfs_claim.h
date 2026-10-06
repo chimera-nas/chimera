@@ -17,6 +17,45 @@
 
 struct chimera_vfs_request;
 
+/* Recall every OTHER caching lease on the file backing `handle` (the operating
+ * open's own lease is spared) and PARK until the recall drains, then invoke
+ * `callback`.  A namespace-mutation recall (breaks a peer's handle cache) with no
+ * backend op -- used by the SMB delete-on-close path so the peer's lease break is
+ * acked before the SetInfo reply is sent (smb2.lease.unlink). */
+typedef void (*chimera_vfs_recall_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_recall_handle_lease(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    chimera_vfs_recall_callback_t   callback,
+    void                           *private_data);
+
+/* Completion for chimera_vfs_recall_caching_fh: `still_open` reports whether the
+ * file still has a live (non-implicit) share holder once the recall has drained
+ * (a holder that did NOT close in response to the handle-lease break). */
+typedef void (*chimera_vfs_recall_fh_callback_t)(
+    enum chimera_vfs_error error_code,
+    int                    still_open,
+    void                  *private_data);
+
+/* Single-step recall of every caching lease on the file named by a bare FH
+ * (no open handle is spared), breaking each holder's handle cache once
+ * (RH -> R) and PARKing until the recall drains, then report whether a holder
+ * kept the file open.  Used by the SMB directory-rename path to break the
+ * handle leases of files open inside a directory being renamed. */
+void
+chimera_vfs_recall_caching_fh(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const uint8_t                   *fh,
+    uint32_t                         fh_len,
+    chimera_vfs_recall_fh_callback_t callback,
+    void                            *private_data);
+
 /*
  * The claim core: unified lease/lock/share/cache arbitration.
  *
@@ -950,6 +989,19 @@ chimera_vfs_claim_invalidate(
     const struct chimera_claim_actor *actor,
     uint8_t                           retain);
 
+/* The executor's scoped invalidation: claims privately retired by this
+ * attempt are neither recalled nor waited upon. Excluded claims stay pinned
+ * and publicly visible until accepted publication. */
+void
+chimera_vfs_claim_invalidate_view(
+    struct chimera_vfs_state         *state,
+    const uint8_t                    *fh,
+    uint8_t                           fh_len,
+    uint64_t                          fh_hash,
+    enum chimera_claim_trigger        trigger,
+    const struct chimera_vfs_io_view *view,
+    uint8_t                           retain);
+
 /* NS_FULL as a synchronous query: kick the full recall and report whether
  * any holder still blocks (NFSv4 REMOVE/RENAME's NFS4ERR_DELAY loop). */
 SYMBOL_EXPORT bool
@@ -958,6 +1010,21 @@ chimera_vfs_claim_break_caching(
     const uint8_t            *fh,
     uint8_t                   fh_len,
     uint64_t                  fh_hash);
+
+/* Request-scoped NS_FULL coordination. Exclusions stay pinned and publicly
+ * visible until the caller accepts its journal; unrelated holders still break. */
+bool
+chimera_vfs_claim_break_caching_view(
+    struct chimera_vfs_state         *state,
+    const uint8_t                    *fh,
+    uint8_t                           fh_len,
+    uint64_t                          fh_hash,
+    const struct chimera_vfs_io_view *view);
+
+bool
+chimera_vfs_claim_has_caching_view(
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_vfs_io_view *view);
 
 /* Pure NS_FULL blocking snapshot. Caller retains file; no refs, callbacks,
  * break initiation, or lease changes occur. */

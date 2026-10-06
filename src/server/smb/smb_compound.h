@@ -63,6 +63,9 @@ struct smb_vfs_open_state {
     uint8_t                                lock_seq_index[64];
     uint32_t                               lock_seq_status[64];
     uint64_t                               lock_seq_dirty;
+    /* Admission survives attempt reset; unlike the replay overlay it is not
+     * tentative protocol state. Waiting batches hold no partial reservation. */
+    uint64_t                               lock_seq_needed, lock_seq_admitted;
     uint16_t                               channel_sequence;
     uint8_t                                channel_sequence_valid;
     uint8_t                                position_dirty;
@@ -155,6 +158,8 @@ struct smb_vfs_command {
 extern const struct smb_vfs_command_ops chimera_smb_read_compound_ops;
 extern const struct smb_vfs_command_ops chimera_smb_flush_compound_ops;
 extern const struct smb_vfs_command_ops chimera_smb_lock_compound_ops;
+void chimera_smb_lock_compound_admission_wait(
+    struct smb_vfs_command *command);
 extern const struct smb_vfs_command_ops chimera_smb_query_info_compound_ops;
 extern const struct smb_vfs_command_ops chimera_smb_write_compound_ops;
 extern const struct smb_vfs_command_ops chimera_smb_query_directory_compound_ops;

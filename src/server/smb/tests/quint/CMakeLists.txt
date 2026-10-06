@@ -136,6 +136,28 @@ target_link_libraries(smb2_wire_probe chimera_server chimera_metrics chimera_cry
 # Actual NextCommand-chained requests plus held/rejected VFS finish. The
 # executable interposes compound submission to verify coalescing and staging.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(smb2_handle_lifetime_probe
+        smb2_handle_lifetime_probe.c smb2_handle_lifetime_inspect.c)
+    target_include_directories(smb2_handle_lifetime_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_handle_lifetime_probe
+        chimera_server chimera_metrics chimera_smb chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_handle_lifetime_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/handle_lifetime_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_handle_lifetime_probe>)
+    set_tests_properties(chimera/server/smb/mbt/handle_lifetime_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_handle_lifetime_probe_memfs"
+        LABELS "quint;smb_mbt;memfs" TIMEOUT 120)
+    add_executable(smb2_standalone_retry_probe smb2_standalone_retry_probe.c)
+    target_compile_definitions(smb2_standalone_retry_probe PRIVATE CHIMERA_VFS_INTERNAL_API)
+    target_include_directories(smb2_standalone_retry_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb2_standalone_retry_probe
+        chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
+    set_target_properties(smb2_standalone_retry_probe PROPERTIES ENABLE_EXPORTS ON)
+    add_test(NAME chimera/server/smb/mbt/standalone_retry_probe_memfs
+        COMMAND $<TARGET_FILE:smb2_standalone_retry_probe>)
+    set_tests_properties(chimera/server/smb/mbt/standalone_retry_probe_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_standalone_retry_probe_memfs"
+        LABELS "quint;smb_mbt;memfs" TIMEOUT 180)
     add_executable(smb2_compound_probe smb2_compound_probe.c)
     target_include_directories(smb2_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(smb2_compound_probe
@@ -156,6 +178,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             TIMEOUT 180)
     endforeach()
     add_executable(smb2_metadata_compound_probe smb2_metadata_compound_probe.c)
+    target_compile_definitions(smb2_metadata_compound_probe PRIVATE CHIMERA_VFS_INTERNAL_API)
     target_include_directories(smb2_metadata_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(smb2_metadata_compound_probe
         chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
@@ -168,6 +191,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         TIMEOUT 180)
     add_executable(smb2_ioctl_compound_probe smb2_ioctl_compound_probe.c smb2_resiliency_inspect.c
         smb2_reparse_inspect.c)
+    target_compile_definitions(smb2_ioctl_compound_probe PRIVATE CHIMERA_VFS_INTERNAL_API)
     target_include_directories(smb2_ioctl_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(smb2_ioctl_compound_probe
         chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
@@ -202,6 +226,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         TIMEOUT 180)
     add_executable(smb2_create_cache_compound_probe
         smb2_create_cache_compound_probe.c smb2_create_cache_inspect.c)
+    target_compile_definitions(smb2_create_cache_compound_probe PRIVATE CHIMERA_VFS_INTERNAL_API)
     target_include_directories(smb2_create_cache_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(smb2_create_cache_compound_probe
         chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
@@ -248,7 +273,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_persistent_cleanup_probe_memfs"
         LABELS "quint;smb_mbt;memfs"
         TIMEOUT 180)
-    add_executable(smb2_doc_compound_probe smb2_doc_compound_probe.c)
+    add_executable(smb2_doc_compound_probe smb2_doc_compound_probe.c smb2_compound_inspect.c)
     target_include_directories(smb2_doc_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(smb2_doc_compound_probe
         chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
@@ -260,6 +285,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         LABELS "quint;smb_mbt;memfs"
         TIMEOUT 180)
     add_executable(smb2_rename_compound_probe smb2_rename_compound_probe.c)
+    target_compile_definitions(smb2_rename_compound_probe PRIVATE CHIMERA_VFS_INTERNAL_API)
     target_include_directories(smb2_rename_compound_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(smb2_rename_compound_probe
         chimera_server chimera_metrics chimera_vfs crypto ${CMAKE_DL_LIBS})
@@ -463,7 +489,9 @@ specs_corpus(NAME    smb2/replay
 # Execute each declared family independently. A lease timeout must not stop
 # durable/replay traces from running, and no family may pass by skipping all
 # of its traces. Plain and signed connections use the identical model corpus.
+set(SMB2_MBT_TRACE_DIRS "")
 foreach(cell base durable force_l2 leases replay)
+    list(APPEND SMB2_MBT_TRACE_DIRS --trace-dir ${smb2_${cell}_traces})
     foreach(wire plain signed311)
         set(wire_args "")
         if(NOT wire STREQUAL "plain")

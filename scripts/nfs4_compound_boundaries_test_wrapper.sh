@@ -25,14 +25,26 @@ if [ -n "$RETRY_PRELOAD" ]; then
     SAVED_LD_PRELOAD="${SAVED_LD_PRELOAD:+$SAVED_LD_PRELOAD:}$RETRY_PRELOAD"
 fi
 NETNS_NAME="nfscompound_$$_$(date +%s%N)"
-SESSION_DIR=$(mktemp -d "${TMPDIR:-/tmp}/chimera-compound-wire.XXXXXX")
+SESSION_ROOT=${TMPDIR:-/tmp}
+if [[ "$FEATURE" = pnfs_unsupported || "$FEATURE" = readdir_linux ]]; then
+    SESSION_ROOT=${CHIMERA_TEST_ROOT:-${CHIMERA_MBT_SCRATCH:-$SESSION_ROOT}}
+fi
+SESSION_DIR=$(mktemp -d "$SESSION_ROOT/chimera-compound-wire.XXXXXX")
 CHIMERA_LOG="${SESSION_DIR}/chimera.log"
 CHIMERA_PID=""
 DS_PID=""
 DS_NETNS_NAME=""
 KEEP_SESSION=${CHIMERA_KEEP_TEST_SESSION:-0}
-if [ "$FEATURE" = namespace ] && [ -n "$RETRY_PRELOAD" ]; then
+if [[ "$FEATURE" = namespace || "$FEATURE" = cold_root || "$FEATURE" = pseudo || "$FEATURE" = checkpoints || "$FEATURE" = pnfs_checkpoints ]] && [ -n "$RETRY_PRELOAD" ]; then
     export CHIMERA_COMPOUND_JUNCTION_GATE="$SESSION_DIR/junction-gate"
+fi
+if [ "$FEATURE" = pnfs ] && [ -n "$RETRY_PRELOAD" ]; then
+    export CHIMERA_COMPOUND_LAYOUT_GATE="$SESSION_DIR/layout-gate"
+    export CHIMERA_COMPOUND_LAYOUTGET_GATE="$SESSION_DIR/layoutget-gate"
+fi
+
+if [[ "$TEST_SCRIPT" == */nfs4_compound_retirement.py || "$TEST_SCRIPT" == */nfs4_compound_layout_transitions.py ]] && [ -n "$RETRY_PRELOAD" ]; then
+    export CHIMERA_COMPOUND_RETIREMENT_GATE="$SESSION_DIR/retirement-gate"
 fi
 
 cleanup() {
@@ -97,15 +109,33 @@ directory = pathlib.Path(sys.argv[1])
 feature = sys.argv[2]
 path = directory / "chimera.json"
 config = json.loads(path.read_text())
-if feature == "delegation":
+if feature in ("readdir", "readdir_linux"):
     config["server"]["nfs4_delegations"] = True
-elif feature == "namespace":
+    if feature == "readdir_linux":
+        local = directory / "local"
+        local.mkdir()
+        config["mounts"]["share"] = {"module": "linux", "path": str(local)}
+elif feature in ("synthetic", "synthetic_delegation"):
+    config["server"]["smb_named_streams"] = True
+    config["server"]["nfs4_delegations"] = feature == "synthetic_delegation"
+elif feature == "delegation":
+    config["server"]["nfs4_delegations"] = True
+elif feature == "metadata":
+    config["server"]["smb_named_streams"] = True
+    config["exports"]["/alias"] = {"path": "/share"}
+    config["exports"]["/readonly"] = {"path": "/share", "access": "ro"}
+    config["filesystems"]["otherfs"] = {"module": "memfs"}
+    config["mounts"]["other"] = {"module": "memfs", "path": "otherfs"}
+    config["exports"]["/other"] = {"path": "/other"}
+elif feature in ("namespace", "cold_root", "pseudo"):
     config["server"]["rest_http_port"] = 8080
     config["server"]["rest_auth_enabled"] = False
-    config["filesystems"]["rootfs"] = {"module": "memfs"}
-    config["mounts"]["rootfs"] = {"module": "memfs", "path": "rootfs"}
-    config["exports"]["/"] = {"path": "/rootfs"}
-elif feature in ("pnfs", "pnfs_unsupported", "proxy3", "proxy4"):
+    config["server"]["smb_named_streams"] = True
+    if feature in ("namespace", "cold_root"):
+        config["filesystems"]["rootfs"] = {"module": "memfs"}
+        config["mounts"]["rootfs"] = {"module": "memfs", "path": "rootfs"}
+        config["exports"]["/"] = {"path": "/rootfs"}
+elif feature in ("pnfs", "pnfs_resident", "pnfs_unsupported", "pnfs_checkpoints", "pnfs_synthetic", "proxy3", "proxy4"):
     ds = {
         "common": {"rcu_reclaim_threads": 2},
         "server": {"nfs_enabled": True, "threads": 2,
@@ -127,10 +157,18 @@ elif feature in ("pnfs", "pnfs_unsupported", "proxy3", "proxy4"):
                                "options": "vers=4,port=2050"}
     if feature in ("pnfs", "proxy3", "proxy4"):
         config["exports"]["/share"]["path"] = "/ds0"
+    elif feature in ("pnfs_resident", "pnfs_checkpoints", "pnfs_synthetic"):
+        config["server"]["smb_named_streams"] = True
+    elif feature == "pnfs_unsupported":
+        # memfs now supports pNFS residency on its first WRITE. Use a backend
+        # without layout capability to keep this a real unsupported case.
+        local = directory / "local"
+        local.mkdir()
+        config["mounts"]["share"] = {"module": "linux", "path": str(local)}
     if feature.startswith("proxy"):
         config["mounts"]["ds0"]["path"] = "10.231.0.2:/ds_export"
         config["mounts"]["ds0"]["options"] = f"vers={feature[-1]},port=2049"
-elif feature != "none":
+elif feature not in ("none", "checkpoints"):
     raise ValueError(f"Unknown compound feature: {feature}")
 path.write_text(json.dumps(config))
 PY
@@ -193,10 +231,10 @@ RC=0
 ip netns exec "$NETNS_NAME" timeout 120 python3 "$TEST_SCRIPT" \
     --host 127.0.0.1 --port 2049 --export share --minor "$MINOR" \
     --server-log "$CHIMERA_LOG" || RC=$?
-if [ "$RC" = 0 ] && [ -n "$RETRY_PRELOAD" ]; then
+if [ "$RC" = 0 ] && [ -n "$RETRY_PRELOAD" ] && [[ "$TEST_SCRIPT" != */nfs4_compound_vectors.py && "$TEST_SCRIPT" != */nfs4_compound_wire_budget.py ]]; then
     # Loading the fixture must actually exercise rejected and accepted
     # attempts; a missing/preempted interposition cannot silently pass.
-    python3 - "$CHIMERA_LOG" "$MINOR" "$FEATURE" <<'PY' || RC=$?
+    python3 - "$CHIMERA_LOG" "$MINOR" "$FEATURE" "$TEST_SCRIPT" <<'PY' || RC=$?
 import pathlib
 import re
 import sys
@@ -213,7 +251,53 @@ failed = sum("NFS4_FINISH_RETRY injected " in line and
              re.search(r"execution=(?!0(?:\s|$))\d+", line) is not None
              for line in log.splitlines())
 assert failed >= 1, "Expected a failed execution prefix to encounter finish EAGAIN"
+if pathlib.Path(sys.argv[4]).name in ("nfs4_compound_retirement.py", "nfs4_compound_multiclient.py", "nfs4_compound_layout_transitions.py"):
+    if pathlib.Path(sys.argv[4]).name in ("nfs4_compound_retirement.py", "nfs4_compound_layout_transitions.py") and sys.argv[2] != "0":
+        assert "NFS4_FINISH_GATE failed " in log, "Retirement terminal finish error was not tested"
+    print(f"PASS state finish EAGAIN injection: {injected} compounds retried and accepted")
+    sys.exit(0)
 if sys.argv[3] != "none":
+    if sys.argv[3].startswith("readdir"):
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* readdirs=2(?:\s|$)", log), \
+            "Two ordinary READDIR pages did not encounter finish rejection in one compound"
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* execution=[1-9]\d* [^\n]* readdirs=1(?:\s|$)", log), \
+            "Failed ordinary READDIR did not encounter finish rejection"
+    if sys.argv[3] in ("namespace", "cold_root"):
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* paths=1(?:\s|$)", log), \
+            "Export/root path resolution did not encounter finish rejection"
+    if sys.argv[3] == "namespace":
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* paths=3(?:\s|$)", log), \
+            "Repeated root entries did not retry together in one compound"
+    if sys.argv[3] == "cold_root":
+        assert "NFS4_FINISH_GATE accepted " in log, "Cold-root publication was not tested after accepted finish"
+        assert "NFS4_FINISH_GATE failed " in log, "Cold-root terminal finish error was not tested"
+    if sys.argv[3] == "pseudo":
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* paths=4[0-9](?:\s|$)", log), \
+            "A whole pseudo-root page did not encounter one shared finish rejection"
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* execution=[1-9]\d* [^\n]* paths=2(?:\s|$)", log), \
+            "A failed pseudo-root page did not retain and retry its successful lookup prefix"
+    if sys.argv[3] == "metadata":
+        assert "metadata=1" in log, "Metadata-only compounds did not encounter finish rejection"
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* stream_lists=2(?:\s|$)", log), \
+            "Two named READDIR pages did not encounter finish rejection in one compound"
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* execution=[1-9]\d* [^\n]* stream_lists=1(?:\s|$)", log), \
+            "Failed named READDIR page did not encounter finish rejection"
+        stream = "retry-v40-stream" if sys.argv[2] == "0" else "metadata-one"
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* name=" + stream + r" named_opens=1(?:\s|$)", log), \
+            "Named-stream OPEN did not encounter finish rejection"
+        if sys.argv[2] != "0":
+            for field in ("readlinks", "xattrs", "commits"):
+                assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* " + field + r"=1(?:\s|$)", log), \
+                    f"Standalone {field} did not encounter finish rejection"
+            assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* stream_pages=[1-9]\d*(?:\s|$)", log), \
+                "A non-EOF backend stream page did not encounter finish rejection"
+            assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* name=metadata-one named_opens=3 reads=3(?:\s|$)", log), \
+                "Multiple stream bases did not encounter finish rejection in one compound"
+    if sys.argv[3] == "pnfs":
+        assert "NFS4_FINISH_GATE accepted " in log, "LAYOUTGET did not exercise accepted pending finish"
+        assert "NFS4_FINISH_GATE failed " in log, "LAYOUTGET did not exercise terminal finish failure"
+        assert re.search(r"NFS4_FINISH_RETRY injected [^\n]* layout_noops=[1-9]\d*(?:\s|$)", log), \
+            "No-op LAYOUTCOMMIT did not encounter finish rejection"
     print(f"PASS feature finish EAGAIN injection: {injected} compounds retried and accepted")
     sys.exit(0)
 if sys.argv[2] == "0":

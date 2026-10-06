@@ -616,6 +616,7 @@ state_table_lookup_locked(
     const struct stateid4  *sid,
     uint8_t                 want_type,
     bool                    bump_refcount,
+    bool                    allow_revoked,
     void                  **out_state,
     uint8_t                *out_type)
 {
@@ -677,7 +678,7 @@ state_table_lookup_locked(
         status = NFS4ERR_STALE_STATEID;
     } else if (want_type != 0 && slot->type != want_type) {
         status = NFS4ERR_BAD_STATEID;
-    } else if (slot->type == NFS4_SLOT_TYPE_DELEG &&
+    } else if (!allow_revoked && slot->type == NFS4_SLOT_TYPE_DELEG &&
                atomic_load_explicit(
                    &((struct nfs_delegation *) slot->state)->revoked,
                    memory_order_acquire)) {
@@ -771,9 +772,19 @@ nfs_state_table_acquire_no_renew(
     void                  **out_state,
     uint8_t                *out_type)
 {
-    return state_table_lookup_locked(table, sid, want_type, true,
+    return state_table_lookup_locked(table, sid, want_type, true, false,
                                      out_state, out_type);
 } /* nfs_state_table_acquire_no_renew */
+
+nfsstat4
+nfs_state_table_acquire_retirement(
+    struct nfs_state_table *table,
+    const struct stateid4  *sid,
+    void                  **state,
+    uint8_t                *type)
+{
+    return state_table_lookup_locked(table, sid, 0, true, true, state, type);
+} /* nfs_state_table_acquire_retirement */
 
 nfsstat4
 nfs_state_table_acquire(
@@ -928,7 +939,7 @@ nfs_state_table_validate(
     void   *unused_state;
     uint8_t unused_type;
 
-    return state_table_lookup_locked(table, sid, 0, false,
+    return state_table_lookup_locked(table, sid, 0, false, false,
                                      &unused_state, &unused_type);
 } /* nfs_state_table_validate */
 
@@ -945,7 +956,8 @@ nfs_state_table_snapshot(
     struct nfs_state_table              *table,
     const struct stateid4               *sid,
     const struct nfs_client             *session_client,
-    const struct nfs_state_advise_check *advise)
+    const struct nfs_state_advise_check *advise,
+    uint64_t                            *clientid)
 {
     struct nfs4_stateid_view view;
     struct nfs_state_shard  *shard;
@@ -954,13 +966,13 @@ nfs_state_table_snapshot(
     uint32_t                 seqid;
     nfsstat4                 status = NFS4ERR_BAD_STATEID;
 
-    if (!session_client || nfs4_stateid_is_special(sid)) {
+    if ((!session_client && !clientid) || nfs4_stateid_is_special(sid)) {
         return status;
     }
     nfs4_stateid_decode(&view, sid);
     /* TEST_STATEID maps stale identities to BAD_STATEID, including restart. */
     if (view.epoch != table->epoch) {
-        return advise ? NFS4ERR_STALE_STATEID : NFS4ERR_BAD_STATEID;
+        return advise || clientid ? NFS4ERR_STALE_STATEID : NFS4ERR_BAD_STATEID;
     }
     if (view.version != NFS4_STATEID_VERSION ||
         view.shard >= NFS_STATE_NUM_SHARDS) {
@@ -978,7 +990,7 @@ nfs_state_table_snapshot(
     }
     slot = &shard->slots[view.slot_idx];
     if (slot->generation != view.generation) {
-        status = advise ? NFS4ERR_STALE_STATEID : NFS4ERR_BAD_STATEID;
+        status = advise || clientid ? NFS4ERR_STALE_STATEID : NFS4ERR_BAD_STATEID;
         goto out;
     }
     if (slot->type == NFS4_SLOT_TYPE_EXPIRED) {
@@ -988,11 +1000,8 @@ nfs_state_table_snapshot(
     if (!slot->state) {
         goto out;
     }
-    if (advise && slot->type != NFS4_SLOT_TYPE_OPEN && slot->type != NFS4_SLOT_TYPE_LOCK) {
-        goto out;
-    }
     client = nfs_state_owner_client(slot->state, slot->type);
-    if (client != session_client) {
+    if (!client || (!clientid && client != session_client)) {
         goto out;
     }
     if (atomic_load_explicit(&client->reclaim_pending, memory_order_acquire)) {
@@ -1035,8 +1044,17 @@ nfs_state_table_snapshot(
         default:
             goto out;
     } /* switch */
+    if (clientid) {
+        /* Owner replay classifies its own seqid before the state version.
+         * Return only the immutable client identity, with no renewal or ref. */
+        *clientid = client->client_id;
+        status    = NFS4_OK;
+        goto out;
+    }
     if (advise) {
-        struct nfs_open_state *open_state;
+        struct nfs_open_state *open_state   = NULL;
+        const uint8_t         *state_fh     = NULL;
+        uint32_t               state_fh_len = 0;
         if (slot->type == NFS4_SLOT_TYPE_OPEN) {
             open_state = slot->state;
         } else if (slot->type == NFS4_SLOT_TYPE_LOCK) {
@@ -1044,16 +1062,34 @@ nfs_state_table_snapshot(
              * cleanup. Keeping the lock slot live therefore protects both
              * objects. Parent identity/principal are immutable once public. */
             open_state = ((struct nfs_lock_state *) slot->state)->open_state;
+        } else if (slot->type == NFS4_SLOT_TYPE_DELEG) {
+            const struct nfs_delegation *delegation = slot->state;
+            state_fh     = delegation->fh;
+            state_fh_len = delegation->fh_len;
+        } else if (slot->type == NFS4_SLOT_TYPE_LAYOUT) {
+            const struct nfs_layout_state *layout = slot->state;
+            state_fh     = layout->fh;
+            state_fh_len = layout->fh_len;
         } else {
             goto out;
         }
-        if (!open_state || atomic_load_explicit(&open_state->destroyed, memory_order_acquire) ||
-            open_state->owner->client != session_client || open_state->fh_len != advise->fh_len ||
-            !advise->fh || memcmp(open_state->fh, advise->fh, advise->fh_len)) {
+        if (open_state) {
+            if (atomic_load_explicit(&open_state->destroyed, memory_order_acquire) ||
+                open_state->owner->client != session_client) {
+                goto out;
+            }
+            state_fh     = open_state->fh;
+            state_fh_len = open_state->fh_len;
+        }
+        /* Delegations and layouts have no separately stored RPC principal.
+         * Their holder client, exact FH, lifecycle and stateid version still
+         * constrain this advisory no-op just as they constrain real state. */
+        if (!state_fh || !advise->fh || state_fh_len != advise->fh_len ||
+            memcmp(state_fh, advise->fh, advise->fh_len)) {
             goto out;
         }
-        if (!nfs_open_state_check_principal(open_state, advise->principal_flavor,
-                                            advise->principal_name, advise->principal_len)) {
+        if (open_state && !nfs_open_state_check_principal(open_state, advise->principal_flavor,
+                                                          advise->principal_name, advise->principal_len)) {
             status = NFS4ERR_ACCESS;
             goto out;
         }
@@ -1070,8 +1106,17 @@ nfs_state_table_test_stateid(
     const struct stateid4   *sid,
     const struct nfs_client *session_client)
 {
-    return nfs_state_table_snapshot(table, sid, session_client, NULL);
+    return nfs_state_table_snapshot(table, sid, session_client, NULL, NULL);
 } /* nfs_state_table_test_stateid */
+
+nfsstat4
+nfs_state_table_clientid(
+    struct nfs_state_table *table,
+    const struct stateid4  *sid,
+    uint64_t               *clientid)
+{
+    return nfs_state_table_snapshot(table, sid, NULL, NULL, clientid);
+} /* nfs_state_table_clientid */
 
 nfsstat4
 nfs_state_table_advise(
@@ -1097,7 +1142,7 @@ nfs_state_table_advise(
             ,
     };
 
-    return nfs_state_table_snapshot(table, sid, session_client, &check);
+    return nfs_state_table_snapshot(table, sid, session_client, &check, NULL);
 } /* nfs_state_table_advise */
 
 nfsstat4
@@ -1735,7 +1780,8 @@ nfs_open_owner_reserve_compound_internal(
     struct nfs_state_table             *table,
     struct chimera_vfs_thread          *vfs_thread,
     struct nfs_open_owner_reservation **out_reservation,
-    bool                                allow_locks)
+    bool                                allow_locks,
+    nfsstat4                           *principal_error)
 {
     struct nfs_open_owner_reservation *reservation;
     struct nfs_open_owner             *owner, *published;
@@ -1744,6 +1790,9 @@ nfs_open_owner_reserve_compound_internal(
     bool                               created;
 
     *out_reservation = NULL;
+    if (principal_error) {
+        *principal_error = NFS4_OK;
+    }
     if (!client) {
         return NFS4ERR_NOTSUPP;
     }
@@ -1764,15 +1813,33 @@ nfs_open_owner_reserve_compound_internal(
         atomic_load_explicit(&client->reclaim_pending, memory_order_acquire)) {
         status = NFS4ERR_EXPIRED;
     } else if (published != owner || owner->compound_pending || owner->compound_close_count ||
-               owner->compound_reservation || HASH_COUNT(owner->states_by_fh) > NFS4_COMPOUND_OWNER_MAX_STATES ||
+               owner->compound_reservation ||
                atomic_load_explicit(&owner->refcount, memory_order_acquire) !=
                2 + HASH_COUNT(owner->states_by_fh)) {
         status = NFS4ERR_DELAY;
+    }
+    if (status == NFS4_OK) {
+        size_t existing_count = HASH_COUNT(owner->states_by_fh), lock_count = 0;
+        HASH_ITER(hh, owner->states_by_fh, state, tmp)
+        {
+            for (struct nfs_lock_state *lock = state->locks; lock; lock = lock->next_in_open) {
+                lock_count++;
+            }
+        }
+        /* Keep both arrays valid even for an empty owner. Counts, rather
+         * than NULL storage, delimit the populated reservation entries. */
+        reservation->existing = calloc(existing_count ? existing_count : 1, sizeof(*reservation->existing));
+        reservation->locks    = calloc(lock_count ? lock_count : 1, sizeof(*reservation->locks));
+        if (!reservation->existing || !reservation->locks) {
+            status = NFS4ERR_RESOURCE;
+        }
     }
     if (status != NFS4_OK) {
         evpl_mutex_unlock(&owner->lock);
         evpl_mutex_unlock(&client->lock);
         nfs_open_owner_put(owner);
+        free(reservation->existing);
+        free(reservation->locks);
         free(reservation);
         return status;
     }
@@ -1797,15 +1864,20 @@ nfs_open_owner_reserve_compound_internal(
         }
 
         evpl_rwlock_wrlock(&shard->lock);
-        if ((!allow_locks && state->locks) || state->base_stream_file_state ||
+        if ((!allow_locks && state->locks) ||
             atomic_load_explicit(&state->destroyed, memory_order_acquire) ||
             atomic_load_explicit(&state->compound_closing, memory_order_acquire) ||
             atomic_load_explicit(&state->compound_reserved, memory_order_acquire) ||
             atomic_load_explicit(&state->refcount, memory_order_acquire) != 1 + num_locks) {
             status = NFS4ERR_DELAY;
-        } else if (!nfs_open_state_check_principal(state, principal_flavor, principal_name, principal_len)) {
+        } else if (!principal_error &&
+                   !nfs_open_state_check_principal(state, principal_flavor, principal_name, principal_len)) {
             status = NFS4ERR_ACCESS;
         } else {
+            if (principal_error &&
+                !nfs_open_state_check_principal(state, principal_flavor, principal_name, principal_len)) {
+                *principal_error = NFS4ERR_ACCESS;
+            }
             atomic_fetch_add_explicit(&state->refcount, 1, memory_order_relaxed);
             atomic_store_explicit(&state->compound_reserved, 1, memory_order_release);
             state->compound_reservation                        = reservation;
@@ -1820,10 +1892,6 @@ nfs_open_owner_reserve_compound_internal(
             struct nfs_lock_owner *published_lock_owner;
             struct nfs_lock_state *ls;
             uint32_t               owner_states = 0;
-            if (reservation->num_locks >= NFS4_COMPOUND_OWNER_MAX_STATES) {
-                status = NFS4ERR_RESOURCE;
-                break;
-            }
             evpl_mutex_lock(&lo->lock);
             HASH_FIND(hh, client->lock_owners_by_str, lo->owner, lo->owner_len, published_lock_owner);
             for (ls = lo->states; ls; ls = ls->next_in_owner) {
@@ -1909,7 +1977,7 @@ nfs_open_owner_reserve_compound(
 {
     return nfs_open_owner_reserve_compound_internal(client, owner_bytes, owner_len, principal_flavor,
                                                     principal_name, principal_len, cookie, num_candidates, table,
-                                                    vfs_thread, out_reservation, false);
+                                                    vfs_thread, out_reservation, false, NULL);
 } /* nfs_open_owner_reserve_compound */
 
 nfsstat4
@@ -1928,8 +1996,29 @@ nfs_open_owner_reserve_compound_locks(
 {
     return nfs_open_owner_reserve_compound_internal(client, owner_bytes, owner_len, principal_flavor,
                                                     principal_name, principal_len, cookie, num_candidates, table,
-                                                    vfs_thread, out_reservation, true);
+                                                    vfs_thread, out_reservation, true, NULL);
 } /* nfs_open_owner_reserve_compound_locks */
+
+nfsstat4
+nfs_open_owner_reserve_compound_replay(
+    struct nfs_client                  *client,
+    const void                         *owner_bytes,
+    uint16_t                            owner_len,
+    uint32_t                            principal_flavor,
+    const char                         *principal_name,
+    uint32_t                            principal_len,
+    const void                         *cookie,
+    uint32_t                            num_candidates,
+    struct nfs_state_table             *table,
+    struct chimera_vfs_thread          *vfs_thread,
+    struct nfs_open_owner_reservation **out_reservation,
+    nfsstat4                           *principal_error)
+{
+    chimera_nfs_abort_if(!principal_error, "replay reservation requires an admission result");
+    return nfs_open_owner_reserve_compound_internal(client, owner_bytes, owner_len, principal_flavor,
+                                                    principal_name, principal_len, cookie, num_candidates, table,
+                                                    vfs_thread, out_reservation, true, principal_error);
+} /* nfs_open_owner_reserve_compound_replay */
 
 static int
 nfs_open_owner_candidate_index(
@@ -2101,6 +2190,8 @@ nfs_open_owner_finish_compound(
     client->compound_pins--;
     destroy = !client->compound_pins && client->compound_destroy_pending;
     evpl_mutex_unlock(&client->lock);
+    free(reservation->existing);
+    free(reservation->locks);
     free(reservation);
     if (destroy) {
         nfs_client_destroy(client, table, vfs_thread, false);
@@ -2273,7 +2364,7 @@ nfs_open_state_reserve_close_compound(
      * takes a state reference without the ordinary acquire's lease renewal. */
     evpl_mutex_lock(&client->lock);
     status = state_table_lookup_locked(table, stateid, NFS4_SLOT_TYPE_OPEN,
-                                       true, &found, &type);
+                                       true, false, &found, &type);
     if (status != NFS4_OK) {
         evpl_mutex_unlock(&client->lock);
         return status;
@@ -2708,6 +2799,577 @@ nfs_open_state_destroy(
 
 /* --- pNFS layout state ------------------------------------------------- */
 
+/* A pending grant owns one file's layout admission until finish. The holder
+ * index and state slot remain unchanged while the executor can still retry. */
+struct nfs_layout_journal_entry {
+    struct nfs_layout_journal_entry *next, *client_next;
+    struct nfs_layout_journal       *journal;
+    struct nfs_layout_state         *target;
+    uint32_t                         seqid, iomode, layout_type;
+    uint16_t                         export_id;
+    bool                             fresh, dirty, retired, grant_admission, current;
+};
+
+static struct nfs_layout_journal_entry *
+nfs_layout_journal_find(
+    struct nfs_layout_journal *journal,
+    const uint8_t             *fh,
+    uint16_t                   fh_len)
+{
+    for (struct nfs_layout_journal_entry *entry = journal->entries; entry; entry = entry->next) {
+        if (entry->current && entry->target->fh_len == fh_len && !memcmp(entry->target->fh, fh, fh_len)) {
+            return entry;
+        }
+    }
+    return NULL;
+} /* nfs_layout_journal_find */
+
+nfsstat4
+nfs_layout_journal_reserve_grant(
+    struct nfs_layout_journal        *journal,
+    struct nfs_client                *client,
+    struct nfs_state_table           *table,
+    struct nfs_layout_table          *layout_table,
+    const uint8_t                    *fh,
+    uint16_t                          fh_len,
+    uint32_t                          own_barriers,
+    struct nfs_layout_journal_entry **reservation)
+{
+    if (reservation) {
+        *reservation = NULL;
+    }
+    if (!client || (journal->client && journal->client != client) || !fh_len || fh_len > NFS4_FHSIZE) {
+        return NFS4ERR_LAYOUTUNAVAILABLE;
+    }
+    struct nfs_layout_journal_entry *existing = nfs_layout_journal_find(journal, fh, fh_len);
+    if (existing && !existing->retired) {
+        /* A return reservation pins memory without excluding recalls. A
+         * failed callback may already have destroyed this target. Check its
+         * lifetime under the client lock before upgrading to grant admission,
+         * which excludes new recalls until publication or discard. */
+        nfsstat4 status = NFS4_OK;
+        evpl_mutex_lock(&client->lock);
+        if (atomic_load_explicit(&existing->target->destroyed, memory_order_acquire)) {
+            status = NFS4ERR_BAD_STATEID;
+        } else if (!existing->grant_admission) {
+            if (!nfs_layout_table_grant_begin_scoped(layout_table, fh, fh_len, own_barriers)) {
+                status = NFS4ERR_RECALLCONFLICT;
+            } else {
+                existing->grant_admission = true;
+            }
+        }
+        evpl_mutex_unlock(&client->lock);
+        if (status == NFS4_OK && reservation) {
+            *reservation = existing;
+        }
+        return status;
+    }
+    struct nfs_layout_journal_entry *entry = calloc(1, sizeof(*entry));
+    if (!entry) {
+        return NFS4ERR_RESOURCE;
+    }
+    evpl_mutex_lock(&client->lock);
+    if (client->layout_return_all && client->layout_return_all != journal) {
+        evpl_mutex_unlock(&client->lock);
+        free(entry);
+        return NFS4ERR_DELAY;
+    }
+    for (struct nfs_layout_journal_entry *held = client->layout_reservations; held; held = held->client_next) {
+        if (held->journal != journal && held->target->fh_len == fh_len && !memcmp(held->target->fh, fh, fh_len)) {
+            evpl_mutex_unlock(&client->lock);
+            free(entry);
+            return NFS4ERR_DELAY;
+        }
+    }
+    if (!nfs_layout_table_grant_begin_scoped(layout_table, fh, fh_len, own_barriers)) {
+        evpl_mutex_unlock(&client->lock);
+        free(entry);
+        return NFS4ERR_RECALLCONFLICT;
+    }
+    entry->grant_admission = true;
+    if (!existing) {
+        HASH_FIND(hh, client->layouts_by_fh, fh, fh_len, entry->target);
+    }
+    if (entry->target) {
+        nfs_layout_state_get(entry->target);
+    } else {
+        entry->fresh  = true;
+        entry->target = calloc(1, sizeof(*entry->target));
+        if (!entry->target || nfs_state_table_alloc(table, NFS4_SLOT_TYPE_RESERVED,
+                                                    &entry->target->shard, &entry->target->slot_idx, &entry->target->
+                                                    generation)) {
+            free(entry->target);
+            nfs_layout_table_grant_end(layout_table, fh, fh_len);
+            evpl_mutex_unlock(&client->lock);
+            free(entry);
+            return NFS4ERR_RESOURCE;
+        }
+        entry->target->client    = client;
+        entry->target->client_id = client->client_id;
+        atomic_fetch_add_explicit(&client->refcount, 1, memory_order_relaxed);
+        entry->target->fh_len = fh_len;
+        memcpy(entry->target->fh, fh, fh_len);
+        entry->target->global_table = layout_table;
+        atomic_init(&entry->target->refcount, 1);
+        atomic_init(&entry->target->destroyed, 0);
+    }
+    if (existing) {
+        existing->current = false;
+    }
+    entry->current              = true;
+    entry->journal              = journal;
+    entry->seqid                = entry->target->seqid;
+    entry->iomode               = entry->target->iomode;
+    entry->layout_type          = entry->target->layout_type;
+    entry->export_id            = entry->target->export_id;
+    entry->client_next          = client->layout_reservations;
+    client->layout_reservations = entry;
+    entry->next                 = journal->entries;
+    journal->entries            = entry;
+    journal->client             = client;
+    journal->table              = table;
+    journal->layout_table       = layout_table;
+    evpl_mutex_unlock(&client->lock);
+    if (reservation) {
+        *reservation = entry;
+    }
+    return NFS4_OK;
+} /* nfs_layout_journal_reserve_grant */
+
+void
+nfs_layout_journal_activate(struct nfs_layout_journal_entry *reservation)
+{
+    for (struct nfs_layout_journal_entry *entry = reservation->journal->entries; entry; entry = entry->next) {
+        if (entry->target->fh_len == reservation->target->fh_len &&
+            !memcmp(entry->target->fh, reservation->target->fh, entry->target->fh_len)) {
+            entry->current = entry == reservation;
+        }
+    }
+} /* nfs_layout_journal_activate */
+
+nfsstat4
+nfs_layout_journal_reserve(
+    struct nfs_layout_journal *journal,
+    struct nfs_client         *client,
+    struct nfs_state_table    *table,
+    struct nfs_layout_table   *layout_table,
+    const uint8_t             *fh,
+    uint16_t                   fh_len)
+{
+    /* Non-encoder callers use this helper again after reset. Reuse their
+     * retained fresh candidate rather than allocating another state slot. */
+    if (!nfs_layout_journal_find(journal, fh, fh_len)) {
+        for (struct nfs_layout_journal_entry *entry = journal->entries; entry; entry = entry->next) {
+            if (entry->fresh && !entry->dirty && entry->target->fh_len == fh_len &&
+                !memcmp(entry->target->fh, fh, fh_len)) {
+                nfs_layout_journal_activate(entry);
+                break;
+            }
+        }
+    }
+    return nfs_layout_journal_reserve_grant(journal, client, table, layout_table, fh, fh_len, 0, NULL);
+} /* nfs_layout_journal_reserve */
+
+static nfsstat4
+layout_journal_reserve_return_locked(
+    struct nfs_layout_journal *journal,
+    struct nfs_client         *client,
+    struct nfs_layout_state   *target)
+{
+    if (nfs_layout_journal_find(journal, target->fh, target->fh_len)) {
+        return NFS4_OK;
+    }
+    for (struct nfs_layout_journal_entry *held = client->layout_reservations; held; held = held->client_next) {
+        if (held->target == target) {
+            return NFS4ERR_DELAY;
+        }
+    }
+    struct nfs_layout_journal_entry *entry = calloc(1, sizeof(*entry));
+    if (!entry) {
+        return NFS4ERR_RESOURCE;
+    }
+    nfs_layout_state_get(target);
+    entry->target               = target;
+    entry->current              = true;
+    entry->journal              = journal;
+    entry->seqid                = target->seqid;
+    entry->iomode               = target->iomode;
+    entry->layout_type          = target->layout_type;
+    entry->export_id            = target->export_id;
+    entry->next                 = journal->entries;
+    journal->entries            = entry;
+    entry->client_next          = client->layout_reservations;
+    client->layout_reservations = entry;
+    return NFS4_OK;
+} /* layout_journal_reserve_return_locked */
+
+nfsstat4
+nfs_layout_journal_reserve_return(
+    struct nfs_layout_journal *journal,
+    struct nfs_client         *client,
+    struct nfs_state_table    *table,
+    struct nfs_layout_table   *layout_table,
+    const uint8_t             *fh,
+    uint16_t                   fh_len,
+    bool                       all)
+{
+    if (!client || (journal->client && journal->client != client)) {
+        return NFS4ERR_BAD_STATEID;
+    }
+    nfsstat4 status = NFS4_OK;
+    evpl_mutex_lock(&client->lock);
+    if (client->layout_return_all && client->layout_return_all != journal) {
+        evpl_mutex_unlock(&client->lock);
+        return NFS4ERR_DELAY;
+    }
+    journal->client       = client;
+    journal->table        = table;
+    journal->layout_table = layout_table;
+    if (all) {
+        for (struct nfs_layout_journal_entry *held = client->layout_reservations; held; held = held->client_next) {
+            if (held->journal != journal) {
+                status = NFS4ERR_DELAY;
+                break;
+            }
+        }
+        if (status == NFS4_OK) {
+            client->layout_return_all = journal;
+            struct nfs_layout_state *layout, *tmp;
+            HASH_ITER(hh, client->layouts_by_fh, layout, tmp)
+            {
+                status = layout_journal_reserve_return_locked(journal, client, layout);
+                if (status != NFS4_OK) {
+                    break;
+                }
+            }
+        }
+    } else {
+        struct nfs_layout_state *layout;
+        HASH_FIND(hh, client->layouts_by_fh, fh, fh_len, layout);
+        if (layout) {
+            status = layout_journal_reserve_return_locked(journal, client, layout);
+        }
+    }
+    evpl_mutex_unlock(&client->lock);
+    return status;
+} /* nfs_layout_journal_reserve_return */
+
+nfsstat4
+nfs_layout_journal_return(
+    struct nfs_layout_journal *journal,
+    const uint8_t             *fh,
+    uint16_t                   fh_len,
+    const struct stateid4     *sid,
+    uint32_t                   layout_type,
+    bool                       all)
+{
+    if (all) {
+        for (struct nfs_layout_journal_entry *entry = journal->entries; entry; entry = entry->next) {
+            /* Reservations survive retry. A fresh slot is not in this
+             * attempt's layout set until its preceding LAYOUTGET stages it. */
+            if (entry->fresh && !entry->dirty) {
+                continue;
+            }
+            entry->retired = entry->dirty = true;
+        }
+        return NFS4_OK;
+    }
+    struct nfs_layout_journal_entry *entry = nfs_layout_journal_find(journal, fh, fh_len);
+    if (!entry) {
+        /* FILE return must identify this client's live layout. Absence is
+         * not authority to accept an arbitrary or foreign stateid. */
+        return NFS4ERR_BAD_STATEID;
+    }
+    if (entry->retired || !entry->seqid) {
+        return NFS4ERR_BAD_STATEID;
+    }
+    struct stateid4                  current;
+    nfs4_stateid_encode(&current, entry->seqid, NFS4_STATEID_TYPE_LAYOUT,
+                        entry->target->shard, entry->target->slot_idx, entry->target->generation,
+                        journal->table->epoch);
+    if (!sid->seqid || memcmp(current.other, sid->other, sizeof(sid->other))) {
+        return NFS4ERR_BAD_STATEID;
+    }
+    nfsstat4                         status = nfs4_stateid_check_seqid(entry->seqid, sid->seqid);
+    if (status != NFS4_OK) {
+        return status;
+    }
+    if (entry->layout_type && entry->layout_type != layout_type) {
+        return NFS4ERR_BADLAYOUT;
+    }
+    entry->retired = entry->dirty = true;
+    return NFS4_OK;
+} /* nfs_layout_journal_return */
+
+bool
+nfs_layout_journal_returned(
+    struct nfs_layout_journal *journal,
+    const uint8_t             *fh,
+    uint16_t                   fh_len)
+{
+    struct nfs_layout_journal_entry *entry = nfs_layout_journal_find(journal, fh, fh_len);
+
+    return entry && entry->retired;
+} /* nfs_layout_journal_returned */
+
+nfsstat4
+nfs_layout_journal_check(
+    struct nfs_layout_journal *journal,
+    const uint8_t             *fh,
+    uint16_t                   fh_len,
+    const struct stateid4     *sid)
+{
+    struct nfs_layout_journal_entry *entry = nfs_layout_journal_find(journal, fh, fh_len);
+    struct stateid4                  current;
+    struct nfs4_stateid_view         view;
+
+    if (!entry || entry->retired ||
+        atomic_load_explicit(&entry->target->destroyed, memory_order_acquire) ||
+        nfs4_stateid_is_special(sid)) {
+        return NFS4ERR_BAD_STATEID;
+    }
+    nfs4_stateid_decode(&view, sid);
+    if (view.type != NFS4_STATEID_TYPE_LAYOUT) {
+        return NFS4_OK; /* The encoder validates the private OPEN/LOCK/DELEG view. */
+    }
+    nfs4_stateid_encode(&current, entry->seqid, NFS4_STATEID_TYPE_LAYOUT,
+                        entry->target->shard, entry->target->slot_idx, entry->target->generation,
+                        journal->table->epoch);
+    if (!entry->seqid || memcmp(current.other, sid->other, sizeof(sid->other)) ||
+        sid->seqid > current.seqid) {
+        return NFS4ERR_BAD_STATEID;
+    }
+    return NFS4_OK;
+} /* nfs_layout_journal_check */
+
+nfsstat4
+nfs_layout_journal_stage(
+    struct nfs_layout_journal *journal,
+    const uint8_t             *fh,
+    uint16_t                   fh_len,
+    uint16_t                   export_id,
+    uint32_t                   iomode,
+    uint32_t                   layout_type,
+    const struct stateid4     *input,
+    struct stateid4           *output)
+{
+    nfsstat4                         status = nfs_layout_journal_check(journal, fh, fh_len, input);
+
+    if (status != NFS4_OK) {
+        return status;
+    }
+    struct nfs_layout_journal_entry *entry = nfs_layout_journal_find(journal, fh, fh_len);
+    entry->seqid++;
+    if (iomode == LAYOUTIOMODE4_RW || !entry->iomode) {
+        entry->iomode = iomode;
+    }
+    entry->layout_type = layout_type;
+    entry->export_id   = export_id;
+    entry->dirty       = true;
+    nfs4_stateid_encode(output, entry->seqid, NFS4_STATEID_TYPE_LAYOUT,
+                        entry->target->shard, entry->target->slot_idx, entry->target->generation,
+                        journal->table->epoch);
+    return NFS4_OK;
+} /* nfs_layout_journal_stage */
+
+bool
+nfs_layout_journal_granted(
+    struct nfs_layout_journal *journal,
+    const uint8_t             *fh,
+    uint16_t                   fh_len)
+{
+    struct nfs_layout_journal_entry *entry = nfs_layout_journal_find(journal, fh, fh_len);
+
+    return entry && entry->dirty;
+} /* nfs_layout_journal_granted */
+
+bool
+nfs_layout_journal_test(
+    struct nfs_layout_journal *journal,
+    const struct stateid4     *sid,
+    nfsstat4                  *status)
+{
+    for (struct nfs_layout_journal_entry *entry = journal->entries; entry; entry = entry->next) {
+        if (!entry->dirty) {
+            continue;
+        }
+        struct stateid4 current;
+        nfs4_stateid_encode(&current, entry->seqid, NFS4_STATEID_TYPE_LAYOUT,
+                            entry->target->shard, entry->target->slot_idx, entry->target->generation, journal->table->
+                            epoch);
+        if (!memcmp(current.other, sid->other, sizeof(sid->other))) {
+            *status = entry->retired ? NFS4ERR_BAD_STATEID : nfs4_stateid_check_seqid(entry->seqid, sid->seqid);
+            return true;
+        }
+    }
+    return false;
+} /* nfs_layout_journal_test */
+
+nfsstat4
+nfs_layout_journal_commit_check(
+    struct nfs_layout_journal *journal,
+    const uint8_t             *fh,
+    uint16_t                   fh_len,
+    const struct stateid4     *sid)
+{
+    nfsstat4                         status = nfs_layout_journal_check(journal, fh, fh_len, sid);
+
+    if (status != NFS4_OK) {
+        return status;
+    }
+    struct nfs4_stateid_view         view;
+    nfs4_stateid_decode(&view, sid);
+    struct nfs_layout_journal_entry *entry = nfs_layout_journal_find(journal, fh, fh_len);
+    if (view.type != NFS4_STATEID_TYPE_LAYOUT) {
+        return NFS4ERR_BAD_STATEID;
+    }
+    status = nfs4_stateid_check_seqid(entry->seqid, sid->seqid);
+    if (status == NFS4_OK && entry->iomode != LAYOUTIOMODE4_RW) {
+        status = NFS4ERR_BADLAYOUT;
+    }
+    return status;
+} /* nfs_layout_journal_commit_check */
+
+bool
+nfs_layout_journal_truncate_conflict(
+    struct nfs_layout_journal *journal,
+    const uint8_t             *fh,
+    uint16_t                   fh_len)
+{
+    for (struct nfs_layout_journal_entry *entry = journal->entries; entry; entry = entry->next) {
+        if (entry->target->fh_len == fh_len && !memcmp(entry->target->fh, fh, fh_len) &&
+            entry->dirty && !entry->retired) {
+            return true;
+        }
+    }
+    return false;
+} /* nfs_layout_journal_truncate_conflict */
+
+bool
+nfs_layout_journal_recall_view(
+    struct nfs_layout_journal     *journal,
+    const uint8_t                 *fh,
+    uint16_t                       fh_len,
+    struct nfs_layout_recall_view *view)
+{
+    memset(view, 0, sizeof(*view));
+    for (struct nfs_layout_journal_entry *entry = journal->entries; entry; entry = entry->next) {
+        if (entry->retired && entry->target->fh_len == fh_len && !memcmp(entry->target->fh, fh, fh_len)) {
+            view->num_excluded++;
+            view->grants += entry->grant_admission;
+        }
+    }
+    if (!view->num_excluded) {
+        return true;
+    }
+    view->excluded = calloc(view->num_excluded, sizeof(*view->excluded));
+    if (!view->excluded) {
+        return false;
+    }
+    uint32_t count = 0;
+    for (struct nfs_layout_journal_entry *entry = journal->entries; entry; entry = entry->next) {
+        if (entry->retired && entry->target->fh_len == fh_len && !memcmp(entry->target->fh, fh, fh_len)) {
+            view->excluded[count++] = entry->target;
+        }
+    }
+    return true;
+} /* nfs_layout_journal_recall_view */
+
+void
+nfs_layout_journal_reset(struct nfs_layout_journal *journal)
+{
+    for (struct nfs_layout_journal_entry *entry = journal->entries; entry; entry = entry->next) {
+        entry->seqid       = entry->target->seqid;
+        entry->iomode      = entry->target->iomode;
+        entry->layout_type = entry->target->layout_type;
+        entry->export_id   = entry->target->export_id;
+        entry->dirty       = entry->retired = false;
+        entry->current     = !entry->fresh;
+    }
+} /* nfs_layout_journal_reset */
+
+static void layout_state_destroy_locked(
+    struct nfs_client         *client,
+    struct nfs_layout_state   *st,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *thread);
+
+void
+nfs_layout_journal_finish(
+    struct nfs_layout_journal *journal,
+    bool                       accepted)
+{
+    if (!journal->client) {
+        return;
+    }
+    struct nfs_client *client = journal->client;
+    evpl_mutex_lock(&client->lock);
+    /* Retire old public slots before installing replacements with the same
+     * filehandle. Journal list order is reservation order, not wire order. */
+    if (accepted) {
+        for (struct nfs_layout_journal_entry *entry = journal->entries; entry; entry = entry->next) {
+            if (entry->retired && !entry->fresh) {
+                layout_state_destroy_locked(client, entry->target, journal->table, NULL);
+            }
+        }
+    }
+    while (journal->entries) {
+        struct nfs_layout_journal_entry  *entry  = journal->entries;
+        struct nfs_layout_state          *target = entry->target;
+        journal->entries = entry->next;
+        struct nfs_layout_journal_entry **link = &client->layout_reservations;
+        while (*link != entry) {
+            link = &(*link)->client_next;
+        }
+        *link = entry->client_next;
+        bool                              publish = accepted && entry->dirty && !entry->retired;
+        if (publish) {
+            target->seqid       = entry->seqid;
+            target->iomode      = entry->iomode;
+            target->layout_type = entry->layout_type;
+            target->export_id   = entry->export_id;
+            if (entry->fresh) {
+                nfs_state_table_install(journal->table, target->shard, target->slot_idx,
+                                        NFS4_SLOT_TYPE_LAYOUT, target);
+                HASH_ADD_KEYPTR(hh, client->layouts_by_fh, target->fh, target->fh_len, target);
+                nfs_layout_table_register(journal->layout_table, target);
+            }
+        }
+        if (entry->grant_admission) {
+            nfs_layout_table_grant_end(journal->layout_table, target->fh, target->fh_len);
+        }
+        if (entry->fresh && !publish) {
+            nfs_state_table_free_slot(journal->table, target->shard, target->slot_idx);
+        }
+        if (!entry->fresh || !publish) {
+            nfs_layout_state_put(target);
+        }
+        free(entry);
+    }
+    if (client->layout_return_all == journal) {
+        client->layout_return_all = NULL;
+    }
+    evpl_mutex_unlock(&client->lock);
+    journal->client = NULL;
+} /* nfs_layout_journal_finish */
+
+static bool
+layout_file_reserved_locked(
+    struct nfs_client *client,
+    const uint8_t     *fh,
+    uint16_t           fh_len)
+{
+    if (client->layout_return_all) {
+        return true;
+    }
+    for (struct nfs_layout_journal_entry *entry = client->layout_reservations; entry; entry = entry->client_next) {
+        if (entry->target->fh_len == fh_len && !memcmp(entry->target->fh, fh, fh_len)) {
+            return true;
+        }
+    }
+    return false;
+} /* layout_file_reserved_locked */
+
 struct nfs_layout_state *
 nfs_layout_state_find(
     struct nfs_client *client,
@@ -2857,6 +3519,10 @@ nfs_layout_state_grant(
     struct nfs_layout_state *layout;
 
     evpl_mutex_lock(&client->lock);
+    if (layout_file_reserved_locked(client, fh, fh_len)) {
+        evpl_mutex_unlock(&client->lock);
+        return NFS4ERR_DELAY;
+    }
     HASH_FIND(hh, client->layouts_by_fh, fh, fh_len, layout);
     nfsstat4                 status = layout_state_check_locked(layout, input, table);
     if (status == NFS4_OK) {
@@ -2985,6 +3651,10 @@ nfs_layout_state_return_file(
     nfsstat4                 status = NFS4_OK;
 
     evpl_mutex_lock(&client->lock);
+    if (layout_file_reserved_locked(client, fh, fh_len)) {
+        evpl_mutex_unlock(&client->lock);
+        return NFS4ERR_DELAY;
+    }
     HASH_FIND(hh, client->layouts_by_fh, fh, fh_len, layout);
     if (layout) {
         nfs_layout_state_get(layout);
@@ -3009,13 +3679,18 @@ nfs_layout_state_return_file(
     return status;
 } /* nfs_layout_state_return_file */
 
-void
+nfsstat4
 nfs_layout_state_destroy_all(
     struct nfs_client         *client,
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread)
 {
     evpl_mutex_lock(&client->lock);
+    if (client->layout_reservations) {
+        evpl_mutex_unlock(&client->lock);
+        return NFS4ERR_DELAY;
+    }
+
 
     /* The uthash delete-during-iteration idiom trips scan-build's
      * use-after-free checker; guard it the way the client teardown above
@@ -3030,6 +3705,7 @@ nfs_layout_state_destroy_all(
 #endif /* ifndef __clang_analyzer__ */
 
     evpl_mutex_unlock(&client->lock);
+    return NFS4_OK;
 } /* nfs_layout_state_destroy_all */
 
 struct nfs_lock_owner *
@@ -3201,10 +3877,21 @@ nfs_lock_owner_reserve_compound(
         status = NFS4ERR_DELAY;
     }
     for (state = owner->states; status == NFS4_OK && state; state = state->next_in_owner) {
+        if (count == UINT32_MAX) {
+            status = NFS4ERR_RESOURCE;
+            break;
+        }
         count++;
+    }
+    if (status == NFS4_OK) {
+        reservation->existing = calloc(count ? count : 1, sizeof(*reservation->existing));
+        if (!reservation->existing) {
+            status = NFS4ERR_RESOURCE;
+        }
+    }
+    for (state = owner->states; status == NFS4_OK && state; state = state->next_in_owner) {
         /* Parent OPEN groups own these pins and must outlive this journal. */
-        if (count > NFS4_COMPOUND_OWNER_MAX_STATES ||
-            !atomic_load(&state->compound_reserved) || state->compound_group != cookie ||
+        if (!atomic_load(&state->compound_reserved) || state->compound_group != cookie ||
             atomic_load(&state->refcount) != 2 || atomic_load(&state->destroyed)) {
             status = NFS4ERR_DELAY;
             break;
@@ -3218,6 +3905,7 @@ nfs_lock_owner_reserve_compound(
         evpl_mutex_unlock(&owner->lock);
         evpl_mutex_unlock(&client->lock);
         nfs_lock_owner_put(owner);
+        free(reservation->existing);
         free(reservation);
         return status;
     }
@@ -3253,6 +3941,26 @@ nfs_lock_owner_reserve_compound(
     *out_reservation = reservation;
     return NFS4_OK;
 } /* nfs_lock_owner_reserve_compound */
+
+/* Accepted RELEASE_LOCKOWNER: all of this owner's stateids were retired by
+ * the same journal. Its reservation reference survives removal of the hash ref. */
+void
+nfs_lock_owner_release_compound(struct nfs_lock_owner_reservation *reservation)
+{
+    struct nfs_lock_owner *owner = reservation->owner, *published;
+    struct nfs_client     *client = owner->client;
+
+    evpl_mutex_lock(&client->lock);
+    evpl_mutex_lock(&owner->lock);
+    HASH_FIND(hh, client->lock_owners_by_str, owner->owner, owner->owner_len, published);
+    chimera_nfs_abort_if(published != owner || owner->states ||
+                         owner->compound_group != reservation->cookie,
+                         "invalid compound lock owner retirement");
+    HASH_DELETE(hh, client->lock_owners_by_str, owner);
+    evpl_mutex_unlock(&owner->lock);
+    evpl_mutex_unlock(&client->lock);
+    nfs_lock_owner_put(owner);
+} /* nfs_lock_owner_release_compound */
 
 void
 nfs_lock_owner_finish_compound(
@@ -3297,6 +4005,7 @@ nfs_lock_owner_finish_compound(
     client->compound_pins--;
     destroy = !client->compound_pins && client->compound_destroy_pending;
     evpl_mutex_unlock(&client->lock);
+    free(reservation->existing);
     free(reservation);
     if (destroy) {
         nfs_client_destroy(client, table, vfs_thread, false);
@@ -3306,8 +4015,6 @@ nfs_lock_owner_finish_compound(
 /* Each mutation can add at most two interval boundaries. All storage,
  * including the nodes eventually installed in public state, is reserved
  * before dispatch; the attempt callbacks only rewrite these private arrays. */
-#define NFS4_COMPOUND_MAX_ORIGINAL_RANGES 256
-
 struct nfs_lock_range_interval {
     uint64_t                      start;
     struct chimera_range_endpoint end;
@@ -3401,11 +4108,12 @@ nfs_lock_range_journal_alloc(
         return NULL;
     }
     for (lease = target ? target->range_leases : NULL; lease; lease = lease->next) {
-        if (++count > NFS4_COMPOUND_MAX_ORIGINAL_RANGES || lease->claim.backend_token ||
+        if (count >= UINT32_MAX - 2 * max_modifications - 1 || lease->claim.backend_token ||
             lease->claim.break_cb || lease->claim.parked || !lease->claim.file ||
             !lease->claim.length || lease->claim.construct != CHIMERA_CONSTRUCT_LOCK_ADVISORY) {
             return NULL;
         }
+        count++;
     }
     journal = calloc(1, sizeof(*journal));
     if (!journal) {
@@ -3442,8 +4150,8 @@ nfs_lock_range_journal_alloc(
         };
     }
     memcpy(journal->intervals, journal->original, count * sizeof(*journal->intervals));
-    /* Legacy mixed-mode overlapping lists have no unambiguous final mode;
-     * keep those on the existing protocol path rather than guess. */
+    /* Historical mixed-mode overlapping lists have no unambiguous final
+    * mode. Refuse admission rather than invent an ordering for them. */
     if (!nfs_lock_range_normalize(journal->intervals, &count)) {
         nfs_lock_range_journal_free(journal);
         return NULL;
@@ -3944,6 +4652,63 @@ nfs_lock_state_destroy(
 *  Lifecycle: delegations
 * ---------------------------------------------------------------------- */
 
+nfsstat4
+nfs_delegation_retirement_reserve(
+    struct nfs_delegation            *deleg,
+    const void                       *cookie,
+    struct nfs_delegation_retirement *journal)
+{
+    nfsstat4 status = NFS4ERR_DELAY;
+
+    evpl_mutex_lock(&deleg->combine_lock);
+    /* An outstanding CB_GETATTR owns its own reference and revalidates the
+     * holder before using the reply. It must not prevent the holder from
+     * returning while that callback is pending: the return may be what lets
+     * the client finish its flush/callback sequence. Serialize returns against
+     * each other, not against the independent change-combine snapshot. */
+    if (!atomic_load_explicit(&deleg->destroyed, memory_order_acquire) &&
+        !deleg->retirement_reservation) {
+        deleg->retirement_reservation = cookie;
+        journal->deleg                = deleg;
+        journal->cookie               = cookie;
+        journal->retired              = false;
+        atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_relaxed);
+        status = NFS4_OK;
+    }
+    evpl_mutex_unlock(&deleg->combine_lock);
+    return status;
+} /* nfs_delegation_retirement_reserve */
+
+void
+nfs_delegation_retirement_finish(
+    struct nfs_delegation_retirement *journal,
+    bool                              accepted,
+    struct nfs_state_table           *table,
+    struct chimera_vfs_thread        *thread)
+{
+    struct nfs_delegation *deleg = journal->deleg;
+
+    if (!deleg) {
+        return;
+    }
+    /* Keep admission closed until the public slot and claim have retired. */
+    if (accepted && journal->retired) {
+        if (deleg->lease_held) {
+            chimera_vfs_claim_release(thread->vfs->vfs_state, deleg->file_state, &deleg->claim);
+            deleg->lease_held = false;
+        }
+        atomic_store_explicit(&deleg->cb_recall_state, NFS4_DELEG_RETURNED, memory_order_release);
+        nfs_delegation_destroy(deleg, table, thread);
+    }
+    evpl_mutex_lock(&deleg->combine_lock);
+    chimera_nfs_abort_if(deleg->retirement_reservation != journal->cookie,
+                         "delegation retirement reservation lost");
+    deleg->retirement_reservation = NULL;
+    evpl_mutex_unlock(&deleg->combine_lock);
+    journal->deleg = NULL;
+    nfs_state_table_release(table, deleg, NFS4_SLOT_TYPE_DELEG, thread);
+} /* nfs_delegation_retirement_finish */
+
 void
 nfs_delegation_combine_reset(struct nfs_delegation_combine_journal *journal)
 {
@@ -3967,6 +4732,7 @@ nfs_delegation_combine_reserve(
     }
     evpl_mutex_lock(&deleg->combine_lock);
     if (!deleg->combine_reservation &&
+        (!deleg->retirement_reservation || deleg->retirement_reservation == cookie) &&
         !atomic_load_explicit(&deleg->destroyed, memory_order_acquire) &&
         !atomic_load_explicit(&deleg->revoked, memory_order_acquire)) {
         memset(journal, 0, sizeof(*journal));
@@ -4078,7 +4844,9 @@ nfs_delegation_combine_finish(
     }
     evpl_mutex_lock(&deleg->combine_lock);
     chimera_nfs_abort_if(deleg->combine_reservation != journal, "delegation combine reservation lost");
-    if (accepted && journal->applied) {
+    if (accepted && journal->applied &&
+        !atomic_load_explicit(&deleg->destroyed, memory_order_acquire) &&
+        !atomic_load_explicit(&deleg->revoked, memory_order_acquire)) {
         deleg->combine_sc    = journal->sc;
         deleg->combine_last  = journal->last;
         deleg->combine_valid = journal->valid;

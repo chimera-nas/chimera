@@ -498,7 +498,9 @@ overwrite_client_cap(struct smb2_conn *c)
         assert(captured_create_len); disarm(1); c->capture_create_reply_fn = NULL;
         memcpy(c->rbuf, captured_create, captured_create_len); c->rlen     = captured_create_len;
         smb2c_parse_create(c, &opened);
-        assert(opened.status == ST_SUCCESS && opened.oplock == SMB2_OPLOCK_LEVEL_NONE);
+        /* The acknowledged overwrite removed H caching. The surviving open
+         * caps EXCLUSIVE to LEVEL_II, but no longer excludes all oplocks. */
+        assert(opened.status == ST_SUCCESS && opened.oplock == SMB2_OPLOCK_LEVEL_II);
         assert(!smb2_conn_nbreaks(c));
         assert(smb2_close(c, opened.file_id) == ST_SUCCESS);
         assert(smb2_close(c, holder.file_id) == ST_SUCCESS);

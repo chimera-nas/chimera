@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
+#include "nfs4_reply.h"
 
 /*
  * Put `fh` on the wire as a GETFH4 result.  Shared by the per-op path below and
@@ -62,6 +63,11 @@ chimera_nfs4_getfh(
     }
 
     res->status = chimera_nfs4_getfh_fill(req, res, req->fh, req->fhlen);
+    if (res->status == NFS4_OK) {
+        res->status = chimera_nfs4_reply_check(req, req->index,
+                                               req->reply_bytes + marshall_length_nfs_resop4(resop), req->
+                                               reply_chunk_bytes, true);
+    }
 
     chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_getfh */

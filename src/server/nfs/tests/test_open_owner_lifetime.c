@@ -6,22 +6,22 @@
  * Regression test: NFSv4.0 open_owner / lock_owner heap-use-after-free
  * between the lease sweeper and an in-flight OPEN/LOCK.
  *
- * The production race: a worker thread resolves an open_owner for an OPEN,
- * stashes a borrowed pointer on the request (req->open_4_0_owner), and goes
+ * The original production race: a worker resolved an open_owner for OPEN,
+ * retained an unpinned request pointer, and went
  * async into the VFS.  Before the async completion runs, the 1 Hz lease
  * sweeper reaps the idle client and frees every owner via
  * nfs_client_expire_state().  The completion then writes owner->seqid into
- * freed memory (nfs4_proc_open.c:479) -- the faulting write in the captured
- * crash.  LOCK has the same shape via req->lock_4_0_lock_owner /
- * req->lock_4_0_open_owner and chimera_nfs4_lock_finish().
+ * freed memory -- the faulting write in the captured
+ * crash. LOCK formerly had the same direct-completion shape. The shared
+ * compound now retains owner reservations through accepted publication.
  *
  * This test forces that exact interleaving deterministically -- no threads or
  * VFS backend needed.  (A CHIMERA_VFS_CAP_BLOCKING backend only widens the
  * async window in production; here we simply call the sweeper's teardown while
  * still holding the borrowed reference.)  It holds the caller reference that
  * find_or_create now returns -- the same reference an in-flight request keeps
- * -- expires the client, and then dereferences the owner as the OPEN/LOCK
- * completion does.
+ * -- expires the client, and then dereferences the retained owner. Later
+ * cases exercise the compound journals' reservation and publication lifetime.
  *
  *   Pre-fix: nfs_client_expire_state freed the owner unconditionally, so the
  *            post-expiry owner->seqid write is a heap-use-after-free that ASAN
@@ -60,6 +60,7 @@
 
 #include "nfs4_state.h"
 #include "nfs4_layout_table.h"
+#include "nfs4_pnfs_compound.h"
 #include "nfs4_procs.h"
 
 /* CHECK() always evaluates and aborts on failure (assert(3) is a no-op under
@@ -950,6 +951,10 @@ test_compound_client_table_pin(void)
     HASH_ADD(nfs4_client_hh_by_id, table.nfs4_ct_clients_by_id, nfs4_client_id, sizeof(record.nfs4_client_id), &record);
     CHECK(nfs4_client_reserve_compound(&table, client->client_id, &pinned) == NFS4ERR_STALE_CLIENTID);
     record.nfs4_client_confirmed = 1;
+    client->expired              = 1;
+    CHECK(nfs4_client_reserve_compound(&table, client->client_id, &pinned) == NFS4ERR_EXPIRED);
+    CHECK(!pinned && !atomic_load(&client->compound_pins));
+    client->expired = 0;
     atomic_store(&client->reclaim_pending, 1);
     CHECK(nfs4_client_reserve_compound(&table, client->client_id, &pinned) == NFS4ERR_DELAY);
     CHECK(!pinned && !atomic_load(&client->compound_pins));
@@ -1399,6 +1404,85 @@ test_compound_owner_reservation_apply(void)
 } /* test_compound_owner_reservation_apply */
 
 static void
+test_compound_many_lock_children(void)
+{
+    struct nfs_state_table             table;
+    struct nfs_client                 *client;
+    struct nfs_open_state             *parent;
+    struct nfs_open_owner_reservation *reservation;
+    struct stateid4                    parent_sid, lock_sid;
+    bool                               created;
+
+    nfs_state_table_init(&table, 1);
+    client = nfs_client_alloc(60, "many-children", 13, 0x7160, 1);
+    parent = make_close_state(&table, client, "owner", 1, &parent_sid);
+    for (unsigned i = 0; i < 130; i++) {
+        char                   name[32];
+        int                    len   = snprintf(name, sizeof(name), "child-%u", i);
+        struct nfs_lock_owner *owner = nfs_lock_owner_find_or_create(client, name, len, &created);
+        CHECK(nfs_lock_state_create(owner, parent, NULL, &table, &lock_sid));
+        nfs_lock_owner_put(owner);
+    }
+    CHECK(nfs_open_owner_reserve_compound_locks(client, "owner", 5, 1, "host", 4,
+                                                &table, 1, &table, NULL, &reservation) == NFS4_OK);
+    CHECK(reservation->num_locks == 130 && reservation->num_existing == 1);
+    for (unsigned i = 0; i < reservation->num_locks; i++) {
+        CHECK(atomic_load(&reservation->locks[i]->compound_reserved));
+    }
+    nfs_open_owner_finish_compound(reservation, &table, NULL);
+    for (struct nfs_lock_state *lock = parent->locks; lock; lock = lock->next_in_open) {
+        CHECK(!atomic_load(&lock->compound_reserved));
+    }
+    CHECK(atomic_load(&parent->refcount) == 131);
+    nfs_client_destroy(client, &table, NULL, true);
+    nfs_state_table_free(&table, NULL);
+    printf("ok: standalone OPEN can freeze more children than a wire compound has operations\n");
+} /* test_compound_many_lock_children */
+
+static void
+test_compound_stream_lifetime(void)
+{
+    struct nfs_state_table                table;
+    struct nfs_client                    *client;
+    struct nfs_open_state                *state;
+    struct nfs_open_owner_reservation    *reservation;
+    struct nfs_open_state_compound_update update = { 0 };
+    struct stateid4                       sid;
+    struct chimera_vfs                    vfs     = { 0 };
+    struct chimera_vfs_thread             thread  = { .vfs = &vfs };
+    uint8_t                               base_fh = 42;
+
+    vfs.vfs_state = chimera_vfs_state_init();
+    struct chimera_vfs_file_state        *base = chimera_vfs_state_get(vfs.vfs_state, &base_fh, 1, 42, true);
+    nfs_state_table_init(&table, 1);
+    client                        = nfs_client_alloc(59, "stream-owner", 12, 0x7159, 1);
+    state                         = make_close_state(&table, client, "owner", 1, &sid);
+    state->base_stream_file_state = chimera_vfs_state_get(vfs.vfs_state, &base_fh, 1, 42, false);
+    chimera_vfs_state_stream_holder_inc(base);
+    CHECK(reserve_owner(&table, client, 1, &reservation) == NFS4_OK);
+    nfs_open_owner_finish_compound(reservation, &table, &thread);
+    CHECK(state->base_stream_file_state == base && chimera_vfs_state_stream_holders(base) == 1);
+    CHECK(reserve_owner(&table, client, 1, &reservation) == NFS4_OK);
+    update.fh           = state->fh;
+    update.fh_len       = state->fh_len;
+    update.share_access = OPEN4_SHARE_ACCESS_BOTH;
+    update.share_combos = nfs_open_combo_bit(update.share_access, OPEN4_SHARE_DENY_NONE);
+    update.seqid        = state->seqid + 1;
+    nfs_open_owner_apply_compound(reservation, state, &update, &table, &thread);
+    nfs_open_owner_finish_compound(reservation, &table, &thread);
+    CHECK(state->base_stream_file_state == base && chimera_vfs_state_stream_holders(base) == 1);
+    CHECK(reserve_owner(&table, client, 0, &reservation) == NFS4_OK);
+    nfs_open_owner_close_compound(reservation, state, state->seqid + 1, &table, &thread);
+    nfs_open_owner_finish_compound(reservation, &table, &thread);
+    CHECK(chimera_vfs_state_stream_holders(base) == 0);
+    nfs_client_destroy(client, &table, &thread, true);
+    nfs_state_table_free(&table, &thread);
+    chimera_vfs_state_put(vfs.vfs_state, base);
+    chimera_vfs_state_destroy(vfs.vfs_state);
+    printf("ok: stream reservation retry/coalesce preserves its base guard until CLOSE\n");
+} /* test_compound_stream_lifetime */
+
+static void
 test_compound_owner_downgrade_only(void)
 {
     struct nfs_state_table                table;
@@ -1543,9 +1627,15 @@ test_pure_test_stateid_snapshot(void)
     atomic_store(&state->destroyed, 0);
     CHECK(nfs_state_table_test_stateid(&table, &deleg_sid, client) == NFS4_OK);
     CHECK(nfs_state_table_test_stateid(&table, &layout_sid, client) == NFS4_OK);
-    CHECK(nfs_state_table_advise(&table, &deleg_sid, client, state->fh, state->fh_len, 1, "host", 4) ==
+    CHECK(nfs_state_table_advise(&table, &deleg_sid, client, state->fh, state->fh_len, 1, "host", 4) == NFS4_OK);
+    CHECK(nfs_state_table_advise(&table, &layout_sid, client, state->fh, state->fh_len, 1, "host", 4) == NFS4_OK);
+    CHECK(nfs_state_table_advise(&table, &deleg_sid, foreign, state->fh, state->fh_len, 1, "host", 4) ==
           NFS4ERR_BAD_STATEID);
-    CHECK(nfs_state_table_advise(&table, &layout_sid, client, state->fh, state->fh_len, 1, "host", 4) ==
+    CHECK(nfs_state_table_advise(&table, &layout_sid, foreign, state->fh, state->fh_len, 1, "host", 4) ==
+          NFS4ERR_BAD_STATEID);
+    CHECK(nfs_state_table_advise(&table, &deleg_sid, client, (const uint8_t *) "wrong", 5, 1, "host", 4) ==
+          NFS4ERR_BAD_STATEID);
+    CHECK(nfs_state_table_advise(&table, &layout_sid, client, (const uint8_t *) "wrong", 5, 1, "host", 4) ==
           NFS4ERR_BAD_STATEID);
     lock->seqid++;
     layout->seqid++;
@@ -1568,6 +1658,354 @@ test_pure_test_stateid_snapshot(void)
     nfs_state_table_free(&table, NULL);
     printf("ok: TEST_STATEID snapshots type/client/sequence/revocation without borrowing or renewal\n");
 } /* test_pure_test_stateid_snapshot */
+
+static void
+test_layout_journal_recalled_target(void)
+{
+    struct nfs_state_table    table;
+    struct nfs_layout_table   layouts = { 0 };
+    struct nfs_layout_journal journal = { 0 };
+    struct nfs_client        *client;
+    struct nfs_open_state    *state;
+    struct nfs_layout_state  *layout;
+    struct stateid4           open_sid, layout_sid, granted;
+
+    nfs_state_table_init(&table, 1);
+    for (int i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
+        evpl_mutex_init(&layouts.shards[i].lock, NULL);
+    }
+    client = nfs_client_alloc(60, "layout-recall", 13, 0x7160, 1);
+    state  = make_close_state(&table, client, "owner", 1, &open_sid);
+    layout = nfs_layout_state_create(client, state->fh, state->fh_len, 0,
+                                     LAYOUTIOMODE4_READ, table.epoch, &table, &layouts, &layout_sid);
+    CHECK(layout);
+    layout->layout_type = LAYOUT4_FLEX_FILES;
+    CHECK(nfs_client_reserve_compound(client));
+
+    /* Construction of a later ALL pins the public layout, but must allow an
+     * outstanding recall to finish before an earlier LAYOUTGET executes. */
+    CHECK(nfs_layout_journal_reserve_return(&journal, client, &table, &layouts,
+                                            NULL, 0, true) == NFS4_OK);
+    CHECK(nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    CHECK(nfs_layout_journal_reserve(&journal, client, &table, &layouts,
+                                     state->fh, state->fh_len) == NFS4ERR_RECALLCONFLICT);
+    /* A failed CB_LAYOUTRECALL destroys the holder and its state slot. The
+     * return reservation keeps only the allocation alive. */
+    nfs_layout_state_destroy(layout, &table, NULL);
+    CHECK(atomic_load(&layout->destroyed));
+    CHECK(!nfs_layout_state_find(client, state->fh, state->fh_len));
+    CHECK(nfs_state_table_test_stateid(&table, &layout_sid, client) == NFS4ERR_BAD_STATEID);
+    nfs_layout_table_barrier_release(&layouts, state->fh, state->fh_len);
+    CHECK(nfs_layout_journal_reserve(&journal, client, &table, &layouts,
+                                     state->fh, state->fh_len) == NFS4ERR_BAD_STATEID);
+    CHECK(nfs_layout_journal_check(&journal, state->fh, state->fh_len, &open_sid) == NFS4ERR_BAD_STATEID);
+    CHECK(nfs_layout_journal_stage(&journal, state->fh, state->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES,
+                                   &open_sid, &granted) == NFS4ERR_BAD_STATEID);
+    /* Rejecting the dead target must not acquire or leak grant admission. */
+    CHECK(nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    nfs_layout_table_barrier_release(&layouts, state->fh, state->fh_len);
+    nfs_layout_journal_finish(&journal, true);
+    CHECK(!nfs_layout_state_find(client, state->fh, state->fh_len));
+
+    /* A return-only reservation must still release a live recalled holder. */
+    layout = nfs_layout_state_create(client, state->fh, state->fh_len, 0,
+                                     LAYOUTIOMODE4_READ, table.epoch, &table, &layouts, &layout_sid);
+    CHECK(layout);
+    layout->layout_type = LAYOUT4_FLEX_FILES;
+    CHECK(nfs_layout_journal_reserve_return(&journal, client, &table, &layouts,
+                                            state->fh, state->fh_len, false) == NFS4_OK);
+    CHECK(nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    CHECK(nfs_layout_journal_return(&journal, state->fh, state->fh_len, &layout_sid,
+                                    LAYOUT4_FLEX_FILES, false) == NFS4_OK);
+    nfs_layout_journal_finish(&journal, true);
+    CHECK(!nfs_layout_state_find(client, state->fh, state->fh_len));
+    CHECK(nfs_state_table_test_stateid(&table, &layout_sid, client) == NFS4ERR_BAD_STATEID);
+    nfs_layout_table_barrier_release(&layouts, state->fh, state->fh_len);
+
+    nfs_client_finish_compound(client, &table, NULL);
+    nfs_client_destroy(client, &table, NULL, true);
+    for (int i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
+        CHECK(!layouts.shards[i].by_fh);
+        evpl_mutex_destroy(&layouts.shards[i].lock);
+    }
+    nfs_state_table_free(&table, NULL);
+    printf("ok: layout grant rejects a recalled ALL-reserved target without blocking returns\n");
+} /* test_layout_journal_recalled_target */
+
+static void
+test_layout_journal_all_retry_order(void)
+{
+    struct nfs_state_table    table;
+    struct nfs_layout_table   layouts = { 0 };
+    struct nfs_layout_journal journal = { 0 };
+    struct nfs_client        *client;
+    struct nfs_open_state    *state, *later;
+    struct stateid4           open_sid, later_open_sid, first, retried, cancelled;
+
+    nfs_state_table_init(&table, 1);
+    for (int i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
+        evpl_mutex_init(&layouts.shards[i].lock, NULL);
+    }
+    client = nfs_client_alloc(61, "layout-retry", 12, 0x7161, 1);
+    state  = make_close_state(&table, client, "owner", 1, &open_sid);
+    later  = make_close_state(&table, client, "later", 2, &later_open_sid);
+    CHECK(nfs_client_reserve_compound(client));
+    CHECK(nfs_layout_journal_reserve_return(&journal, client, &table, &layouts,
+                                            NULL, 0, true) == NFS4_OK);
+    CHECK(nfs_layout_journal_return(&journal, NULL, 0, NULL, LAYOUT4_FLEX_FILES, true) == NFS4_OK);
+    CHECK(nfs_layout_journal_reserve(&journal, client, &table, &layouts,
+                                     state->fh, state->fh_len) == NFS4_OK);
+    CHECK(nfs_layout_journal_stage(&journal, state->fh, state->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES,
+                                   &open_sid, &first) == NFS4_OK);
+    CHECK(nfs_state_table_test_stateid(&table, &first, client) == NFS4ERR_BAD_STATEID);
+    CHECK(!nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+
+    /* Finish EAGAIN keeps the slot/admission reserved. ALL precedes this
+     * fresh grant on the wire, so it must again leave that slot untouched. */
+    nfs_layout_journal_reset(&journal);
+    CHECK(nfs_layout_journal_return(&journal, NULL, 0, NULL, LAYOUT4_FLEX_FILES, true) == NFS4_OK);
+    CHECK(!nfs_layout_journal_returned(&journal, state->fh, state->fh_len));
+    CHECK(nfs_layout_journal_reserve(&journal, client, &table, &layouts,
+                                     state->fh, state->fh_len) == NFS4_OK);
+    CHECK(nfs_layout_journal_stage(&journal, state->fh, state->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES,
+                                   &open_sid, &retried) == NFS4_OK);
+    CHECK(first.seqid == retried.seqid && !memcmp(first.other, retried.other, sizeof(first.other)));
+    CHECK(nfs_state_table_test_stateid(&table, &retried, client) == NFS4ERR_BAD_STATEID);
+    nfs_layout_journal_finish(&journal, true);
+    CHECK(nfs_state_table_test_stateid(&table, &retried, client) == NFS4_OK);
+    CHECK(nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    nfs_layout_table_barrier_release(&layouts, state->fh, state->fh_len);
+
+    /* Conversely, a fresh grant before ALL participates in that attempt's
+     * layout set, alongside layouts published by an earlier compound. */
+    CHECK(nfs_layout_journal_reserve_return(&journal, client, &table, &layouts,
+                                            NULL, 0, true) == NFS4_OK);
+    CHECK(nfs_layout_journal_reserve(&journal, client, &table, &layouts,
+                                     later->fh, later->fh_len) == NFS4_OK);
+    CHECK(nfs_layout_journal_stage(&journal, later->fh, later->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES,
+                                   &later_open_sid, &cancelled) == NFS4_OK);
+    CHECK(nfs_layout_journal_return(&journal, NULL, 0, NULL, LAYOUT4_FLEX_FILES, true) == NFS4_OK);
+    CHECK(nfs_layout_journal_returned(&journal, state->fh, state->fh_len));
+    CHECK(nfs_layout_journal_returned(&journal, later->fh, later->fh_len));
+    nfs_layout_journal_finish(&journal, true);
+    CHECK(!client->layouts_by_fh);
+    CHECK(nfs_state_table_test_stateid(&table, &retried, client) == NFS4ERR_BAD_STATEID);
+    CHECK(nfs_state_table_test_stateid(&table, &cancelled, client) == NFS4ERR_BAD_STATEID);
+
+    nfs_client_finish_compound(client, &table, NULL);
+    nfs_client_destroy(client, &table, NULL, true);
+    for (int i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
+        CHECK(!layouts.shards[i].by_fh);
+        evpl_mutex_destroy(&layouts.shards[i].lock);
+    }
+    nfs_state_table_free(&table, NULL);
+    printf("ok: layout ALL preserves wire order across fresh-grant retry and cancellation\n");
+} /* test_layout_journal_all_retry_order */
+
+static void
+layout_recall_count(void *arg)
+{
+    (*(int *) arg)++;
+} /* layout_recall_count */
+
+static void
+test_layout_journal_replacement_and_recall(void)
+{
+    struct nfs_state_table           table;
+    struct nfs_layout_table          layouts = { 0 };
+    struct nfs_layout_journal        journal = { 0 };
+    struct nfs_layout_journal_entry *replacement, *final_slot;
+    struct nfs_layout_recall_view    view;
+    struct nfs_client               *client, *peer;
+    struct nfs_open_state           *state;
+    struct nfs_layout_state         *old, *other;
+    struct stateid4                  open_sid, original, first, retried, last, peer_sid;
+    nfsstat4                         status;
+
+    nfs_state_table_init(&table, 1);
+    for (int i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
+        evpl_mutex_init(&layouts.shards[i].lock, NULL);
+    }
+    client = nfs_client_alloc(62, "layout-replace", 14, 0x7162, 1);
+    peer   = nfs_client_alloc(63, "layout-peer", 11, 0x7163, 1);
+    state  = make_close_state(&table, client, "owner", 1, &open_sid);
+    old    = nfs_layout_state_create(client, state->fh, state->fh_len, 0,
+                                     LAYOUTIOMODE4_READ, table.epoch, &table, &layouts, &original);
+    CHECK(old && nfs_client_reserve_compound(client));
+    old->layout_type = LAYOUT4_FLEX_FILES;
+    CHECK(nfs_layout_journal_reserve_return(&journal, client, &table, &layouts,
+                                            state->fh, state->fh_len, false) == NFS4_OK);
+    CHECK(nfs_layout_journal_return(&journal, state->fh, state->fh_len, &original,
+                                    LAYOUT4_FLEX_FILES, false) == NFS4_OK);
+    CHECK(nfs_layout_journal_reserve_grant(&journal, client, &table, &layouts,
+                                           state->fh, state->fh_len, 0, &replacement) == NFS4_OK);
+    CHECK(nfs_layout_journal_stage(&journal, state->fh, state->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES, &open_sid, &first) == NFS4_OK);
+    CHECK(memcmp(first.other, original.other, sizeof(first.other)));
+    CHECK(nfs_layout_journal_test(&journal, &original, &status) && status == NFS4ERR_BAD_STATEID);
+    CHECK(nfs_state_table_test_stateid(&table, &original, client) == NFS4_OK);
+    CHECK(nfs_state_table_test_stateid(&table, &first, client) == NFS4ERR_BAD_STATEID);
+    CHECK(nfs_layout_journal_truncate_conflict(&journal, state->fh, state->fh_len));
+
+    /* A memoized later reservation must not mask the public identity when
+     * replay reaches the earlier FILE return. Activation follows wire order. */
+    nfs_layout_journal_reset(&journal);
+    CHECK(nfs_layout_journal_return(&journal, state->fh, state->fh_len, &original,
+                                    LAYOUT4_FLEX_FILES, false) == NFS4_OK);
+    nfs_layout_journal_activate(replacement);
+    CHECK(nfs_layout_journal_stage(&journal, state->fh, state->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES, &open_sid, &retried) == NFS4_OK);
+    CHECK(first.seqid == retried.seqid && !memcmp(first.other, retried.other, sizeof(first.other)));
+    CHECK(nfs_layout_journal_return(&journal, state->fh, state->fh_len, &retried,
+                                    LAYOUT4_FLEX_FILES, false) == NFS4_OK);
+    CHECK(!nfs_layout_journal_truncate_conflict(&journal, state->fh, state->fh_len));
+    CHECK(nfs_layout_journal_reserve_grant(&journal, client, &table, &layouts,
+                                           state->fh, state->fh_len, 0, &final_slot) == NFS4_OK);
+    CHECK(nfs_layout_journal_stage(&journal, state->fh, state->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES, &open_sid, &last) == NFS4_OK);
+    CHECK(memcmp(last.other, first.other, sizeof(last.other)));
+    CHECK(nfs_layout_journal_check(&journal, state->fh, state->fh_len, &original) == NFS4ERR_BAD_STATEID);
+    CHECK(nfs_layout_journal_check(&journal, state->fh, state->fh_len, &first) == NFS4ERR_BAD_STATEID);
+    nfs_layout_journal_finish(&journal, true);
+    CHECK(nfs_state_table_test_stateid(&table, &original, client) == NFS4ERR_BAD_STATEID);
+    CHECK(nfs_state_table_test_stateid(&table, &first, client) == NFS4ERR_BAD_STATEID);
+    CHECK(nfs_state_table_test_stateid(&table, &last, client) == NFS4_OK);
+    CHECK(HASH_COUNT(client->layouts_by_fh) == 1);
+
+    /* Terminal finish rejection keeps the old public slot and drops the
+     * replacement, including its admission hold and reserved state slot. */
+    original = last;
+    CHECK(nfs_layout_journal_reserve_return(&journal, client, &table, &layouts,
+                                            state->fh, state->fh_len, false) == NFS4_OK);
+    CHECK(nfs_layout_journal_return(&journal, state->fh, state->fh_len, &original,
+                                    LAYOUT4_FLEX_FILES, false) == NFS4_OK);
+    CHECK(nfs_layout_journal_reserve_grant(&journal, client, &table, &layouts,
+                                           state->fh, state->fh_len, 0, &replacement) == NFS4_OK);
+    CHECK(nfs_layout_journal_stage(&journal, state->fh, state->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES, &open_sid, &first) == NFS4_OK);
+    nfs_layout_journal_finish(&journal, false);
+    CHECK(nfs_state_table_test_stateid(&table, &original, client) == NFS4_OK);
+    CHECK(nfs_state_table_test_stateid(&table, &first, client) == NFS4ERR_BAD_STATEID);
+
+    /* A private return excludes only its exact holder and grant admission.
+     * Peer holders remain recalled, and an unscoped concurrent waiter still
+     * waits for the old public slot until accepted publication. */
+    CHECK(nfs_layout_journal_reserve_grant(&journal, client, &table, &layouts,
+                                           state->fh, state->fh_len, 0, &replacement) == NFS4_OK);
+    CHECK(nfs_layout_journal_return(&journal, state->fh, state->fh_len, &original,
+                                    LAYOUT4_FLEX_FILES, false) == NFS4_OK);
+    CHECK(nfs_layout_journal_recall_view(&journal, state->fh, state->fh_len, &view));
+    CHECK(view.num_excluded == 1 && view.grants == 1);
+    CHECK(!nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    other = nfs_layout_state_create(peer, state->fh, state->fh_len, 0,
+                                    LAYOUTIOMODE4_READ, table.epoch, &table, &layouts, &peer_sid);
+    CHECK(other);
+    CHECK(nfs_layout_table_barrier_acquire_view(&layouts, state->fh, state->fh_len, &view));
+    int                              scoped_resumes = 0, public_resumes = 0;
+    struct nfs_layout_recall_waiter *scoped   = calloc(1, sizeof(*scoped));
+    struct nfs_layout_recall_waiter *ordinary = calloc(1, sizeof(*ordinary));
+    struct nfs_layout_state        **scoped_holders, **public_holders;
+    CHECK(scoped && ordinary);
+    scoped->resume = ordinary->resume = layout_recall_count;
+    scoped->arg    = &scoped_resumes;
+    ordinary->arg  = &public_resumes;
+    CHECK(nfs_layout_table_recall_prepare_view(&layouts, state->fh, state->fh_len,
+                                               scoped, &scoped_holders, &view) == 1);
+    CHECK(scoped_holders[0] == other);
+    CHECK(nfs_layout_table_recall_prepare(&layouts, state->fh, state->fh_len,
+                                          ordinary, &public_holders) == 2);
+    nfs_layout_state_destroy(other, &table, NULL);
+    CHECK(scoped_resumes == 1 && public_resumes == 0);
+    CHECK(nfs_state_table_test_stateid(&table, &original, client) == NFS4_OK);
+    nfs_layout_state_put(scoped_holders[0]);
+    free(scoped_holders);
+    nfs_layout_journal_finish(&journal, true);
+    CHECK(scoped_resumes == 1 && public_resumes == 1);
+    for (int i = 0; i < 2; i++) {
+        nfs_layout_state_put(public_holders[i]);
+    }
+    free(public_holders);
+    free(view.excluded);
+    nfs_layout_table_barrier_release(&layouts, state->fh, state->fh_len);
+    CHECK(nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    nfs_layout_table_barrier_release(&layouts, state->fh, state->fh_len);
+    nfs_client_finish_compound(client, &table, NULL);
+    nfs_client_destroy(client, &table, NULL, true);
+    nfs_client_destroy(peer, &table, NULL, true);
+    for (int i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
+        CHECK(!layouts.shards[i].by_fh);
+        evpl_mutex_destroy(&layouts.shards[i].lock);
+    }
+    nfs_state_table_free(&table, NULL);
+    printf("ok: layout replacement retries preserve identities and scoped recalls preserve peer admission\n");
+} /* test_layout_journal_replacement_and_recall */
+
+static void
+test_layout_journal_own_barrier_grant(void)
+{
+    struct nfs_state_table           table;
+    struct nfs_layout_table          layouts = { 0 };
+    struct nfs_layout_journal        journal = { 0 };
+    struct nfs_layout_journal_entry *reservation;
+    struct nfs_client               *client;
+    struct nfs_open_state           *state;
+    struct stateid4                  opened, first, retried;
+
+    nfs_state_table_init(&table, 1);
+    for (int i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
+        evpl_mutex_init(&layouts.shards[i].lock, NULL);
+    }
+    client = nfs_client_alloc(64, "layout-barrier", 14, 0x7164, 1);
+    state  = make_close_state(&table, client, "owner", 1, &opened);
+    CHECK(nfs_client_reserve_compound(client));
+    /* Two earlier truncates in one compound retain two exact own holds. */
+    CHECK(nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    CHECK(nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    CHECK(!nfs_layout_table_grant_begin_scoped(&layouts, state->fh, state->fh_len, 1));
+    CHECK(!nfs_layout_table_grant_begin_scoped(&layouts, state->fh, state->fh_len, 3));
+    /* A peer may have acquired another barrier before our grant. Counting
+     * only our two cannot consume that peer's exclusion or allocate a slot. */
+    CHECK(nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    CHECK(nfs_layout_journal_reserve_grant(&journal, client, &table, &layouts,
+                                           state->fh, state->fh_len, 2, &reservation) == NFS4ERR_RECALLCONFLICT);
+    CHECK(!reservation && !journal.entries);
+    nfs_layout_table_barrier_release(&layouts, state->fh, state->fh_len);
+    CHECK(nfs_layout_journal_reserve_grant(&journal, client, &table, &layouts,
+                                           state->fh, state->fh_len, 2, &reservation) == NFS4_OK);
+    CHECK(nfs_layout_journal_stage(&journal, state->fh, state->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES, &opened, &first) == NFS4_OK);
+    CHECK(nfs_state_table_test_stateid(&table, &first, client) == NFS4ERR_BAD_STATEID);
+    CHECK(!nfs_layout_table_barrier_acquire(&layouts, state->fh, state->fh_len));
+    CHECK(!nfs_layout_table_grant_begin(&layouts, state->fh, state->fh_len));
+    /* Both exclusion classes survive reset. Replay only private state; this
+     * unit does not simulate rollback of the preceding filesystem mutation. */
+    nfs_layout_journal_reset(&journal);
+    nfs_layout_journal_activate(reservation);
+    CHECK(nfs_layout_journal_stage(&journal, state->fh, state->fh_len, 0,
+                                   LAYOUTIOMODE4_READ, LAYOUT4_FLEX_FILES, &opened, &retried) == NFS4_OK);
+    CHECK(first.seqid == retried.seqid && !memcmp(first.other, retried.other, sizeof(first.other)));
+    CHECK(nfs_state_table_test_stateid(&table, &retried, client) == NFS4ERR_BAD_STATEID);
+    nfs_layout_journal_finish(&journal, true);
+    CHECK(nfs_state_table_test_stateid(&table, &retried, client) == NFS4_OK);
+    CHECK(!nfs_layout_table_grant_begin(&layouts, state->fh, state->fh_len));
+    nfs_layout_table_barrier_release(&layouts, state->fh, state->fh_len);
+    CHECK(!nfs_layout_table_grant_begin(&layouts, state->fh, state->fh_len));
+    nfs_layout_table_barrier_release(&layouts, state->fh, state->fh_len);
+    CHECK(nfs_layout_table_grant_begin(&layouts, state->fh, state->fh_len));
+    nfs_layout_table_grant_end(&layouts, state->fh, state->fh_len);
+    nfs_client_finish_compound(client, &table, NULL);
+    nfs_client_destroy(client, &table, NULL, true);
+    for (int i = 0; i < NFS_LAYOUT_TABLE_SHARDS; i++) {
+        CHECK(!layouts.shards[i].by_fh);
+        evpl_mutex_destroy(&layouts.shards[i].lock);
+    }
+    nfs_state_table_free(&table, NULL);
+    printf("ok: same-compound layout grant respects peer truncate barriers and retained own holds\n");
+} /* test_layout_journal_own_barrier_grant */
 
 static void
 test_compound_owner_close_reopen_destroy(void)
@@ -2006,31 +2444,13 @@ test_v40_owner_replay_journals(void)
     parent = make_close_state(&table, client, "owner", 1, &parent_sid);
     CHECK(reserve_owner(&table, client, 0, &opens) == NFS4_OK);
     CHECK(!opens->owner_replay.initial_confirmed && !opens->owner_replay.confirmed);
-    /* A late legacy OPEN must not publish a consuming error or enter VFS while
-     * this owner has a reserved replay snapshot, even before confirmation. */
+    /* A second OPEN must not acquire this reserved owner's replay snapshot. */
     {
-        struct nfs_request  *request  = calloc(1, sizeof(*request));
-        struct nfs4_session  session  = { .client_unified = client };
-        struct nfs_argop4    argument = { .argop = OP_OPEN };
-        struct nfs_resop4    response = { .resop = OP_OPEN };
-        struct COMPOUND4args args     = { .argarray = &argument, .num_argarray = 1 };
-        uint32_t             refs     = atomic_load(&parent->owner->refcount);
-        nfsstat4             status   = NFS4_OK;
-
-        CHECK(request);
-        argument.opopen.owner.clientid   = client->client_id;
-        argument.opopen.owner.owner.data = "owner";
-        argument.opopen.owner.owner.len  = 5;
-        argument.opopen.seqid            = 1;
-        request->session                 = &session;
-        request->args_compound           = &args;
-        request->res_compound.resarray   = &response;
-        CHECK(chimera_nfs4_open_4_0_entry(NULL, request, 0, &status));
-        CHECK(status == NFS4ERR_DELAY && response.opopen.status == NFS4ERR_DELAY);
-        CHECK(!request->open_4_0_owner);
-        CHECK(atomic_load(&parent->owner->refcount) == refs);
+        struct nfs_open_owner_reservation *competing = NULL;
+        uint32_t                           refs      = atomic_load(&parent->owner->refcount);
+        CHECK(reserve_owner(&table, client, 1, &competing) == NFS4ERR_DELAY);
+        CHECK(!competing && atomic_load(&parent->owner->refcount) == refs);
         CHECK(!parent->owner->replay.valid && parent->owner->seqid == 0);
-        free(request);
     }
     opens->owner_replay.confirmed = true;
     close_sid                     = parent_sid;
@@ -2274,7 +2694,13 @@ main(
     test_compound_owner_reservation_abort();
     test_compound_owner_reservation_apply();
     test_compound_owner_downgrade_only();
+    test_compound_stream_lifetime();
+    test_compound_many_lock_children();
     test_pure_test_stateid_snapshot();
+    test_layout_journal_recalled_target();
+    test_layout_journal_all_retry_order();
+    test_layout_journal_replacement_and_recall();
+    test_layout_journal_own_barrier_grant();
     test_compound_owner_close_reopen_destroy();
     test_compound_lock_owner_reservation();
     test_compound_lock_range_journal();

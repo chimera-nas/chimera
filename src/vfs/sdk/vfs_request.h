@@ -203,6 +203,7 @@ struct chimera_vfs_mount_options {
 /* Frontend publishes creation only after compound acceptance. */
 #define CHIMERA_VFS_MKDIR_NO_NOTIFY        (1U << 0)
 #define CHIMERA_VFS_SYMLINK_NO_NOTIFY      (1U << 0)
+#define CHIMERA_VFS_LINK_NO_NOTIFY         (1U << 0)
 #define CHIMERA_VFS_MKNOD_NO_NOTIFY        (1U << 0)
 
 /* RENAME flags also accept REMOVE_RECALL for historical callers. */
@@ -505,6 +506,7 @@ struct chimera_vfs_request_handle {
  * entry's fh (to derive fileid / answer FATTR4_FILEHANDLE); SMB stream info does
  * not, so it omits them and keeps the compact name-only record. */
 struct chimera_vfs_stream_entry {
+    uint64_t cookie;      /* resume after this record with the page verifier */
     uint64_t size;        /* stream end-of-file */
     uint64_t alloc;       /* stream allocation size */
     uint16_t name_len;    /* bytes of name that follow this struct */
@@ -1484,6 +1486,7 @@ struct chimera_vfs_request {
         struct {
             struct chimera_vfs_open_handle *handle;       /* base file handle */
             uint64_t                        cookie;
+            uint64_t                        verifier;
             void                           *buffer;       /* caller-provided buffer */
             uint32_t                        max_bytes;
             uint8_t                         want_fh;      /* emit each stream's fh */
@@ -1494,6 +1497,7 @@ struct chimera_vfs_request {
             uint32_t                        r_count;      /* number of streams written */
             uint32_t                        r_eof;
             uint64_t                        r_cookie;
+            uint64_t                        r_verifier;
         } list_streams;
 
         struct {

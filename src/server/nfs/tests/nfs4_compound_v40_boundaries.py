@@ -84,6 +84,8 @@ class Probe40(Probe):
             if sid is not None:
                 self.close(fh, sid)
             self.call([op.putfh(self.directory), op.remove(name)])
+        for name in reversed(self.directories):
+            self.call([op.putfh(self.directory), op.remove(name)])
 
 
 def same_sid(a, b):
@@ -315,6 +317,284 @@ def test_v40_locks(p):
     p.close(fh, sid, "v40_close_held_lock")
 
 
+def test_v40_state_error_ordering(p):
+    """Retain the direct-state fixture's version, typed replay and consuming errors."""
+    _, fh, opened = p.create("v40-state-error-ordering")
+    owner = p.file_owners[fh]
+    create_lock = op.lock(WRITE_LT, False, 0, 1, locker4(True,
+                         open_to_lock_owner4(p.owner_seqids[owner], opened, 0,
+                                             lock_owner4(p.clientid, b"state-error-owner"))))
+    res = p.call([op.putfh(fh), create_lock])
+    p.owner_seqids[owner] += 1
+    first = res.resarray[1].lock_stateid
+    res = p.call([op.putfh(fh), op.lock(WRITE_LT, False, 2, 1,
+                  locker4(False, lock_owner=exist_lock_owner4(first, 1)))])
+    current = res.resarray[1].lock_stateid
+    invalid = op.locku(WRITE_LT, 2, first, 0, 1)
+    for label in ("v40_unlock_old_version", "v40_unlock_old_version_replay"):
+        p.call([op.putfh(fh), invalid, op.getattr(1 << FATTR4_SIZE)], label, NFS4ERR_OLD_STATEID)
+    p.call([op.putfh(fh), op.locku(WRITE_LT, 3, current, NFS4_UINT64_MAX - 1, 3),
+            op.getattr(1 << FATTR4_SIZE)], "v40_unlock_overflow_consumed", NFS4ERR_INVAL)
+    future = stateid4(current.seqid + 1, current.other)
+    p.call([op.putfh(fh), op.locku(WRITE_LT, 4, future, 0, 3), op.getattr(1 << FATTR4_SIZE)],
+           "v40_unlock_future_no_consume", NFS4ERR_BAD_STATEID)
+    unlock = op.locku(WRITE_LT, 4, current, 0, 3)
+    res = p.call([op.putfh(fh), unlock, op.getattr(1 << FATTR4_SIZE)], "v40_unlock_corrected_sequence")
+    updated = res.resarray[1].lock_stateid
+    replay = p.call([op.putfh(fh), unlock, op.getattr(1 << FATTR4_SIZE)], "v40_unlock_corrected_replay")
+    require(updated.seqid == current.seqid + 1 and same_sid(updated, replay.resarray[1].lock_stateid),
+            "failed LOCKU consumed the wrong sequence or replay advanced state")
+    p.call([op.putfh(fh), op.lock(WRITE_LT, False, 0, 1,
+            locker4(False, lock_owner=exist_lock_owner4(updated, 4))), op.getattr(1 << FATTR4_SIZE)],
+           "v40_lock_wrong_replay_type", NFS4ERR_BAD_SEQID)
+    reclaim = op.lock(WRITE_LT, True, 0, 1,
+                      locker4(False, lock_owner=exist_lock_owner4(updated, 5)))
+    for label in ("v40_lock_reclaim_consumed", "v40_lock_reclaim_replay"):
+        p.call([op.putfh(fh), reclaim, op.getattr(1 << FATTR4_SIZE)], label, NFS4ERR_NO_GRACE)
+    p.call([op.putfh(fh), op.lock(WRITE_LT, True, 0, 1,
+            locker4(False, lock_owner=exist_lock_owner4(first, 6))), op.getattr(1 << FATTR4_SIZE)],
+           "v40_lock_recovery_before_old_version", NFS4ERR_NO_GRACE)
+
+    new_reclaim = op.lock(WRITE_LT, True, 8, 1, locker4(True,
+                         open_to_lock_owner4(p.owner_seqids[owner], opened, 5,
+                                             lock_owner4(p.clientid, b"state-reclaim-owner"))))
+    for label in ("v40_new_lock_reclaim_consumed", "v40_new_lock_reclaim_replay"):
+        p.call([op.putfh(fh), new_reclaim, op.getattr(1 << FATTR4_SIZE)], label, NFS4ERR_NO_GRACE)
+    p.owner_seqids[owner] += 1
+    corrected = op.lock(WRITE_LT, False, 8, 1, locker4(True,
+                        open_to_lock_owner4(p.owner_seqids[owner], opened, 6,
+                                            lock_owner4(p.clientid, b"state-reclaim-owner"))))
+    res = p.call([op.putfh(fh), corrected, op.getattr(1 << FATTR4_SIZE)],
+                 "v40_new_lock_after_consumed_reclaim")
+    p.owner_seqids[owner] += 1
+    require(res.resarray[1].lock_stateid.seqid == 1,
+            "failed reclaim leaked a public lock state or advanced its version")
+
+    name, owner = b"v40-confirm-typed-errors", b"owner-v40-confirm-typed-errors"
+    res = p.call([op.putfh(p.directory), p.open_op(name), op.getfh()])
+    fh, sid = res.resarray[2].object, res.resarray[1].stateid
+    p.files.append((name, fh, sid))
+    p.file_owners[fh] = owner
+    p.owner_seqids[owner] = 1
+    p.call([op.putfh(fh), op.open_confirm(sid, 0), op.getattr(1 << FATTR4_SIZE)],
+           "v40_confirm_wrong_replay_type", NFS4ERR_BAD_SEQID)
+    future = stateid4(sid.seqid + 1, sid.other)
+    p.call([op.putfh(fh), op.open_confirm(future, 1), op.getattr(1 << FATTR4_SIZE)],
+           "v40_confirm_future_no_consume", NFS4ERR_BAD_STATEID)
+    p.call([op.putfh(p.directory), op.open_confirm(sid, 1), op.getattr(1 << FATTR4_SIZE)],
+           "v40_confirm_wrong_fh_no_consume", NFS4ERR_BAD_STATEID)
+    res = p.call([op.putfh(fh), op.open_confirm(sid, 1), op.getattr(1 << FATTR4_SIZE)],
+                 "v40_confirm_corrected_sequence")
+    confirmed = res.resarray[1].open_stateid
+    p.replace_stateid(fh, confirmed)
+    p.owner_seqids[owner] = 2
+    replay = p.call([op.putfh(fh), op.open_confirm(sid, 1), op.getattr(1 << FATTR4_SIZE)],
+                    "v40_confirm_corrected_replay")
+    require(confirmed.seqid == sid.seqid + 1 and same_sid(confirmed, replay.resarray[1].open_stateid),
+            "corrected CONFIRM or replay advanced state incorrectly")
+    p.call([op.putfh(fh), op.open_confirm(confirmed, 2), op.getattr(1 << FATTR4_SIZE)],
+           "v40_confirm_already_confirmed", NFS4ERR_BAD_STATEID)
+
+
+def test_v40_transport_owner_admission(p):
+    """Every state mutation journals correctly without an implicit session."""
+    original = p.client
+    transports = []
+
+    def fresh():
+        transport = nfs4client.NFS4Client(p.args.host, p.args.port, 0)
+        transport.set_cred(AuthSys().init_cred(uid=0, gid=0, name=b"compound-v40-probe"))
+        transports.append(transport)
+        p.client = transport
+
+    try:
+        fresh()
+        name, owner = b"v40-fresh-transport", b"owner-v40-fresh-transport"
+        res = p.call([op.putfh(p.directory), p.open_op(name, owner=owner), op.getfh(),
+                      op.getattr(1 << FATTR4_SIZE)], "v40_unbound_open_suffix")
+        fh, opened = res.resarray[2].object, res.resarray[1].stateid
+        p.files.append((name, fh, opened))
+        p.file_owners[fh] = owner
+        p.owner_seqids[owner] = 1
+        require(res.resarray[1].rflags & OPEN4_RESULT_CONFIRM, "fresh owner did not require CONFIRM")
+
+        fresh()
+        confirm = op.open_confirm(opened, 1)
+        res = p.call([op.putfh(fh), confirm, op.getattr(1 << FATTR4_SIZE)], "v40_unbound_confirm_suffix")
+        sid = res.resarray[1].open_stateid
+        p.replace_stateid(fh, sid)
+        p.owner_seqids[owner] = 2
+        fresh()
+        replay = p.call([op.putfh(fh), confirm, op.getattr(1 << FATTR4_SIZE)], "v40_unbound_confirm_replay")
+        require(same_sid(replay.resarray[1].open_stateid, sid), "fresh-transport CONFIRM replay advanced twice")
+
+        fresh()
+        lock = op.lock(WRITE_LT, False, 0, 4,
+                       locker4(True, open_to_lock_owner4(2, sid, 0,
+                                                       lock_owner4(p.clientid, b"unbound-range-owner"))))
+        res = p.call([op.putfh(fh), lock, op.getattr(1 << FATTR4_SIZE)], "v40_unbound_lock_suffix")
+        locked = res.resarray[1].lock_stateid
+        p.owner_seqids[owner] = 3
+        fresh()
+        res = p.call([op.putfh(fh), op.locku(WRITE_LT, 1, locked, 0, 4),
+                      op.open_downgrade(sid, 3, OPEN4_SHARE_ACCESS_BOTH, OPEN4_SHARE_DENY_NONE),
+                      op.getattr(1 << FATTR4_SIZE)], "v40_unbound_unlock_downgrade")
+        sid = res.resarray[2].open_stateid
+        p.replace_stateid(fh, sid)
+        p.owner_seqids[owner] = 4
+        fresh()
+        closed, res = p.close(fh, sid, "v40_unbound_close_suffix")
+        fresh()
+        replay = p.call([op.putfh(fh), closed, op.getattr(1 << FATTR4_SIZE)], "v40_unbound_close_replay")
+        require(same_sid(replay.resarray[1].open_stateid, res.resarray[1].open_stateid),
+                "fresh-transport CLOSE tombstone replay changed the result")
+
+        # Confirm a different client on this same connection, then OPEN with
+        # the original clientid. Its prefix and suffix must stay coalesced.
+        identity = nfs_client_id4(b"othercid", f"compound-v40-other-{os.getpid()}".encode())
+        callback = cb_client4(0, clientaddr4(b"tcp", b"0.0.0.0.0.0"))
+        res = p.call([op.setclientid(identity, callback, 0)])
+        other_clientid = res.resarray[0].clientid
+        p.call([op.setclientid_confirm(other_clientid, res.resarray[0].setclientid_confirm)])
+        name, owner = b"v40-mismatched-transport", b"owner-v40-mismatched-transport"
+        res = p.call([op.putfh(p.directory), p.open_op(name, owner=owner), op.getfh(),
+                      op.getattr(1 << FATTR4_SIZE)], "v40_mismatched_client_open_suffix")
+        fh, sid = res.resarray[2].object, res.resarray[1].stateid
+        p.files.append((name, fh, sid))
+        p.file_owners[fh] = owner
+        p.owner_seqids[owner] = 1
+        if res.resarray[1].rflags & OPEN4_RESULT_CONFIRM:
+            res = p.call([op.putfh(fh), op.open_confirm(sid, 1)])
+            sid = res.resarray[1].open_stateid
+            p.replace_stateid(fh, sid)
+            p.owner_seqids[owner] = 2
+    finally:
+        p.client = original
+
+
+def test_v40_single_io(p):
+    _, fh, sid = p.create("v40-single-io")
+    large = lambda: op.readdir(0, b"", 4096, 1024 * 1024, 1 << FATTR4_TYPE)
+
+    def single(operation, label, expected=NFS4_OK):
+        result = p.call([op.putfh(fh), operation, large()], "v40_single_" + label,
+                        NFS4ERR_NOTDIR if expected == NFS4_OK else expected,
+                        runs=[(0, 3)])
+        return result.resarray[1]
+
+    require(single(op.write(sid, 0, FILE_SYNC4, b"v40-data"), "write").count == 8,
+            "single v4.0 WRITE lost its count")
+    require(single(op.read(sid, 0, 16), "read").data == b"v40-data", "single v4.0 READ lost data")
+    single(op.setattr(sid, {FATTR4_SIZE: 3}), "setattr")
+    require(p.read(fh, sid) == b"v40", "single v4.0 SETATTR lost truncation")
+    single(op.lockt(READ_LT, 0, 4, lock_owner4(p.clientid, b"v40-single-lockt")), "lockt")
+    _, other, wrong = p.create("v40-single-other")
+    for label, operation in (("read", op.read(wrong, 0, 16)),
+                              ("write", op.write(wrong, 0, FILE_SYNC4, b"BAD")),
+                              ("setattr", op.setattr(wrong, {FATTR4_SIZE: 0}))):
+        single(operation, label + "_wrong_fh", NFS4ERR_BAD_STATEID)
+    require(p.read(fh, sid) == b"v40" and p.read(other, wrong) == b"", "wrong-FH v4.0 I/O changed data")
+
+
+def test_v40_standalone_open(p):
+    name, fh, original = p.create("v40-standalone-open")
+    owner = p.file_owners[fh]
+    operations = [op.putfh(p.directory), p.open_op(name, create=False),
+                  op.readdir(0, b"", 4096, 1024 * 1024, 1 << FATTR4_TYPE)]
+    result = p.call(operations, "v40_standalone_open", NFS4ERR_NOTDIR, runs=[(0, 3)])
+    opened = result.resarray[1].stateid
+    p.replace_stateid(fh, opened)
+    p.owner_seqids[owner] += 1
+    check_open_version(original, opened, "standalone v4.0 OPEN lost its identity")
+    replay = p.call(operations, "v40_standalone_open_replay", NFS4ERR_NOTDIR, runs=[(0, 3)])
+    require(repr(result.resarray[1]) == repr(replay.resarray[1]), "standalone v4.0 replay changed the OPEN result")
+
+    denied = [op.putfh(p.directory), p.open_op(name, create=False), operations[-1]]
+    cred = p.client.default_cred
+    p.client.set_cred(AuthSys().init_cred(uid=0, gid=0, name=b"other-v40-open-principal"))
+    try:
+        p.call(denied, "v40_standalone_principal", NFS4ERR_ACCESS, runs=[(0, 3)])
+        p.call(denied, "v40_standalone_principal_replay", NFS4ERR_ACCESS, runs=[(0, 3)])
+    finally:
+        p.client.set_cred(cred)
+    p.owner_seqids[owner] += 1
+    result = p.call([op.putfh(p.directory), p.open_op(name, create=False), operations[-1]],
+                   "v40_open_after_consumed_access", NFS4ERR_NOTDIR, runs=[(0, 3)])
+    p.owner_seqids[owner] += 1
+    check_open_version(opened, result.resarray[1].stateid, "principal failure advanced the OPEN stateid")
+    p.replace_stateid(fh, result.resarray[1].stateid)
+
+
+def test_v40_stream_open(p):
+    _, base, _ = p.create("v40-stream-base")
+    p.call([op.putfh(base), op.openattr(True), op.getfh()], "v40_attrdir")
+    name, owner = b"retry-v40-stream", b"v40-stream-owner"
+    operations = [op.putfh(base), op.openattr(True), p.open_op(name, owner=owner), op.getfh()]
+    result = p.call(operations, "v40_stream_create")
+    fh, opened = result.resarray[-1].object, result.resarray[2].stateid
+    replay = p.call(operations, "v40_stream_create_replay")
+    require(repr(result.resarray[2]) == repr(replay.resarray[2]) and replay.resarray[-1].object == fh,
+            "stream create replay changed OPEN or current FH")
+    require(result.resarray[2].rflags & OPEN4_RESULT_CONFIRM, "stream owner did not require confirmation")
+    confirmed = p.call([op.putfh(fh), op.open_confirm(opened, 1)]).resarray[-1].open_stateid
+    p.owner_seqids[owner] = 2
+    p.call([op.putfh(fh), op.write(confirmed, 0, FILE_SYNC4, b"stream-replay")])
+    predicted = stateid4(confirmed.seqid + 1, confirmed.other)
+    operations = [op.putfh(base), op.openattr(True), p.open_op(name, create=False, owner=owner),
+                  op.read(predicted, 0, 64), op.getfh()]
+    result = p.call(operations, "v40_stream_reopen")
+    replay = p.call(operations, "v40_stream_reopen_replay")
+    require(same_sid(result.resarray[2].stateid, predicted) and
+            repr(result.resarray[2]) == repr(replay.resarray[2]) and
+            result.resarray[3].data == replay.resarray[3].data == b"stream-replay" and
+            result.resarray[-1].object == replay.resarray[-1].object == fh,
+            "stream reopen/retry lost access, advanced state twice or restored the base FH")
+    p.call([op.putfh(fh), op.close(3, predicted)])
+    mask = ((1 << 56) - 1) & ~((1 << FATTR4_TIME_ACCESS_SET) | (1 << FATTR4_TIME_MODIFY_SET))
+    result = p.call([op.putfh(base), op.openattr(False), op.readdir(0, b"", 4096, 4096, mask),
+                    op.readdir(0, b"", 4096, 4096, mask), op.getfh()], "v40_stream_readdir")
+    for listing in result.resarray[2:4]:
+        require(listing.reply.eof and len(listing.reply.entries) == 1 and
+                listing.reply.entries[0].name == name and
+                listing.reply.entries[0].attrs[FATTR4_FILEHANDLE] == fh and
+                listing.reply.entries[0].attrs[FATTR4_SIZE] == len(b"stream-replay"),
+                "v4.0 named READDIR lost its stream identity or duplicated a retry page")
+    p.call([op.putfh(base), op.openattr(False), op.readdir(0, b"", 16, 16, mask), op.getfh()],
+           "v40_stream_readdir_too_small", NFS4ERR_TOOSMALL)
+
+
+def test_v40_root_entry(p):
+    sibling = p.directory
+    root = p.call([op.putrootfh(), op.getfh()]).resarray[-1].object
+    p.directory = root
+    name, fh, sid = p.create("retry-v40-root-entry")
+    p.call([op.putfh(fh), op.write(sid, 0, FILE_SYNC4, b"root-entry")])
+    for label, root_op in (("root", op.putrootfh()), ("public", op.putpubfh())):
+        result = p.call([root_op, op.getfh(), op.lookup(name), op.read(sid, 0, 64), op.getfh()],
+                        "v40_" + label + "_entry")
+        require(result.resarray[1].object == root and result.resarray[3].data == b"root-entry" and
+                result.resarray[-1].object == fh, "v4.0 root entry lost its cursor or data")
+    operation = p.open_op(name, create=False, access=OPEN4_SHARE_ACCESS_READ)
+    predicted = stateid4(sid.seqid + 1, sid.other)
+    operations = [op.putrootfh(), operation, op.getfh(), op.read(predicted, 0, 64)]
+    result = p.call(operations, "v40_root_open")
+    sid = result.resarray[1].stateid
+    p.owner_seqids[p.file_owners[fh]] += 1
+    p.replace_stateid(fh, sid)
+    replay = p.call(operations, "v40_root_open_replay")
+    require(same_sid(sid, predicted) and repr(replay.resarray[1]) == repr(result.resarray[1]) and
+            result.resarray[2].object == replay.resarray[2].object == fh and
+            result.resarray[-1].data == replay.resarray[-1].data == b"root-entry",
+            "root entry lost OPEN owner replay, restored cursor or suffix data")
+    result = p.call([op.putrootfh(), op.lookup(b"share"), op.getfh()],
+                    "v40_export_entry", runs=[(0, 3)])
+    require(result.resarray[-1].object == sibling, "v4.0 junction selected the wrong export")
+    p.call([op.putrootfh(), op.readdir(0, b"", 4096, 1024 * 1024, 1 << FATTR4_TYPE), op.getfh()],
+           "v40_single_root", runs=[(0, 3)])
+    p.call([op.putrootfh(), op.lookup(b"missing-v40-root-entry"), op.getfh()],
+           "v40_root_failed_prefix", NFS4ERR_NOENT)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -324,6 +604,27 @@ def main():
     parser.add_argument("--server-log", required=True)
     probe = Probe40(parser.parse_args())
     try:
+        if os.environ.get("CHIMERA_COMPOUND_FEATURE", "").startswith("readdir"):
+            from nfs4_readdir_sizing import readdir_sizing
+            readdir_sizing(probe)
+            probe.check_trace()
+            return 0
+        if os.environ.get("CHIMERA_COMPOUND_FEATURE") == "pseudo":
+            from nfs4_compound_adoption import pseudo_root
+            pseudo_root(probe)
+            probe.check_trace()
+            return 0
+        if os.environ.get("CHIMERA_COMPOUND_FEATURE") == "cold_root":
+            from nfs4_compound_adoption import cold_root
+            cold_root(probe)
+            probe.check_trace()
+            return 0
+        if os.environ.get("CHIMERA_COMPOUND_FEATURE") == "namespace":
+            test_v40_root_entry(probe)
+            from nfs4_compound_adoption import namespace_coalescing
+            namespace_coalescing(probe)
+            probe.check_trace()
+            return 0
         test_v40_secinfo_cursor(probe)
         test_v40_fresh_open_replay(probe)
         test_v40_confirm_consumed_error(probe)
@@ -331,6 +632,12 @@ def main():
         test_v40_confirmed_create_replay(probe)
         test_v40_downgrade(probe)
         test_v40_locks(probe)
+        test_v40_transport_owner_admission(probe)
+        test_v40_state_error_ordering(probe)
+        test_v40_single_io(probe)
+        test_v40_standalone_open(probe)
+        if os.environ.get("CHIMERA_COMPOUND_FEATURE") == "metadata":
+            test_v40_stream_open(probe)
         probe.check_trace()
     finally:
         probe.cleanup()

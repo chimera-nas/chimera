@@ -98,7 +98,7 @@ static struct {
     uint64_t                         pre_mask, post_mask;
     struct chimera_vfs_open_handle  *handle;
     struct chimera_claim_actor       actor;
-    bool                             have_actor;
+    struct chimera_vfs_io_view       view;
     uint32_t                         match_fh_len;
     enum chimera_vfs_rename_outcome *outcome;
     chimera_vfs_rename_at_callback_t callback;
@@ -113,22 +113,22 @@ rename_poll(
     if (!atomic_exchange(&release_rename, 0)) {
         evpl_add_oneshot_timer(evpl, timer, rename_poll, 1000); return;
     }
-    __typeof__(&chimera_vfs_rename_at_checked_result_actor) next =
-        (__typeof__(&chimera_vfs_rename_at_checked_result_actor))dlsym(RTLD_NEXT,
-                                                                       "chimera_vfs_rename_at_checked_result_actor");
+    __typeof__(&chimera_vfs_rename_at_checked_result_view) next =
+        (__typeof__(&chimera_vfs_rename_at_checked_result_view))dlsym(RTLD_NEXT,
+                                                                      "chimera_vfs_rename_at_checked_result_view");
     assert(next);
     atomic_store(&rename_held, 0);
     next(rename_gate.thread, rename_gate.cred, rename_gate.fh, rename_gate.fh_len,
          rename_gate.name, rename_gate.name_len, rename_gate.new_fh, rename_gate.new_fh_len,
          rename_gate.new_name, rename_gate.new_name_len, rename_gate.target_fh,
          rename_gate.target_fh_len, rename_gate.flags, rename_gate.pre_mask, rename_gate.post_mask,
-         rename_gate.lease_key, rename_gate.handle, rename_gate.have_actor ? &rename_gate.actor : NULL,
+         rename_gate.lease_key, rename_gate.handle, &rename_gate.view,
          rename_gate.match_fh, rename_gate.match_fh_len,
          rename_gate.outcome, rename_gate.callback, rename_gate.private_data);
 } /* rename_poll */
 
 __attribute__((visibility("default"))) void
-chimera_vfs_rename_at_checked_result_actor(
+chimera_vfs_rename_at_checked_result_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     const void                       *fh,
@@ -146,16 +146,16 @@ chimera_vfs_rename_at_checked_result_actor(
     uint64_t                          post_mask,
     const uint8_t                    *lease_key,
     struct chimera_vfs_open_handle   *handle,
-    const struct chimera_claim_actor *actor,
+    const struct chimera_vfs_io_view *view,
     const uint8_t                    *match_fh,
     uint32_t                          match_fh_len,
     enum chimera_vfs_rename_outcome  *outcome,
     chimera_vfs_rename_at_callback_t  callback,
     void                             *private_data)
 {
-    __typeof__(&chimera_vfs_rename_at_checked_result_actor) next =
-        (__typeof__(&chimera_vfs_rename_at_checked_result_actor))dlsym(RTLD_NEXT,
-                                                                       "chimera_vfs_rename_at_checked_result_actor");
+    __typeof__(&chimera_vfs_rename_at_checked_result_view) next =
+        (__typeof__(&chimera_vfs_rename_at_checked_result_view))dlsym(RTLD_NEXT,
+                                                                      "chimera_vfs_rename_at_checked_result_view");
 
     assert(next);
     if (atomic_load(&scan_mode)) {
@@ -177,18 +177,15 @@ chimera_vfs_rename_at_checked_result_actor(
         ((flags & CHIMERA_VFS_RENAME_MATCH_DEST_FH) && atomic_exchange(&hold_replace, 0)) ||
         (!(flags & (CHIMERA_VFS_RENAME_MATCH_DEST_FH | CHIMERA_VFS_RENAME_NOREPLACE)) &&
          atomic_exchange(&hold_legacy_replace, 0))) {
-        rename_gate.thread     = thread; rename_gate.cred = cred;
-        rename_gate.fh         = fh; rename_gate.fh_len = fh_len;
-        rename_gate.name       = name; rename_gate.name_len = name_len;
-        rename_gate.new_fh     = new_fh; rename_gate.new_fh_len = new_fh_len;
-        rename_gate.new_name   = new_name; rename_gate.new_name_len = new_name_len;
-        rename_gate.target_fh  = target_fh; rename_gate.target_fh_len = target_fh_len;
-        rename_gate.flags      = flags; rename_gate.pre_mask = pre_mask; rename_gate.post_mask = post_mask;
-        rename_gate.lease_key  = lease_key; rename_gate.handle = handle;
-        rename_gate.have_actor = actor != NULL;
-        if (actor) {
-            rename_gate.actor = *actor;
-        }
+        rename_gate.thread    = thread; rename_gate.cred = cred;
+        rename_gate.fh        = fh; rename_gate.fh_len = fh_len;
+        rename_gate.name      = name; rename_gate.name_len = name_len;
+        rename_gate.new_fh    = new_fh; rename_gate.new_fh_len = new_fh_len;
+        rename_gate.new_name  = new_name; rename_gate.new_name_len = new_name_len;
+        rename_gate.target_fh = target_fh; rename_gate.target_fh_len = target_fh_len;
+        rename_gate.flags     = flags; rename_gate.pre_mask = pre_mask; rename_gate.post_mask = post_mask;
+        rename_gate.lease_key = lease_key; rename_gate.handle = handle;
+        chimera_vfs_io_view_copy(&rename_gate.view, &rename_gate.actor, view);
         rename_gate.match_fh = match_fh; rename_gate.match_fh_len = match_fh_len;
         rename_gate.outcome  = outcome;
         rename_gate.callback = callback; rename_gate.private_data = private_data;
@@ -197,9 +194,9 @@ chimera_vfs_rename_at_checked_result_actor(
         return;
     }
     next(thread, cred, fh, fh_len, name, name_len, new_fh, new_fh_len, new_name, new_name_len,
-         target_fh, target_fh_len, flags, pre_mask, post_mask, lease_key, handle, actor,
+         target_fh, target_fh_len, flags, pre_mask, post_mask, lease_key, handle, view,
          match_fh, match_fh_len, outcome, callback, private_data);
-} /* chimera_vfs_rename_at_checked_result_actor */
+} /* chimera_vfs_rename_at_checked_result_view */
 
 /* Hold an actual backend OPEN result before either frontend has seen the
  * handle or reserved ACCESS. The handle ownership transfers to this callback;

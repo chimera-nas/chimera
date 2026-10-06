@@ -108,6 +108,35 @@ add_group(
     assert(chimera_vfs_compound_add_group(cp, &config) >= 0);
 } /* add_group */
 
+struct credential_selection {
+    const struct chimera_vfs_cred *user;
+    unsigned                       calls;
+};
+
+static const struct chimera_vfs_cred *
+select_credential(
+    struct chimera_vfs_compound *cp,
+    uint32_t                     group,
+    void                        *private)
+{
+    struct credential_selection *selection = private;
+    uint32_t                     length;
+
+    assert(!chimera_vfs_compound_current_fh(cp, &length) && !length);
+    assert(!chimera_vfs_compound_saved_fh(cp, &length) && !length);
+    selection->calls++;
+    if (group == 1) {
+        const struct chimera_vfs_compound_op *earlier = chimera_vfs_compound_op(cp, 1);
+        assert(earlier->completed && (earlier->granted & CHIMERA_ACE_WRITE_DATA));
+        return selection->user;
+    }
+    if (group == 2) {
+        const struct chimera_vfs_compound_op *earlier = chimera_vfs_compound_op(cp, 3);
+        assert(earlier->completed && !(earlier->granted & CHIMERA_ACE_WRITE_DATA));
+    }
+    return NULL;
+} /* select_credential */
+
 static void
 fail_again(
     struct chimera_vfs_compound *cp,
@@ -1787,7 +1816,7 @@ check_overwrite(
     chimera_vfs_compound_add_puthandle(cp, handles[1], CHIMERA_VFS_OPEN_INFERRED);
     int overwritten = chimera_vfs_compound_add_overwrite(cp, NULL, &attrs, CHIMERA_VFS_ATTR_SIZE, NULL);
     chimera_vfs_compound_add_puthandle(cp, handles[0], CHIMERA_VFS_OPEN_PATH);
-    int listed = chimera_vfs_compound_add_list_streams(cp, 0, 4096, false);
+    int listed = chimera_vfs_compound_add_list_streams(cp, 0, 0, 4096, false);
     attrs.va_size = 99; /* builder owns its attribute snapshot */
     chimera_vfs_compound_submit(cp, completed, f);
     wait_done(f);
@@ -1802,7 +1831,7 @@ check_overwrite(
     cp            = chimera_vfs_compound_alloc(f->thread, root);
     chimera_vfs_compound_add_overwrite(cp, handles[0], &attrs, CHIMERA_VFS_ATTR_SIZE, NULL);
     chimera_vfs_compound_add_puthandle(cp, handles[0], CHIMERA_VFS_OPEN_PATH);
-    listed = chimera_vfs_compound_add_list_streams(cp, 0, 4096, false);
+    listed = chimera_vfs_compound_add_list_streams(cp, 0, 0, 4096, false);
     chimera_vfs_compound_submit(cp, completed, f);
     wait_done(f);
     assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
@@ -2560,6 +2589,11 @@ main(void)
     chimera_vfs_compound_submit(cp, retry_complete, &f);
     wait_done(&f);
     assert(f.attempts == 2 && f.finishes == 2 && f.callbacks == 2);
+    /* Resubmission must restore groups, callbacks and the original three-op
+     * shape just as finish retry does, without accumulating dynamic suffixes. */
+    chimera_vfs_compound_submit(cp, retry_complete, &f);
+    wait_done(&f);
+    assert(f.attempts == 3 && f.finishes == 3 && f.callbacks == 3);
     chimera_vfs_compound_free(cp);
 
     /* Cursor isolation: GETFH in a following group cannot reuse a prior
@@ -2600,6 +2634,56 @@ main(void)
     assert(chimera_vfs_compound_op(cp, 1)->granted & CHIMERA_ACE_WRITE_DATA);
     assert(!(chimera_vfs_compound_op(cp, 3)->granted & CHIMERA_ACE_WRITE_DATA));
     assert(chimera_vfs_compound_op(cp, 5)->granted & CHIMERA_ACE_WRITE_DATA);
+    chimera_vfs_compound_free(cp);
+
+    /* A selector sees accepted execution results, never inherited cursors.
+     * Retry repeats selection after restoring the original operation inputs. */
+    struct credential_selection selection = { .user = &user };
+    cp = chimera_vfs_compound_alloc(f.thread, &root);
+    for (unsigned i = 0; i < 3; i++) {
+        chimera_vfs_compound_add_putfh(cp, f.fh, f.fh_len);
+        chimera_vfs_compound_add_access(cp, CHIMERA_ACE_WRITE_DATA);
+        struct chimera_vfs_compound_group_config config = {
+            .first_op    = 2 * i,
+            .num_ops     = 2,
+            .dependency  = -1,
+            .select_cred = select_credential,
+            .context     = &selection,
+        };
+        assert(chimera_vfs_compound_add_group(cp, &config) >= 0);
+    }
+    f.finishes = 0;
+    chimera_vfs_compound_set_finish_handler(cp, reject_first, &f);
+    chimera_vfs_compound_submit(cp, completed, &f);
+    wait_done(&f);
+    assert(chimera_vfs_compound_finish_status(cp) == CHIMERA_VFS_EAGAIN);
+    assert(selection.calls == 3);
+    assert(chimera_vfs_compound_retry(cp));
+    wait_done(&f);
+    assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK && selection.calls == 6);
+    assert(chimera_vfs_compound_op(cp, 1)->granted & CHIMERA_ACE_WRITE_DATA);
+    assert(!(chimera_vfs_compound_op(cp, 3)->granted & CHIMERA_ACE_WRITE_DATA));
+    assert(chimera_vfs_compound_op(cp, 5)->granted & CHIMERA_ACE_WRITE_DATA);
+    chimera_vfs_compound_free(cp);
+
+    cp = chimera_vfs_compound_alloc(f.thread, &root);
+    int                                      rejected = chimera_vfs_compound_add_checkpoint(cp);
+    chimera_vfs_compound_set_op_prepare(cp, rejected, fail_again, &f);
+    add_group(cp, 0, 1, NULL, -1, true, &f);
+    chimera_vfs_compound_add_checkpoint(cp);
+    struct chimera_vfs_compound_group_config skipped = {
+        .first_op         = 1,
+        .num_ops          = 1,
+        .dependency       = 0,
+        .dependency_error = CHIMERA_VFS_EACCES,
+        .select_cred      = select_credential,
+        .context          = &selection,
+    };
+    assert(chimera_vfs_compound_add_group(cp, &skipped) >= 0);
+    chimera_vfs_compound_submit(cp, completed, &f);
+    wait_done(&f);
+    assert(selection.calls == 6);
+    assert(chimera_vfs_compound_group_status(cp, 1) == CHIMERA_VFS_EACCES);
     chimera_vfs_compound_free(cp);
 
     /* A dynamically appended OPEN survives the next group's cursor reset;
@@ -2724,6 +2808,13 @@ main(void)
         chimera_vfs_compound_submit(cp, range_compound_complete, &test);
         wait_done(&f);
         assert(f.finishes == 2 && f.callbacks == 2);
+        assert(!chimera_vfs_compound_retry(cp));
+        chimera_vfs_compound_submit(cp, completed, &f);
+        wait_done(&f);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_finish_status(cp) == CHIMERA_VFS_OK);
+        assert(f.finishes == 2 && f.callbacks == 3);
+        assert(test.retired == 0); /* published journal remains pinned */
         chimera_vfs_compound_free(cp);
         assert(test.retired == 1);
         chimera_vfs_claim_owner_put(test.owner);

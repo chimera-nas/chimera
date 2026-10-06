@@ -7,7 +7,6 @@
 #include "nfs_internal.h"
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"

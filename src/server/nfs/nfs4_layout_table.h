@@ -35,11 +35,20 @@ struct nfs_layout_state;
 struct nfs_client;
 struct chimera_server_nfs_thread;
 
+/* A retained compound may recall peers while its own returned slots are
+ * still public until finish. Exclusions name pinned exact slots, not clients. */
+struct nfs_layout_recall_view {
+    struct nfs_layout_state **excluded;
+    uint32_t                  num_excluded;
+    uint32_t                  grants;
+};
+
 struct nfs_layout_recall_waiter {
-    void                             (*resume)(
+    void                                 (*resume)(
         void *arg);
-    void                            *arg;
-    struct nfs_layout_recall_waiter *next;
+    void                                *arg;
+    struct nfs_layout_recall_waiter     *next;
+    const struct nfs_layout_recall_view *view;
 };
 
 struct nfs_layout_entry {
@@ -106,8 +115,12 @@ SYMBOL_EXPORT void nfs_layout_table_barrier_release(
     const uint8_t           *fh,
     uint16_t                 fh_len);
 
-/* LAYOUTGET final publication only: begin/end bracket synchronous create or
- * widening. Never retain a grant section across backend or callback I/O. */
+/* LAYOUTGET admission excludes recalls until publication/discard. A compound
+ * may retain this through backend finish while its client/file journal also
+ * excludes state return. Acquisition never waits. A later same-file recall in
+ * the owning compound must return that private grant first or fail without
+ * waiting for its own unpublished reply. A scoped recall can exclude only
+ * exact slots already returned in that attempt. */
 SYMBOL_EXPORT bool nfs_layout_table_grant_begin(
     struct nfs_layout_table *table,
     const uint8_t           *fh,
@@ -136,3 +149,27 @@ SYMBOL_EXPORT bool nfs_layout_table_has_holders(
     struct nfs_layout_table *table,
     const uint8_t           *fh,
     uint16_t                 fh_len);
+
+/* Scoped forms borrow view until the waiter resumes. Its grant count covers
+ * only admission holds owned by this compound and retained until finish. */
+SYMBOL_EXPORT bool nfs_layout_table_barrier_acquire_view(
+    struct nfs_layout_table             *table,
+    const uint8_t                       *fh,
+    uint16_t                             fh_len,
+    const struct nfs_layout_recall_view *view);
+SYMBOL_EXPORT int nfs_layout_table_recall_prepare_view(
+    struct nfs_layout_table             *table,
+    const uint8_t                       *fh,
+    uint16_t                             fh_len,
+    struct nfs_layout_recall_waiter     *waiter,
+    struct nfs_layout_state           ***out_holders,
+    const struct nfs_layout_recall_view *view);
+
+/* Exact count of this compound's successful retained barriers on this FH.
+ * Under the shard lock, any additional barrier or recall waiter rejects the
+ * grant. The caller must retain every counted barrier through finish. */
+SYMBOL_EXPORT bool nfs_layout_table_grant_begin_scoped(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len,
+    uint32_t                 own_barriers);

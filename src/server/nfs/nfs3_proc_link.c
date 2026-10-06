@@ -5,7 +5,6 @@
 #include "nfs3_procs.h"
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
-#include "vfs/vfs_internal_procs.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
 #include "nfs3_compound.h"

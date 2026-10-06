@@ -13,6 +13,9 @@
 # (URCU_API_MAP, which selects the unprefixed QSBR API, is set alongside
 # CHIMERA_HAVE_URCU in the top-level CMakeLists.txt.)
 add_compile_definitions(_LGPL_SOURCE)
+# The executor, core helpers and their white-box tests implement the private
+# per-operation API. This definition is never propagated to northside targets.
+add_compile_definitions(CHIMERA_VFS_INTERNAL_API)
 
 add_library(chimera_vfs ${CHIMERA_LIBRARY_TYPE} vfs.c vfs_lsan.c vfs_cred.c vfs_sdk_utils.c
             vfs_acl.c vfs_acl_serialize.c vfs_access.c vfs_idmap.c vfs_identity.c

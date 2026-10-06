@@ -3790,6 +3790,9 @@ cairn_remove_at(
     int                        rc;
     struct timespec            now;
 
+    /* A RocksDB conflict can replay this request against a replaced name. */
+    request->remove_at.r_unmatched                = 0;
+    request->remove_at.r_removed_attr.va_set_mask = 0;
     clock_gettime(CLOCK_REALTIME, &now);
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
@@ -3848,6 +3851,25 @@ cairn_remove_at(
     }
 
     inode = child_ih.inode;
+
+    if (request->remove_at.match_child_fh) {
+        uint8_t  fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t len = cairn_inum_to_fh(fs, fh, inode->inum, inode->gen);
+        if (!request->remove_at.child_fh || len != request->remove_at.child_fh_len ||
+            memcmp(fh, request->remove_at.child_fh, len)) {
+            cairn_map_attrs(fs, &request->remove_at.r_dir_pre_attr, parent_inode);
+            cairn_map_attrs(fs, &request->remove_at.r_dir_post_attr, parent_inode);
+            cairn_inode_handle_release(&parent_ih);
+            cairn_inode_handle_release(&child_ih);
+            cairn_dirent_handle_release(&dh);
+            request->remove_at.r_unmatched = 1;
+            request->status                = CHIMERA_VFS_OK;
+            /* Validate the directory/inode read set before reporting a
+             * successful no-op, just as for a successful removal below. */
+            cairn_queue_request(thread, request);
+            return;
+        }
+    }
 
     /* Enforce the caller's type assertion (RMDIR/ISDIR vs REMOVE/ISNOTDIR);
      * neither flag removes whichever kind is present.  Capture the type
@@ -7505,9 +7527,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_ACL_NATIVE |
         CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
         CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
-        CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
-        CHIMERA_VFS_CAP_LAYOUT | CHIMERA_VFS_CAP_SPARSE |
-        CHIMERA_VFS_CAP_NAMED_STREAMS,
+        CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS | CHIMERA_VFS_CAP_REMOVE_MATCH_FH |
+        CHIMERA_VFS_CAP_LAYOUT | CHIMERA_VFS_CAP_SPARSE | CHIMERA_VFS_CAP_NAMED_STREAMS,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,

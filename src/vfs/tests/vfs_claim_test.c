@@ -779,6 +779,12 @@ test_smb_lease_key_client_scope(void)
           "identical lease bytes belong to distinct ClientGuid namespaces");
     CHECK(!chimera_claim_owner_same_key(&first, &foreign),
           "identical bytes cannot cross protocol namespaces");
+    CHECK(chimera_claim_owner_same_cache(&first, &second),
+          "identical SMB keys share object-store caching compatibility");
+    CHECK(!chimera_claim_owner_same_cache(&first, &foreign),
+          "caching compatibility cannot cross protocol namespaces");
+    CHECK(!chimera_claim_owner_same_lease(&first, &second),
+          "caching compatibility does not merge protocol lease identities");
     chimera_vfs_claim_init_rqls(&template_claim, CHIMERA_CLAIM_CR, &first);
     template_claim.break_cb   = recording_break_cb;
     template_claim.cb_private = &rec_a;
@@ -803,8 +809,15 @@ test_smb_lease_key_client_scope(void)
     writer.owner = second;
     chimera_vfs_claim_invalidate(state, file->fh, file->fh_len, file->fh_hash,
                                  CHIMERA_TRIGGER_WRITE, &writer, 0);
-    CHECK(rec_a.fired == 1 && rec_b.fired == 0,
-          "write recalls peer with identical key but preserves writer's own lease");
+    CHECK(rec_a.fired == 0 && rec_b.fired == 0,
+          "same ClientLeaseId preserves both clients' caching grants");
+    writer.owner.key[0]    ^= 0x80;
+    writer.owner.client_key = 0xC;
+    writer.owner.owner_lo   = 3;
+    chimera_vfs_claim_invalidate(state, file->fh, file->fh_len, file->fh_hash,
+                                 CHIMERA_TRIGGER_WRITE, &writer, 0);
+    CHECK(rec_a.fired == 1 && rec_b.fired == 1,
+          "foreign caching context recalls both independent lease records");
     chimera_vfs_claim_grant_release(state, a, false);
     chimera_vfs_claim_grant_release(state, b, false);
     chimera_vfs_state_put(state, file);
@@ -1919,7 +1932,8 @@ test_deferred_grant_respects_surviving_open(void)
         struct chimera_claim_owner        owner, peer_owner;
         struct chimera_claim_actor        opener = { 0 };
         struct chimera_vfs_claim          peer_open, peer_cache, tmpl;
-        struct chimera_vfs_claim_grant   *grant = NULL;
+        struct chimera_vfs_open_handle    peer_handle = { 0 };
+        struct chimera_vfs_claim_grant   *grant       = NULL;
         struct chimera_vfs_claim_conflict conflict;
         struct break_recorder             rec = { 0 };
         const uint8_t                     rh  = CHIMERA_CLAIM_CR | CHIMERA_CLAIM_H;
@@ -1933,10 +1947,12 @@ test_deferred_grant_respects_surviving_open(void)
         chimera_vfs_claim_init_smb_open(&peer_open,
                                         CHIMERA_CLAIM_R | CHIMERA_CLAIM_W,
                                         0, &peer_owner);
+        peer_open.op_handle = &peer_handle;
         CHECK(chimera_vfs_claim_try_acquire(state, file, &peer_open,
                                             &conflict) == CHIMERA_CLAIM_GRANTED,
               "peer Open survives its cache break");
         chimera_vfs_claim_init_rqls(&peer_cache, rwh, &peer_owner);
+        peer_cache.op_handle  = &peer_handle;
         peer_cache.break_cb   = recording_break_cb;
         peer_cache.cb_private = &rec;
         CHECK(chimera_vfs_claim_try_acquire(state, file, &peer_cache,
@@ -2505,6 +2521,49 @@ test_waiter_admission_fence(void)
     chimera_vfs_state_destroy(state);
 } /* test_waiter_admission_fence */
 
+/* A private return excludes exactly its pinned claim from namespace recall.
+ * Peers still observe the original grant until accepted publication. */
+static void
+test_namespace_retirement_view(void)
+{
+    struct chimera_vfs_state       *state = chimera_vfs_state_init();
+    struct chimera_vfs_file_state  *file  = get_file(state, 71);
+    struct chimera_vfs_claim        returned, peer;
+    struct chimera_claim_owner      owner;
+    struct break_recorder           returned_rec = { 0 }, peer_rec = { 0 };
+    const struct chimera_vfs_claim *excluded[] = { &returned };
+    struct chimera_vfs_io_view      view       = { .excluded = excluded, .num_excluded = 1 };
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 71, 1);
+    chimera_vfs_claim_init_delegation(&returned, false, &owner);
+    returned.break_cb   = recording_break_cb;
+    returned.cb_private = &returned_rec;
+    assert(chimera_vfs_claim_try_acquire(state, file, &returned, NULL) == CHIMERA_CLAIM_GRANTED);
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 72, 2);
+    chimera_vfs_claim_init_delegation(&peer, false, &owner);
+    peer.break_cb   = recording_break_cb;
+    peer.cb_private = &peer_rec;
+    assert(chimera_vfs_claim_try_acquire(state, file, &peer, NULL) == CHIMERA_CLAIM_GRANTED);
+
+    CHECK(chimera_vfs_claim_has_caching_view(file, &view), "private namespace view retains peer holder");
+    CHECK(chimera_vfs_claim_break_caching_view(state, file->fh, file->fh_len, file->fh_hash, &view),
+          "scoped namespace recall remains blocked by peer");
+    CHECK(!returned_rec.fired && peer_rec.fired == 1 &&
+          returned.break_state == CHIMERA_CLAIM_BREAK_IDLE,
+          "scoped namespace recall sends no callback to privately returned delegation");
+    chimera_vfs_claim_release(state, file, &peer);
+    CHECK(!chimera_vfs_claim_has_caching_view(file, &view) &&
+          !chimera_vfs_claim_break_caching_view(state, file->fh, file->fh_len, file->fh_hash, &view),
+          "private namespace recall drains after peer returns");
+    CHECK(chimera_vfs_claim_has_caching(file) && returned.file == file && !returned_rec.fired,
+          "private return leaves public grant intact");
+    CHECK(chimera_vfs_claim_break_caching(state, file->fh, file->fh_len, file->fh_hash) && returned_rec.fired == 1,
+          "unscoped namespace recall cannot inherit another attempt's exclusion");
+    chimera_vfs_claim_release(state, file, &returned);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_namespace_retirement_view */
+
 /* Main ---------------------------------------------------------------- */
 int
 main(
@@ -2535,6 +2594,7 @@ main(
     test_smb_lease_key_coalesces();
     test_smb_lease_key_client_scope();
     test_caching_break_revoke();
+    test_namespace_retirement_view();
     test_range_breaks_caching();
     test_nfs4_lock_vs_own_delegation();
     test_async_acquire_immediate();

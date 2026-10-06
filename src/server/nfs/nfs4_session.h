@@ -65,7 +65,8 @@ enum nfs4_slot_state {
 struct nfs4_replay_slot {
     _Atomic uint64_t state_word;       /* (seqid << NFS4_SLOT_SEQID_SHIFT) | state */
     uint32_t         cached_len;       /* bytes in cached_buf (CACHED only) */
-    void            *cached_buf;       /* RPC reply (header+body); malloc'd */
+    uint32_t         cached_capacity;  /* allocated bytes; zero for hydrated/older entries */
+    void            *cached_buf;       /* procedure results; malloc'd */
     /* Who sent the request this slot holds.  RFC 8881 Section 2.10.6.1.3.1: a
      * retry "that uses a different principal in the RPC request's credential
      * field that translates to a different user" is a false retry, and "if the

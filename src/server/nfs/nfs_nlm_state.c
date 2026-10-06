@@ -65,11 +65,14 @@ nlm_state_client_file_path(
 
 void
 nlm_state_init(
-    struct nlm_state *state,
-    const char       *state_dir)
+    struct nlm_state   *state,
+    struct chimera_vfs *vfs,
+    const char         *state_dir)
 {
     evpl_mutex_init(&state->mutex, NULL);
     state->clients   = NULL;
+    state->vfs       = vfs;
+    state->stopping  = false;
     state->in_grace  = 0;
     state->grace_end = 0;
     snprintf(state->state_dir, sizeof(state->state_dir), "%s", state_dir);
@@ -95,7 +98,7 @@ nlm_state_destroy(struct nlm_state *state)
             DL_DELETE(client->locks, entry);
             nlm_lock_entry_free(entry);
         }
-        free(client->carve_previous);
+        chimera_vfs_lock_domain_destroy(client->domain);
         free(client);
     }
 
@@ -157,6 +160,11 @@ nlm_client_lookup_or_create(
     if (!client) {
         return NULL;
     }
+    client->domain = chimera_vfs_lock_domain_create(state->vfs);
+    if (!client->domain) {
+        free(client);
+        return NULL;
+    }
     client->magic = NLM_CLIENT_MAGIC;
     snprintf(client->hostname, sizeof(client->hostname), "%s", hostname);
     HASH_ADD_STR(state->clients, hostname, client);
@@ -179,117 +187,6 @@ nlm_state_persist_client(
     (void) client;
 } /* nlm_state_persist_client */
 
-#if 0
-static void
-nlm_state_persist_client_disabled(
-    struct nlm_state  *state,
-    struct nlm_client *client)
-{
-    char                   path[NLM_CLIENT_PATH_MAX];
-    char                   tmp_path[NLM_CLIENT_PATH_MAX + 4]; /* + ".tmp" */
-    char                   hostname[LM_MAXSTRLEN + 1];
-    FILE                  *fp;
-    struct nlm_file_hdr    hdr;
-    struct nlm_file_entry *snapshot = NULL;
-    struct nlm_lock_entry *entry;
-    uint32_t               count = 0;
-    uint32_t               i;
-
-    /* Phase 1: snapshot the client's lock list under the mutex so that
-     * the file I/O in Phase 2 does not hold the mutex. */
-    evpl_mutex_lock(&state->mutex);
-
-    snprintf(hostname, sizeof(hostname), "%s", client->hostname);
-
-    DL_FOREACH(client->locks, entry)
-    {
-        /* Only persist confirmed (non-pending) locks */
-        if (!entry->pending) {
-            count++;
-        }
-    }
-
-    if (count == 0) {
-        evpl_mutex_unlock(&state->mutex);
-        nlm_state_client_file_path(state, hostname, path, sizeof(path));
-        chimera_nfs_debug("NLM persist: '%s' has no confirmed locks, removing state file",
-                          hostname);
-        unlink(path);
-        return;
-    }
-
-    snapshot = calloc(count, sizeof(*snapshot));
-    if (!snapshot) {
-        evpl_mutex_unlock(&state->mutex);
-        chimera_nfs_debug("NLM persist: out of memory for snapshot of '%s'", hostname);
-        return;
-    }
-
-    i = 0;
-    DL_FOREACH(client->locks, entry)
-    {
-        if (entry->pending) {
-            continue;
-        }
-        snapshot[i].fh_len = entry->fh_len;
-        memcpy(snapshot[i].fh, entry->fh, entry->fh_len);
-        snapshot[i].oh_len = entry->oh_len;
-        memcpy(snapshot[i].oh, entry->oh, entry->oh_len);
-        snapshot[i].svid      = entry->svid;
-        snapshot[i].exclusive = entry->exclusive ? 1 : 0;
-        snapshot[i].offset    = entry->offset;
-        snapshot[i].length    = entry->length;
-        i++;
-    }
-
-    evpl_mutex_unlock(&state->mutex);
-
-    /* Phase 2: write snapshot to disk without holding the mutex. */
-    nlm_state_client_file_path(state, hostname, path, sizeof(path));
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
-
-    chimera_nfs_debug("NLM persist: '%s' has %u lock(s), writing %s", hostname, count, path);
-
-    fp = fopen(tmp_path, "wb");
-    if (!fp) {
-        chimera_nfs_debug("NLM: failed to open state file %s for writing: %s",
-                          tmp_path, strerror(errno));
-        free(snapshot);
-        return;
-    }
-
-    hdr.magic       = NLM_FILE_MAGIC;
-    hdr.version     = NLM_FILE_VERSION;
-    hdr.num_entries = count;
-    hdr.pad         = 0;
-
-    if (fwrite(&hdr, sizeof(hdr), 1, fp) != 1) {
-        fclose(fp);
-        unlink(tmp_path);
-        free(snapshot);
-        return;
-    }
-
-    for (i = 0; i < count; i++) {
-        if (fwrite(&snapshot[i], sizeof(snapshot[i]), 1, fp) != 1) {
-            fclose(fp);
-            unlink(tmp_path);
-            free(snapshot);
-            return;
-        }
-    }
-
-    fclose(fp);
-    free(snapshot);
-
-    if (rename(tmp_path, path) != 0) {
-        chimera_nfs_debug("NLM: failed to rename state file %s -> %s: %s",
-                          tmp_path, path, strerror(errno));
-        unlink(tmp_path);
-    }
-} /* nlm_state_persist_client_disabled */
-#endif /* if 0 */
-
 void
 nlm_state_remove_client_file(
     struct nlm_state *state,
@@ -300,16 +197,9 @@ nlm_state_remove_client_file(
     (void) hostname;
 } /* nlm_state_remove_client_file */
 
-/*
- * Release every lock held (or being acquired) by `client`.
- *
- * IMPORTANT: the caller must NOT hold state->mutex.  This function takes it
- * internally for the detach phase and DROPS it before releasing claims.  That
- * matters because chimera_vfs_claim_release() pumps the file's pending queue,
- * which can synchronously fire another waiter's NLM acquire callback -- and
- * that callback itself takes state->mutex.  Releasing claims under the mutex
- * would therefore self-deadlock.
- */
+/* Client recovery invalidates admission before releasing handle anchors.
+ * Pending entries always belong to their compound, even before OPEN returns.
+ * Domain retirement only schedules worker completions, never calls NLM inline. */
 void
 nlm_client_release_all_locks(
     struct nlm_state          *state,
@@ -318,98 +208,76 @@ nlm_client_release_all_locks(
     struct chimera_vfs_state  *vfs_state,
     struct chimera_vfs_cred   *cred)
 {
-    struct nlm_lock_entry *entry, *tmp;
-    struct nlm_lock_entry *reap  = NULL;  /* detached entries this call owns */
-    int                    count = 0;
+    struct nlm_lock_entry *entry, *next, *reap = NULL;
 
-    (void) cred;
-#ifdef __clang_analyzer__
-    /* The list-walk bodies below are elided under the analyzer (utlist macro
-     * false positive); keep these from tripping unused-variable diagnostics. */
-    (void) entry;
-    (void) tmp;
-    (void) reap;
-    (void) count;
-    (void) vfs_thread;
     (void) vfs_state;
-#endif /* __clang_analyzer__ */
-
-    /* Phase 1 (under the lock): cancel queued blocking tickets and detach every
-     * entry we own onto a private `reap` list.  Entries whose acquire callback
-     * is firing concurrently (cancel lost the race) are left on client->locks
-     * for that callback to remove and free. */
+    (void) cred;
     evpl_mutex_lock(&state->mutex);
-
-    client->reap_gen++;
-
-    DL_FOREACH(client->locks, entry)
-    {
-        count++;
-    }
-    chimera_nfs_debug("NLM: releasing all %d lock(s) for client '%s'", count,
-                      client->hostname);
-
-    /* The DL_DELETE/DL_APPEND utlist macros trip a scan-build null-deref false
-     * positive on the list head's prev field; guarded the same way as
-     * nlm_state_destroy in this file. */
-#ifndef __clang_analyzer__
-    DL_FOREACH_SAFE(client->locks, entry, tmp)
-    {
-        /* A still-pending entry whose blocking acquire is queued in the claim
-         * core (an NLM blocking LOCK not yet granted) must have its ticket
-         * cancelled before we free it -- otherwise the pending pump would later
-         * fire the acquire callback on freed memory.  chimera_vfs_claim_cancel
-         * is the atomic arbiter: true exactly once if it claimed the ticket
-         * before the callback was invoked.
-         *
-         *   - cancel == true : the callback will NOT fire; WE own the entry.
-         *     Its original LOCK RPC already received NLM4_BLOCKED, so no reply is
-         *     owed; free the acquire ctx the callback would have freed.
-         *   - cancel == false: the acquire callback has been invoked and may be
-         *     RUNNING right now, blocked on the mutex we hold.  It will
-         *     DL_DELETE + free this entry itself, so leave it linked and skip --
-         *     but mark it reaped first, so that when it does get the mutex it
-         *     tears the lock down instead of granting a lock to a client we have
-         *     just declared lock-free.  The flag is the whole hand-off: cancel
-         *     must not block here (it once spun until the callback returned,
-         *     deadlocking against the very mutex we hold). */
-        if (entry->pending && !entry->claim_inserted && entry->file_state) {
-            if (!chimera_vfs_claim_cancel(vfs_state, &entry->ticket)) {
-                entry->reaped = true;
-                continue;
-            }
-            free(entry->ticket.private_data);
-            entry->ticket.private_data = NULL;
-            entry->pending             = false;
+    chimera_vfs_lock_domain_retire_all(client->domain);
+    entry         = client->locks;
+    client->locks = NULL;
+    while (entry) {
+        next = entry->next;
+        if (entry->pending) {
+            entry->reaped = true;
+            DL_APPEND(client->locks, entry);
+        } else {
+            entry->next = reap;
+            reap        = entry;
         }
-
-        DL_DELETE(client->locks, entry);
-        entry->next = NULL;
-        entry->prev = NULL;
-        DL_APPEND(reap, entry);
+        entry = next;
     }
-#endif /* ifndef __clang_analyzer__ */
-
     evpl_mutex_unlock(&state->mutex);
-
-    /* Phase 2 (no lock held): release claims (which may pump and fire other
-     * waiters' callbacks), drop file_state refs, close handles, free. */
-#ifndef __clang_analyzer__
-    DL_FOREACH_SAFE(reap, entry, tmp)
-    {
-        if (entry->claim_inserted) {
-            chimera_vfs_claim_release(vfs_state, entry->file_state, &entry->claim);
-            entry->claim_inserted = false;
-        }
-        if (entry->file_state) {
-            chimera_vfs_state_put(vfs_state, entry->file_state);
-            entry->file_state = NULL;
-        }
-        if (entry->handle) {
-            chimera_vfs_release(vfs_thread, entry->handle);
-        }
-        DL_DELETE(reap, entry);
+    while (reap) {
+        entry = reap;
+        reap  = entry->next;
+        chimera_vfs_release(vfs_thread, entry->handle);
         nlm_lock_entry_free(entry);
     }
-#endif /* ifndef __clang_analyzer__ */
 } /* nlm_client_release_all_locks */
+
+void
+nlm_state_shutdown(struct nlm_state *state)
+{
+    struct nlm_client     *client, *next;
+    struct nlm_lock_entry *entry;
+
+    evpl_mutex_lock(&state->mutex);
+    state->stopping = true;
+    HASH_ITER(hh, state->clients, client, next)
+    {
+        chimera_vfs_lock_domain_shutdown(NULL, client->domain);
+        DL_FOREACH(client->locks, entry)
+        {
+            if (entry->pending) {
+                entry->reaped       = true;
+                entry->disconnected = true;
+            }
+        }
+    }
+    evpl_mutex_unlock(&state->mutex);
+} /* nlm_state_shutdown */
+
+/* Connection pointers may be recycled as soon as notify returns. Mark every
+ * pending request before that, including UNLOCKs on a connection that never
+ * acquired locks and therefore has no nlm_client private_data. */
+void
+nlm_state_disconnect(
+    struct nlm_state      *state,
+    struct evpl_rpc2_conn *conn)
+{
+    struct nlm_client     *client, *next;
+    struct nlm_lock_entry *entry;
+
+    evpl_mutex_lock(&state->mutex);
+    HASH_ITER(hh, state->clients, client, next)
+    {
+        DL_FOREACH(client->locks, entry)
+        {
+            if (entry->pending && entry->conn == conn) {
+                entry->disconnected = true;
+            }
+        }
+    }
+    evpl_mutex_unlock(&state->mutex);
+} /* nlm_state_disconnect */

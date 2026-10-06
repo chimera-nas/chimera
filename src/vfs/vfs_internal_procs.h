@@ -5,10 +5,16 @@
 #pragma once
 
 #include "common/export.h"
+#ifndef CHIMERA_VFS_INTERNAL_API
+#error "The per-operation VFS API is private; frontend consumers must use vfs_compound.h"
+#endif // ifndef CHIMERA_VFS_INTERNAL_API
 
 #include <stddef.h>
 #include "vfs.h"
 #include "vfs_kv.h"
+#include "vfs_claim.h"
+#include "vfs_dirent.h"
+#include "vfs_release.h"
 
 struct evpl_iovec;
 
@@ -190,46 +196,7 @@ typedef void (*chimera_vfs_getattr_callback_t)(
     struct chimera_vfs_attrs *attr,
     void                     *private_data);
 
-/* Recall every OTHER caching lease on the file backing `handle` (the operating
- * open's own lease is spared) and PARK until the recall drains, then invoke
- * `callback`.  A namespace-mutation recall (breaks a peer's handle cache) with no
- * backend op -- used by the SMB delete-on-close path so the peer's lease break is
- * acked before the SetInfo reply is sent (smb2.lease.unlink). */
-typedef void (*chimera_vfs_recall_callback_t)(
-    enum chimera_vfs_error error_code,
-    void                  *private_data);
-
-SYMBOL_EXPORT void
-chimera_vfs_recall_handle_lease(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    chimera_vfs_recall_callback_t   callback,
-    void                           *private_data);
-
-/* Completion for chimera_vfs_recall_caching_fh: `still_open` reports whether the
- * file still has a live (non-implicit) share holder once the recall has drained
- * (a holder that did NOT close in response to the handle-lease break). */
-typedef void (*chimera_vfs_recall_fh_callback_t)(
-    enum chimera_vfs_error error_code,
-    int                    still_open,
-    void                  *private_data);
-
-/* Single-step recall of every caching lease on the file named by a bare FH
- * (no open handle is spared), breaking each holder's handle cache once
- * (RH -> R) and PARKing until the recall drains, then report whether a holder
- * kept the file open.  Used by the SMB directory-rename path to break the
- * handle leases of files open inside a directory being renamed. */
-SYMBOL_EXPORT void
-chimera_vfs_recall_caching_fh(
-    struct chimera_vfs_thread       *thread,
-    const struct chimera_vfs_cred   *cred,
-    const uint8_t                   *fh,
-    uint32_t                         fh_len,
-    chimera_vfs_recall_fh_callback_t callback,
-    void                            *private_data);
-
-SYMBOL_EXPORT void
+void
 chimera_vfs_getattr(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
@@ -268,33 +235,33 @@ chimera_vfs_setattr(
     chimera_vfs_setattr_callback_t  callback,
     void                           *private_data);
 
-/* Claim-owning caller variant: preserve its coherent lease identity through
- * authorization and peer recalls; a size change invalidates legacy read-only
- * caching even on the caller's own handle. The actor is copied before return. */
+/* Compound admission view: retain the actor through authorization/recalls,
+ * or admit anonymous size changes with the attempt's private exclusions.
+ * The actor is copied; exclusions remain borrowed through completion. */
 void
-chimera_vfs_setattr_owned(
+chimera_vfs_setattr_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
     struct chimera_vfs_attrs         *set_attr,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_setattr_callback_t    callback,
     void                             *private_data);
 
 /* Descriptor-originated variant: WRITE_DATA-only mutations (ftruncate,
  * futimens-to-now) are authorized by the handle's open-time access grant
  * rather than the file's current mode (POSIX rights retention). */
-SYMBOL_EXPORT void
-chimera_vfs_fsetattr_owned(
+void
+chimera_vfs_fsetattr_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
     struct chimera_vfs_attrs         *set_attr,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_setattr_callback_t    callback,
     void                             *private_data);
 
@@ -340,15 +307,6 @@ chimera_vfs_readdir(
     chimera_vfs_readdir_callback_t  callback,
     chimera_vfs_readdir_complete_t  complete,
     void                           *private_data);
-
-/* SMB-style directory wildcard match (MS-FSA 2.1.4.4), exposed for callers that
- * filter outside chimera_vfs_readdir.  A NULL/empty pattern matches everything. */
-SYMBOL_EXPORT int
-chimera_vfs_dirent_match(
-    const char *name,
-    int         namelen,
-    const char *pattern,
-    int         patternlen);
 
 typedef void (*chimera_vfs_open_fh_callback_t)(
     enum chimera_vfs_error          error_code,
@@ -454,17 +412,6 @@ chimera_vfs_create_unlinked(
     uint64_t                               attr_mask,
     chimera_vfs_create_unlinked_callback_t callback,
     void                                  *private_data);
-
-/*
- * Release an open handle returned by chimera_vfs_open_fh()/open_at().  This is
- * a non-inline export of the internal inline chimera_vfs_release(); out-of-tree
- * consumers that link libchimera_vfs (e.g. in-process VFS module tests) use it
- * to avoid pulling in the internal open-cache headers.
- */
-SYMBOL_EXPORT void
-chimera_vfs_release_handle(
-    struct chimera_vfs_thread      *thread,
-    struct chimera_vfs_open_handle *handle);
 
 typedef void (*chimera_vfs_mkdir_at_callback_t)(
     enum chimera_vfs_error    error_code,
@@ -944,9 +891,10 @@ chimera_vfs_rename_at_checked_result(
     chimera_vfs_rename_at_callback_t callback,
     void                            *private_data);
 
-/* Copies the actor; ParentLeaseKey only overrides its directory-notify key. */
+/* Copies the actor and borrows pinned exclusions through callback completion.
+ * ParentLeaseKey only overrides the directory-notify key. */
 void
-chimera_vfs_rename_at_checked_result_actor(
+chimera_vfs_rename_at_checked_result_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     const void                       *fh,
@@ -964,7 +912,7 @@ chimera_vfs_rename_at_checked_result_actor(
     uint64_t                          post_attr_mask,
     const uint8_t                    *parent_lease_skip,
     struct chimera_vfs_open_handle   *op_handle,
-    const struct chimera_claim_actor *actor,
+    const struct chimera_vfs_io_view *view,
     const uint8_t                    *match_source_fh,
     uint32_t                          match_source_fh_len,
     enum chimera_vfs_rename_outcome  *outcome,
@@ -999,7 +947,6 @@ chimera_vfs_link_at(
 
 /* A compound frontend takes responsibility for accepted-only FILE_ADDED
  * notification when it requests suppression during tentative execution. */
-#define CHIMERA_VFS_LINK_NO_NOTIFY 0x00000001
 
 void
 chimera_vfs_link_at_flags(
@@ -1021,9 +968,10 @@ chimera_vfs_link_at_flags(
     chimera_vfs_link_at_callback_t  callback,
     void                           *private_data);
 
-/* Copies the actor; ParentLeaseKey only overrides its directory-notify key. */
+/* Copies the actor and borrows pinned exclusions through callback completion.
+ * ParentLeaseKey only overrides the directory-notify key. */
 void
-chimera_vfs_link_at_flags_actor(
+chimera_vfs_link_at_flags_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     const void                       *fh,
@@ -1039,7 +987,7 @@ chimera_vfs_link_at_flags_actor(
     uint64_t                          post_attr_mask,
     const uint8_t                    *parent_lease_skip,
     struct chimera_vfs_open_handle   *op_handle,
-    const struct chimera_claim_actor *actor,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_link_at_callback_t    callback,
     void                             *private_data);
 
@@ -1049,23 +997,10 @@ typedef void (*chimera_vfs_allocate_callback_t)(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data);
 
-SYMBOL_EXPORT void
-chimera_vfs_allocate(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        offset,
-    uint64_t                        length,
-    uint32_t                        flags,
-    uint64_t                        pre_attr_mask,
-    uint64_t                        post_attr_mask,
-    chimera_vfs_allocate_callback_t callback,
-    void                           *private_data);
-
-/* An owned allocation invalidates peer data caches before backend mutation.
- * The caller validates mandatory ranges against its own transactional view. */
+/* Allocation admission uses the compound actor/private exclusions. The
+ * caller validates mandatory ranges against its transactional view. */
 void
-chimera_vfs_allocate_owned(
+chimera_vfs_allocate_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
@@ -1074,7 +1009,7 @@ chimera_vfs_allocate_owned(
     uint32_t                          flags,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
-    const struct chimera_claim_actor *owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_allocate_callback_t   callback,
     void                             *private_data);
 
@@ -1147,8 +1082,8 @@ typedef void (*chimera_vfs_clone_range_callback_t)(
 
 /* Claim-owning native clone. Both endpoints retain their frontend grants;
  * destination WRITE invalidation must settle before backend dispatch. */
-SYMBOL_EXPORT void
-chimera_vfs_clone_range_owned(
+void
+chimera_vfs_clone_range_view(
     struct chimera_vfs_thread         *thread,
     const struct chimera_vfs_cred     *cred,
     struct chimera_vfs_open_handle    *src_handle,
@@ -1159,7 +1094,7 @@ chimera_vfs_clone_range_owned(
     uint64_t                           pre_attr_mask,
     uint64_t                           post_attr_mask,
     const struct chimera_claim_actor  *src_owner,
-    const struct chimera_claim_actor  *dst_owner,
+    const struct chimera_vfs_io_view  *dst_view,
     chimera_vfs_clone_range_callback_t callback,
     void                              *private_data);
 
@@ -1184,15 +1119,16 @@ typedef void (*chimera_vfs_read_plus_callback_t)(
     uint32_t               eof,
     void                  *private_data);
 
-SYMBOL_EXPORT void
-chimera_vfs_read_plus(
-    struct chimera_vfs_thread       *thread,
-    const struct chimera_vfs_cred   *cred,
-    struct chimera_vfs_open_handle  *handle,
-    uint64_t                         offset,
-    uint64_t                         length,
-    chimera_vfs_read_plus_callback_t callback,
-    void                            *private_data);
+void
+chimera_vfs_read_plus_view(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint64_t                          length,
+    const struct chimera_vfs_io_view *view,
+    chimera_vfs_read_plus_callback_t  callback,
+    void                             *private_data);
 
 typedef void (*chimera_vfs_write_same_callback_t)(
     enum chimera_vfs_error    error_code,
@@ -1202,8 +1138,8 @@ typedef void (*chimera_vfs_write_same_callback_t)(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data);
 
-SYMBOL_EXPORT void
-chimera_vfs_write_same(
+void
+chimera_vfs_write_same_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
@@ -1216,6 +1152,7 @@ chimera_vfs_write_same(
     uint32_t                          sync,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_write_same_callback_t callback,
     void                             *private_data);
 
@@ -1247,15 +1184,16 @@ typedef void (*chimera_vfs_seek_callback_t)(
     uint64_t               sr_offset,
     void                  *private_data);
 
-SYMBOL_EXPORT void
-chimera_vfs_seek(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        offset,
-    uint32_t                        what,
-    chimera_vfs_seek_callback_t     callback,
-    void                           *private_data);
+void
+chimera_vfs_seek_view(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          what,
+    const struct chimera_vfs_io_view *view,
+    chimera_vfs_seek_callback_t       callback,
+    void                             *private_data);
 
 typedef void (*chimera_vfs_getparent_callback_t)(
     enum chimera_vfs_error error_code,
@@ -1391,6 +1329,7 @@ typedef void (*chimera_vfs_list_streams_callback_t)(
     uint32_t               count,
     uint32_t               eof,
     uint64_t               cookie,
+    uint64_t               verifier,
     void                  *private_data);
 
 SYMBOL_EXPORT void
@@ -1399,6 +1338,7 @@ chimera_vfs_list_streams(
     const struct chimera_vfs_cred      *cred,
     struct chimera_vfs_open_handle     *handle,
     uint64_t                            cookie,
+    uint64_t                            verifier,
     void                               *buffer,
     uint32_t                            max_bytes,
     int                                 want_fh,

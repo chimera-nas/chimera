@@ -12,6 +12,7 @@
 #include "nfs3_drc.h"
 #include "nfs_drc_reply.h"
 #include "nfs_common.h"
+#include "nfs4_reply.h"
 #include "nfs_internal.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
@@ -356,11 +357,12 @@ struct nfs4_v40_drc_capture_ctx {
 
 static void
 nfs4_v40_drc_capture_reply(
-    const struct evpl_iovec *iov,
-    int                      niov,
-    int                      total_length,
-    uint32_t                 body_offset,
-    void                    *private_data)
+    const struct evpl_iovec           *iov,
+    int                                niov,
+    int                                total_length,
+    uint32_t                           body_offset,
+    const struct evpl_rpc2_rdma_chunk *write_chunk,
+    void                              *private_data)
 {
     struct nfs4_v40_drc_capture_ctx *ctx = private_data;
     uint8_t                         *buf;
@@ -380,7 +382,7 @@ nfs4_v40_drc_capture_reply(
         return;  /* OOM: skip caching this reply (degrade to a cache miss) */
     }
 
-    if (nfs_drc_copy_rpc_reply(iov, niov, body_offset, buf, rpc_len) != rpc_len) {
+    if (nfs_drc_copy_rpc_reply(iov, niov, body_offset, write_chunk, buf, rpc_len) != rpc_len) {
         free(buf);
         return;
     }
@@ -414,6 +416,56 @@ nfs4_v40_drc_cancel_capture(struct evpl_rpc2_encoding *encoding)
 *  dispatch                                                          *
 * ------------------------------------------------------------------ */
 
+/* Decode and reserve response space before any handler runs. The decode
+ * scope returns cloned payload references on both partial XDR failures and
+ * post-decode admission failure; the transport retains its Read chunk. */
+static int
+nfs4_decode_dispatch(
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_encoding *encoding,
+    uint32_t                   proc,
+    void                      *program_data,
+    struct evpl_rpc2_cred     *cred,
+    xdr_iovec                 *iov,
+    int                        niov,
+    int                        length,
+    void                      *private_data)
+{
+    struct chimera_server_nfs_thread *thread  = private_data;
+    struct NFS_V4                    *program = program_data;
+    struct COMPOUND4args             *args;
+    struct nfs_request                reservation = { .conn = conn, .encoding = encoding };
+    int                               decoded;
+
+    if (proc != NFS4_PROC_COMPOUND) {
+        return thread->shared->v40_drc.orig_dispatch(evpl, conn, encoding, proc,
+                                                     program_data, cred, iov, niov, length, private_data);
+    }
+    if (!program->recv_call_NFSPROC4_COMPOUND) {
+        return 1;
+    }
+    args = xdr_dbuf_alloc_space(sizeof(*args), encoding->dbuf);
+    if (!args) {
+        return 1;
+    }
+    struct xdr_decode_scope scope;
+    xdr_decode_begin(encoding->dbuf, &scope);
+    decoded = unmarshall_COMPOUND4args(args, iov, niov, encoding->read_chunk, encoding->dbuf);
+    int                     failure = decoded < 0 || decoded != length ? 2 : !chimera_nfs4_reply_fits(&reservation, 0) ?
+        3 : 0;
+    xdr_decode_end(encoding->dbuf, &scope, failure ? -1 : decoded);
+    if (failure) {
+        /* RPC SYSTEM_ERR uses one stack descriptor and a small fixed reply,
+         * including over RDMA: no Write payload or reduced Reply chunk needs
+         * arena views. The generated COMPOUND adapter instead needs 260 arena
+         * descriptors even to report an empty NFS4ERR_RESOURCE result. */
+        return failure;
+    }
+    program->recv_call_NFSPROC4_COMPOUND(evpl, conn, cred, args, encoding, private_data);
+    return 0;
+} /* nfs4_decode_dispatch */
+
 static int
 nfs4_v40_drc_dispatch(
     struct evpl               *evpl,
@@ -444,8 +496,8 @@ nfs4_v40_drc_dispatch(
      * other -- it has to be, or a non-idempotent COMPOUND re-executes there. */
     if (proc != NFS4_PROC_COMPOUND ||
         !nfs4_v40_peek_minorversion(iov, niov, &mv) || mv != 0) {
-        return drc->orig_dispatch(evpl, conn, encoding, proc, program_data,
-                                  cred, iov, niov, length, private_data);
+        return nfs4_decode_dispatch(evpl, conn, encoding, proc, program_data,
+                                    cred, iov, niov, length, private_data);
     }
 
     /* The lookup runs for every 4.0 COMPOUND, read-only ones included, because
@@ -467,11 +519,9 @@ nfs4_v40_drc_dispatch(
         int rc = nfs_drc_send_cached_reply(thread, encoding, cached, cached_len);
 
         free(cached);
-        if (rc == 0) {
-            return 0;
-        }
-        /* Unparseable cached reply (should not happen: only SUCCESS replies are
-         * inserted).  Fall through and re-execute. */
+        /* Delivery failure is an RPC error, never permission to repeat the
+         * mutations represented by a cache hit. */
+        return rc;
     }
 
     /* Miss: arm the capture so this request's reply is cached.  The context is
@@ -488,8 +538,8 @@ nfs4_v40_drc_dispatch(
         encoding->reply_capture_private = cctx;
     }
 
-    return drc->orig_dispatch(evpl, conn, encoding, proc, program_data, cred,
-                              iov, niov, length, private_data);
+    return nfs4_decode_dispatch(evpl, conn, encoding, proc, program_data, cred,
+                                iov, niov, length, private_data);
 } /* nfs4_v40_drc_dispatch */
 
 /* ------------------------------------------------------------------ *

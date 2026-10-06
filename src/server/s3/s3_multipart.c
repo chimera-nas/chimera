@@ -16,7 +16,6 @@
 #include "evpl/evpl_http.h"
 #include "common/format.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
 #include "s3_compound.h"

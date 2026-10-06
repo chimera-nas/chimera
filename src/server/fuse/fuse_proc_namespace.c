@@ -9,6 +9,7 @@
 #endif /* ifdef _WIN32 */
 
 #include "fuse_internal.h"
+#include "common/compound_retry.h"
 #include "fuse_attr.h"
 
 
@@ -70,8 +71,8 @@ chimera_fuse_create_submit(
                                     target, target ? (int) strlen(target) : 0,
                                     set_attr, CHIMERA_FUSE_ATTR_MASK, 0, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_entry_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_entry_sequence_complete, req);
 } /* chimera_fuse_create_submit */
 
 /* --- MKDIR / MKNOD --- */
@@ -255,8 +256,8 @@ chimera_fuse_op_link(
     chimera_vfs_compound_add_link(req->compound, name, (int) strlen(name),
                                   CHIMERA_FUSE_ATTR_MASK, 0, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_link_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_link_sequence_complete, req);
 } /* chimera_fuse_op_link */
 
 /* --- UNLINK / RMDIR --- */
@@ -304,8 +305,8 @@ chimera_fuse_remove_common(struct chimera_fuse_request *req)
     chimera_vfs_compound_add_remove(req->compound, name, (int) strlen(name),
                                     flags, 0, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_status_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_status_sequence_complete, req);
 } /* chimera_fuse_remove_common */
 
 void
@@ -404,6 +405,6 @@ chimera_fuse_op_rename(
                                     newname, (int) strlen(newname),
                                     CHIMERA_VFS_REMOVE_RECALL, 0, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_status_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_status_sequence_complete, req);
 } /* chimera_fuse_op_rename */

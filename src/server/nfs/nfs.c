@@ -455,7 +455,7 @@ nfs_server_init(
                       shared->nfs_grace_time_s,
                       chimera_server_config_get_nfs4_drc(config));
 
-    nlm_state_init(&shared->nlm_state,
+    nlm_state_init(&shared->nlm_state, shared->vfs,
                    chimera_server_config_get_state_dir(config));
 
     nsm_state_init(&shared->nsm_state, shared->vfs);
@@ -664,6 +664,7 @@ nfs_server_stop(void *arg)
                                     chimera_server_config_get_nfs_nsm_port(shared->config));
     }
 
+    nlm_state_shutdown(&shared->nlm_state);
 } /* nfs_server_stop */
 
 static void
@@ -865,6 +866,9 @@ chimera_nfs_server_notify(
              * rpc2 layer frees the connection, so the pointer this cache keys on
              * cannot be recycled while its entries still exist. */
             nfs4_v40_drc_conn_close(&shared->v40_drc, conn);
+            if (thread->nlm_active) {
+                nlm_state_disconnect(&shared->nlm_state, conn);
+            }
 
             priv = evpl_rpc2_conn_get_private_data(conn);
             if (!priv) {
@@ -994,7 +998,6 @@ nfs_server_thread_destroy(void *data)
     }
 
     nfs4_cb_thread_destroy(thread);
-    chimera_nfs_nlm4_thread_destroy(thread);
 
     if (thread->shared->mount_server) {
         evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->mount_server);
@@ -1009,6 +1012,8 @@ nfs_server_thread_destroy(void *data)
     if (thread->shared->portmap_server) {
         evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->portmap_server);
     }
+
+    chimera_nfs_nlm4_thread_destroy(thread);
 
     /* Drain all in-flight NFS requests before destroying RPC2 thread.
      * This prevents use-after-free when request callbacks try to free

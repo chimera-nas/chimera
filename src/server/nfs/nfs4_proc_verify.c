@@ -9,7 +9,6 @@
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "server/server.h"
-#include "vfs/vfs_compound.h"
 
 /* RFC 7530 §16.31 (VERIFY) and §16.14 (NVERIFY).
  *
@@ -47,48 +46,6 @@ verify_args_fattr4(struct nfs_request *req)
     return &argop->opverify.obj_attributes;
 } /* verify_args_fattr4 */
 
-static bool
-verify_is_nverify(struct nfs_request *req)
-{
-    return req->args_compound->argarray[req->index].argop == OP_NVERIFY;
-} /* verify_is_nverify */
-
-/* PUTFH, OPEN_CURRENT, GETATTR: the stat is op 2 of the run. */
-#define NFS4_VERIFY_OP_GETATTR 2
-
-static void
-chimera_nfs4_verify_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct nfs_request                   *req = private_data;
-    /* VERIFY4res and NVERIFY4res are layout-identical (status only). */
-    struct VERIFY4res                    *res = &req->res_compound.resarray[req->index].opverify;
-    const struct chimera_vfs_compound_op *gop;
-    enum chimera_vfs_error                error_code;
-    nfsstat4                              status;
-
-    error_code = chimera_vfs_compound_status(compound);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_compound_free(compound);
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    /* The comparison marshals an ACL the compound owns, so it happens before
-     * the free. */
-    gop    = chimera_vfs_compound_op(compound, NFS4_VERIFY_OP_GETATTR);
-    status = chimera_nfs4_verify_status(req, req->index, &gop->attr,
-                                        req->fh, req->fhlen);
-
-    chimera_vfs_compound_free(compound);
-
-    res->status = status;
-    chimera_nfs4_compound_complete(req, status);
-} /* chimera_nfs4_verify_complete */
-
 /*
  * Does the object's current state match the attributes the client sent?
  *
@@ -103,6 +60,7 @@ chimera_nfs4_verify_complete(
 SYMBOL_EXPORT nfsstat4
 chimera_nfs4_verify_status(
     struct nfs_request             *req,
+    uint16_t                        export_id,
     uint32_t                        index,
     const struct chimera_vfs_attrs *attr,
     const uint8_t                  *fh,
@@ -131,8 +89,7 @@ chimera_nfs4_verify_status(
 
     /* ACL attributes are variable sized. A fixed comparison buffer can cause
     * the marshaller to omit a valid stored ACL and incorrectly report a
-    * mismatch. Match GETATTR's allocation policy, using the owned snapshot
-    * in a compound and the live callback-scoped ACL on the legacy path.
+    * mismatch. Match GETATTR's allocation policy using the owned snapshot.
     * This scratch buffer never consumes reply-arena space across retries. */
     if (args->num_attrmask && (args->attrmask[0] & (1U << FATTR4_ACL))) {
         if (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
@@ -183,7 +140,7 @@ chimera_nfs4_verify_status(
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
                                 req->thread->shared->nfs_lease_time_s,
-                                req->export_id,
+                                export_id,
                                 req->thread->shared->fh_key,
                                 req->thread->shared->fh_sign,
                                 0);
@@ -267,9 +224,8 @@ chimera_nfs4_verify_dispatch(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req)
 {
-    struct VERIFY4res           *res  = &req->res_compound.resarray[req->index].opverify;
-    struct fattr4               *args = verify_args_fattr4(req);
-    struct chimera_vfs_compound *compound;
+    struct VERIFY4res *res  = &req->res_compound.resarray[req->index].opverify;
+    struct fattr4     *args = verify_args_fattr4(req);
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -283,19 +239,7 @@ chimera_nfs4_verify_dispatch(
         return;
     }
 
-    /* A PATH open: the whole operation is a stat and a comparison. */
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putfh(compound, req->fh, req->fhlen);
-    chimera_vfs_compound_add_open_current(compound,
-                                          CHIMERA_VFS_OPEN_INFERRED |
-                                          CHIMERA_VFS_OPEN_PATH, 0);
-    chimera_vfs_compound_add_getattr(compound,
-                                     chimera_nfs4_attr2mask(
-                                         args->attrmask,
-                                         args->num_attrmask));
-
-    chimera_vfs_compound_submit(compound, chimera_nfs4_verify_complete, req);
+    chimera_nfs4_compound_single(thread, req);
 } /* chimera_nfs4_verify_dispatch */
 
 void

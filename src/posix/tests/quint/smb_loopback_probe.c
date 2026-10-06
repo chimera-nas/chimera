@@ -414,6 +414,22 @@ probe_pin_symlink(void)
         probe_fail("readlink", "did not return the target 'w'");
     }
     json_decref(res);
+    /* Replacing a namespace entry must move the link itself, preserving its
+     * identity and target rather than trying to follow the target directory. */
+    probe_ok("symlink replacement destination", op_mkdir("/test/rename-symlinks", 0755));
+    res = probe_req("symlink");
+    probe_set_str(res, "path", "/test/rename-symlinks/dst");
+    probe_set_str(res, "target", "missing");
+    probe_ok("symlink replacement target", probe_call(res));
+    probe_ok("rename symlink over symlink",
+             op_two_path("rename", "/test/sym", "/test/rename-symlinks/dst"));
+    probe_ok("rename symlink back",
+             op_two_path("rename", "/test/rename-symlinks/dst", "/test/sym"));
+    probe_touch("/test/rename-symlinks/dst");
+    probe_ok("rename symlink over regular file",
+             op_two_path("rename", "/test/sym", "/test/rename-symlinks/dst"));
+    probe_ok("rename symlink back from regular replacement",
+             op_two_path("rename", "/test/rename-symlinks/dst", "/test/sym"));
 } /* probe_pin_symlink */
 
 /* SD4 (FIXED): the proxy reports real POSIX owner/mode/nlink.  A create stamps

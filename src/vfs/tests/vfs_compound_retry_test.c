@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
 #undef NDEBUG
 #include <assert.h>
 
@@ -113,6 +114,52 @@ compound_cb(
     ctx->callbacks++;
     ctx->done = 1;
 } /* compound_cb */
+
+struct drain_test {
+    struct test_ctx             *ctx;
+    struct chimera_vfs_compound *compound;
+    struct evpl_timer            timer;
+    unsigned                     finishes, callbacks;
+};
+
+static void
+drain_finish_timer(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct drain_test *test = (struct drain_test *) ((char *) timer - offsetof(struct drain_test, timer));
+
+    chimera_vfs_compound_finish_result(test->compound,
+                                       test->finishes == 1 ? CHIMERA_VFS_EAGAIN : CHIMERA_VFS_OK);
+} /* drain_finish_timer */
+
+static void
+drain_finish(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct drain_test *test = private_data;
+
+    test->finishes++;
+    evpl_add_oneshot_timer(test->ctx->evpl, &test->timer, drain_finish_timer, 1000);
+} /* drain_finish */
+
+static void
+drain_complete(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
+{
+    struct drain_test *test = private_data;
+
+    test->callbacks++;
+    if (chimera_vfs_compound_finish_status(compound) == CHIMERA_VFS_EAGAIN) {
+        assert(chimera_vfs_compound_retry(compound));
+        return;
+    }
+    assert(chimera_vfs_compound_status(compound) == CHIMERA_VFS_OK);
+    chimera_vfs_compound_free(compound);
+    test->compound = NULL;
+} /* drain_complete */
 
 static const uint8_t compound_key[]   = { 0, 'k', 255 };
 static const uint8_t compound_value[] = { 11, 0, 22 };
@@ -1808,6 +1855,17 @@ main(
         assert(op->niov >= 1);
         assert(memcmp(evpl_iovec_data(&op->iov[0]), payload, 8) == 0);
 
+        /* Each resubmission replaces the owned READ references while leaving
+         * the borrowed WRITE payload and input handle usable. */
+        for (int run = 0; run < 3; run++) {
+            chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+            wait_done(&ctx);
+            assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+            op = chimera_vfs_compound_op(cp, i_rd);
+            assert(op->read_len == 8 && op->niov >= 1);
+            assert(memcmp(evpl_iovec_data(&op->iov[0]), payload, 8) == 0);
+        }
+        assert(ctx.callbacks == 4);
         chimera_vfs_compound_free(cp);
 
         /* Borrowed: the compound did not release the payload, so it is still
@@ -1945,6 +2003,11 @@ main(
         wait_done(&ctx);
         assert(d.prepares == 2 && d.resets == 2);
         assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EACCES);
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(d.prepares == 3 && d.resets == 3);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EACCES);
+        assert(chimera_vfs_compound_op(cp, later)->status == CHIMERA_VFS_UNSET);
         chimera_vfs_compound_free(cp);
         TEST_PASS("prepare veto precedes mutation and retry restores bindings");
     }
@@ -1969,6 +2032,12 @@ main(
         assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
         assert(chimera_vfs_compound_num_completed(cp) == 102);
         assert(d.prepares == 2 && d.completes == 2 && d.resets == 2);
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+        assert(chimera_vfs_compound_num_ops(cp) == 102);
+        assert(chimera_vfs_compound_num_completed(cp) == 102);
+        assert(d.prepares == 3 && d.completes == 3 && d.resets == 3);
         chimera_vfs_compound_free(cp);
         TEST_PASS("skip and dynamically appended suffix survive retry without duplication");
     }
@@ -2079,6 +2148,57 @@ main(
             chimera_vfs_claim_release(ctx.vfs->vfs_state, taken_file, &narrow);
             chimera_vfs_state_put(ctx.vfs->vfs_state, taken_file);
             TEST_PASS("borrowed-handle reserve retries without reopening or changing public claims");
+        }
+        /* Anonymous mutation admission must see an attempt-private close,
+        * while keeping unrelated denies and later unscoped requests intact.
+        * WRITE_SAME tests the native path here; frontend tests also exercise
+        * sparse operations following a protocol CLOSE in the same run. */
+        {
+            struct chimera_vfs_claim        peer;
+            const struct chimera_vfs_claim *excluded[] = { &held };
+            const char                      pattern    = 'v';
+
+            chimera_vfs_claim_init_nfs4_open(&peer, CHIMERA_CLAIM_R,
+                                             CHIMERA_CLAIM_W, &second_owner);
+            assert(chimera_vfs_claim_try_acquire(ctx.vfs->vfs_state, file,
+                                                 &peer, NULL) == CHIMERA_CLAIM_GRANTED);
+            for (int phase = 0; phase < 4; phase++) {
+                if (phase == 2) {
+                    chimera_vfs_claim_release(ctx.vfs->vfs_state, file, &peer);
+                }
+                for (int kind = 0; kind < 4; kind++) {
+                    int mutation;
+                    cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+                    if (kind == 0) {
+                        memset(&attrs, 0, sizeof(attrs));
+                        attrs.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+                        attrs.va_size     = 4096;
+                        mutation          = chimera_vfs_compound_add_setattr(cp, handle,
+                                                                             &attrs, 0, 0);
+                    } else if (kind < 3) {
+                        mutation = chimera_vfs_compound_add_allocate(cp, handle,
+                                                                     0, 4096, kind == 2 ?
+                                                                     CHIMERA_VFS_ALLOCATE_DEALLOCATE : 0,
+                                                                     0, 0);
+                    } else {
+                        mutation = chimera_vfs_compound_add_write_same(cp, handle,
+                                                                       0, 4096, 1, &pattern, 1, 0, 0, 0, 0);
+                    }
+                    assert(mutation >= 0);
+                    if (phase == 1 || phase == 2) {
+                        struct chimera_vfs_compound_op *op = chimera_vfs_compound_op_args(cp, mutation);
+                        op->io_view.excluded     = excluded;
+                        op->io_view.num_excluded = 1;
+                    }
+                    chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+                    wait_done(&ctx);
+                    assert(chimera_vfs_compound_status(cp) ==
+                           (phase == 2 ? CHIMERA_VFS_OK : CHIMERA_VFS_EACCES));
+                    assert(held.file == file && held.denied == CHIMERA_CLAIM_W);
+                    chimera_vfs_compound_free(cp);
+                }
+            }
+            TEST_PASS("size and sparse mutations honor private exclusions without bypassing peer denies");
         }
         chimera_vfs_claim_release(ctx.vfs->vfs_state, file, &held);
         {
@@ -2285,6 +2405,13 @@ main(
         wait_done(&ctx);
         assert(test.finishes == 2 && test.callbacks == 2 && test.publications == 1);
         assert(!chimera_vfs_compound_retry(cp)); /* accepted handle is already public */
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.callbacks == 1);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_finish_status(cp) == CHIMERA_VFS_OK);
+        assert(test.finishes == 2); /* refusal does not republish acceptance */
         chimera_vfs_compound_free(cp);
 
         /* A borrowed CLOSE cannot consume this accepted reference when its
@@ -2299,6 +2426,13 @@ main(
         chimera_vfs_compound_submit(cp, finish_retry_complete, &close);
         wait_done(&ctx);
         assert(close.finishes == 2 && close.publications == 1);
+        assert(!chimera_vfs_compound_retry(cp));
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_finish_status(cp) == CHIMERA_VFS_OK);
+        assert(close.finishes == 2);
+        /* Accepted CLOSE still owns exactly one release during teardown. */
         chimera_vfs_compound_free(cp);
         TEST_PASS("finish EAGAIN preserves handles and borrowed CLOSE until acceptance");
     }
@@ -2411,7 +2545,7 @@ main(
         struct finish_test       retry = { .ctx = &ctx, .handle_index = -1 };
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, a_fh, a_fh_len);
-        int                      listed = chimera_vfs_compound_add_list_streams(cp, 0, 4096, true);
+        int                      listed = chimera_vfs_compound_add_list_streams(cp, 0, 0, 4096, true);
         stream = chimera_vfs_compound_add_open_stream(cp, "compound-stream", 15,
                                                       CHIMERA_VFS_OPEN_INFERRED, NULL, CHIMERA_VFS_ATTR_SIZE);
         int                      kept = chimera_vfs_compound_add_gethandle(cp);
@@ -2501,6 +2635,23 @@ main(
     assert(chimera_vfs_compound_num_completed(cp) == 0);
     chimera_vfs_compound_free(cp);
     TEST_PASS("an empty sequence completes with one callback");
+
+    /* No backend requests keep this thread alive: both attempts are parked
+     * solely on finish. Drain must service the timer, the retry scheduled by
+     * its callback, and final completion freeing the compound. */
+    {
+        struct drain_test test = { .ctx = &ctx };
+        assert(!ctx.vfs_thread->num_active_compounds);
+        test.compound = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_set_finish_handler(test.compound, drain_finish, &test);
+        chimera_vfs_compound_submit(test.compound, drain_complete, &test);
+        assert(!ctx.vfs_thread->num_active_requests);
+        assert(!test.callbacks);
+        chimera_vfs_thread_drain(ctx.vfs_thread);
+        assert(test.finishes == 2 && test.callbacks == 2 && !test.compound);
+        assert(!ctx.vfs_thread->num_active_compounds);
+        TEST_PASS("thread drain includes pending compound finish, inline retry and callback teardown");
+    }
 
     chimera_vfs_umount(ctx.vfs_thread, &cred, "/mem", mount_cb, &ctx);
     wait_done(&ctx);

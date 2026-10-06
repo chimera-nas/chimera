@@ -919,6 +919,32 @@ probe_dir_stream(struct smb2_conn *c)
           "%llu, dir %u)", st, (unsigned long long) g64(out, 8), out[21]);
     smb2_close(c, s1.file_id);
 } /* probe_dir_stream */
+/* Paged VFS enumeration must not turn an oversized SMB query into a silently
+ * successful prefix: FILE_STREAM_INFORMATION has no continuation cookie. */
+static void
+probe_stream_list_overflow(struct smb2_conn *c)
+{
+    struct smb2_create_out base, stream;
+    char                   name[128];
+    uint8_t                out[16384];
+    uint32_t               length = 0;
+
+    assert(smb2_create(c, "stream-list-overflow", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                       MBT_FILE_SHARE_RWD, NULL, &base) == ST_SUCCESS);
+    for (unsigned i = 0; i < 80; i++) {
+        snprintf(name, sizeof(name), "stream-list-overflow:%03u-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz",
+                 i);
+        assert(smb2_create(c, name, MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                           MBT_FILE_SHARE_RWD, NULL, &stream) == ST_SUCCESS);
+        assert(smb2_close(c, stream.file_id) == ST_SUCCESS);
+    }
+    uint32_t status = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_STREAM_INFO_T,
+                                      base.file_id, 0, out, sizeof(out), &length);
+    assert(status != ST_SUCCESS);
+    assert(smb2_set_disposition(c, base.file_id, 1) == ST_SUCCESS);
+    assert(smb2_close(c, base.file_id) == ST_SUCCESS);
+    printf("ok   - partial VFS stream page is not reported as a complete SMB list\n");
+} /* probe_stream_list_overflow */
 
 int
 main(
@@ -945,6 +971,7 @@ main(
     probe_stream_lifecycle(c);
     probe_stream_rename(c);
     probe_dir_stream(c);
+    probe_stream_list_overflow(c);
     probe_stream_last_close(c);
     probe_checked_stream_delete(c);
     probe_stream_compound_close(c);

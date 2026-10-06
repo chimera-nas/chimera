@@ -314,8 +314,10 @@ struct chimera_fuse_channel {
 /* One per kernel OPEN/OPENDIR/CREATE; fuse_open_out.fh carries its pointer.
 * The VFS handle is captured into the request at dispatch time, so nothing
 * but OPEN/RELEASE and the shutdown sweep touches this struct afterwards. */
+/* OPENDIR owns a backend reference until RELEASEDIR, including after rmdir.
+ * A path-cache entry can be inferred and hold no backend reference. */
 #define CHIMERA_FUSE_OPENDIR_FLAGS \
-        (CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)
+        (CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_DIRECTORY)
 struct chimera_fuse_open_file {
     unsigned int                    open_flags;
     struct chimera_vfs_open_handle *handle;

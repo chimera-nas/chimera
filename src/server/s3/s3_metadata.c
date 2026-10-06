@@ -16,7 +16,6 @@
 #include <ctype.h>
 
 #include "vfs/vfs.h"
-#include "vfs/vfs_internal_procs.h"
 #include "s3_internal.h"
 #include "s3_metadata.h"
 #include "s3_tagging.h"

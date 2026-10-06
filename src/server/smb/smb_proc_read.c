@@ -4,6 +4,7 @@
 
 #include "common/evpl_iovec_cursor.h"
 #include "smb_internal.h"
+#include "common/compound_retry.h"
 #include "smb_async_interim.h"
 #include "smb_procs.h"
 #include "smb_session.h"
@@ -452,8 +453,8 @@ chimera_smb_read(struct chimera_smb_request *request)
                                   0,
                                   &io_owner, NULL, 0);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_read_sequence_complete, request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_read_sequence_complete, request);
 } /* chimera_smb_read */
 
 

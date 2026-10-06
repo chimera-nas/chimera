@@ -25,6 +25,7 @@
 #endif /* ifdef _WIN32 */
 
 #include "fuse_internal.h"
+#include "common/compound_retry.h"
 #include "vfs/sdk/vfs_attrs.h"
 
 /*
@@ -97,7 +98,7 @@ chimera_fuse_resolve_root(
                                          CHIMERA_VFS_ATTR_FH,
                                          CHIMERA_VFS_LOOKUP_FOLLOW);
 
-    chimera_vfs_compound_submit(compound, chimera_fuse_resolve_complete, &ctx);
+    chimera_frontend_compound_submit(compound, chimera_fuse_resolve_complete, &ctx);
 
     while (!ctx.done) {
         evpl_continue(evpl);

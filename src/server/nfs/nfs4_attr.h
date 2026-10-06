@@ -459,6 +459,38 @@ chimera_nfs4_attr_append_acl(
     }
 } /* chimera_nfs4_attr_append_acl */
 
+static inline uint32_t
+chimera_nfs4_attr_capacity(
+    uint32_t        num_req_mask,
+    const uint32_t *req_mask,
+    uint32_t        acl_capacity)
+{
+    uint32_t capacity = 0;
+
+    /* Every fixed attribute is at most 40 bytes (OPEN_ARGUMENTS), except
+     * the wrapped filehandle. The marshaller bounds ACLs separately, but
+     * its limit does not bound fixed attributes following the ACL. */
+    for (uint32_t i = 0; i < num_req_mask && i < 3; i++) {
+        uint32_t bits = req_mask[i];
+        if (i == 0) {
+            bits &= ~(1U << FATTR4_ACL);
+        }
+        while (bits) {
+            capacity += 40;
+            bits     &= bits - 1;
+        }
+    }
+    if (num_req_mask) {
+        if (req_mask[0] & (1U << FATTR4_FILEHANDLE)) {
+            capacity += ((CHIMERA_NFS_FH_MAX + 7) & ~3U) - 40;
+        }
+        if (req_mask[0] & (1U << FATTR4_ACL)) {
+            capacity += acl_capacity;
+        }
+    }
+    return capacity < 256 ? 256 : capacity;
+} /* chimera_nfs4_attr_capacity */
+
 static int
 chimera_nfs4_marshall_attrs(
     const struct chimera_vfs_attrs *attr,

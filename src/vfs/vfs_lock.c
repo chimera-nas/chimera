@@ -13,10 +13,12 @@
 #include "sdk/vfs_log.h"
 #include "vfs_internal_procs.h"
 #include "common/macros.h"
+#include "common/range.h"
 
 struct lock_range {
     struct lock_range       *next;
     struct chimera_vfs_claim claim;
+    uint64_t                 sequence; /* accepted acquisition order, inherited by fragments */
 };
 
 struct lock_owner_file {
@@ -38,6 +40,7 @@ struct chimera_vfs_lock_domain {
     struct lock_owner_file          *owners;
     struct chimera_vfs_lock_attempt *attempts;
     bool                             shutdown;
+    uint64_t                         sequence;
 };
 
 enum lock_phase { LOCK_NEW, LOCK_STARTING, LOCK_ACQUIRING, LOCK_ADMITTED,
@@ -54,6 +57,7 @@ struct chimera_vfs_lock_attempt {
     struct chimera_vfs_pending_acquire ticket;
     struct chimera_vfs_claim_conflict  conflict;
     uint32_t                           pid;
+    uint64_t                           admission_sequence;
     struct lock_range                 *replacement;
     struct chimera_vfs_claim         **previous, **published;
     uint32_t                           nprevious, npublished;
@@ -164,6 +168,38 @@ chimera_vfs_lock_domain_admit(
     return generation;
 } /* chimera_vfs_lock_domain_admit */
 
+SYMBOL_EXPORT uint64_t
+chimera_vfs_lock_domain_admit_fh(
+    struct chimera_vfs_lock_domain   *domain,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    const struct chimera_claim_owner *owner)
+{
+    struct chimera_vfs_open_handle identity = { 0 };
+
+    if (!fh || !fh_len || fh_len > sizeof(identity.fh)) {
+        return 0;
+    }
+    memcpy(identity.fh, fh, fh_len);
+    identity.fh_len  = fh_len;
+    identity.fh_hash = chimera_vfs_hash(fh, fh_len);
+    return chimera_vfs_lock_domain_admit(domain, &identity, owner);
+} /* chimera_vfs_lock_domain_admit_fh */
+
+SYMBOL_EXPORT bool
+chimera_vfs_lock_domain_has_locks(
+    struct chimera_vfs_lock_domain   *domain,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    const struct chimera_claim_owner *owner)
+{
+    evpl_mutex_lock(&domain->lock);
+    struct lock_owner_file *b    = lock_find(domain, fh, fh_len, owner);
+    bool                    held = b && b->ranges;
+    evpl_mutex_unlock(&domain->lock);
+    return held;
+} /* chimera_vfs_lock_domain_has_locks */
+
 static void
 lock_ranges_free(struct lock_range *ranges)
 {
@@ -179,7 +215,7 @@ lock_ranges_free(struct lock_range *ranges)
  * alive until its worker doorbell has been rung. Local-only ticket cancel
  * cannot invoke a completion callback inline. */
 static void
-lock_retire_locked(
+lock_cutoff_locked(
     struct chimera_vfs_lock_domain *domain,
     struct lock_owner_file         *b)
 {
@@ -209,6 +245,20 @@ lock_retire_locked(
             evpl_ring_doorbell(&a->bell);
         }
     }
+    /* A finish-pending local attempt must not prevent close/new admissions.
+     * Its acceptance checks generation before touching its old snapshot. */
+    if (b->busy && b->busy->phase != LOCK_BACKEND) {
+        b->busy = NULL;
+    }
+    lock_wake(domain, b);
+} /* lock_cutoff_locked */
+
+static void
+lock_retire_locked(
+    struct chimera_vfs_lock_domain *domain,
+    struct lock_owner_file         *b)
+{
+    lock_cutoff_locked(domain, b);
     struct lock_range *ranges = b->ranges;
     b->ranges = NULL;
     while (ranges) {
@@ -218,12 +268,6 @@ lock_retire_locked(
         free(ranges);
         ranges = next;
     }
-    /* A finish-pending local attempt must not prevent close/new admissions.
-     * Its acceptance checks generation before touching its old snapshot. */
-    if (b->busy && b->busy->phase != LOCK_BACKEND) {
-        b->busy = NULL;
-    }
-    lock_wake(domain, b);
 } /* lock_retire_locked */
 
 SYMBOL_EXPORT void
@@ -250,24 +294,61 @@ chimera_vfs_lock_domain_retire(
     }
 } /* chimera_vfs_lock_domain_retire */
 
-SYMBOL_EXPORT void
-chimera_vfs_lock_domain_shutdown(
-    struct chimera_vfs_thread      *thread,
-    struct chimera_vfs_lock_domain *domain)
+static void
+lock_domain_retire_all(
+    struct chimera_vfs_lock_domain *domain,
+    bool                            shutdown)
 {
-    (void) thread;
     if (!domain) {
         return;
     }
     evpl_mutex_lock(&domain->lock);
+    struct lock_owner_file *cutoff = domain->owners;
     if (!domain->shutdown) {
-        domain->shutdown = true;
-        for (struct lock_owner_file *b = domain->owners; b; b = b->next) {
-            lock_retire_locked(domain, b);
+        domain->shutdown = shutdown;
+        for (struct lock_owner_file *b = cutoff; b; b = b->next) {
+            lock_cutoff_locked(domain, b);
+            /* Hold new-epoch edits until every old range has drained. */
+            b->retiring++;
+        }
+        /* Preserve acquisition order across files/owners. Dropping all ranges
+         * before pumping can let a wide queued waiter displace an older
+         * partial grant. Fragments inherit their original acquisition order. */
+        for (;;) {
+            struct lock_owner_file *owner  = NULL;
+            struct lock_range     **oldest = NULL;
+            for (struct lock_owner_file *b = cutoff; b; b = b->next) {
+                for (struct lock_range **r = &b->ranges; *r; r = &(*r)->next) {
+                    if (!oldest || (*r)->sequence < (*oldest)->sequence ||
+                        ((*r)->sequence == (*oldest)->sequence && (*r)->claim.offset < (*oldest)->claim.offset)) {
+                        oldest = r;
+                        owner  = b;
+                    }
+                }
+            }
+            if (!oldest) {
+                break;
+            }
+            struct lock_range             *range = *oldest;
+            *oldest = range->next;
+            struct chimera_vfs_claim      *claim = &range->claim;
+            chimera_vfs_claim_range_retire(owner->file, &claim, 1);
+            struct chimera_vfs_file_state *file = chimera_vfs_state_get(
+                domain->vfs->vfs_state, owner->fh, owner->fh_len, owner->hash, false);
+            free(range);
+            evpl_mutex_unlock(&domain->lock);
+            chimera_vfs_claim_replacement_complete(file);
+            chimera_vfs_state_put(domain->vfs->vfs_state, file);
+            evpl_mutex_lock(&domain->lock);
+        }
+        for (struct lock_owner_file *b = cutoff; b; b = b->next) {
+            b->retiring--;
+            lock_wake(domain, b);
         }
     }
+    struct lock_owner_file *owners = domain->owners;
     evpl_mutex_unlock(&domain->lock);
-    for (struct lock_owner_file *b = domain->owners; b; b = b->next) {
+    for (struct lock_owner_file *b = owners; b; b = b->next) {
         evpl_mutex_lock(&domain->lock);
         struct chimera_vfs_file_state *file = b->file ?
             chimera_vfs_state_get(domain->vfs->vfs_state, b->fh, b->fh_len, b->hash, false) : NULL;
@@ -277,6 +358,21 @@ chimera_vfs_lock_domain_shutdown(
             chimera_vfs_state_put(domain->vfs->vfs_state, file);
         }
     }
+} /* lock_domain_retire_all */
+
+SYMBOL_EXPORT void
+chimera_vfs_lock_domain_retire_all(struct chimera_vfs_lock_domain *domain)
+{
+    lock_domain_retire_all(domain, false);
+} /* chimera_vfs_lock_domain_retire_all */
+
+SYMBOL_EXPORT void
+chimera_vfs_lock_domain_shutdown(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_lock_domain *domain)
+{
+    (void) thread;
+    lock_domain_retire_all(domain, true);
 } /* chimera_vfs_lock_domain_shutdown */
 
 SYMBOL_EXPORT void
@@ -351,6 +447,38 @@ chimera_vfs_lock_attempt_alloc(
     return a;
 } /* chimera_vfs_lock_attempt_alloc */
 
+struct chimera_vfs_lock_attempt *
+chimera_vfs_lock_attempt_alloc_fh(
+    struct chimera_vfs_thread             *thread,
+    struct chimera_vfs_lock_domain        *domain,
+    const uint8_t                         *fh,
+    uint32_t                               fh_len,
+    const struct chimera_vfs_lock_request *request)
+{
+    struct chimera_vfs_open_handle   identity = { 0 };
+
+    if (!fh || !fh_len || fh_len > sizeof(identity.fh) || !request || request->project_backend) {
+        return NULL;
+    }
+    memcpy(identity.fh, fh, fh_len);
+    identity.fh_len = fh_len;
+    struct chimera_vfs_lock_attempt *a = chimera_vfs_lock_attempt_alloc(
+        thread, domain, &identity, request, false, false);
+    if (a) {
+        a->handle = NULL; /* Local admission never dispatches backend locks. */
+    }
+    return a;
+} /* chimera_vfs_lock_attempt_alloc_fh */
+
+bool
+chimera_vfs_lock_attempt_matches_fh(
+    struct chimera_vfs_lock_attempt *a,
+    const uint8_t                   *fh,
+    uint32_t                         fh_len)
+{
+    return a->bucket && fh_len == a->bucket->fh_len && !memcmp(fh, a->bucket->fh, fh_len);
+} /* chimera_vfs_lock_attempt_matches_fh */
+
 static void
 lock_journal_clear(struct chimera_vfs_lock_attempt *a)
 {
@@ -367,7 +495,8 @@ lock_add_piece(
     struct chimera_vfs_lock_attempt *a,
     uint64_t                         offset,
     uint64_t                         length,
-    bool                             exclusive)
+    bool                             exclusive,
+    uint64_t                         sequence)
 {
     struct lock_range *piece = calloc(1, sizeof(*piece));
 
@@ -376,6 +505,7 @@ lock_add_piece(
     }
     chimera_vfs_claim_init_range(&piece->claim, exclusive, false, offset, length, &a->request.owner);
     piece->claim.local_only       = 1;
+    piece->sequence               = sequence;
     piece->next                   = a->replacement;
     a->replacement                = piece;
     a->published[a->npublished++] = &piece->claim;
@@ -400,22 +530,27 @@ lock_journal_build(struct chimera_vfs_lock_attempt *a)
         lock_journal_clear(a);
         return false;
     }
-    uint64_t start = a->request.offset;
-    uint64_t end   = a->request.length == UINT64_MAX ? UINT64_MAX : start + a->request.length;
+    uint64_t                      start = a->request.offset;
+    struct chimera_range_endpoint end   = a->request.length == UINT64_MAX ?
+        chimera_range_eof() : chimera_range_end(start, a->request.length);
     for (struct lock_range *r = b->ranges; r; r = r->next) {
-        struct chimera_vfs_claim *c         = &r->claim;
-        uint64_t                  stop      = c->length == UINT64_MAX ? UINT64_MAX : c->offset + c->length;
-        bool                      exclusive = !!(c->used & CHIMERA_CLAIM_LW);
+        struct chimera_vfs_claim     *c    = &r->claim;
+        struct chimera_range_endpoint stop = c->length == UINT64_MAX ?
+            chimera_range_eof() : chimera_range_end(c->offset, c->length);
+        bool                          exclusive = !!(c->used & CHIMERA_CLAIM_LW);
         a->previous[a->nprevious++] = c;
-        if (stop <= start || c->offset >= end) {
-            if (!lock_add_piece(a, c->offset, c->length, exclusive)) {
+        if (chimera_range_compare(stop, chimera_range_offset(start)) <= 0 ||
+            (!end.carry && c->offset >= end.value)) {
+            if (!lock_add_piece(a, c->offset, c->length, exclusive, r->sequence)) {
                 goto failed;
             }
         } else {
-            if (c->offset < start && !lock_add_piece(a, c->offset, start - c->offset, exclusive)) {
+            if (c->offset < start && !lock_add_piece(a, c->offset, start - c->offset, exclusive, r->sequence)) {
                 goto failed;
             }
-            if (stop > end && !lock_add_piece(a, end, stop == UINT64_MAX ? UINT64_MAX : stop - end, exclusive)) {
+            if (chimera_range_compare(stop, end) > 0 &&
+                !lock_add_piece(a, end.value, stop.carry ? UINT64_MAX : stop.value - end.value, exclusive, r->sequence))
+            {
                 goto failed;
             }
         }
@@ -424,7 +559,7 @@ lock_journal_build(struct chimera_vfs_lock_attempt *a)
         a->previous[a->nprevious++] = &a->reservation;
     }
     if (a->request.type != CHIMERA_VFS_LOCK_UNLOCK &&
-        !lock_add_piece(a, start, a->request.length, a->request.type == CHIMERA_VFS_LOCK_WRITE)) {
+        !lock_add_piece(a, start, a->request.length, a->request.type == CHIMERA_VFS_LOCK_WRITE, 0)) {
         goto failed;
     }
     return true;
@@ -469,6 +604,9 @@ lock_acquired(
     (void) granted;
     evpl_mutex_lock(&a->domain->lock);
     a->acquire_result = result;
+    if (result == CHIMERA_CLAIM_GRANTED) {
+        a->admission_sequence = ++a->domain->sequence;
+    }
     if (conflict) {
         a->conflict = *conflict;
     }
@@ -566,6 +704,16 @@ lock_backend_dispatch(void *private_data)
 } /* lock_backend_dispatch */
 
 static void
+lock_blocked(void *private_data)
+{
+    struct chimera_vfs_lock_attempt *a = private_data;
+
+    if (a->request.on_wait) {
+        a->request.on_wait(a->request.wait_private);
+    }
+} /* lock_blocked */
+
+static void
 lock_resume(
     struct evpl          *evpl,
     struct evpl_doorbell *bell)
@@ -661,12 +809,27 @@ lock_resume(
             a->phase                   = LOCK_STARTING;
             evpl_mutex_unlock(&d->lock);
             chimera_vfs_claim_acquire(a->thread, d->vfs->vfs_state, b->file,
-                                      &a->reservation, &a->ticket, true, a->request.wait, lock_acquired, NULL, a);
+                                      &a->reservation, &a->ticket, !a->request.fail_on_recall, a->request.wait,
+                                      lock_acquired, lock_blocked, a);
             /* A release may race the arbiter's initial try/enqueue window. */
             chimera_vfs_claim_pump_pending(d->vfs->vfs_state, b->file);
             evpl_mutex_lock(&d->lock);
             a->phase = LOCK_ACQUIRING;
             evpl_ring_doorbell(&a->bell);
+            evpl_mutex_unlock(&d->lock);
+            return;
+        }
+    }
+    if (!a->admission_sequence) {
+        a->admission_sequence = ++d->sequence;
+    }
+    /* Arbiter callbacks can queue several same-owner grants before any home
+    * worker runs. Preserve their admission order when applying overlapping
+    * replacements, including a later UNLOCK. Doorbell order is not FIFO. */
+    for (struct chimera_vfs_lock_attempt *prior = d->attempts; prior; prior = prior->next) {
+        if (prior != a && prior->bucket == b && !prior->projected && !prior->finalized && !prior->canceled &&
+            !prior->callback_done && prior->admission_sequence &&
+            prior->admission_sequence < a->admission_sequence) {
             evpl_mutex_unlock(&d->lock);
             return;
         }
@@ -768,6 +931,11 @@ chimera_vfs_lock_attempt_accept(struct chimera_vfs_lock_attempt *a)
     }
     if (!a->test && a->previous) {
         struct lock_range *old = b->ranges;
+        for (struct lock_range *r = a->replacement; r; r = r->next) {
+            if (!r->sequence) {
+                r->sequence = a->admission_sequence;
+            }
+        }
         chimera_vfs_claim_range_publish(b->file, a->previous, a->nprevious, a->published, a->npublished);
         a->reservation_held = false;
         b->ranges           = a->replacement;
@@ -846,6 +1014,7 @@ chimera_vfs_lock_attempt_reset(struct chimera_vfs_lock_attempt *a)
     a->started             = a->callback_done = a->finalized = false;
     a->backend_changed     = false;
     a->reservation_retired = false;
+    a->admission_sequence  = 0;
     atomic_store(&a->acquired, false);
     memset(&a->conflict, 0, sizeof(a->conflict));
     a->pid = 0;

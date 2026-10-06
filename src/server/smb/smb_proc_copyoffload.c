@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "smb_internal.h"
+#include "common/compound_retry.h"
 #include "smb_procs.h"
 #include "smb_common/smb2.h"
 #include "smb_session.h"
@@ -183,9 +184,9 @@ chimera_smb_duplicate_extents_submit_copy(struct chimera_smb_request *request)
 
     smb_copyoffload_bind_actors(request->vfs_compound, request->ioctl.de_src_open_file, request->ioctl.de_dst_open_file)
     ;
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_duplicate_extents_copy_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_duplicate_extents_copy_complete,
+                                     request);
 } /* chimera_smb_duplicate_extents_submit_copy */
 
 /* CLONE_RANGE. */
@@ -241,9 +242,9 @@ chimera_smb_duplicate_extents_submit_clone(struct chimera_smb_request *request)
 
     smb_copyoffload_bind_actors(request->vfs_compound, request->ioctl.de_src_open_file, request->ioctl.de_dst_open_file)
     ;
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_duplicate_extents_clone_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_duplicate_extents_clone_complete,
+                                     request);
 } /* chimera_smb_duplicate_extents_submit_clone */
 
 /*
@@ -400,9 +401,9 @@ chimera_smb_ioctl_duplicate_extents(struct chimera_smb_request *request)
                                      CHIMERA_VFS_ATTR_MASK_STAT |
                                      CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_duplicate_extents_getattr_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_duplicate_extents_getattr_complete,
+                                     request);
 } /* chimera_smb_ioctl_duplicate_extents */
 
 /* ------------------------------- OFFLOAD_READ ---------------------------- */
@@ -502,9 +503,9 @@ chimera_smb_ioctl_offload_read(struct chimera_smb_request *request)
     chimera_vfs_compound_add_getattr(request->vfs_compound,
                                      CHIMERA_VFS_ATTR_MASK_STAT);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_offload_read_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_offload_read_sequence_complete,
+                                     request);
 } /* chimera_smb_ioctl_offload_read */
 
 /* ------------------------------ OFFLOAD_WRITE ---------------------------- */
@@ -585,9 +586,9 @@ chimera_smb_offload_write_clone_complete(
 
         smb_copyoffload_bind_actors(request->vfs_compound, request->ioctl.od_src_open_file, request->ioctl.
                                     od_dst_open_file);
-        chimera_vfs_compound_submit(request->vfs_compound,
-                                    chimera_smb_offload_write_copy_complete,
-                                    request);
+        chimera_frontend_compound_submit(request->vfs_compound,
+                                         chimera_smb_offload_write_copy_complete,
+                                         request);
         return;
     }
 
@@ -686,9 +687,9 @@ chimera_smb_ioctl_offload_write(struct chimera_smb_request *request)
 
     smb_copyoffload_bind_actors(request->vfs_compound, request->ioctl.od_src_open_file, request->ioctl.od_dst_open_file)
     ;
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_offload_write_clone_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_offload_write_clone_complete,
+                                     request);
 } /* chimera_smb_ioctl_offload_write */
 
 static void

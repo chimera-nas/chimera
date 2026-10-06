@@ -26,7 +26,10 @@ chimera_vfs_io_is_write(const struct chimera_vfs_request *request)
     return request->opcode == CHIMERA_VFS_OP_WRITE ||
            request->opcode == CHIMERA_VFS_OP_COPY_RANGE ||
            request->opcode == CHIMERA_VFS_OP_CLONE_RANGE ||
-           request->opcode == CHIMERA_VFS_OP_ALLOCATE;
+           request->opcode == CHIMERA_VFS_OP_ALLOCATE ||
+           request->opcode == CHIMERA_VFS_OP_WRITE_SAME ||
+           (request->opcode == CHIMERA_VFS_OP_SETATTR &&
+            (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE));
 } /* chimera_vfs_io_is_write */
 
 static void
@@ -238,13 +241,15 @@ chimera_vfs_io_unpark_locked(
 static struct chimera_vfs_claim *
 chimera_vfs_io_sync_victim_locked(
     struct chimera_vfs_file_state    *file,
-    const struct chimera_claim_actor *actor)
+    const struct chimera_claim_actor *actor,
+    const struct chimera_vfs_io_view *view)
 {
     struct chimera_vfs_claim *cur;
 
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur;
          cur = cur->next) {
-        if (cur->construct != CHIMERA_CONSTRUCT_FUSE_GRANT) {
+        if (chimera_vfs_io_view_excludes(view, cur) ||
+            cur->construct != CHIMERA_CONSTRUCT_FUSE_GRANT) {
             continue;
         }
         if (chimera_vfs_claim_advertised(cur) == 0) {
@@ -319,7 +324,7 @@ chimera_vfs_io_sync_gate(
     }
 
     evpl_mutex_lock(&file->lock);
-    if (!chimera_vfs_io_sync_victim_locked(file, actor)) {
+    if (!chimera_vfs_io_sync_victim_locked(file, actor, &request->io_view)) {
         evpl_mutex_unlock(&file->lock);
         chimera_vfs_state_put(state, file);
         return false;
@@ -418,9 +423,9 @@ chimera_vfs_io_try(
         const struct chimera_claim_actor *actor = &request->io_owner;
 
         chimera_vfs_claim_trigger_fire(state, file, CHIMERA_TRIGGER_WRITE,
-                                       actor, 0);
+                                       actor, 0, &request->io_view);
         evpl_mutex_lock(&file->lock);
-        if (chimera_vfs_io_sync_victim_locked(file, actor)) {
+        if (chimera_vfs_io_sync_victim_locked(file, actor, &request->io_view)) {
             chimera_vfs_io_park_locked(file, request);  /* re-park in place */
             request->io_lease_file = file;
             evpl_mutex_unlock(&file->lock);
@@ -470,7 +475,8 @@ chimera_vfs_io_try(
         if (chimera_vfs_claim_trigger_ns_full(state, file,
                                               request->io_handle,
                                               request->io_owner_valid ? &request->io_owner : NULL,
-                                              request->io_recall_flush_only)) {
+                                              request->io_recall_flush_only,
+                                              &request->io_view)) {
             evpl_mutex_lock(&file->lock);
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
@@ -604,7 +610,7 @@ chimera_vfs_io_try(
 
             actor.owner = iowner;
             chimera_vfs_claim_trigger_fire(state, file, CHIMERA_TRIGGER_WRITE,
-                                           &actor, 0);
+                                           &actor, 0, &request->io_view);
         }
         request->io_next(request);
         return;
@@ -662,9 +668,9 @@ chimera_vfs_io_claim_acquire(
      * must be visible before the write returns, not merely begun. */
     if (actor) {
         if (chimera_vfs_io_is_write(request)) {
-            chimera_vfs_claim_invalidate(state, key_fh, key_fh_len,
-                                         key_fh_hash,
-                                         CHIMERA_TRIGGER_WRITE, actor, 0);
+            chimera_vfs_claim_invalidate_view(state, key_fh, key_fh_len,
+                                              key_fh_hash,
+                                              CHIMERA_TRIGGER_WRITE, &request->io_view, 0);
             if (chimera_vfs_io_sync_gate(state, request, actor, next)) {
                 return;
             }

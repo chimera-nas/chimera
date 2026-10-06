@@ -717,11 +717,15 @@ test_owned_native_gate(
         assert(chimera_vfs_claim_try_acquire(state, file, &cache, NULL) == CHIMERA_CLAIM_GRANTED);
         native_dispatches = native_breaks = 0;
         if (kind == 2) {
-            chimera_vfs_allocate_owned(ctx->vfs_thread, cred, dst, 0,
-                                       4096, 0, 0, 0, &actor, clone_cb, ctx);
+            chimera_vfs_allocate_view(ctx->vfs_thread, cred, dst, 0,
+                                      4096, 0, 0, 0,
+                                      &(struct chimera_vfs_io_view) { .owner = &actor },
+                                      clone_cb, ctx);
         } else if (kind == 1) {
-            chimera_vfs_clone_range_owned(ctx->vfs_thread, cred, src, 0, dst, 0,
-                                          4096, 0, 0, &actor, &actor, clone_cb, ctx);
+            chimera_vfs_clone_range_view(ctx->vfs_thread, cred, src, 0, dst, 0,
+                                         4096, 0, 0, &actor,
+                                         &(struct chimera_vfs_io_view) { .owner = &actor },
+                                         clone_cb, ctx);
         } else {
             chimera_vfs_copy_range_owned(ctx->vfs_thread, cred, src, 0, dst, 0,
                                          4096, 0, 0, 0, &actor, &actor, copy_cb, ctx);
@@ -732,6 +736,35 @@ test_owned_native_gate(
         assert(ctx->status == CHIMERA_VFS_OK && native_dispatches == 1);
         chimera_vfs_claim_release(state, file, &cache);
     }
+    /* Retiring one destination share claim must not bypass a peer's deny,
+     * and the scoped implicit grant must not escape to the following caller. */
+    struct chimera_claim_owner      owner = { .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+                                              .client_key = 781,                      .owner_lo = 1 };
+    struct chimera_vfs_claim        closing, peer;
+    chimera_vfs_claim_init_nfs4_open(&closing, CHIMERA_CLAIM_R, CHIMERA_CLAIM_W, &owner);
+    owner.client_key++;
+    chimera_vfs_claim_init_nfs4_open(&peer, CHIMERA_CLAIM_R, CHIMERA_CLAIM_W, &owner);
+    assert(chimera_vfs_claim_try_acquire(state, file, &closing, NULL) == CHIMERA_CLAIM_GRANTED);
+    assert(chimera_vfs_claim_try_acquire(state, file, &peer, NULL) == CHIMERA_CLAIM_GRANTED);
+    const struct chimera_vfs_claim *excluded[] = { &closing };
+    struct chimera_vfs_io_view      view       = { .excluded = excluded, .num_excluded = 1 };
+    native_dispatches = 0;
+    chimera_vfs_clone_range_view(ctx->vfs_thread, cred, src, 0, dst, 0,
+                                 4096, 0, 0, &actor, &view, clone_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES && !native_dispatches);
+    chimera_vfs_claim_release(state, file, &peer);
+    chimera_vfs_clone_range_view(ctx->vfs_thread, cred, src, 0, dst, 0,
+                                 4096, 0, 0, &actor, &view, clone_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK && native_dispatches == 1);
+    chimera_vfs_clone_range_view(ctx->vfs_thread, cred, src, 0, dst, 0,
+                                 4096, 0, 0, &actor, NULL, clone_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES && native_dispatches == 1);
+    chimera_vfs_claim_release(state, file, &closing);
+    TEST_PASS("native CLONE destination exclusions retain peer denies and stay scoped");
+
     module->dispatch     = native_original;
     module->capabilities = capabilities;
     chimera_vfs_state_put(state, file);

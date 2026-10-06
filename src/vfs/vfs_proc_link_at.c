@@ -110,7 +110,7 @@ chimera_vfs_link_at_dispatch(
     uint64_t                          post_attr_mask,
     const uint8_t                    *parent_lease_skip,
     struct chimera_vfs_open_handle   *op_handle,
-    const struct chimera_claim_actor *actor,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_link_at_callback_t    callback,
     void                             *private_data)
 {
@@ -142,10 +142,8 @@ chimera_vfs_link_at_dispatch(
     /* Self-exempt the operating handle's own lease from the source-file recall
      * (the linker is coherent with its own change; NULL = recall all). */
     request->io_handle = op_handle;
-    if (actor) {
-        request->io_owner       = *actor;
-        request->io_owner_valid = 1;
-    }
+    chimera_vfs_io_view_copy(&request->io_view, &request->io_owner, view);
+    request->io_owner_valid                      = request->io_view.owner != NULL;
     request->link_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->link_at.r_attr.va_set_mask          = 0;
     request->link_at.r_replaced_attr.va_req_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
@@ -185,7 +183,7 @@ struct chimera_vfs_link_at_gate {
     uint64_t                        pre_attr_mask;
     uint64_t                        post_attr_mask;
     struct chimera_claim_actor      actor;
-    uint8_t                         have_actor;
+    struct chimera_vfs_io_view      view;
     uint8_t                         parent_lease_skip[16];
     uint8_t                         parent_lease_skip_valid;
     struct chimera_vfs_open_handle *op_handle;
@@ -215,7 +213,7 @@ chimera_vfs_link_at_gate_complete(
                                  gate->pre_attr_mask, gate->post_attr_mask,
                                  gate->parent_lease_skip_valid ?
                                  gate->parent_lease_skip : NULL,
-                                 gate->op_handle, gate->have_actor ? &gate->actor : NULL,
+                                 gate->op_handle, &gate->view,
                                  gate->callback, gate->private_data);
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_link_at_gate_complete */
@@ -235,7 +233,7 @@ chimera_vfs_link_at_toolong(
 } /* chimera_vfs_link_at_toolong */
 
 SYMBOL_EXPORT void
-chimera_vfs_link_at_flags_actor(
+chimera_vfs_link_at_flags_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     const void                       *fh,
@@ -251,7 +249,7 @@ chimera_vfs_link_at_flags_actor(
     uint64_t                          post_attr_mask,
     const uint8_t                    *parent_lease_skip,
     struct chimera_vfs_open_handle   *op_handle,
-    const struct chimera_claim_actor *actor,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_link_at_callback_t    callback,
     void                             *private_data)
 {
@@ -307,10 +305,7 @@ chimera_vfs_link_at_flags_actor(
         } else {
             gate->parent_lease_skip_valid = 0;
         }
-        gate->have_actor = actor != NULL;
-        if (actor) {
-            gate->actor = *actor;
-        }
+        chimera_vfs_io_view_copy(&gate->view, &gate->actor, view);
         gate->op_handle    = op_handle;
         gate->callback     = callback;
         gate->private_data = private_data;
@@ -325,7 +320,7 @@ chimera_vfs_link_at_flags_actor(
     chimera_vfs_link_at_dispatch(thread, cred, fh, fhlen, dir_fh, dir_fhlen,
                                  name, namelen, replace, flags, attr_mask,
                                  pre_attr_mask, post_attr_mask,
-                                 parent_lease_skip, op_handle, actor, callback,
+                                 parent_lease_skip, op_handle, view, callback,
                                  private_data);
 } /* chimera_vfs_link_at_flags */
 
@@ -375,7 +370,7 @@ chimera_vfs_link_at_flags(
     chimera_vfs_link_at_callback_t  callback,
     void                           *private_data)
 {
-    chimera_vfs_link_at_flags_actor(thread, cred, fh, fhlen, dir_fh, dir_fhlen,
-                                    name, namelen, replace, flags, attr_mask, pre_attr_mask, post_attr_mask,
-                                    parent_lease_skip, op_handle, NULL, callback, private_data);
+    chimera_vfs_link_at_flags_view(thread, cred, fh, fhlen, dir_fh, dir_fhlen,
+                                   name, namelen, replace, flags, attr_mask, pre_attr_mask, post_attr_mask,
+                                   parent_lease_skip, op_handle, NULL, callback, private_data);
 } /* chimera_vfs_link_at_flags */

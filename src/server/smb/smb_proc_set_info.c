@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
-#include "vfs/vfs_internal_procs.h"
 #include "smb_doc_compound.h"
 #include "smb_procs.h"
 #include "smb_ea.h"
@@ -151,9 +150,9 @@ chimera_smb_set_info_size(struct chimera_smb_request *request)
     chimera_vfs_compound_set_gate(request->vfs_compound,
                                   chimera_smb_set_info_owner_gate, request);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_set_info_setattr_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_set_info_setattr_sequence_complete,
+                                     request);
 } /* chimera_smb_set_info_size */
 
 
@@ -269,9 +268,9 @@ chimera_smb_set_info_link_process(struct chimera_smb_request *request)
     op->io_owner.op_handle = open_file->handle;
     op->have_io_owner      = 1;
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_set_info_link_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_set_info_link_sequence_complete,
+                                     request);
 } /* chimera_smb_set_info_link_process */
 
 /* Merge a FileBasicInformation attribute change into the stored DOS set. */
@@ -410,9 +409,9 @@ chimera_smb_set_info_allocation(struct chimera_smb_request *request)
                                   chimera_smb_set_info_allocation_gate,
                                   request);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_set_info_setattr_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_set_info_setattr_sequence_complete,
+                                     request);
 } /* chimera_smb_set_info_allocation */
 /* Preserve the Open's cache identity across the VFS authorization/recall
 * sequence. In particular, a same-key sibling is coherent with this handle,
@@ -1766,12 +1765,33 @@ chimera_smb_set_info_disposition_fail(
     struct chimera_smb_request *request,
     uint32_t                    status);
 
-struct chimera_vfs_attrs;
+static bool
+smb_disposition_readonly(
+    const struct chimera_smb_request *request,
+    const struct chimera_vfs_attrs   *attrs)
+{
+    return !(request->set_info.attrs.smb_disposition_flags & 0x10) &&
+           (attrs->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+           (attrs->va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY);
+} /* smb_disposition_readonly */
+
 static void
-chimera_smb_set_info_disposition_getattr(
-    enum chimera_vfs_error    error,
-    struct chimera_vfs_attrs *attrs,
-    void                     *private_data);
+smb_disposition_readdir_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    (void) status;
+    if (smb_disposition_readonly(private_data, &chimera_vfs_compound_op(compound, 1)->attr)) {
+        chimera_vfs_compound_op_skip(compound, index);
+    }
+} /* smb_disposition_readdir_prepare */
+
+static void
+smb_disposition_validation_done(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data);
 
 static void
 chimera_smb_set_info_disposition(struct chimera_smb_request *request)
@@ -1796,11 +1816,17 @@ chimera_smb_set_info_disposition(struct chimera_smb_request *request)
             chimera_smb_set_info_disposition_fail(request, SMB2_STATUS_FILE_CLOSED);
             return;
         }
-        chimera_vfs_getattr(request->compound->thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            request->set_info.disposition_validation_handle,
-                            CHIMERA_VFS_ATTR_DOS_ATTRIBUTES,
-                            chimera_smb_set_info_disposition_getattr, request);
+        struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(
+            request->compound->thread->vfs_thread, &request->session_handle->session->cred);
+        chimera_vfs_compound_add_puthandle(compound, request->set_info.disposition_validation_handle, 0);
+        chimera_vfs_compound_add_getattr(compound, CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
+        if ((request->set_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) &&
+            !(request->set_info.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+            /* At most dot, dot-dot and one child are needed to disprove empty. */
+            int op = chimera_vfs_compound_add_readdir(compound, 0, 0, 0, 0, 3, 0, 0);
+            chimera_vfs_compound_set_op_prepare(compound, op, smb_disposition_readdir_prepare, request);
+        }
+        chimera_frontend_compound_submit(compound, smb_disposition_validation_done, request);
     }
 } /* chimera_smb_set_info_disposition */
 
@@ -1918,103 +1944,40 @@ chimera_smb_set_info_disposition_fail(
     chimera_smb_complete_request(request, status);
 } /* chimera_smb_set_info_disposition_fail */
 
-struct chimera_vfs_attrs;
-static int
-chimera_smb_set_info_disposition_entry(
-    uint64_t                        inum,
-    uint64_t                        cookie,
-    const char                     *name,
-    int                             namelen,
-    const struct chimera_vfs_attrs *attrs,
-    void                           *private_data);
-
-struct chimera_vfs_attrs;
-struct chimera_vfs_open_handle;
 static void
-chimera_smb_set_info_disposition_readdir(
-    enum chimera_vfs_error          error,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        cookie,
-    uint64_t                        verifier,
-    uint32_t                        eof,
-    struct chimera_vfs_attrs       *attrs,
-    void                           *private_data);
-
-static void
-chimera_smb_set_info_disposition_getattr(
-    enum chimera_vfs_error    error,
-    struct chimera_vfs_attrs *attrs,
-    void                     *private_data)
-{
-    struct chimera_smb_request   *request   = private_data;
-    struct chimera_smb_open_file *open_file = request->set_info.open_file;
-    struct chimera_vfs_thread    *thread    = request->compound->thread->vfs_thread;
-
-    if (error) {
-        chimera_smb_set_info_disposition_fail(request, chimera_smb_set_info_error_status(error));
-        return;
-    }
-    if (!(request->set_info.attrs.smb_disposition_flags & 0x10) &&
-        (attrs->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
-        (attrs->va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY)) {
-        chimera_smb_set_info_disposition_fail(request, SMB2_STATUS_CANNOT_DELETE);
-        return;
-    }
-    if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) &&
-        !(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
-        request->set_info.disposition_nonempty = 0;
-        chimera_vfs_readdir(thread, &request->session_handle->session->cred,
-                            request->set_info.disposition_validation_handle,
-                            0, 0, 0, 0, 0, NULL, 0,
-                            chimera_smb_set_info_disposition_entry,
-                            chimera_smb_set_info_disposition_readdir, request);
-        return;
-    }
-    chimera_smb_set_info_disposition_apply(request);
-} /* chimera_smb_set_info_disposition_getattr */
-
-static int
-chimera_smb_set_info_disposition_entry(
-    uint64_t                        inum,
-    uint64_t                        cookie,
-    const char                     *name,
-    int                             namelen,
-    const struct chimera_vfs_attrs *attrs,
-    void                           *private_data)
+smb_disposition_validation_done(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request = private_data;
+    enum chimera_vfs_error      error   = chimera_vfs_compound_status(compound);
+    uint32_t                    status  = chimera_smb_set_info_error_status(error);
 
-    if ((namelen == 1 && name[0] == '.') ||
-        (namelen == 2 && name[0] == '.' && name[1] == '.')) {
-        return 0;
+    if (error == CHIMERA_VFS_OK) {
+        if (smb_disposition_readonly(request, &chimera_vfs_compound_op(compound, 1)->attr)) {
+            status = SMB2_STATUS_CANNOT_DELETE;
+        } else if (chimera_vfs_compound_num_ops(compound) > 2) {
+            const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, 2);
+            /* Do not turn a partial enumeration into a false empty verdict. */
+            status = op->eof ? SMB2_STATUS_SUCCESS : SMB2_STATUS_RETRY;
+            for (unsigned i = 0; i < op->num_entries; i++) {
+                const struct chimera_vfs_compound_dirent *entry = &op->entries[i];
+                if ((entry->name_len == 1 && entry->name[0] == '.') ||
+                    (entry->name_len == 2 && entry->name[0] == '.' && entry->name[1] == '.')) {
+                    continue;
+                }
+                status = SMB2_STATUS_DIRECTORY_NOT_EMPTY;
+                break;
+            }
+        }
     }
-    request->set_info.disposition_nonempty = 1;
-    return 1;
-} /* chimera_smb_set_info_disposition_entry */
-
-static void
-chimera_smb_set_info_disposition_readdir(
-    enum chimera_vfs_error          error,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        cookie,
-    uint64_t                        verifier,
-    uint32_t                        eof,
-    struct chimera_vfs_attrs       *attrs,
-    void                           *private_data)
-{
-    struct chimera_smb_request *request = private_data;
-
-    if (error) {
-        chimera_smb_set_info_disposition_fail(request, chimera_smb_set_info_error_status(error));
-    } else if (request->set_info.disposition_nonempty) {
-        chimera_smb_set_info_disposition_fail(request, SMB2_STATUS_DIRECTORY_NOT_EMPTY);
-    } else if (!eof) {
-        /* Do not turn a partial enumeration into a false empty verdict. */
-        chimera_smb_set_info_disposition_fail(request, SMB2_STATUS_RETRY);
+    chimera_vfs_compound_free(compound);
+    if (status != SMB2_STATUS_SUCCESS) {
+        chimera_smb_set_info_disposition_fail(request, status);
     } else {
         chimera_smb_set_info_disposition_apply(request);
     }
-} /* chimera_smb_set_info_disposition_readdir */
+} /* smb_disposition_validation_done */
 
 static void
 chimera_smb_set_info_disposition_unpin(struct chimera_smb_request *request)

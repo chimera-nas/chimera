@@ -14,11 +14,16 @@
 #include "vfs/vfs_compound.h"
 #include "common/compound_retry.h"
 
-static atomic_int armed, submissions, expected_groups;
-static atomic_int attempts;
-static int        reject_count, pause_finish;
-static atomic_int held, release_finish;
-static            _Thread_local struct evpl *owner_evpl;
+static atomic_int           armed, submissions, expected_groups;
+static atomic_int           attempts;
+static atomic_uint_fast64_t target_session, target_message;
+bool smb2_test_compound_matches(
+    struct chimera_vfs_compound *,
+    uint64_t,
+    uint64_t);
+static int                  reject_count, pause_finish;
+static atomic_int           held, release_finish;
+static                      _Thread_local struct evpl *owner_evpl;
 
 struct finish_injection {
     chimera_vfs_compound_callback_t callback;
@@ -110,7 +115,10 @@ chimera_vfs_compound_submit(
         void *);
     submit_fn next = (submit_fn) dlsym(RTLD_NEXT, "chimera_vfs_compound_submit");
     assert(next);
-    if (atomic_load(&armed)) {
+    /* Delayed requests on other sessions, including disconnected waiters,
+     * can still submit after the next test packet has armed this hook. */
+    if (atomic_load(&armed) && smb2_test_compound_matches(cp,
+                                                          atomic_load(&target_session), atomic_load(&target_message))) {
         atomic_fetch_add(&submissions, 1);
         assert(chimera_vfs_compound_num_groups(cp) == (uint32_t) atomic_load(&expected_groups));
         if (reject_count || pause_finish) {
@@ -221,6 +229,8 @@ doc_send(
 
     atomic_store(&submissions, 0);
     atomic_store(&expected_groups, p->count);
+    atomic_store(&target_session, c->session_id);
+    atomic_store(&target_message, p->first_mid);
     atomic_store(&armed, 1);
     memcpy(c->sbuf + 4, p->data, p->length);
     smb2c_send(c, p->length - SMB2_HDR_SIZE);
@@ -453,6 +463,8 @@ main(void)
     atomic_store(&release_finish, 0);
     atomic_store(&submissions, 0);
     atomic_store(&expected_groups, p.count);
+    atomic_store(&target_session, c->session_id);
+    atomic_store(&target_message, p.first_mid);
     atomic_store(&armed, 1);
     int      replies = c->nreply_app;
     memcpy(c->sbuf + 4, p.data, p.length);

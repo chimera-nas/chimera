@@ -26,20 +26,28 @@
 /* -------------------------------------------------------------------- */
 
 SYMBOL_EXPORT bool
-chimera_vfs_claim_has_caching(struct chimera_vfs_file_state *file)
+chimera_vfs_claim_has_caching_view(
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_vfs_io_view *view)
 {
     bool held = false;
 
     evpl_mutex_lock(&file->lock);
     for (struct chimera_vfs_claim *claim = file->claims[CHIMERA_CLAIM_CLASS_CACHE];
          claim; claim = claim->next) {
-        if (chimera_vfs_claim_advertised(claim)) {
+        if (!chimera_vfs_io_view_excludes(view, claim) && chimera_vfs_claim_advertised(claim)) {
             held = true;
             break;
         }
     }
     evpl_mutex_unlock(&file->lock);
     return held;
+} /* chimera_vfs_claim_has_caching_view */
+
+SYMBOL_EXPORT bool
+chimera_vfs_claim_has_caching(struct chimera_vfs_file_state *file)
+{
+    return chimera_vfs_claim_has_caching_view(file, NULL);
 } /* chimera_vfs_claim_has_caching */
 
 SYMBOL_EXPORT struct chimera_vfs_state *
@@ -436,13 +444,13 @@ chimera_vfs_claim_circle_exempt(
              * Windows uses LeaseKey as ClientLeaseId across clients (MS-SMB2
              * 3.3.1.4, product behavior 211). Protocol grant lookup below still
              * includes the client, keeping versions, epochs and ACKs separate. */
-            return chimera_claim_owner_same_key(&holder->owner, &probe->owner) ||
+            return chimera_claim_owner_same_cache(&holder->owner, &probe->owner) ||
                    chimera_vfs_claim_same_holder(holder, probe);
         case CHIMERA_CIRCLE_CLIENT:
             return chimera_claim_owner_same_client(&holder->owner, &probe->owner);
         case CHIMERA_CIRCLE_OWNER_OR_KEY:
             return chimera_claim_owner_equal(&holder->owner, &probe->owner) ||
-                   chimera_claim_owner_same_key(&holder->owner, &probe->owner) ||
+                   chimera_claim_owner_same_cache(&holder->owner, &probe->owner) ||
                    chimera_vfs_claim_same_holder(holder, probe);
         default:
             return false;
@@ -740,7 +748,7 @@ chimera_vfs_claim_deny_rows(
 
         case CHIMERA_CONSTRUCT_RQLS:
             /* W-cache exclusivity across cache holders (R28), KEY-exempt
-             * (LeaseKey identity is scoped to the protocol and client). */
+             * (SMB ClientLeaseId compatibility spans clients). */
             if (adv & CHIMERA_CLAIM_CW) {
                 rows[n++] = (struct chimera_claim_deny_row) {
                     .mask = CHIMERA_CLAIM_R | CHIMERA_CLAIM_W |
@@ -991,7 +999,7 @@ chimera_vfs_claim_batch_escape(
             chimera_vfs_claim_revocable(cand) &&
             (cand->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
              cand->break_state == CHIMERA_CLAIM_BREAK_BREAKING) &&
-            !chimera_claim_owner_same_key(&cand->owner, &probe->owner)) {
+            !chimera_claim_owner_same_cache(&cand->owner, &probe->owner)) {
             return cand;
         }
     }
@@ -1008,7 +1016,7 @@ chimera_vfs_claim_batch_escape(
         if (!(cur->used & CHIMERA_CLAIM_H) || !chimera_vfs_claim_revocable(cur)) {
             continue;
         }
-        if (chimera_claim_owner_same_key(&cur->owner, &probe->owner)) {
+        if (chimera_claim_owner_same_cache(&cur->owner, &probe->owner)) {
             continue;
         }
         if (cur->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
@@ -1084,7 +1092,9 @@ chimera_vfs_claim_sole_opener_blocker_locked(
          * metadata-only access do not remove another Open from OpenList. */
         if ((!probe_is_rqls && chimera_claim_owner_equal(&cur->owner, &probe->owner)) ||
             (probe_is_rqls && chimera_claim_owner_same_client(&cur->owner, &probe->owner) &&
-             chimera_claim_owner_same_key(&cur->owner, &probe->owner))) {
+             chimera_claim_owner_same_cache(&cur->owner, &probe->owner) &&
+             (!(probe->used & CHIMERA_CLAIM_CW) || have_granular_cache ||
+              (probe->op_handle && cur->op_handle == probe->op_handle)))) {
             continue;
         }
         /* A parked holder does not cap HANDLE caching. The write-cache
@@ -1421,13 +1431,18 @@ chimera_vfs_claim_try_acquire_internal(
              * RANGE_LOCK trigger (2.1.5.18); W/H caches were handled at
              * admission.  Fired only once lock-vs-lock admission passed. */
             if (claim->klass == CHIMERA_CLAIM_CLASS_RANGE) {
-                struct chimera_claim_actor actor = {
+                struct chimera_claim_actor       actor = {
                     .owner     = claim->owner,
                     .op_handle = claim->op_handle,
                 };
+                const struct chimera_vfs_io_view view = {
+                    .owner        = &actor,
+                    .excluded     = claim->admit_excluded,
+                    .num_excluded = claim->admit_num_excluded,
+                };
                 chimera_vfs_claim_trigger_fire(
                     state, file, CHIMERA_TRIGGER_RANGE_LOCK, &actor,
-                    (claim->used & CHIMERA_CLAIM_LW) ? 1 : 0);
+                    (claim->used & CHIMERA_CLAIM_LW) ? 1 : 0, &view);
             }
             /* Single entrance: every admission funnels the backend cover
              * re-evaluation (cheap no-op absent a CAP_LEASE module). */

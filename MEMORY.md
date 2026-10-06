@@ -2602,3 +2602,2729 @@ test_ack_before_enqueue and test_ack_before_requeue. All three pass in Debug
 and Release.
 Main's diskfs production fix is retained exactly. The intermediate published
 989821ec tip is backed up at backup/compound-before-final-main-20260926.
+
+## 2026-09-26 review of published PR a9e0efe0
+
+Source review against main c971e5a5 and four fresh focused CTests are recorded
+in docs/reviews/compound-pr-a9e0efe0-review.md. No production changes. Do not
+equate executor routing with coalesced wire requests or finish-retry readiness.
+
+Newly isolated integration regression: smb_proc_query_info.c:916 lost main's
+assignment of r_fs_attrs.smb_fs_attributes via chimera_smb_fs_attributes. The
+reply still emits that field at :1275. Native QUERY_INFO uses a private open
+snapshot without a handle; restore from the actual command handle rather than
+blindly copying main's expression. info_probe_memfs gets zero capability words
+with streams both on and off.
+
+Important remaining non-SMB gap: FUSE has 27 production raw compound_submit
+sites, two shared frontend adapter sites (lock and commit), no direct retry.
+Ordinary OPEN/CREATE/READDIR/etc return aggregate failure instead of replaying
+finish EAGAIN. READDIR staging test manually resets; it does not exercise
+production completion retry. Audit inputs/resets and use the adapter. Ordinary
+SDK/POSIX, S3 and REST already use it. Several standalone NFS4 and legacy SMB
+paths also use raw submit without finish retry.
+
+NFSv4 proxy REMOVE ignores ISDIR/ISNOTDIR: current NFS3 remote model reproduces
+both RMDIR(symlink) -> success and REMOVE(directory) -> success. Other remote
+permission/attribute/statfs failures exist too; do not explain all by this flag.
+Main already emits unrestricted proxy REMOVE, so do not call the missing type
+enforcement a newly introduced PR regression. Main also did handle-only reparse
+rebinding; the conversion repairs a slice but retains the stateful problem.
+Stateful legacy SET_REPARSE still swaps only handle/flags, leaving old ACCESS,
+RANGE and namespace identity; restricted native path excludes those stateful
+opens. LockSequence cross-layer publication race remains source-level, without
+a deterministic concurrent reproducer. Generic CLAIM/RECALL/CLOSE_DOC and
+projected POSIX lock mutations/mandatory release remain explicitly nonretryable.
+NLM pending/held/reaper lifecycle still requires a real journal conversion.
+
+Backend integration contract concern: finish_result(OK) calls lock_attempt_accept
+which can still fail on generation/cancel. Validate/freeze before backend commit,
+then make accepted publication infallible under logical gates. VFS cache/notify
+updates also remain pre-finish; deferred backend rollback alone cannot fix them.
+
+Fresh tests all failed as expected: pnfs_memfs_remote, close_claim_probe,
+lease_identity_probe_memfs, info_probe_memfs (6.34s total).
+Log /tmp/chimera-pr-review-regressions.log. These reinforce, not supersede, the
+prior 214-pass/29-skip/30-fail full quick results at 989821ec and final-main
+14 focused passes per build plus lease-model timeout. Earlier wave green counts
+do not describe the current merged tree/corpus. Review artifacts are uncommitted.
+
+## September 26 PR regression/identity refinement (working tree)
+
+- User prioritized confirmed regressions and identity, then asked why PR growth
+  is so large. Production fixes are in the primary worktree and mirrored into
+  `/tmp/chimera-compound-reconcile` for existing builds (same original HEAD).
+- Capability planner now receives actual backend capabilities explicitly,
+  including QUERY_INFO on private CREATE handles. Both streams knob probes pass.
+- Embedded SMB ACCESS/cache CLOSE teardown uses atomic release_open again;
+  close_claim_probe now passes for one and coalesced holders.
+- Added same_cache for SMB ClientLeaseId compatibility; same_key/same_lease
+  remain protocol+client-qualified, including RANGE I/O. Grant records/ACKs
+  remain separate. Directory ParentLeaseKey suppression retains client scope.
+  lease_identity_probe_memfs passes across clients and wire variants.
+- Deleted unsafe SET_REPARSE handle-only callback fallback. Unsupported state
+  (range/cache/DOC/streams/durable/resilient/peers/nonregular source) now fails
+  before unlink. Supported migration updates open_flags with the new identity.
+  IOCTL fixture now verifies preserved identities/bytes, range exclusion, and
+  DOC behavior; existing retry/cancel/teardown/migration coverage still passes.
+- NFSv4 proxy typed REMOVE uses LOOKUP + VERIFY/NVERIFY(type) in the same remote
+  compound, proper NOTDIR/ISDIR mapping and pre-op attrs on failure. New quick
+  remove_types_remote test passes, including dangling/directory symlinks.
+  This does NOT solve concurrent remote rename vs removal: NFSv4 lacks atomic
+  typed/matched REMOVE. Backend does not advertise REMOVE_MATCH_FH.
+- Remote full NFS model still fails independent CREATE/permission/attrs cases.
+  Unconfirmed LockSequence publication race, general FUSE finish retry, and
+  backend transaction support remain outside this refinement.
+- Size at a9e0efe0 vs main c971: +123589/-28129, net+95460. Tests+41564;
+  VFS production+19241; SMB+16673; NFS+10993; other production-3093;
+  docs+7199; other+2883. Production net+43814. Executor .c+.h adds12054,
+  NFS4 adapter7067. Need deletion/consolidation pass, not just more conversion.
+- Focused logs: `/tmp/chimera-pr-fixes-focused1.log` (3 original SMB regressions
+  pass), focused3 (claim unit + extended IOCTL pass), focused4 (13 pass before
+  new CMake registration), remove-types.log (new remote test passes), retry.log
+  (extended VFS compound retry passes). Full required check completed at
+  `/tmp/chimera-pr-fixes-check.log`; final results follow.
+- Full GCC check result for this refinement: Release and Debug each 219 passed,
+  29 skipped, 27 failed / 275. Previous baseline had 30 failures / 273; all three
+  targeted SMB failures are repaired and no new failing test names appeared.
+  The existing lease model still stalls at state267 in Debug and reports grant/
+  break mismatches plus 600s timeouts in Release. Source/fixture changes are
+  net-320 production lines and net+135 test lines. Root syntax, SDK include,
+  REUSE and copyright checks pass (REUSE needed unsandboxed local IPC).
+- Final make check exited2: Clang Debug40 / Release45 reports remain. The
+  combined scan has42 unique file/message signatures versus40 in the saved
+  baseline; the two additional signatures concern unchanged nfs_delay_retry_test.c
+  and its included nfs4_slot.c (null slot-table path / parked-list leak).
+  The extended delay_retry_test passes in both GCC Debug and Release; this
+  does not by itself resolve those analyzer reports. No new warning signature
+  points at modified production code. Full tests still have27 known failures.
+  Code remains uncommitted; production files in both worktrees are identical.
+
+
+## September 26 continued test repair (working tree)
+
+User asked to continue fixing tests. No new agents, commits, or pushes in this
+pass. Sources remain mirrored into /tmp/chimera-compound-reconcile for builds.
+
+Confirmed fixes:
+- SMB CMake had dropped SMB2_MBT_TRACE_DIRS, leaving encrypted311/ntlmv2/signed30
+  batch tests with no input traces. Restore all five families' --trace-dir args.
+- POSIX setup now unwinds before returning SKIP77 on an unsupported scratch
+  filesystem, and drivers propagate77. server_destroy tolerates an initialized
+  server whose worker pool was never started. Previously exit77 could abort on
+  live threads, and clean unwind exposed a null-pool crash.
+- /tmp is overlay; /worktrees/compounds is ext4 and supports passthrough handles.
+  Use CHIMERA_MBT_SCRATCH and CHIMERA_TEST_ROOT both set to
+  /worktrees/compounds/build/mbt-scratch. All ten previously failing POSIX
+  linux/io_uring and NFS-over-passthrough cases pass there (55s). Overlay cases
+  now skip cleanly instead of aborting. Do not count those as a backend fix.
+- SMB CLOSE publishes empty-cache revocation before compound_free pumps ACCESS
+  waiters. Cache retirement broadcasts owner-thread resume doorbells, and a
+  newly registered reply wait rechecks locally to avoid a missed CLOSE wakeup.
+- Native legacy-oplock publication recomputes the same-client lease cap from
+  settled live state. The old pre-recall snapshot incorrectly forced NONE
+  after the peer acknowledged NONE or closed. Updated overwrite_client_cap
+  fixture expects LEVEL_II after ACK with a surviving peer open.
+- Synchronous share-CLAIM denial fires OPEN_H_FORCE as the op's deny trigger,
+  before a WAIT retry. The old final callback trigger was unreachable while
+  WAIT parked and notified only the first blocking H holder. Removed the old
+  duplicated trigger block. Queued denial does not repeat the trigger.
+- An established RqLs lease at NONE must obey the sole-open WRITE-cache rule.
+  Same-key ACCESS claims exempt only the requesting handle in that case;
+  established nonzero granular caches retain their upgrade policy. This fixes
+  lease 0x23_4 state146 wrongly rearming NONE to RWH and bumping its epoch.
+  The claim unit's peer-open/cache fixture now supplies their common actual
+  handle identity; all original assertions pass with that realistic identity.
+- Legacy CREATE's successful OPEN attributes/access decisions are retained
+  before a later share refusal can hand the handle to a claim-only retry.
+  Otherwise peer CLOSE allowed the retry to succeed with r_attrs.mask=0 and
+  CREATE reply aborted. leasePendingCloseRegression now passes.
+- Abandoned parked legacy CREATE now completes CANCELLED after resource cleanup
+  so the wire compound retires through the disconnected completion path. It
+  previously returned with thread.live_compounds=1 forever; lease 0x23_6/_7
+  replayed successfully but hung at server shutdown. Both now exit normally.
+  Native recall settlement clears its retired park_fh marker as well.
+- NLM confirmed ranges now preserve grant/replacement order: surviving split
+  fragments stay at the original list position; granted pending reservations
+  move to the tail at grant time. Removed duplicate LOCK's fast path so a
+  re-lock uses the same admission/replacement semantics. FREE_ALL releases
+  entries sequentially and pumps waiters each time, so this order changes
+  which overlapping waiter is granted. All three previously failing
+  stepBlocking_200_0x9_{0,1,2} traces now pass unchanged, with --paranoid.
+  NLM's general direct-claim/journal/reaper conversion concerns remain.
+
+Focused evidence: /tmp/chimera-tests-next-scratch-all.log (10 pass),
+/tmp/chimera-tests-next-skip2.log (2 clean skips),
+/tmp/chimera-tests-next-traces5.log (first8 lease traces pass),
+/tmp/chimera-tests-next-smb-focused.log (38 SMB tests pass),
+/tmp/chimera-tests-next-nlm-fixed2.log (3 NLM traces pass),
+/tmp/chimera-tests-next-leases-fixed8.log (lease12 pass; earlier lease20 failure),
+/tmp/chimera-tests-next-leases-fixed9.log (lease14/15/20 pass),
+/tmp/chimera-tests-next-claim-fixed.log (269 claim assertions pass).
+Extended journal/access/compound retry/NFS delay retry/SMB close/POSIX lock retry
+also pass; initial combined extended log had the old handle-less claim fixture.
+The initial full SMB attempt was superseded while stuck in the now-fixed
+teardown; do not mistake its timeout/termination for the final code's result.
+
+Required make syntax passes. Full make -k check running at
+/tmp/chimera-tests-next-check.log, with ext4 scratch. Its first Release build
+predated the claim-fixture handle correction, so that one test needs a rebuilt
+Release rerun; Debug and later Clang builds will use the corrected fixture.
+Final sweep results are to be recorded after completion. Remaining proxy issues
+include NFSv4 GETATTR's stat-only request/parser (no statfs fields), remote
+CREATE/type/permission semantics, and SMB-backed POSIX symlink behavior. Do not
+claim the full tree is green based on the focused results above.
+
+
+Additional finding from the ext4 sweep: six newly enabled NFSv4 passthrough
+suites stalled on typeCoverageRegression step5 (READ anonymous FIFO). The
+executor's open-intent flag treated every explicit handle as typechecked,
+including PATH handles, although the later dispatch condition correctly
+required a type check for PATH. It therefore opened the FIFO for data before
+it could reject the type. Aligning the two conditions fixes the stalls;
+regular data handles retain the existing descriptor-rights path. The directory
+PATH-handle unit now checks EISDIR for READ/WRITE, the type-specific refusal
+before opening, instead of the old generic flag-mismatch EINVAL.
+
+Release reruns: both delegation passthrough suites pass; four ordinary/RDMA
+linux/io_uring NFS4 suites now finish quickly but fail xattr operations with
+STALE. Source cause: compound xattrs open PATH, while linux/io_uring use
+fgetxattr/fsetxattr/flistxattr/fremovexattr on that descriptor. Those calls do
+not support O_PATH. This needs a metadata-safe backend xattr access mechanism,
+not blindly reopening FIFO/device handles for data. Log:
+/tmp/chimera-tests-next-release-passthrough.log. The corrected claim test also
+passes in that rerun. Nine functional failing test names currently remain:
+three NFS3-over-NFS4 remote models, two SMB-backed POSIX models, four newly
+unskipped NFS4 passthrough xattr models. Four new failures must be distinguished
+from the five remaining out of the original27.
+
+Final validation for this repair pass:
+- Required `make -k check` completed with exit 2. Full log:
+  /tmp/chimera-tests-next-check.log. GCC Debug/Release and Clang Debug/Release
+  compile; syntax, REUSE and copyright checks pass. Static analysis and the
+  remaining functional failures still prevent a green check.
+- The full Release run reported 263 pass / 12 fail; it preceded the final FIFO and
+  claim-fixture corrections. Rebuilt Release reruns pass the claim test and
+  both delegation passthrough suites, with the four ordinary/RDMA passthrough
+  suites completing with xattr failures instead of hanging.
+- The full Debug run reported 265 pass / 10 fail; its VFS compound unit executable
+  still expected EINVAL for the directory PATH-handle case. After rebuilding
+  that unit, compound/compound_retry/claim_test/claim_journal/claim_access all
+  pass in Debug and Release. Logs:
+  /tmp/chimera-tests-next-debug-vfs-final.log and
+  /tmp/chimera-tests-next-vfs-final2.log.
+- Accounting for those targeted reruns, nine functional test names remain
+  failing. 22 of 27 original failing names are cleared; 29 previously skipped
+  tests now execute with ext4 scratch, exposing four additional failing names.
+  Neither full CTest invocation skipped a whole test (individual unsupported
+  trace capabilities still have their existing allowances). Do not describe
+  this as one final full run with 266 passes: the final accounting includes the
+  targeted reruns above. Ten former POSIX failures were scratch/skip handling,
+  not ten backend correctness fixes.
+- Clang logs have 41 unique path/message warning signatures versus 42 before this
+  pass; no new signature, and the old NLM fragments-list null warning is gone.
+  scan-build's retained-report summaries are 13 Debug / 14 Release; these are not
+  comparable to the unique compiler warning count. Existing warnings remain
+  untriaged; do not claim they are false positives or fixed.
+- `make syntax` and `git diff --check` pass. All 25 modified source/build files
+  are byte-identical between /worktrees/compounds and the integration source
+  /tmp/chimera-compound-reconcile used for builds. No commit or push performed.
+
+## September 27 architectural acceptance criterion: compound-only consumers
+
+User explicitly reaffirmed that the final goal is to REMOVE the per-operation
+north-facing VFS API. Every VFS consumer must submit filesystem operations
+through compounds, including single-operation requests. Only a small, explicit
+set of APIs inappropriate for compounds, such as resource release functions,
+may remain outside that interface. Existing exceptions are not automatically
+grandfathered into the final design.
+
+Per-operation backend dispatch or executor implementation helpers may remain
+private inside the VFS; their continued internal use does not justify exposing
+them to consumers. Renaming vfs_procs.h to vfs_internal_procs.h is insufficient:
+current NFS, SMB, S3 and FUSE production sources still include that header
+(inclusion alone does not establish an actual per-op call). Removal of external
+dependencies, consumer-facing declarations, fallback execution paths and
+duplicated frontend implementations is part of completion, not optional cleanup
+after declaring conversion finished. Single-command and multi-command execution
+should use the same compound operation construction and protocol checks.
+Enforce the final interface boundary in build/static checks once callers are
+converted; keep release/lifecycle exceptions narrowly documented and justified.
+
+## September 27 NFSv4 metadata API consolidation (working tree)
+
+- ACCESS, ordinary GETATTR, READDIR and SECINFO now use the same native wire
+  compound builder even when coalescing declines a run. The new metadata entry
+  limits construction to one wire operation and uses the same operation checks,
+  ownership, finish retry, response marshalling and accepted publication. It
+  bypasses only the multi-op conservative reply budget; actual reply allocation
+  checks remain. Removed the separate raw VFS callback chains, including the
+  duplicate GETATTR delegation-query/combine path.
+- SECINFO's standalone export-junction handling remains in the dispatcher. The
+  shared builder rechecks possible junctions on execution/retry; a cached root
+  comparison permits same-named entries under descendants, while unknown/root
+  matches fail with DELAY. The namespace fixture covers descendant SECINFO with
+  an export-name collision as well as export updates during finish.
+- Synthetic named-attribute GETATTR and READDIR submit owned compounds and
+  marshal only accepted results. READDIR gets base attrs plus stream records in
+  one compound, keeps the synthetic protocol cursor, and uses the requested
+  continuation cookie. Named-entry cookies now start at 3 rather than reserved
+  cookies 1/2. The existing 64 KiB stream-list bound remains.
+- Existing standalone PUTFH validation and OPENATTR now use the common finish
+  retry adapter. They remain separate wire boundaries; this does not add a
+  general synthetic cursor overlay or coalesced OPENATTR.
+- NFSv4 ordinary calls to functions declared in vfs_internal_procs.h fell from
+  28 to 14; all 14 remaining calls and the sole NFSv4 include of that header are
+  in nfs4_proc_open.c (open_fh/open_at/lookup_at/open_stream/fsetattr). NFS4 LOCK
+  still directly acquires claims via vfs_claim.h; DRC/recovery KV and other
+  state/coordination boundaries remain. Do not call NFSv4 conversion complete.
+- This pass reduces NFSv4 production by 516 physical lines (186 added / 702
+  removed at this checkpoint), excluding tests and all earlier uncommitted work.
+
+Debug build and 12 focused suites pass: v4.0/4.1/4.2 compound boundaries/retry,
+delegation accepted/retry, namespace accepted/retry, metadata accepted/retry.
+New metadata coverage checks ACCESS/GETATTR/READDIR forced through standalone
+compound fallback by an oversized maxcount, suffix suppression on type error,
+named-attribute type/size, paged entries/cookies and TOOSMALL. The fixture injects
+finish EAGAIN into read-only metadata/stream compounds and verifies acceptance.
+Logs: /tmp/chimera-nfs4-api-{metadata1,existing1,focused2}.log.
+
+Previous /tmp/chimera-compound-reconcile and /tmp/chimera-reconcile-check trees
+and logs no longer exist in the refreshed environment. New builds use the actual
+working tree, build/Debug and build/Release; no source mirror is needed. Fresh
+model corpus generation completed for all seven families. Both GCC builds pass,
+and the same 12 focused suites pass in Release too (24 Debug/Release executions).
+Release focused log: /tmp/chimera-nfs4-api-release-focused.log.
+
+The required `make -k check` uses the fresh shared corpus, ext4 scratch at
+build/mbt-scratch, and ASAN_OPTIONS=detect_leaks=0. Release reports 266 passed /
+9 failed out of 275, matching the previously recorded failing names. Debug
+reports 265 passed / 10 failed, with the same nine plus an intermittent FUSE
+compound-lock teardown abort. Neither full run skips a whole test. Clang Debug
+and Release compile but scan-build retains 42 / 46 findings; the combined log
+has 41 unique path/message warning signatures. This matches the previous count,
+but the previous logs are unavailable for an exact signature comparison. The
+existing compound adapter combine/open_replay nullability warnings remain.
+Formatting, SDK include, REUSE, copyright and git diff --check pass.
+`make -k check` exits 2; do not describe the full check as passing. Full log:
+/tmp/chimera-nfs4-api-check.log. No commit or push performed.
+
+### Newly reproduced FUSE shutdown failure (outside NFSv4 pass)
+
+`chimera/fuse/sim/compound_locks` passed once in isolation, then failed on the
+11th run of CTest `--repeat until-fail:20`. The retained debug log ends with
+`fuse thread destroyed with 1 active requests` at src/server/fuse/fuse.c:267;
+NFS and SMB are disabled in this fixture. The final scenario deliberately
+shuts down with a parked blocking lock after RELEASE. Stop cancels locks before
+destroying the pool, but the cancellation/completion drain ordering needs
+investigation; do not claim the passing rerun fixed it. No FUSE source was
+changed in this NFSv4 pass. Evidence:
+/tmp/chimera-nfs4-api-fuse-repeat.log,
+/tmp/chimera-nfs4-api-fuse-abort.debug.log, and
+/tmp/chimera-nfs4-api-debug-full-lasttest.log. The test-local debug artifact is
+overwritten by subsequent reruns, so preserve the retained /tmp copy.
+
+Code evidence for the likely teardown mechanism: fuse_server_stop calls
+chimera_fuse_locks_shutdown, which calls synchronous lock_domain_shutdown and
+schedules cancellation on the owning worker. Server destroy immediately stops
+the worker pool. chimera_vfs_thread_drain (src/vfs/vfs.c:1484) waits only for
+num_active_requests; neither parked lock attempts nor compounds themselves
+participate in that counter. A drain/accounting contract for suspended compounds
+is also needed before asynchronous backend finish is introduced. This remains
+an investigation finding, not an implemented or verified shutdown fix.
+
+## September 27 NFS delegated OPEN/API pass (working tree)
+
+User requested another NFS pass, preserving the objective of removing the
+north-facing per-operation API. No subagents, commit or push in this pass.
+
+- CLAIM_DELEGATE_CUR and CLAIM_DELEG_CUR_FH now use the shared compound OPEN
+  builder, including the single-operation fallback when reply budgeting declines
+  coalescing. Removed their legacy OPEN dispatch branches and renewing stateid
+  helper. Named claims LOOKUP, validate the delegation against the resolved FH,
+  then OPEN that FH so a name replacement cannot redirect to an unchecked inode.
+  The pure delegation snapshot checks client, object, version, access and
+  revocation. Input failures remain compound checkpoints; reservation failure
+  cannot silently revert to an unjournaled delegated OPEN.
+- NFSv4.0 no longer breaks OPEN compounds simply because delegations are enabled.
+  Grants run after accepted finish while client/owner reservations remain held.
+  The final delegation (including owned WHO bytes) is copied into OPEN replay
+  snapshots without overwriting a later owner operation. A repeated OPEN in the
+  same wire compound receives the same grant; fresh-XID replay preserves it.
+- New delegated UNCHECKED truncate testing found missing caller identity on the
+  compound OPEN's internal SETATTR. That caused recall/revocation of the caller's
+  own delegation. Truncate now supplies the admitted opener's actor identity.
+- Named delegated CREATE remains supported: guarded/exclusive collision checks
+  happen after identity validation; UNCHECKED size-zero truncation happens after
+  access reservation. FH CREATE is invalid. Do not reject all named delegated
+  CREATE: RFC 8881 section 18.16.3 explicitly permits it.
+- NFSv4 ordinary raw VFS call sites decrease 14 -> 11, all still in
+  nfs4_proc_open.c (open_fh 3, open_at 4, lookup_at 2, open_stream 1, fsetattr 1).
+  Ordinary/cold-client OPEN fallback, named streams, legacy truncation and direct
+  LOCK claims remain. NFSv3 has no ordinary raw VFS calls; removed 21 obsolete
+  vfs_internal_procs.h includes. NFSv4 production delta for this pass alone:
+  +269/-202, net +67; NFSv3 -21; VFS pNFS fix below is line-neutral.
+- Broader testing exposed an obsolete pnfs_unsupported fixture: memfs now
+  supports first-WRITE residency after main integration. Switched the negative
+  fixture to Linux (no CAP_LAYOUT), using CHIMERA_TEST_ROOT/MBT scratch if set.
+  This exposed actual data loss: VFS pNFS redirection materialized a DS backing
+  for Linux, whose SETATTR does not persist PNFS_LAYOUT, so subsequent READ got
+  local zeros. Both resolver entry points now honor CAP_LAYOUT via
+  chimera_vfs_pnfs_io_possible, preserving local authoritative bytes.
+
+Debug: all 26 selected NFS compound suites pass, including all three NFS3 backend
+probes, namespace/proxy/delegation/pNFS/metadata, v4.0/4.1/4.2 boundaries and finish
+retry, two new delegation-enabled v4.0 suites, actual read/write delegation replay
+within a wire compound and across XIDs, and v4.0 named delegated-claim replay.
+New delegated tests check both claim forms, current stateid READ/CLOSE, forced
+single-op fallback, wrong object/stateid/version, guarded CREATE and valid/invalid
+truncate. Retry fixture still deliberately excludes filesystem mutations;
+these tests do not establish backend rollback. Log:
+/tmp/chimera-nfs4-open-debug-focused.log. Release passes the same 26 suites:
+/tmp/chimera-nfs4-open-release-focused.log.
+
+Final required make -k check exits 2. Both Release and Debug report 266 passed /
+9 failed out of 275; neither skips a whole test. Failing names exactly match the
+nine baseline failures: pnfs_{memfs,diskfs,cairn}_remote, NFSv4
+batch_{linux,io_uring,rdma_linux,rdma_io_uring}, POSIX batch_smb_memfs and
+strict_smb. The previously reproduced intermittent FUSE shutdown abort did not
+occur this time and remains unfixed. Both Clang builds compile; scan-build
+reports two regenerated bugs in each build, but ccache reused previous analysis
+compilations, so these counts are NOT a reduction from 42/46 baseline reports.
+The emitted warnings retain all 41 baseline path/message signatures, with no
+added signature occurrences. Formatting, SDK include boundary, REUSE, copyright
+and final git diff --check pass. Full log: /tmp/chimera-nfs4-open-check.log.
+No commit or push performed.
+
+## September 27 remaining NFS OPEN conversion (working tree)
+
+Converted the remaining ordinary OPEN fallback, named-stream OPEN and deferred
+truncate paths to the shared VFS compound builder. Deleted the separate OPEN
+installation/completion/callback chain, request fields and obsolete exported
+helpers. This pass's NFS production delta, against
+/tmp/chimera-nfs4-all-open-before, is +286/-1963 (net -1677 lines), excluding tests,
+documentation and earlier changes. All 11 remaining ordinary per-operation VFS
+calls are gone; NFS production has no vfs_internal_procs.h includes. Release,
+claim/state/lifecycle helpers remain and are not counted as ordinary VFS ops.
+
+- Standalone OPEN now uses the same reserved-owner journal, pure validation,
+  replay, share admission, access union and accepted publication as coalesced
+  OPEN. It binds cold v4.0 clients before building; there is no unjournaled
+  fallback. Argument errors execute as checkpoints. Deferred truncation is an
+  internal SETATTR after successful share reservation, carrying the opener's
+  identity. Reservation failures preserve ACCESS/RESOURCE/client errors rather
+  than collapsing everything into perpetual DELAY. Expired clients now report
+  EXPIRED rather than being silently revived by the deleted OPEN path.
+  A final review caught v4.0 principal ACCESS errors escaping before the owner
+  journal. A standalone replay reservation now freezes that owner and reports
+  the principal error as a mandatory execution checkpoint: no filesystem work,
+  seqid consumption only after accepted finish, and correct error replay. The
+  opt-in reservation API is explicitly restricted to this rejection/replay use;
+  normal state reservations continue rejecting principal mismatches directly.
+- Attribute-directory OPEN seeds the compound with the base FH, uses
+  OPEN_STREAM, and shares the state journal. No stream create attributes are
+  stamped onto the base inode, stream cinfo stays zero, and streams are not
+  delegated. Existing UNCHECKED size-zero stream OPEN truncates the stream only
+  after admission. A base stream-holder guard is acquired once at construction,
+  retained across retries, transferred to a newly accepted stream state, and
+  otherwise released at disposal. Repeatable operation callbacks do not publish
+  it. Existing stream states can now be reserved/coalesced/closed by the journal;
+  their original guard survives coalescing and drops at final CLOSE.
+- Removing fallback exposed the former 128-existing-files-per-owner cap. Owner
+  reservations now allocate their existing-file/child-pin arrays by population;
+  compound state journals grow during construction and remain stable during
+  execution/retry. Candidates remain bounded by wire operation count. A
+  standalone OPEN freezes but does not build journals for unchanged child locks,
+  avoiding unrelated coalescing limits. Coalesced lock-owner closure/range
+  journal limits remain; this is not a claim to have removed all state limits.
+- Added wire cases for forced standalone OPEN/replay/truncate, principal denial,
+  held-lock reopen (coalesced and standalone), an owner with 130 open files,
+  stream create/read/access union/close, denied and accepted stream truncation,
+  guarded collision, and v4.0 stream create/reopen replay across fresh XIDs.
+  Fault injection now admits nonmutating OPEN_STREAM and explicitly asserts a
+  named stream's finish was rejected. Unit cases cover stream-holder lifetime,
+  130 frozen child locks and expired-client error classification. Backend
+  mutation rollback remains unimplemented and is not simulated by these tests.
+- API conversion does not mean one VFS transaction per wire compound everywhere:
+  the synthetic OPENATTR/attribute-directory boundary and reply-budget splits
+  remain. Large connected lock sets may also require standalone dispatch.
+  Owner reservation still scans/freezes the owner's existing state population;
+  reducing that coordination cost is a separate design refinement.
+
+The full sweep also exposed an intermittent SMB fixture abort in
+chimera/server/smb/mbt/doc_compound_probe_memfs: expected_groups assertion at
+smb2_doc_compound_probe.c:115 and submissions==1 at :230, after its disconnected
+DOC waiter scenario. NFS is disabled in this fixture. An isolated Release
+repeat passed eight times then failed on the ninth. The probe globally arms
+all submissions, so late disconnected-client cleanup entering a later measured
+window is a plausible cause, not yet proved or fixed. Preserve evidence in
+/tmp/chimera-nfs4-all-open-check.log and
+/tmp/chimera-nfs4-all-open-smb-doc-repeat.log. Do not relabel this as one of the
+previous nine baseline failures or claim the broader suite is green.
+
+Final verification for this pass:
+- All 29 focused NFS CTest suites pass in Debug and Release, including the final
+  principal-error replay regression. Logs:
+  /tmp/chimera-nfs4-open-replay-debug-focused.log and
+  /tmp/chimera-nfs4-open-replay-release-focused.log.
+- The last owner-seqid correction was made during the full check's analysis
+  phase, after its GCC test runs. Both GCC builds were rebuilt afterwards; in
+  addition to the 29 focused suites, all 41 NFSv4 model suites were rerun in
+  each build: 37 pass and the same four Linux/io_uring PATH-fd/xattr failures
+  remain. Logs: /tmp/chimera-nfs4-open-replay-{debug,release}-mbt.log.
+- The completed make -k check sweep reports 266 pass / 9 fail in both Debug
+  and Release, with exactly the previous nine failing names and no whole-test
+  skips. The SMB DOC probe abort from the first sweep did not recur in this
+  sweep and remains unfixed. Full log:
+  /tmp/chimera-nfs4-all-open-check-final.log. KVM suites were not run; CMake
+  reported KVM disabled because oras is unavailable.
+- Both Clang builds compile the final code. Final emitted diagnostics match
+  all 41 baseline path/message signatures, with no added signature occurrences.
+  Two new null-array warnings from the initial dynamic allocation shape were
+  eliminated by using valid storage even for empty arrays and explicit counts.
+  A targeted uncached state-file analysis confirmed only its existing file/FH
+  warning remained. Final scan-build regenerated 4 reports in Debug and 5 in
+  Release; ccache reuse still prevents interpreting those as total remaining
+  analyzer findings. Targeted log: /tmp/chimera-nfs4-owner-scan-final.log.
+- make syntax, the final syntax/SDK-boundary/REUSE/copyright checks, and
+  git diff --check pass. Final hygiene log:
+  /tmp/chimera-nfs4-open-final-hygiene.log. The final procedure-header symbol
+  audit finds zero ordinary NFS VFS call sites and zero internal-procedure
+  includes, excluding the explicitly permitted release API.
+No commit or push performed.
+
+## September 27 NFS attribute-directory coalescing (working tree)
+
+This follows the remaining OPEN conversion above. NFS still has zero ordinary
+per-operation VFS API calls. This pass removes additional dispatcher boundaries
+and duplicate standalone compound implementations; it does not add backend
+transaction begin/end hooks or rollback.
+
+- OPENATTR now executes its configuration, backend-capability and regular-file
+  checks inside the shared compound before any successor can run. PUTFH,
+  GETFH, GETATTR, SAVEFH and RESTOREFH understand the synthetic attribute-directory
+  cursor while the VFS cursor addresses its real base. OPENATTR -> stream OPEN
+  -> READ/WRITE/CLOSE can share one VFS compound, including bases discovered by
+  LOOKUP during execution. Multiple bases and stream OPENs are supported in the
+  same compound. Synthetic saved cursors survive both coalescing and dispatcher
+  boundaries. Operations lacking an attribute-directory encoding are explicitly
+  excluded so they cannot accidentally address the base inode.
+- Stream LOOKUP and REMOVE now join the shared encoder too, using OPEN_STREAM
+  and REMOVE_STREAM. LOOKUP returns the real stream cursor; REMOVE preserves
+  the synthetic directory and its existing zero/non-atomic change_info. The
+  separate attribute-directory lookup/remove completion chains are deleted.
+- The former single construction-time stream guard is replaced by explicit
+  COORDINATE operations keyed by operation index and resolved base FH. Each
+  guard is acquired once per such identity, retained across finish rejection,
+  and selected by a repeatable pure completion callback. Only accepted state
+  publication transfers ownership; disposal drops untransferred guards. The
+  state journal retains the guard even when a later same-owner CLAIM_FH OPEN
+  supplies the final handle. Replayed v4.0 OPEN skips acquiring a new guard.
+- The attempt journal now records the protocol cursor after each successful
+  wire operation, independently of internal VFS cursor moves. Accepted finish
+  publishes it; retry resets it. This replaces completion-time special cases
+  for failed namespace recalls and COPY/CLONE cursor walks. Ordinary OPENATTR,
+  attribute-directory GETATTR, and all standalone PUTFH now reuse the same
+  builder and gates; their duplicate callbacks and old staleness helper are
+  removed. Standalone PUTFH submissions now appear in the shared trace, and
+  boundary tests explicitly account for them.
+- New FILEHANDLE/ACL attribute coverage caught an existing bug: the backend's
+  base FH could win over the synthetic cursor when GETATTR requested FILEHANDLE.
+  Synthetic attribute projection now clears that backend FH before marshalling,
+  making GETATTR(FILEHANDLE) agree with GETFH. OPENATTR also rejects a base FH
+  too long for the current wrapped-inner-FH limit (64 bytes including the
+  8-byte marker), before allowing any suffix, instead of making an unwrappable
+  synthetic handle. Increasing that wrapper limit is separate protocol work.
+- Regression cases cover coalesced create/write, multiple resolved bases,
+  saved/inherited synthetic cursors, stream CLAIM_FH identity, successful OPEN
+  prefixes before failed suffixes, type/disabled-feature rejection before
+  mutations, stream lookup/remove and standalone lookup fallback, synthetic
+  TYPE/SIZE/FILEHANDLE/ACL, and v4.0 OPENATTR+stream create/reopen/replay. The
+  metadata retry wrapper additionally requires three stream OPENs and three
+  reads in one rejected finish, as well as the existing single-stream proof.
+  The injector still excludes filesystem mutations; it does not model rollback.
+
+The production delta against /tmp/chimera-nfs4-attrdir-before is +371/-557,
+net -186 lines across seven production files, excluding tests/docs and earlier
+work. Snapshots, detailed diff and diagnostic baseline are under /tmp with the
+chimera-nfs4-attrdir prefix. No commit or push requested/performed.
+
+Remaining named-attribute boundary: READDIR still uses its own LIST_STREAMS
+compound and marshals its page after accepted completion. To coalesce it, move
+cookie/verifier/page sizing and TOOSMALL checks into retryable execution
+callbacks, with reply-arena reset, so they can veto a following mutation.
+Namespace-root/export credential transitions, conservative reply/operation
+budgets, connected lock-journal limits, and protocol lifecycle/pNFS cleanup
+boundaries also remain. The previous intermittent FUSE shutdown and SMB DOC
+probe failures remain unfixed unless subsequent records explicitly say otherwise.
+
+Final validation:
+- All 29 focused NFS suites pass on the final code/tests in both Debug and
+  Release, including metadata, v4.0 replay, disabled OPENATTR, stream CLAIM_FH
+  and explicit multi-base finish rejection. Logs:
+  /tmp/chimera-nfs4-attrdir-focused-debug-final.log and
+  /tmp/chimera-nfs4-attrdir-focused-release-final.log.
+- The required make -k check sweep completed: 266 pass / 9 fail out of 275
+  in EACH build, with the same nine previously recorded failing suites (three
+  NFS remote-pNFS, four NFSv4 Linux/io_uring xattr cases, two SMB/POSIX symlink
+  cases). There are no additional failing suites or whole-test skips. The
+  known intermittent FUSE and SMB DOC aborts did not recur in this sweep and
+  remain unfixed. Log: /tmp/chimera-nfs4-attrdir-check.log.
+- Both Clang builds compile and emit the same 41 baseline path/message warning
+  signatures, with no added occurrences. Analyzer exit status remains nonzero
+  for existing findings; regenerated report counts remain subject to ccache
+  reuse and are not a count of all remaining defects.
+- make syntax, syntax/include-boundary/REUSE/copyright checks pass. The final
+  internal-procedure declaration audit scans 76 function names and finds zero
+  ordinary NFS call sites, excluding permitted release/handle-reference APIs.
+  KVM tests were not registered because oras is unavailable.
+- Final git diff --check passes. No commit or push performed.
+
+## September 27 named-attribute READDIR coalescing (working tree)
+
+This supersedes the named-attribute READDIR boundary recorded above. The shared
+NFSv4 encoder now admits READDIR on synthetic attribute-directory cursors and
+encodes base META open + GETATTR + LIST_STREAMS. No new VFS API was needed.
+OPENATTR, READDIR, stream OPEN/READ/WRITE/CLOSE/REMOVE, saved cursors and following
+operations can share one VFS compound. The duplicate standalone READDIR compound
+and completion implementation are deleted; its single-operation fallback uses
+the shared builder. Oversized reply-budget requests still deliberately split.
+
+- The LIST_STREAMS execution gate validates records and stages the page before
+  any successor executes. TOOSMALL, malformed records, change projection errors,
+  invalid cookies and invalid attribute requests stop the sequence there.
+  Argument checks moved from scanner boundaries into the operation prepare
+  callback for both ordinary and named READDIR. Successful pages and EOF are
+  private per-operation state; accepted finish publishes them, and whole-attempt
+  reset rewinds the arena and clears the page marks before retry. Multiple pages
+  and staged ACL GETATTR results coexist without overwriting earlier replies.
+- Named-directory pagination no longer ignores cookieverf. Its opaque verifier
+  hashes the base FH and ordered stream names/FHs, excluding sizes and record
+  padding. A stale/nonmatching continuation returns NFS4ERR_NOT_SAME, matching
+  RFC 8881 section 18.23.3 (https://www.rfc-editor.org/rfc/rfc8881.html#section-18.23.3).
+  Reserved/out-of-range cookies return BAD_COOKIE. Cookie zero starts a fresh
+  listing. Hashing/record validation continues beyond the returned page so a
+  later malformed record cannot allow a mutation suffix to run. Missing named
+  stream FHs fail IO instead of inheriting the base file's identity.
+- The existing 64 KiB complete backend stream snapshot remains a limit. Memfs
+  is currently the LIST_STREAMS implementation and returns a complete listing
+  or ERANGE. A future backend returning a non-EOF partial snapshot is explicitly
+  rejected with RESOURCE: positional cookies need a continuation-aware encoding
+  before backend pagination can be supported. This pass does not provide backend
+  transaction hooks or mutation rollback.
+- Regressions cover empty and paginated lists, per-stream FILEHANDLE/ACL/SIZE,
+  two pages plus ACL GETATTR/OPEN/READ in a rejected finish, v4.0 listing retries,
+  invalid arguments/verifiers stopping CREATE, stale continuation stopping
+  REMOVE, and pages before/after CREATE/WRITE/REMOVE in one wire/VFS compound.
+  The finish injector now counts LIST_STREAMS operations actually completed;
+  both metadata retry suites require a rejected two-list compound and a rejected
+  unsuccessful list. Mutating compounds remain excluded from fake rollback.
+- Removed the unused old READDIR entry-count estimator. Production delta for
+  this pass: +135/-198, net -63 lines in nfs4_compound_vfs.c and
+  nfs4_proc_readdir.c. Baseline snapshot:
+  /tmp/chimera-nfs4-attrdir-readdir-before. No commit or push requested/performed.
+
+Final validation:
+- All 29 focused NFS suites pass in both Debug and Release after final cleanup,
+  including the new v4.0 and v4.2 named-directory cases. Each v4.2 metadata suite
+  now measures 44 complete wire/VFS spans. Logs:
+  /tmp/chimera-nfs4-attrdir-readdir-focused-debug-final.log and
+  /tmp/chimera-nfs4-attrdir-readdir-focused-release-final.log.
+- Required make -k check completed with 266 passed / 9 failed out of 275 in EACH
+  GCC build, exactly the previous nine failing suites: three remote-pNFS NFS
+  suites, four Linux/io_uring NFSv4 PATH-fd/xattr suites, and two SMB/POSIX symlink
+  suites. No additional failing suites or whole-test skips. The intermittent
+  FUSE shutdown and SMB DOC failures did not recur; they remain unfixed.
+  Log: /tmp/chimera-nfs4-attrdir-readdir-check.log.
+- Both Clang builds compile. Diagnostic comparison against the prior snapshot
+  has exactly the same 41 path/message signatures and occurrence counts, with
+  no additions. Two reports were regenerated per build (ccache-dependent).
+  make check remains nonzero for baseline tests and analyzer findings.
+- Final syntax/include-boundary, REUSE, copyright and git diff checks pass.
+  The internal-procedure reference audit scanned 76 names and found zero
+  ordinary NFS call sites. KVM suites remain unregistered (oras unavailable).
+- Initial new-test failures were test expectations, not production failures:
+  four ACL-bearing entries needed a larger page than 4096, and standalone
+  SAVEFH does not submit a VFS compound. Corrected tests pass. No commit/push.
+
+## September 27 stream-list pagination (working tree)
+
+User requested removal of the 64 KiB named-attribute stream-list limit. This
+supersedes the complete-snapshot restriction in the prior READDIR record.
+
+- LIST_STREAMS now carries an input/output verifier and a continuation cookie
+  in every packed stream record. All in-tree compound callers and the internal
+  backend adapter use the revised interface. The documented contract permits
+  partial pages, supports resuming after any returned entry, and uses EBADCOOKIE
+  for a stale verifier. A buffer too small for its first record still returns
+  ERANGE; an earlier complete prefix succeeds with eof false.
+- Memfs, the current stream-capable backend, honors continuation and returns
+  bounded pages. Its verifier combines the base FH with a per-inode stream
+  namespace generation, updated on stream creation, unlink and bulk removal
+  during overwrite. Inode reuse resets the generation and changes the FH.
+  Data writes/truncation and unrelated metadata changes do not invalidate it.
+  The namespace lock protects verifier validation and page production together.
+  Record fit calculations now include trailing alignment and initialize padding.
+- NFS forwards the client's cookie/verifier into LIST_STREAMS and returns the
+  backend cookies on the entries that actually fit its wire page. A backend page
+  may contain more entries than the NFS reply. EOF reflects both limits, so a
+  client resumes exactly after the last returned entry without omissions. The
+  64 KiB allocation is now a page size, not a directory-size limit. Every READDIR
+  retains its shared-compound execution gate, attempt-local staging, stop-before-
+  mutation checks and accepted-finish publication. No new compound boundary.
+- The previous frontend whole-snapshot name/FH hash is gone. Namespace edits
+  now invalidate continuation even if a later edit restores the old membership.
+  Invalid/reserved positions retain their NFS BAD_COOKIE handling; a stale
+  verifier maps to NOT_SAME. A fresh cookie-zero request ignores its verifier.
+- SMB's existing bounded stream-info query does not expose a continuation token.
+  Both its shared and standalone paths now reject a non-EOF backend page instead
+  of accidentally returning a successful truncated list. This preserves its
+  bounded-query failure behavior; removing SMB's separate 4096-byte staging
+  limit is not accomplished by this NFS pagination change. Its fallback default
+  stream record is also fully initialized, including the FH length.
+- New regressions create 300 names of 241 bytes each (>80 KiB of packed records),
+  enumerate them to EOF, verify no duplicates/omissions and stable stream identity,
+  reject a stale continuation before REMOVE, and continue after a data write.
+  The retry fixture explicitly requires an actually completed non-EOF backend
+  page to encounter finish rejection. VFS tests cover alignment at the first
+  record, partial default-fork pages, continuation and stale-cookie mutation
+  veto. SMB tests ensure an oversized result is not silently truncated.
+- Production delta against /tmp/chimera-stream-pages-before: +148/-119, net +29
+  lines. No backend transaction hooks or rollback are introduced. No commit/push.
+
+Final validation:
+- All 34 focused suites pass in BOTH Debug and Release, comprising the 29 NFS
+  suites, three VFS compound suites and two SMB stream probes. The metadata
+  feature suites each check 69 full wire/VFS spans. Logs:
+  /tmp/chimera-stream-pages-focused-debug.log and
+  /tmp/chimera-stream-pages-focused-release.log.
+- Required make -k check completed: 266 passed / 9 failed of 275 in EACH GCC
+  build, exactly the prior failing suites (three remote-pNFS, four Linux/io_uring
+  NFSv4 PATH-fd/xattr, two SMB/POSIX symlink). No additional failing suites or
+  whole-test skips. The known intermittent FUSE shutdown and SMB DOC failures
+  did not recur and remain unfixed. Log: /tmp/chimera-stream-pages-check.log.
+- Both Clang builds compile. The first Debug analysis found a new dead-store
+  warning in the buffer-boundary test; an explicit assertion now checks that
+  the saved LIST_STREAMS operation itself returned ERANGE. That target was
+  rebuilt and passed CTest in both GCC builds, and reanalyzed in ClangDebug;
+  the subsequent ClangRelease sweep included the corrected assertion. Final
+  diagnostics have exactly the same 41 baseline path/message signatures and
+  occurrence counts. The comparison replaces the superseded Debug test-file
+  diagnostics with its reanalysis, rather than hiding an unresolved warning.
+  Reanalysis log: /tmp/chimera-stream-pages-clang-debug-final.log; comparison:
+  /tmp/chimera-stream-pages-final-diagnostics.py. Existing analyzer findings
+  keep make check nonzero; report counts reflect fresh SDK-dependent analysis
+  and ccache reuse, not a count of newly introduced defects.
+- make syntax, final syntax/include-boundary, REUSE, copyright and diff checks
+  pass. The NFS internal-procedure reference audit still finds zero ordinary
+  calls across 76 names. KVM remains unregistered because oras is unavailable.
+- Source snapshots are at /tmp/chimera-stream-pages-before. No commit/push.
+
+## September 27 NFS4 shared-builder consolidation (working tree)
+
+READLINK, VERIFY/NVERIFY, GETXATTR, SETXATTR, LISTXATTRS and REMOVEXATTR now
+use chimera_nfs4_compound_metadata for standalone execution as well as the
+shared multi-operation encoder. Removed six independent builders/completion
+chains, the duplicate READLINK type gate, its unused declaration, and unused
+VERIFY helper. Keep protocol argument validation and shared reply marshallers.
+There are now 18 nfs4_proc_*.c files with independent builders, down from 24.
+The broader namespace/state/pNFS boundaries from the previous assessment remain.
+
+- Preserve READLINK's NOFOLLOW open intent and its non-symlink status.
+- Use one pure xattr-name length validator in the handlers, scan and name
+  staging; invalid lengths no longer allocate reply memory before rejection.
+- Shared xattr operations now acquire ordinary inferred data handles rather
+  than PATH handles, including after a metadata operation. This preserves the
+  removed standalone builders' descriptor semantics and FIXES the four recorded
+  NFS4 Linux/io_uring xattr failures (plain and RDMA variants).
+- Unsupported operations on pseudo-root/named-attribute directory handles keep
+  their previous STALE result. In particular, fallback must not silently unwrap
+  an attribute-directory cursor and mutate xattrs on its base inode.
+- Fifteen new measured requests force single-operation execution via an
+  oversized READDIR suffix, or check xattrs following metadata in one compound.
+  Cover successful and failed VERIFY/NVERIFY, READLINK/type rejection, xattr
+  payload/list lifetime, CREATE collision, missing keys and TOOSMALL. Further
+  checks cover invalid arguments stopping WRITE and synthetic cursors leaving
+  the base untouched. Metadata suites now measure 84 complete wire/VFS spans.
+- Finish injection now explicitly observes completed READLINK and GET/LISTXATTR
+  operations; both metadata retry tests require these to encounter EAGAIN.
+  Filesystem mutations remain excluded from synthetic rollback.
+- Production delta against /tmp/chimera-nfs4-shared-builder-before: +74/-488,
+  net -414 lines in eight production files. No commit or push.
+
+Final validation:
+- All 29 focused NFS suites pass in Debug and Release. Two initial Debug pNFS
+  fixtures failed to mount the Linux backend on /tmp; rerunning those two with
+  CHIMERA_TEST_ROOT=/worktrees/compounds/build/mbt-scratch passed. All Release
+  focused tests used that scratch directory. Initial new-test failures were
+  Python harness issues (xattr names decode as bytes, and pynfs rejected the
+  deliberately invalid enum while packing); corrected assertions/packing pass.
+- Required make -k check CTEST_PARALLEL=8: Release 270 passed / 5 failed of 275;
+  Debug 269 passed / 6 failed of 275. Four previous NFS4 failures are fixed.
+  The five carried-over failures are nfs/mbt/pnfs_{memfs,diskfs,cairn}_remote
+  and posix/mbt/{batch_smb_memfs,strict_smb}. The known FUSE shutdown and SMB
+  DOC intermittent failures did not occur in this sweep and remain unfixed.
+- Newly observed independent correctness issue: Debug chimera/vfs/compound
+  passes its assertions but LeakSanitizer reports 116408 bytes in six
+  allocations. An isolated CTest rerun reproduces it. Five leaked operation
+  snapshots originate at vfs_compound.c:8555: submit allocates original_ops
+  again when an already-completed compound is submitted without disposing of
+  the old snapshot/results. The io_owner re-submission test also leaves a
+  632-byte cached open handle. This is a second submit after accepted completion,
+  distinct from compound_retry after a rejected finish. Fix requires proper
+  resubmission cleanup, not merely freeing the snapshot array. These VFS sources were unchanged in this
+  pass, and the failing executable does not link the NFS server library. This
+  issue remains unfixed; do not describe the overall checks as green or silently
+  equate this sweep with the prior nine-failure baseline.
+- Source audit still finds zero ordinary NFS calls across 76 internal VFS
+  declarations (permitted release calls excluded). KVM not registered: oras
+  unavailable. Final GCC builds include the comment cleanup after testing.
+
+Logs: /tmp/chimera-nfs4-shared-builder-{check,focused-debug,focused-release,
+pnfs-debug,targeted,vfs-debug}.log; final analysis comparison script:
+/tmp/chimera-nfs4-shared-builder-diagnostics.py.
+
+- Both Clang builds and corpus generation completed. Final diagnostics exactly
+  match the 41 baseline path/message signatures and occurrence counts, with
+  no additions or excess occurrences. ScanReport artifact counts are 42 Debug
+  and 46 Release (affected by regenerated translation units/cache reuse).
+  Existing diagnostics and the test failures above keep make check nonzero.
+- Final syntax, SDK include-boundary, REUSE, copyright and git diff checks pass.
+  The sandboxed standalone REUSE invocation could not bind its multiprocessing
+  socket; the required full sweep and the separate unsandboxed license check
+  both pass. Logs: /tmp/chimera-nfs4-shared-builder-{style-final,license-final,
+  diagnostics}.txt/log as appropriate. No commit or push performed.
+
+## September 27 VFS compound resubmission lifetime repair (working tree)
+
+Follow-up to the NFS4 shared-builder pass's LeakSanitizer finding. A second
+compound_submit now retains the original construction snapshot and runs the
+same restart path as compound_retry, rather than allocating another snapshot
+from already-executed operation structs. Restart releases the prior attempt's
+owned results, restores original arguments/status/callback flags, resets groups
+and cursors, and discards dynamic suffixes before attempt_reset and execution.
+
+- Factored result-only teardown into one helper shared by compound_free and
+  restart. Preserve build-owned paths, KV inputs, borrowed I/O/ACL inputs, and
+  lock attempts. Reservations drain before producer/cursor handles. The common
+  result helper also balances lock_file_state references.
+- Resubmission observes the same replay barriers as retry: no running/canceled
+  run, ownership transfer, published claim/access journal, nonretryable operation,
+  or pending cross-thread cancel. Accepted borrowed CLOSE is also a barrier:
+  its reference is owed to accepted teardown, so replay must not discard it or
+  consume it again. Rejected-finish CLOSE remains retryable.
+- An unsafe second submit reports aggregate EINVAL to the supplied terminal
+  callback without executing operations/finish adapter. It preserves prior
+  result ownership and finish status for proper teardown. Submitting an active
+  compound is a programming error. These APIs still do not undo filesystem
+  effects; ordinary operation EAGAIN does not establish backend rollback.
+- Tests now require original gate/prepare inputs on re-execution, rerun prepare
+  callbacks, rebuild grouped and ungrouped dynamic suffixes without growth,
+  replace untaken READ references while preserving WRITE inputs, and refuse
+  replay after taking a handle, publishing a range journal, or accepting an
+  external CLOSE. Refusal preserves journal retirement and CLOSE release.
+- The formerly failing Debug compound test now passes with leak checking, as
+  do compound_retry and compound_groups. All six compound/claim suites pass
+  in Release. Final validation is recorded below.
+- Snapshot before this pass: /tmp/chimera-resubmit-before. Production delta
+  is +33 net lines across vfs_compound.c and vfs_compound.h; no frontend
+  operation conversion changes. No commit/push.
+
+Final validation for the resubmission repair:
+- All 35 focused extended suites pass in Debug and Release: six VFS compound/
+  claim suites plus the 29 NFS compound/lifetime/delegation suites. Debug ASan
+  no longer reports the 116408-byte resubmission leak. Release was rebuilt
+  after final API comment changes before its focused sweep.
+- Required make -k check CTEST_PARALLEL=8 completed all stages, exit 2 because
+  of baseline failures/findings. Both quick sweeps: 270 passed / 5 failed of
+  275. Failures remain nfs/mbt/pnfs_{memfs,diskfs,cairn}_remote and
+  posix/mbt/{batch_smb_memfs,strict_smb}; Debug compound is now green. The known
+  intermittent FUSE shutdown and SMB DOC failures did not recur here.
+- Both Clang builds and model corpus generation completed. Diagnostics match
+  exactly the prior 41 path/message signatures and 110 occurrences, with no
+  additions/excess or missing/reduced occurrences. ScanReport artifact counts
+  are 34 Debug and 35 Release; they differ with cache/regeneration and are not
+  a count of newly introduced findings.
+- make syntax, final syntax-check, VFS SDK boundary, REUSE, copyright and diff
+  checks pass. KVM remains unregistered because oras is unavailable.
+- Logs: /tmp/chimera-resubmit-check.log, /tmp/chimera-resubmit-focused-debug.log,
+  /tmp/chimera-resubmit-focused-release.log, /tmp/chimera-resubmit-extended-debug.log,
+  /tmp/chimera-resubmit-extended-release.log, /tmp/chimera-resubmit-style-final.log.
+  Warning comparison: /tmp/chimera-resubmit-diagnostics.py and .txt.
+- No commit or push. NFS shared-builder consolidation is still the next separate
+  conversion task (COMMIT/CREATE/LINK first); the 18 independent builders and
+  broader namespace/state/pNFS boundaries from the previous assessment remain.
+
+## September 27 NFS4 COMMIT / CREATE / LINK shared builders (working tree)
+
+COMMIT, CREATE and LINK now use chimera_nfs4_compound_metadata for their
+single-operation fallbacks. Deleted their duplicate construction and completion
+paths. The shared encoder handles accepted results, cursor publication and
+finish retries for both coalesced and standalone execution. Production delta
+against /tmp/chimera-nfs4-ccl-before: +104/-430, net -326 lines in five files.
+Independent builder files fall from 18 to 15. No commit/push requested.
+
+Preserved behavior and repairs:
+- COMMIT retains NOFOLLOW on its preliminary metadata open, rejects nonregular
+  objects before a potentially blocking data open, and reads flush pre_attr
+  rather than the shared path's incorrect post-operation attr field.
+- CREATE has one pure request validator shared by the scan and handler.
+  Decode failures now become execution-checkpoint errors before any directory
+  open/mutation; the old standalone path ignored unmarshalling errors. Rename
+  map.open_input_status to map.input_status and reuse that attempt-invariant
+  error field for OPEN and CREATE. Bad nanosecond timestamps return INVAL and
+  create no name, including when the finish adapter rejects an attempt.
+- CREATE's result callback now rejects absent/empty backend filehandles before
+  the compound suffix can use the parent cursor as the created object.
+- LINK preserves the explicit target-directory OPEN before LINK, including
+  source-side lease recall in the VFS. Its single-op encoder can seed raw saved
+  handles from sibling exports: different export IDs can share a filesystem,
+  so the VFS decides EXDEV, not the encoder. Normal coalescing still stops at
+  export credential transitions. Read-only saved exports still reject LINK.
+- Synthetic current root/attribute-directory handles retain STALE. Saved
+  synthetic LINK sources remain opaque and must never be unwrapped to link
+  their base inode. The existing VFS mount-ID check returns XDEV for these
+  sources; memfs inferred opens do not necessarily validate directory type,
+  so XDEV also precedes NOTDIR for a regular target in this combination.
+- Forty-eight additional measured wire requests exercise forced single-op and
+  coalesced COMMIT/CREATE/LINK, six CREATE object types, device numbers, mode,
+  applied attrset, change_info, SAVEFH/RESTOREFH, collisions, invalid timestamps,
+  COMMIT type failures, error suffix stopping and cross-export hard links.
+  Extra unmeasured checks cover synthetic cursors and read-only exports.
+- The finish-retry fixture now injects EAGAIN on completed COMMIT and requires
+  a nonzero commits counter. Successful CREATE/LINK remain excluded because
+  the fixture has no backend mutation rollback.
+
+The 15 remaining independent handler builders are ALLOCATE, CLONE, COPY,
+DEALLOCATE, LOCKT, LOOKUP, LOOKUPP, READ, READ_PLUS, REMOVE, RENAME, SEEK,
+SETATTR, WRITE and WRITE_SAME. They already use compounds; the remaining work
+is sharing their builders and eliminating avoidable segmentation, alongside
+namespace/export, bounded journal, state-retirement and pNFS boundaries.
+RENAME remains the next suggested consolidation task.
+
+Final validation:
+- All 35 focused VFS/NFS extended suites pass in both Debug and Release,
+  including the expanded metadata and finish-retry tests. Initial new-test
+  failures were incorrect expectations (memfs symlink mode, synthetic-source
+  XDEV ordering, and synchronous cursor-only fallback trace spans), corrected
+  after comparing with the removed builders and VFS dispatch.
+- Required make -k check CTEST_PARALLEL=8 completed all stages, exit 2 for the
+  existing test failures and analyzer findings. Both quick sweeps pass 270/275;
+  failures remain nfs/mbt/pnfs_{memfs,diskfs,cairn}_remote and
+  posix/mbt/{batch_smb_memfs,strict_smb}. Known intermittent FUSE shutdown and
+  SMB DOC failures did not recur and remain unfixed.
+- Both Clang source builds and model corpus generations completed. Diagnostics
+  exactly match all 41 baseline signatures and 110 occurrences: no additions,
+  excess, missing or reduced occurrences. Each ScanReport has two generated
+  reports; cache reuse changes that artifact count, not the warning baseline.
+- make syntax, syntax-check, SDK include boundaries, REUSE, copyright and
+  git diff --check pass. NFS source audit finds zero ordinary calls across 74
+  internal VFS declarations after excluding permitted release APIs. KVM
+  remains unregistered because oras is unavailable.
+- Logs: /tmp/chimera-nfs4-ccl-{check,focused-debug,focused-release,targeted,
+  build-debug,syntax}.log; diagnostic comparison script/output:
+  /tmp/chimera-nfs4-ccl-diagnostics.py and .txt. Isolated production delta:
+  /tmp/chimera-nfs4-ccl-production.patch. No commit or push performed.
+
+
+## September 27 NFS4 remaining handler builders, three batches (working tree)
+
+User asked to remove the remaining independent builders in successive batches.
+Completed all 15 nfs4_proc_* handler files: RENAME/LOOKUP/LOOKUPP/LOCKT, then
+READ/READ_PLUS/WRITE/SETATTR/ALLOCATE/DEALLOCATE/SEEK/WRITE_SAME, then COPY/CLONE/
+REMOVE. All use chimera_nfs4_compound_single (renamed from _metadata), sharing
+construction, pure execution callbacks, retry teardown and accepted publication
+with coalesced runs. No nfs4_proc_*.c allocates a compound now; this removes 25
+allocation sites from those 15 files. Relative snapshot:
+/tmp/chimera-nfs4-all-builders-before. Production delta +365/-3972 = -3607 lines.
+No commit/push requested or performed.
+
+Semantics and correctness:
+- RENAME keeps target-directory validation and delegation coordination. LINK,
+  RENAME, COPY and CLONE single-operation fallbacks preserve raw saved handles
+  across export IDs, letting the VFS decide cross-filesystem behavior. Synthetic
+  saved handles remain opaque; credential transitions still split coalescing.
+- LOOKUP/LOOKUPP retain namespace routing and reject missing backend result FHs
+  before suffix execution. Audit caught an unconditional root-export LOOKUPP
+  scanner refusal: ordinary child LOOKUPP returned DELAY after consolidation.
+  Restricted that refusal to coalesced scanning; shared single entry is reached
+  only after the handler resolves namespace routing. New regression fails on
+  the pre-fix binary, passes after fix, including namespace finish retry.
+- LOCKT preserves v4.0 client/grace validation, NOFOLLOW/type checks, range error
+  order, owner/range deny results and accepted-only lease renewal.
+- Shared I/O retains grace, NOFOLLOW metadata checks, stateid/FH/client/principal
+  validation and request-input errors. SETATTR decode errors use a checkpoint
+  and stay coalesced; updated four trace expectations previously requiring a
+  refused build for malformed owner attributes. WRITE_SAME geometry validation
+  avoids unsigned addition overflow.
+- v4.0 I/O formerly renewed client leases during execution via acquire(). It now
+  acquires without renewal and pins encountered clients; attempt reset clears
+  renewal flags and accepted finish touches them. Pins remain across retries,
+  release at teardown. v4.1+ renews only its authenticated session client.
+- COPY uses the existing VFS generic read/write fallback, removing the duplicate
+  frontend transfer loop. Endpoint stateid classes now fail at execution;
+  CLONE retains capability checking even for zero-length requests.
+- REMOVE's MDS phase uses the shared encoder. Real pNFS REMOVE still ends the
+  wire run: its independent DS cleanup is best effort AFTER accepted MDS finish,
+  and retries only finish EAGAIN (bounded), before resuming the wire suffix.
+  Fixed stale backing-name construction to use the shared mount-id/file-id
+  helper, matching both creation paths. New resident-memfs pNFS test verifies
+  first WRITE creates a backing file, nonfinal-link REMOVE preserves it/data,
+  and last-link REMOVE deletes it. Existing proxy pNFS tests did not cover this.
+
+Coverage and remaining scope:
+- Added forced-single wire tests for all 15 handlers, payloads/counts/stability,
+  wrong-FH stateids, invalid attributes/ranges, change_info, cursors and errors;
+  separate v4.0 READ/WRITE/SETATTR/LOCKT coverage. Namespace tests cover ordinary
+  child LOOKUPP under a root export and descendant LOOKUP of an export name.
+- Debug and Release focused VFS/NFS suites: 36/36 pass in each, including the
+  new resident-pNFS test.
+  Initial CLONE test used four bytes; backend requires aligned ranges, so fixed
+  fixture to 4096 bytes. No assertion was relaxed to conceal a production fault.
+- Remaining non-shared allocations are three namespace/export/root-resolution
+  builders in nfs4_root.c and three pNFS builders in nfs4_pnfs.c (LAYOUTGET query,
+  backing materialization, LAYOUTCOMMIT), plus accepted pNFS REMOVE cleanup in
+  the shared encoder. These already use compounds but are separate orchestration
+  work; do not claim the entire NFSv4 wire request is always one VFS transaction.
+- Existing state-retirement/session/namespace/export and bounded reply/journal
+  boundaries remain. Backend transactions and real mutation rollback remain out
+  of scope; the synthetic finish fixture excludes successful mutations.
+- Both final quick sweeps pass 270/275. Failures are the same existing
+  nfs/mbt/pnfs_{memfs,diskfs,cairn}_remote and posix/mbt/{batch_smb_memfs,strict_smb}.
+  Initial full-check Release ran before the LOOKUPP fix and had two extra root
+  namespace MBT failures; a full Release rebuild and 275-test rerun confirmed
+  both are fixed. Debug in the full check ran the final source.
+- Full make -k check CTEST_PARALLEL=8 completed, exit 2 for the recorded tests
+  and existing analyzer findings. Both Clang builds and all model generation
+  stages finished. Diagnostics exactly match the saved baseline: 41 signatures,
+  110 occurrences, no new/excess or reduced/missing entries. Each ScanReport
+  has two reports. Final Release quick rerun is the authoritative Release
+  result because the original sweep preceded the LOOKUPP correction.
+- make syntax, final syntax-check, SDK include boundaries, REUSE, copyright
+  and git diff --check pass. KVM remains unregistered because oras is absent.
+  Existing intermittent FUSE shutdown/SMB DOC failures did not recur.
+- Audited 74 ordinary internal VFS API names after stripping comments: zero
+  direct calls anywhere in the NFS frontend.
+- Logs: /tmp/chimera-nfs4-all-{check,debug-focused,namespace-before,
+  namespace-build,batch1-tests,batch2-tests,batch3-tests,syntax}.log. Additional
+  final logs: /tmp/chimera-nfs4-all-{release-focused,release-quick,
+  final-release-build,final-boundaries}.log. Diagnostic comparison:
+  /tmp/chimera-nfs4-all-diagnostics.py and .txt. Isolated production patch:
+  /tmp/chimera-nfs4-all-production.patch.
+
+
+## September 29 NFS4 LAYOUTCOMMIT consolidation (working tree)
+
+User requested another NFS compound cleanup pass. LAYOUTCOMMIT now participates
+in the shared encoder and uses chimera_nfs4_compound_single for fallback. Removed
+its independent builder/gate/completion from nfs4_pnfs.c. Production delta against
+/tmp/chimera-nfs4-layoutcommit-before: +135/-180 = -45 lines, across
+nfs4_compound_vfs.c and nfs4_pnfs.c. No commit/push requested or performed.
+
+- Pure execution authorization acquires the layout without lease renewal,
+  validates the pinned session client, full identity, current execution FH,
+  destruction, explicit sequence version and writable iomode, then drops the
+  reference. Every backend retry redoes these checks. Seqid zero means current;
+  old/future/open/anonymous/forged/returned stateids keep their distinct errors.
+- Each attempt reads current size, then prepares a conditional SETATTR. Repeated
+  commits in one run see preceding changes; reported high-water marks never
+  shrink the file. Mtime updates and newsize reporting are preserved. The
+  setattr_after_write flag avoids recalling the layout authorizing those writes.
+  Empty updates use the executor's successful skip path. Wire arguments remain
+  unchanged, and responses are published only after accepted finish.
+- Reject overflow and invalid nanoseconds before metadata changes or suffixes.
+  Pseudo-root and named-attribute directories cannot use a base file's layout.
+  Feature-disabled and missing-FH paths retain their errors. The shared scanner
+  retains export, synthetic-cursor, minor-version and reply-capacity boundaries.
+- Tests cover coalesced before/after metadata, repeated commits, no shrink,
+  mtime-only, standalone fallback, wrong client/FH, read-only grants, stateid
+  versions, invalid input, stopped mutation suffixes and synthetic cursors.
+  Disabled-pNFS tests cover coalesced, standalone and no-FH requests.
+- Finish injection only admits unexecuted or skipped LAYOUTCOMMIT SETATTRs;
+  applied size/mtime mutations remain excluded because the fixture has no
+  rollback. A deterministic pending-finish gate returns the layout on another
+  request, rejects finish, and proves the retry returns BAD_STATEID before its
+  GETATTR suffix. Existing namespace rendezvous shares the fixture helper.
+- Initial test issues: generated nfstime4 values require scalar comparison,
+  not Python object equality. The proxy pNFS fixture lacks named streams, so
+  the attrdir test uses resident memfs with named streams explicitly enabled
+  and a real base-file layout; OPENATTR must succeed before LC is rejected.
+  No production assertion was relaxed to hide either fixture issue.
+- Debug and Release focused VFS/NFS suites pass 36/36 each; final disabled-pNFS
+  additions also pass in both metadata variants. Both full quick sweeps pass
+  270/275, with the same existing nfs/mbt/pnfs_{memfs,diskfs,cairn}_remote and
+  posix/mbt/{batch_smb_memfs,strict_smb} failures.
+- Full make -k check CTEST_PARALLEL=8 completed (exit 2 for the existing tests
+  and analyzer findings). Both Clang builds and all model-generation steps
+  finished; diagnostics exactly match the saved baseline: 41 signatures and
+  110 occurrences, no new/excess or reduced/missing entries. Each ScanReport
+  contains two reports. SMB model generation took 495s/476s; it was not hung.
+  make syntax, syntax-check, SDK boundaries, REUSE, copyright and diff checks
+  pass. KVM suites remain unregistered because oras is absent.
+- Remaining specialized allocation sites: three root/export-resolution builders,
+  two pNFS builders (LAYOUTGET query and backing materialization), plus accepted
+  pNFS REMOVE cleanup. No nfs4_proc_* handler allocates its own compound. A fresh
+  comment-stripped audit of vfs_internal_procs.h names finds zero ordinary
+  direct VFS calls in the NFS frontend.
+- LAYOUTGET still needs staged layout publication, retry-time authorization and
+  consolidation of its conditional native-layout/backing-file work. Root export
+  resolution needs export credential/snapshot semantics; simply sharing a small
+  allocation helper would not coalesce those wire boundaries. State/session
+  retirement and reply/journal capacity boundaries remain. Backend transaction
+  rollback and cross-MDS/DS atomicity are not provided by this pass.
+- Logs: /tmp/chimera-nfs4-lc-{syntax,build,targeted,disabled,focused-debug,
+  focused-release,check}.log. Isolated production patch:
+  /tmp/chimera-nfs4-lc-production.patch. Diagnostic comparison:
+  /tmp/chimera-nfs4-lc-diagnostics.py and .txt.
+
+
+## September 29 NFS4 root and export entry consolidation (working tree)
+
+User asked to continue the remaining NFS work. Export-entry LOOKUP and real-root
+PUTROOTFH/PUTPUBFH now call chimera_nfs4_compound_export, which selects the export
+credential and uses the shared encoder for the entry and its same-export suffix.
+Oversized replies use the same single-operation fallback. Removed the independent
+export LOOKUP builder/completion in nfs4_root.c and PUTROOTFH's resolver callback.
+Current production delta against /tmp/chimera-nfs4-root-before: +196/-113 = +83
+lines. No commit/push requested or performed.
+
+- The VFS seed is PUTROOT followed by LOOKUP_PATH (GETFH for an empty root
+  path). LOOKUP keeps its original no-follow semantics; PUTROOTFH follows final
+  symlinks and resolves afresh, preserving root-remount recovery. Failed real
+  root resolution remains SERVERFAULT, never a synthetic-root fallback.
+- An optional owned export snapshot fixes name/id/path/access/squash/anon ids/
+  security policy. Pure prepare callbacks compare it under exports_lock before
+  each wire operation on every attempt. A changed or removed export returns
+  DELAY, forcing fresh client selection instead of replaying old credentials.
+  Cache priming occurs only at accepted result publication, with a second
+  locked snapshot comparison. Caller-owned paths are copied by the VFS.
+- Export-entry LOOKUP copies live export records under lock before selecting
+  policy. Crossing to another export/root remains a boundary because a VFS
+  compound has one credential. Squash always derives from orig_cred.
+- PUTROOTFH's deliberate WRONGSEC deferral is preserved. A disallowed flavor
+  can install the root when the next operation handles security, but that root
+  operation runs alone: otherwise a coalesced same-export PUTFH could bypass
+  the normal security-flavor check. Tests retain the old signed root FH while
+  reusing its export id with a Kerberos-only policy to exercise this case.
+- Tests assert exact spans for root/public-root plus lookup/read, root after a
+  file cursor, SAVEFH/SECINFO_NO_NAME/RESTOREFH, repeated roots, sibling entry,
+  multi-component exports, single fallbacks, failed prefixes, read-only policy,
+  security flavors, and squash/reset across two OPENs. Synthetic-root entry is
+  measured separately in metadata tests. Real root cases include VFS path /,
+  a final symlink and a missing path.
+- The read-only finish fixture now admits namespace LOOKUP_PATHs and records
+  them. A deterministic gate replaces an export while finish is pending, then
+  rejects finish. Tests explicitly reuse the export id while changing its path
+  or only its policy; retry rejects the old snapshot before GETFH. A root
+  replacement case uses the same rendezvous. Successful mutations are still
+  excluded; this does not implement backend rollback.
+- Added accepted/retry NFSv4.0 namespace suites for PUTROOTFH/PUTPUBFH, entry
+  suffixes, single fallback and failed-prefix retry. Initial v4.0 test had only
+  successful requests and failed the fixture's required failed-prefix coverage;
+  added the missing NOENT case, retaining the assertion. All six targeted
+  namespace/metadata suites now pass. Initial existing focused suites passed
+  36/36 before adding the two v4.0 suites. Final focused suites pass 38/38 in
+  both Debug and Release. Final quick sweeps pass 270/275 in both builds,
+  reproducing only pnfs_{memfs,diskfs,cairn}_remote, posix/batch_smb_memfs and
+  posix/strict_smb. Clang diagnostics exactly match the saved baseline: 41
+  signatures, 110 occurrences. The final incremental ClangDebug rebuild
+  reports only the same two encoder diagnostics (combine/open_replay).
+  Formatting, SDK boundary, licensing, copyright and diff checks pass. The
+  licensing checker needed escalation for its Python multiprocessing socket.
+- Final review added the common checkpoint to COPY/CLONE preparation so range
+  operations also revalidate the selected export. Export lookup rejects a reused
+  id whose path changed between name selection and snapshot copying. New root
+  COPY tests exposed a needless build-time FH requirement in range restoration;
+  NFSv4.0 OPEN replay had the same assumption. Both now use placeholders filled
+  by their existing execution callbacks. Exact-span tests cover nonempty/EOF
+  COPY and v4.0 OPEN/replay, including suffix data and restored handles.
+- Release metadata retry initially failed an exact-span assertion after all
+  wire checks passed. Reproduced with preserved logs: fixture stderr inserted
+  an accepted record into the middle of the stdout submission tag at page 19.
+  Changed fixture output to fwrite/fflush on the same stdout FILE as the server
+  logger, sharing its buffer and stdio lock. Retained every trace assertion;
+  20 consecutive reproducer runs and both final focused suites pass. Failed
+  log: /tmp/chimera-compound-wire.MHutH8/chimera.log (lines 6294-6295).
+- Remaining allocations: root-FH cold-cache resolution and pseudo-root READDIR
+  enumeration in nfs4_root.c; LAYOUTGET query and backing materialization in
+  nfs4_pnfs.c; shared main encoder and accepted pNFS REMOVE cleanup. Root cache
+  miss orchestration and synthetic-root enumeration are still separate work.
+  Other state/session retirement, export credential and capacity boundaries
+  remain. No VFS public API extension was required for this pass.
+- Logs: /tmp/chimera-nfs4-root-{build,initial,targeted,syntax,check}.log;
+  focused-{debug,release}-final, quick-{debug,release}-final, late-targeted,
+  metadata-stress-fixed, clang-debug-final, final-hygiene and diagnostics.txt
+  under the same prefix. All model generation completed.
+  Production-only patch: /tmp/chimera-nfs4-root-production.patch. Analyzer
+  comparison script: /tmp/chimera-nfs4-root-diagnostics.py (same saved baseline
+  as the LAYOUTCOMMIT pass). Full make -k check CTEST_PARALLEL=8 completed
+  with exit 2 only for the recorded quick-test failures and existing analyzer
+  findings. Final production corrections were rebuilt and fully retested in
+  Debug/Release; ClangRelease included them and ClangDebug received a final
+  incremental scan. KVM suites remain unregistered because oras is unavailable.
+
+
+## September 29 NFS4 pseudo-root READDIR page consolidation (working tree)
+
+User asked for another NFS batch. Pseudo-root READDIR now contributes a whole
+response page to the shared encoder instead of allocating/submitting a separate
+compound for every export. Removed the old asynchronous per-entry dispatch loop,
+completion wrapper and public nfs4_root_readdir entry. No commit/push requested.
+Production delta against /tmp/chimera-nfs4-pseudo-before: +271/-301 = -30 lines.
+
+- nfs4_root_readdir_add appends PUTROOT/LOOKUP_PATH pairs and one final checkpoint
+  to the caller's compound. It snapshots export names/paths/ids under the existing
+  export-list lock, reserves page storage during construction, and bounds rows by
+  maxcount, the arena's 8192-byte reserve and remaining VFS operation capacity.
+  Rows that cannot be returned are not queried. Sparse requests retain the
+  256-byte attribute allocation; broad requests reserve a larger bound. The
+  256-byte page allowance, positional cookies, zero verifier and request
+  credential used for pseudo-root listing are unchanged.
+- Each lookup's prepare callback rechecks name/id/path under exports_lock on every
+  attempt. Removed or repointed exports return DELAY, including replacement with
+  the same explicit id. The helper sets the wire verification status explicitly:
+  the generic errno mapping would otherwise turn EAGAIN into SERVERFAULT. Name
+  and path strings remain owned through completion; no live export pointer escapes.
+- Attribute callbacks write only private, preallocated reply buffers. Every
+  successful retry overwrites all output fields; a failed page never publishes
+  partial entries. The common finish handler owns retry, cleanup and accepted
+  publication. The synthetic protocol current FH remains unchanged throughout,
+  regardless of the last backing path resolved. No VFS public API changes.
+- A new test exposed an existing missing-attributes case: LOOKUP_PATH on the
+  physical VFS root has no final component to provide attrs. Empty normalized
+  export paths now append OPEN/GETATTR, and attribute projection supplies the
+  current FH when the backend's attrs omit it. Final symlinks retain no-follow
+  semantics; ordinary multi-component export paths still use LOOKUP_PATH.
+- Added four accepted/retry wire suites: compound_{v40,adoption}_pseudo_{accepted,
+  retry}. They cover a 44-entry page in one VFS submission, signed alias handles,
+  multi-component targets, final symlinks, physical root, small pages, EOF,
+  reserved/out-of-range cookies, TOOSMALL, empty namespace, a successful lookup
+  followed by a missing export, and suppression of a WRITE after failed READDIR.
+  A pending-finish rendezvous replaces an export with the same id but a new path;
+  retry returns DELAY before GETFH and a fresh request sees the new inode.
+- A 444-export fixture exceeds the 128 KiB arena, verifies complete continuation
+  without duplicate/missing names, and keeps the following GETFH intact. Pynfs
+  decodes entry chains recursively and hit its default recursion limit; the
+  fixture temporarily raises it to 4096, then restores it. The REST fixture uses
+  single-component export names (REST rejects a nested export name with HTTP 400).
+- Final review reproduced an ASan crash with broad attribute requests: the old
+  256-byte buffer overflowed into the next preallocated entry. The attribute
+  marshaller's size argument bounds ACL inclusion, not subsequent fixed fields.
+  Construction now bounds fixed attributes by the requested bitmap (40 bytes
+  each, with the larger signed-FH bound) plus the existing ACL allowance. All
+  four wire suites enumerate broad-attribute pages and verify their continuation
+  and trailing fields. Failure log: /tmp/chimera-nfs4-pseudo-broad.log; corrected
+  4/4 run: /tmp/chimera-nfs4-pseudo-broad-fixed.log. No production edits after this
+  correction; full make check was restarted to verify the final code.
+- Existing POSIX pseudo-root/root-export tests on memfs and linux pass. Final
+  focused Debug and Release suites each pass 46/46 (42 VFS/NFS suites plus four
+  root integration tests). Full make -k check CTEST_PARALLEL=8 completed;
+  Release's quick sweep passed 270/275 with the five known remote-pNFS and
+  SMB/POSIX failures. Debug passed 269/275: those five plus the already-recorded
+  intermittent FUSE compound-lock shutdown abort. Repetition reproduced it and
+  the retained log again says "fuse thread destroyed with 1 active requests" at
+  fuse.c:267. NFS is disabled in that fixture; this remains an unfixed teardown
+  issue, not a newly established NFS regression. Evidence:
+  /tmp/chimera-nfs4-pseudo-fuse-{lock-repeat.log,abort.debug.log}.
+  Clang diagnostics exactly match the baseline: 41 signatures / 110 occurrences,
+  with no new or missing messages. Both scan-build stages completed without new
+  reports (ccache replays the existing warning output; do not claim the old
+  findings were fixed). All model generation completed. make syntax, formatting,
+  SDK boundaries, REUSE, copyright and git diff --check pass. Full check exits 2
+  only for the reported test failures; no commit or push was performed.
+- Remaining specialized allocation sites: cold root-FH resolution in nfs4_root.c,
+  two LAYOUTGET builders in nfs4_pnfs.c, and accepted pNFS REMOVE cleanup, plus the
+  common encoder. Positional cookie behavior across export-list mutations and the
+  pseudo-root ACL allowance remain unchanged. Backend transaction
+  rollback and cross-filesystem atomicity are outside this pass.
+- Next-pass review target: the cold root resolver still snapshots the root export
+  but validates only root_export_id before publishing its cache. Reusing that id
+  with a changed path during resolution can satisfy the check; this path needs
+  the common builder's snapshot revalidation and accepted publication rules.
+  Its standalone completion also has no common finish-EAGAIN retry handling.
+- Follow-up audit target: ordinary chimera_nfs4_readdir_entry_fill still uses
+  a 256-byte fixed allowance plus a stored ACL's size. Check broad fixed-field
+  requests there too; the shared marshaller does not enforce that total bound.
+- Logs: /tmp/chimera-nfs4-pseudo-{build,initial,targeted,large,syntax,check,
+  focused-debug,focused-release,broad,broad-fixed,correction-debug-build,
+  correction-release-build}.log. The superseded check before the buffer fix is
+  retained as /tmp/chimera-nfs4-pseudo-check-before-attr-fix.log. Final diagnostic
+  comparison: /tmp/chimera-nfs4-pseudo-diagnostics.txt. Isolated production patch:
+  /tmp/chimera-nfs4-pseudo-production.patch. Diagnostic comparison script:
+  /tmp/chimera-nfs4-pseudo-diagnostics.py (same baseline as the preceding passes).
+
+## September 29 ordinary NFS4 READDIR attribute sizing (working tree)
+
+User asked to address the ordinary READDIR sizing concern from the pseudo-root
+pass. The regression is confirmed and fixed. No commit/push requested.
+
+- Before the fix, the new broad-attribute wire test failed decoding
+  CHANGE_ATTR_TYPE: value 1852255537 (directory-name bytes) was returned as an enum.
+  Ordinary entry storage reserved only 256 fixed bytes plus a stored ACL's bound;
+  the marshaller could write beyond that allocation into subsequent entries.
+  Reproducer: /tmp/chimera-nfs4-readdir-sizing-before.log.
+- Moved the pseudo-root's fixed-attribute capacity calculation to the shared
+  chimera_nfs4_attr_capacity helper in nfs4_attr.h. It bounds requested fixed
+  fields (40 bytes each, with the larger wrapped-FH allowance) and accepts a
+  caller-provided ACL capacity. Pseudo-root behavior is unchanged.
+- Ordinary and named-attribute READDIR now reserve that safe bound plus the
+  requested stored or mode-synthesized ACL. Unrequested ACLs allocate no extra
+  storage. After encoding, the last opaque allocation is trimmed to its actual
+  size with 8-byte arena alignment. maxcount is charged actual XDR entry bytes
+  (24 fixed bytes plus padded name, returned bitmap, and encoded attributes),
+  independently of temporary capacity and C struct sizes. The 8192-byte arena
+  reserve and whole-attempt reset/publication rules remain intact.
+- Production-only delta versus /tmp/chimera-nfs4-readdir-sizing-before:
+  +57/-37 = +20 lines across nfs4_attr.h, nfs4_proc_readdir.c and nfs4_root.c.
+  No VFS API change or new independent compound builder.
+- Added eight accepted/retry wire suites: compound_{v40,adoption}_
+  {readdir,readdir_linux}_{accepted,retry}, on memfs and Linux. They cover broad
+  fixed fields with/without ACL, maximum numeric uid/gid strings, exact-fit
+  maxcount and one-byte-short TOOSMALL, stored 25-ACE ACLs, unrequested ACLs,
+  2048-byte page continuation, two READDIRs with intervening GETATTR in one
+  compound, stopped mutation suffixes, and actual re-encoded response size.
+  Linux free-space attributes can change while logs/builds write to the same
+  filesystem; the equality comparison requests stable fields, while separate
+  broad-request cases still encode the volatile fields.
+- Expanded existing named-attribute READDIR tests to request broad word-0/1
+  fields. The finish fixture explicitly allows read-only metadata for the new
+  feature names and counts completed READDIR operations. The wrapper asserts
+  both a two-page rejected compound and a failed READDIR prefix were retried.
+  Mutations remain excluded from synthetic finish rejection.
+- Targeted Debug run passed 15/15. Combined focused Debug and Release runs each
+  passed 54/54. Both quick sweeps passed 270/275, with the same five persistent
+  failures. The intermittent FUSE/SMB DOC aborts did not recur. Full
+  make -k check CTEST_PARALLEL=8 completed with exit 2 for those test failures
+  and two existing analyzer findings in each Clang configuration. Model
+  generation, SDK boundaries, formatting, licensing and copyright checks pass.
+  Baseline: five persistent quick-test failures (remote pNFS on memfs/diskfs/
+  cairn, POSIX batch_smb_memfs and strict_smb), plus known intermittent FUSE
+  shutdown / SMB DOC fixture aborts; 41 Clang diagnostic signatures and 110
+  occurrences, exactly matched by this run with no new or removed diagnostics.
+  make syntax and git diff --check pass.
+- Logs: /tmp/chimera-nfs4-readdir-sizing-{before,configure,build,syntax,
+  targeted-final,focused-debug,focused-release,check}.log. Production patch:
+  /tmp/chimera-nfs4-readdir-sizing-production.patch. Diagnostic comparison:
+  /tmp/chimera-nfs4-readdir-sizing-diagnostics.{py,txt}, using the same saved
+  baseline.
+
+
+## September 30 NFS4 cold root resolution (working tree)
+
+User approved the cold-root resolver as the next NFS4 consolidation batch.
+No commit/push requested. Implementation and verification are complete.
+
+- Removed the independent nfs4_root_export_fh_resolve builder/context/completion.
+  A cold cache now uses a namespace-prelude mode of nfs4_vfs_submit, with the
+  common allocation, disposal, attempt reset and finish-retry handler. Root
+  resolution and export entry share the path encoder and accepted cache
+  publication helper. The prelude logs count=0 because it completes no wire op;
+  LOOKUP/SECINFO/LOOKUPP resume only after it finishes. Namespace/credential
+  selection is still a boundary, deliberately separate from this batch.
+- The owned export snapshot is compared by id, name, path, access, squash,
+  anonymous uid/gid and allowed security flavors before execution on each
+  attempt and under exports_lock before accepted cache publication. Reusing
+  an export id cannot prime the old root after path or policy replacement.
+  A stale snapshot returns DELAY; LOOKUP/SECINFO no longer swallow that result
+  and fall back to a physical entry. LOOKUPP also propagates it.
+- Finish EAGAIN uses the shared bounded retry; a terminal finish error fails
+  the pending wire op directly and stops its suffix. Ordinary resolution
+  failures retain their namespace behavior. The current protocol FH, export,
+  stateid and request credential stay intact across the prelude. Empty root
+  paths also use the shared path, and final symlinks are still followed.
+- Added four accepted/retry suites: compound_{v40,adoption}_cold_root_
+  {accepted,retry}. Cold/warm junction LOOKUP, SECINFO, root and sibling
+  LOOKUPP, missing root paths, the physical VFS root, symlinks and exact
+  submission spans are covered. Pending-finish rendezvous replaces a root
+  with the same id but a changed path, access or squash/anonymous identity.
+  Both rejected and accepted finishes must reject the stale result; a fresh
+  request must resolve the replacement. Mutation suffixes remain unexecuted.
+  A terminal EIO finish is also tested. The fixture still excludes filesystem
+  mutations from synthetic finish rejection.
+- The new retry test against the old binary reproduced cold_root_lookup
+  returning DELAY instead of completing the junction: the standalone resolver
+  had not retried its rejected finish. Log:
+  /tmp/chimera-nfs4-cold-root-before.log. An initial new test expected LOOKUPP
+  from the symlink target itself to return its parent, but that object was now
+  the namespace root and correctly returned NOENT; the test now starts at the
+  distinct rootfs mount root. All eight cold-root/namespace suites pass.
+- Production delta against /tmp/chimera-nfs4-cold-root-before is +154/-180,
+  a net reduction of 26 lines across four files. No VFS API change.
+- The first full check found a Release -Werror=maybe-uninitialized diagnostic
+  for avail: the new prelude skipped its initialization. Moved the reply-budget
+  initialization before both paths. Stopped only this task's check process
+  group and restarted full verification; another user's check under
+  /worktrees/extended-regress was left untouched. Earlier log:
+  /tmp/chimera-nfs4-cold-root-check-before-release-fix.log.
+- Final focused Debug and Release suites each pass 58/58, after the Release
+  compiler correction. Full make -k check CTEST_PARALLEL=8 completed with
+  exit 2 for the test failures and existing analyzer findings below.
+  Release quick passed 269/275: the five persistent failures plus
+  smb/mbt/batch_memfs_encrypted311, whose durable trace
+  smb2Durable_stepDurable_300_0x41_3.itf.json reported an unexpected pending
+  CREATE 'b' at state 295. Three consecutive isolated repeats passed without
+  code changes; the extra failure is not reproduced or fixed. This fixture
+  enables SMB only (smb2_mbt_common.h:1102), not the changed NFS root paths.
+  Log: /tmp/chimera-nfs4-cold-root-smb-repeat.log. Debug quick passed
+  270/275 with only the five persistent failures, including a pass of the
+  encrypted-SMB case. The known intermittent FUSE/SMB DOC aborts did not recur.
+- Both Clang builds completed with two existing encoder findings each. All
+  diagnostics exactly match the baseline: 41 signatures / 110 occurrences,
+  with no additions or removals. All model generation completed. make syntax,
+  SDK boundaries, formatting, REUSE, copyright and git diff --check pass.
+  KVM suites remain unregistered because oras is unavailable.
+- Remaining specialized builders: two LAYOUTGET phases and accepted pNFS REMOVE
+  backing cleanup, plus the common encoder. The cold-root prelude now shares
+  lifecycle/encoding but still precedes namespace and credential selection.
+  Broader junction/LOOKUPP coalescing and backend rollback remain separate work.
+- Logs: /tmp/chimera-nfs4-cold-root-{before,configure,syntax,build,
+  build-final,debug-rebuild,targeted,targeted2,targeted-final,focused-debug,
+  focused-release,check}.log.
+  Isolated production patch: /tmp/chimera-nfs4-cold-root-production.patch.
+  Diagnostic comparison: /tmp/chimera-nfs4-cold-root-diagnostics.{py,txt}.
+
+
+### NFS4 execution-time namespace coalescing (September 30, 2026)
+
+- User asked to continue broader coalescing after cold-root consolidation.
+  Ordinary LOOKUPP now stays in the common compound after LOOKUP, PUTFH and
+  RESTOREFH, including when a real "/" export exists. LOOKUP/SECINFO names that
+  coincide with exports no longer force a boundary when the execution cursor
+  is a descendant. LOOKUPP at the namespace root returns NOENT in the compound.
+- Construction snapshots the namespace-root policy and possible-junction
+  classification. Pure prepare callbacks validate them and inspect the VFS
+  cursor, at the first checkpoint and again at the actual namespace operation.
+  A root resolved by earlier PUTROOTFH in the same attempt can be used privately
+  without publishing its cache entry before finish. Changes require DELAY.
+- Actual export junctions, mount-root parent crossings and cold root comparisons
+  still need dispatcher credential/namespace selection. They defer that wire op
+  and its entire suffix, then accept/publish only the successful prefix. A
+  one-shot request flag dispatches the boundary directly to avoid re-coalescing
+  it forever; an empty prefix resumes correctly. No new VFS API or builder.
+- Important API contract: op_args only exposes the currently preparing op;
+  it returns NULL for future ops during execution. The prepare callback uses
+  op_skip for itself; the common completion gate uses op_edit to skip future
+  slots. These skips and the private deferred marker reset on finish retry.
+  Deferred callbacks must not publish a cursor, SECINFO consumption or replies.
+- The accepted prefix publishes OPEN/owner journals and saved/current stateids
+  before namespace dispatch resumes. Undispatched WRITE payloads remain owned
+  by the request across disposal; terminal finish failures leave suffix release
+  to the dispatcher's normal truncation sweep. Backend rollback is still future
+  work; synthetic EAGAIN injection remains limited to read-only operations.
+- Added accepted-boundary tracing. The test parser pairs each boundary with its
+  preceding submission and checks the actual accepted prefix, while ordinary
+  coalescing cases still require one submission. Rejected attempts cannot emit
+  a boundary. Root-cache peek helper became unused and was removed. Production
+  delta against /tmp/chimera-nfs4-namespace-coalescing-before: +151/-137, net +14
+  lines across six files. Isolated patch:
+  /tmp/chimera-nfs4-coalescing-production.patch.
+- Extended the existing v4.0/v4.2 namespace suites with moving/nested/saved
+  cursors, shadowed descendant names, version-specific SECINFO semantics,
+  root-parent and non-directory vetoes, OPEN/SAVEFH/current-stateid publication,
+  WRITE data on both sides of an actual junction, v4.0 owner replay, an empty
+  deferred prefix, and controlled prefix finish EAGAIN/EIO. Initial focused
+  Debug run passed 58/58; empty-prefix additions passed all four namespace
+  variants. Final Debug/Release/full-check validation follows below.
+- Remaining: cross-export credential changes, synthetic namespace operations,
+  repeated root entry, budgets and other explicitly unsupported encodings can
+  still split spans. Cold resolution shares lifecycle but remains a prelude.
+  Specialized independent builders remain LAYOUTGET phases and accepted pNFS
+  REMOVE backing cleanup. Backend compound transaction hooks/rollback remain
+  outside this frontend pass.
+- Final review found a warm-cache precedence bug in this pass: a PUTROOTFH
+  that freshly resolved a replaced directory was compared against the older
+  cached root handle. The new regression reproduced LOOKUPP returning OK and
+  the physical parent instead of NOENT. The checkpoint now always prefers an
+  earlier root-entry result from its own attempt over the shared cache. Tests
+  replace the export directory twice without changing its configured path,
+  covering both parent refusal and sibling-junction selection. Before-fix log:
+  /tmp/chimera-nfs4-coalescing-stale-root-before.log.
+- Final verification completed: focused Debug and Release each pass 58/58,
+  including the stale-root-cache regressions and all namespace accepted/retry
+  cases. Both quick suites pass 270/275. Only the five persistent failures
+  remain: nfs/mbt/pnfs_{memfs,diskfs,cairn}_remote and
+  posix/mbt/{batch_smb_memfs,strict_smb}. Their concrete mismatch classes match
+  the previous cold-root log. No intermittent encrypted-SMB or FUSE failure
+  appeared in this run.
+- Full make -k check CTEST_PARALLEL=8 completed with exit 2 for those failures
+  and existing analyzer findings. Clang warning messages/counts exactly match
+  the baseline: 41 signatures, 110 occurrences, no additions or removals.
+  HTML report counts differ: Debug 3, Release 4 (previously 2 each). The extra
+  reports are test_nfs_persist.c:234 in both and nfs_nlm.c:236 in Release;
+  both warnings were already present in the baseline logs. The other two
+  reports are the existing encoder combine/open_replay findings. No new
+  diagnostic is inferred from the changed report-file count.
+- All model generation finished. make syntax, formatting, SDK include boundary,
+  REUSE, copyright and git diff --check pass. Logs:
+  /tmp/chimera-nfs4-coalescing-{syntax,build-final,focused-debug,focused-release,
+  check,stale-root-before,empty-prefix}.log. Diagnostic comparison is saved at
+  /tmp/chimera-nfs4-coalescing-diagnostics.{py,txt}.
+
+### NFS4 same-export root re-entry coalescing (September 30, 2026)
+
+- Latest user request: continue the conversion. This pass admits repeated
+  PUTROOTFH/PUTPUBFH into the existing shared compound when they select the
+  same export and effective credential. A span beginning with a file PUTFH can
+  reset to that export's root and continue. Actual cross-export selection,
+  synthetic roots and deferred WRONGSEC still use namespace dispatch.
+- Capture the root export before scanning the prefix's policy gates. Compare
+  its derived credential against the sequence credential, including active
+  supplementary groups, origin and flags. A plan containing root entry checks
+  the frozen policy at each wire-operation prepare (including the prefix) and
+  again at the root path lookup. Changed identity/path/access/security requires
+  DELAY; a finish retry cannot run its prefix with obsolete export policy.
+- Each root entry encodes PUTROOT plus fresh configured-path resolution (or
+  GETFH for the empty VFS path). It clears the current stateid/attribute-directory
+  cursor while preserving saved FH/stateid. No warm root FH shortcut, new VFS
+  API, or independent builder. The last successful root map is attempt-private,
+  resets on finish retry, and supplies subsequent namespace comparisons. Only
+  this last root result updates the shared cache after accepted finish: earlier
+  roots may have been replaced by mutations inside the same accepted span.
+- Shared v4.0/v4.2 namespace tests cover repeated public/root entry, file PUTFH,
+  saved file and attribute-directory cursors, SECINFO consumption, v4.2 saved
+  and cleared current stateids, physical VFS-root paths, failed root resolution,
+  and RENAME/CREATE followed by a fresh second root entry and parent veto.
+  Pending-finish replacements cover path, squash identity and security changes;
+  exact traces require one span, and retry logs must show three path resolutions
+  in one rejected attempt. Mutating spans are not subjected to synthetic EAGAIN
+  because backend rollback is still outside this frontend pass.
+- The new tests fail against the old binary solely on span assertions: eight
+  operations split 3+3+2 instead of one span, in both v4.0 and v4.2.
+  Log: /tmp/chimera-nfs4-root-coalescing-before.log. All 58 focused suites pass
+  in both builds before the final snapshot-ordering refinement. Final checks
+  will be recorded below. First full check was stopped only after verifying
+  its stdout path, to restart against that last refinement.
+- Turn snapshot: /tmp/chimera-nfs4-root-coalescing-before/.
+  Logs: /tmp/chimera-nfs4-root-coalescing-{syntax,build-debug,build-release,
+  namespace-debug,focused-debug,focused-release,check}.log.
+- Remaining: real export/credential transitions; synthetic namespace boundaries;
+  cold root resolution preludes; operation/reply budgets; LAYOUTGET's specialized
+  phases and accepted pNFS REMOVE backing cleanup. Backend transaction hooks and
+  rollback remain future work. This pass does not claim all NFS spans are 1:1.
+- Final focused reruns after snapshot ordering pass 58/58 in both Debug and
+  Release. Production delta: +85/-22, net +63 lines in nfs4_compound_vfs.c.
+  Release quick passed 269/275: the five baseline failures plus
+  smb/mbt/stream_probe_memfs. Its mode-3 last-peer disconnect check reopened a
+  stream successfully (0) instead of OBJECT_NAME_NOT_FOUND (0xc0000034).
+  Three consecutive isolated ctest reruns passed without code changes; this
+  remains an unresolved intermittent observation. Rerun log:
+  /tmp/chimera-nfs4-root-coalescing-stream-rerun.log.
+- Debug quick initially passed 267/275. Besides the five baseline failures,
+  s3/mbt/batch_diskfs aborted with libaio -28 (ENOSPC), posix/mbt/batch_io_uring
+  first mismatched mkdir/write with errno 28 and then cascaded, and
+  nfs/mbtdrc/batch_cairn aborted during the same disk-pressure period without
+  an explicit cause in its ctest output. The filesystem was 99% full.
+- Reclaimed about 8 GB from seven unused generated /tmp MBT image directories;
+  verified no process cwd/root, FD, cmdline or memory-map references before
+  deleting only those exact directories. Source, logs and other worktrees were
+  preserved. The three affected Debug suites then passed (3/3, no code changes)
+  in /tmp/chimera-nfs4-root-coalescing-space-rerun.log. Do not claim a diagnosed
+  code fix for the otherwise unexplained NFS DRC abort.
+- After normalizing generated inode values, persistent mismatch classes outside
+  the ENOSPC-affected POSIX trace match the previous coalescing baseline.
+  Comparison script/output:
+  /tmp/chimera-nfs4-root-coalescing-failures.{py,txt}.
+- Final make -k check CTEST_PARALLEL=8 completed with exit 2. All model generation,
+  formatting, SDK include boundaries, REUSE and copyright checks passed. Both
+  Clang builds emitted the two existing encoder HTML findings; warning content
+  exactly matches the baseline: 41 signatures, 110 occurrences, no additions or
+  removals. Diagnostic comparison:
+  /tmp/chimera-nfs4-root-coalescing-diagnostics.{py,txt}.
+- Final focused results: Debug 58/58, Release 58/58. Full quick results retain
+  the raw 267/275 Debug and 269/275 Release counts above; the three extra Debug
+  failures and the Release stream failure passed their isolated reruns. The
+  five persistent pNFS/POSIX-over-SMB failures and existing analyzer findings
+  remain unresolved. Do not describe the full check as green. Final
+  git diff --check passed. Before the next large sweep, check available disk
+  space: concurrent generated filesystem images can temporarily consume GBs.
+
+### NFS4 inline cold-root comparison and virtual-root spans (October 1, 2026)
+
+- User accepted the next cold/synthetic-root coalescing pass. Ordinary cold
+  root comparisons now use conditional PUTROOT + LOOKUP_PATH/GETFH before the
+  shared encoder's saved/current cursor seeds. Warm cache results skip both
+  operations. Each attempt privately holds the root handle; only accepted
+  finish can publish it under a matching locked export-policy snapshot.
+- Actual export crossings still defer the wire operation/suffix for credential
+  selection. No zero-wire root-resolution prelude is needed in these normal
+  spans. Standalone cold resolution remains as a dispatcher/budget fallback;
+  do not claim that helper was eliminated. A later wire root resolution takes
+  cache-publication precedence over the early comparison probe.
+- Failed root lookup leaves ordinary physical LOOKUP/SECINFO available; a
+  mount-root LOOKUPP whose configured parent cannot resolve returns SERVERFAULT.
+  Policy changes and root-probe EAGAIN map to DELAY, including before the first
+  wire operation. Changed snapshots during accepted finish veto a deferred
+  continuation while preserving its accepted prefix. Terminal finish failures
+  publish neither the prefix nor cache. Retry resets all private root results.
+- Virtual namespace runs now coalesce PUTROOTFH/PUTPUBFH, synthetic PUTFH,
+  GETFH/GETATTR/ACCESS, SAVEFH/RESTOREFH, LOOKUPP parent refusal,
+  SECINFO_NO_NAME, TEST_STATEID, and bounded pseudo-root READDIR pages.
+  Protocol checkpoints never send the synthetic handle to a backend. READDIR
+  may visit multiple real exports; current/saved protocol cursors remain virtual.
+  GETATTR replies stage privately using existing root attributes and reply sizing.
+  Installing a real root invalidates retried virtual prefixes. Named SECINFO,
+  actual export selection, and unsupported virtual operations remain boundaries.
+  A single virtual non-READDIR operation retains its direct protocol handler.
+- Regression coverage: cold/warm comparisons, failed root views, saved cursors,
+  snapshot path/security/squash replacement, accepted/rejected/terminal finish,
+  virtual metadata/ACCESS, inherited and consumed saved cursors, parent errors,
+  two virtual READDIR pages in one span, attribute-directory to pseudo-root
+  transition, and real-root installation while virtual finish is pending.
+  New cold tests also reproduce an existing DELAY loop when the configured
+  root cannot resolve but an ordinary physical lookup should succeed.
+- Old Release binary fails the new cold failed-view regression and virtual
+  exact-span regressions (4/4 expected failures). During implementation, retry
+  tests caught missing EAGAIN-to-DELAY mapping; final review caught an inherited
+  attrdir flag on synthetic PUTFH. Both fixed, with regression coverage.
+- Production delta: +230/-42, net +188 lines, entirely in the shared encoder;
+  no new VFS API or independent builder. Snapshot and production patch:
+  /tmp/chimera-nfs4-inline-root-before/ and
+  /tmp/chimera-nfs4-inline-root-production.patch.
+- Initial broad focused run hit a full filesystem; some trace logs were cut
+  off and those results are invalid. Removed eight exact inactive generated
+  NFS3/POSIX cairn test-image directories after checking process references,
+  preserving logs/source and live work. Disk-pressure cleanup is not a code fix.
+- Verification logs use
+  /tmp/chimera-nfs4-inline-root-{syntax,build-debug,build-release,focused-debug,
+  focused-release,cold-debug,pseudo-debug,before,check}.log.
+- Final focused suites pass 58/58 in Debug and Release. Full quick Release
+  passes 270/275; Debug passes 269/275. The five persistent remote-pNFS and
+  POSIX-over-SMB failures retain their baseline mismatch signatures (no new
+  normalized mismatch). Debug also reproduces the previously recorded FUSE
+  compound-lock shutdown abort. Three isolated reruns passed; a subsequent
+  until-fail:20 run reproduced it on attempt 12. Retained log again says "fuse thread destroyed
+  with 1 active requests" at fuse.c:267, with the NFS server disabled. No FUSE
+  code changed. Evidence: /tmp/chimera-nfs4-inline-root-fuse-{rerun,repeat}.log
+  and /tmp/chimera-nfs4-inline-root-fuse-abort.debug.log. Passing reruns do not
+  fix or dismiss the reproduced teardown issue.
+- Full make -k check CTEST_PARALLEL=8 completed with exit 2 for the recorded
+  test failures and existing analyzer findings. Both Clang stages finished all
+  model generation and reported the same two encoder findings (combine and
+  open_replay). Warning content/counts exactly match the baseline: 41 signatures,
+  110 occurrences, no new/excess or missing messages. Comparison scripts and
+  outputs are /tmp/chimera-nfs4-inline-root-{diagnostics,failures}.{py,txt}.
+- make syntax, formatting checks, SDK include boundaries, REUSE, copyright and
+  final git diff --check pass. Final quick counts remain Release 270/275 and
+  Debug 269/275; focused suites remain 58/58 in each build. Full check is not
+  green. No production edits followed focused validation, no commit or push.
+
+## NFSv4 explicit export and credential transitions (2026-10-01)
+
+- Current task: coalesce explicit export selections, preserving the retry/publication
+  contract. Cross-export real PUTFH, PUTROOTFH/PUTPUBFH and RESTOREFH now use
+  existing VFS operation groups inside one compound. Groups stop at the first
+  error and share the compound finish/retry lifecycle; no new VFS API or builder.
+- Deduplicated immutable export-policy snapshots own credentials derived afresh
+  from orig_cred. Each operation maps to its current and saved export identity.
+  Prepare validates policy snapshots; changed path/access/squash/security causes
+  DELAY before the affected operation. Later disallowed PUTFH returns WRONGSEC
+  in the same compound, preserving the successful prefix.
+- VFS groups clear both cursors. Group entry explicitly reseeds SAVEFH from the
+  attempt-private protocol handle before selecting the next current cursor.
+  Attribute-directory markers stay in NFS; backend cursors receive their bases.
+  Retry restores inherited saved FH and stateid journals. Accepted publication
+  applies each result's identity, then the last successful cursor's identity.
+  Delegation grants temporarily select their own OPEN's accepted identity.
+- GETATTR staging, VERIFY/NVERIFY and READDIR entry marshalling take an explicit
+  export id. OPEN's frontend ACL check uses the operation's frozen credential.
+  Read-only checks execute under the frozen current/saved policies, including
+  LINK/RENAME sources saved earlier within this same span.
+- New shared v4.0/v4.2 namespace tests cover two distinct anonymous uid/gid
+  mappings and restoration of the original uid/gid, ACCESS isolation, staged
+  ACL/FILEHANDLE replies, VERIFY and READDIR signing, saved attrdir restoration,
+  source/current ROFS with suppressed mutation suffixes, WRONGSEC prefix, and
+  export squash/security/access replacement while a read-only finish is pending.
+  Existing tests cover coalesced OPEN/stateid restoration across a real junction.
+- The old Release binary fails the new span assertion: a 15-operation selection
+  sequence uses five compounds; the new encoder uses one. Evidence:
+  /tmp/chimera-nfs4-export-transitions-before.log.
+- Test fixture fix: attach the finish observer before execution, then decide
+  retry eligibility from executed operations at finish. Skipped/unexecuted
+  mutation suffixes do not forbid retrying a read-only accepted prefix. Any
+  executed mutation still forbids synthetic rejection; this supplies no backend
+  rollback. Also fixed initial handling of an absent synthetic saved-export
+  snapshot, which otherwise changed a legacy LINK XDEV answer to DELAY.
+- Production delta before final validation: +267/-103, net +164 across six NFS
+  files. Snapshot: /tmp/chimera-nfs4-export-transitions-before/.
+  Logs use /tmp/chimera-nfs4-export-transitions-{syntax,build-debug,focused-debug,
+  focused-release,namespace-debug,before,check}.log.
+- Final verification: make syntax and focused Debug/Release each pass 58/58.
+  Full quick Debug/Release each pass 270/275; the five persistent remote-pNFS
+  and POSIX-over-SMB failures exactly match the baseline mismatch signatures.
+  The known intermittent FUSE teardown issue did not recur in this sweep and
+  remains unresolved. Both Clang stages finished all model generation and
+  report the same two findings (combine and open_replay). Warning signatures
+  and counts exactly match the baseline: 41 signatures, 110 occurrences,
+  nothing added or missing. Formatting, SDK header boundaries, REUSE,
+  copyright and final git diff --check pass. Full make -k check completed with
+  exit 2 for those known failures and analyzer findings; the sweep is not green.
+  Comparisons: /tmp/chimera-nfs4-export-transitions-{diagnostics,failures}.{py,txt}.
+  No production edits followed focused validation; no commit or push.
+- Remaining namespace boundaries: dynamic junction LOOKUP/SECINFO and mount-root
+  LOOKUPP; real/synthetic-root transitions; deferred ROOT/PUB WRONGSEC semantics.
+  Existing reply/operation budgets, specialized LAYOUTGET, accepted pNFS backing
+  cleanup and protocol lifecycle paths remain. Backend transactions are future work.
+
+## NFSv4 known-root junctions and named SECINFO (2026-10-02)
+
+- Continuing namespace coalescing after explicit export/credential groups.
+  Known-root LOOKUP junctions now select their frozen export identity in the
+  shared compound, using existing VFS groups. ROOT/PUB and SAVE/RESTORE retain
+  root provenance; restoring an older root after a newer ROOT does not imply
+  that the restored cursor is the current namespace root. Execution validates
+  the root handle, root policy, component mapping, target policy and security
+  flavor before entering the export. Final symlinks remain unfollowed and a
+  slash-only target path still returns NOENT, matching the previous handler.
+- Named SECINFO now stays inline for real-root junctions discovered during
+  execution and for synthetic roots. It advertises the frozen target policy
+  without entering the export or resolving its backing path. Ordinary physical
+  names advertise the current export. Conditional helper skipping preserves
+  v4.0's current/saved directory and v4.1+'s consumed-current-FH semantics.
+  Target policy/component snapshots are revalidated on retry; changed targets
+  return DELAY before the suffix. Attempt-local selection resets on retry.
+- Shared v4.0/v4.2 accepted/retry regressions cover repeated junction groups,
+  signed handles for aliases, saved root identity, inaccessible/missing-backed
+  SECINFO, ordinary names matching export names, final symlinks, slash-only
+  targets, WRONGSEC mutation suppression, runtime SECINFO policy replacement,
+  saved older-root provenance and missing synthetic SECINFO. Existing squash,
+  OPEN and export replacement tests now assert the longer coalesced spans.
+- Cold SECINFO finish-retry cases now include a failing VERIFY before CREATE:
+  SECINFO no longer defers, so without that guard CREATE would actually run,
+  correctly making the read-only rejection fixture ineligible. No mutation
+  rollback is simulated or added.
+- Production delta: +185/-19, net +166, only nfs4_compound_vfs.c. No new VFS API
+  or independent builder. Snapshot /tmp/chimera-nfs4-junctions-before/ and patch
+  /tmp/chimera-nfs4-junctions-production.patch. Old Release fails the new ROOT,
+  LOOKUP, GETFH span: two compounds instead of one. Evidence in
+  /tmp/chimera-nfs4-junctions-before.log.
+- Final focused suites pass 58/58 in Debug and Release. Complete quick Release
+  and the full Debug rerun each pass 270/275 with exactly the five preceding
+  baseline failures and mismatch signatures. No new/missing normalized mismatch.
+  Both Clang stages completed all model generation and reported exactly the
+  same two encoder findings (combine and open_replay). Warning content/counts
+  exactly match the baseline: 41 signatures, 110 occurrences, none new/missing.
+  make syntax, formatting, SDK include boundaries, REUSE, copyright and final
+  git diff --check pass. Full make -k check completed with exit 2 for the
+  recorded failures/findings; it is not green. Comparisons are retained as
+  /tmp/chimera-nfs4-junctions-{diagnostics,failures}.{py,txt}. The known intermittent
+  FUSE teardown abort did not recur and remains unresolved. No production edits
+  followed final focused validation; no commit or push.
+  Logs use /tmp/chimera-nfs4-junctions-{syntax,focused-debug,focused-release,check}.log.
+- First Debug quick sweep encountered transient ENOSPC/failed mkdtemp while
+  another worktree ran ctest at -j48 on the same filesystem. Its stdout log is
+  truncated; do not treat that sweep as valid final evidence. Preserved Testing
+  logs in /tmp/chimera-nfs4-junctions-debug-first-sweep/. Five additional failed
+  suites (NFS DRC io_uring/RDMA and SMB force-L2 plain/signed, replay plain) all
+  passed in the completed full Debug rerun at -j4. Its complete evidence is at
+  /tmp/chimera-nfs4-junctions-quick-debug-rerun.log. No files were manually
+  removed: space recovered through normal test cleanup. Release quick passed
+  270/275 with exactly the preceding baseline failures/mismatch signatures.
+- Remaining namespace boundaries: arbitrary runtime junction LOOKUP (including
+  inherited PUTFH and LOOKUPP-produced root cursors); mount-root LOOKUPP;
+  real/synthetic transitions; deferred ROOT/PUB WRONGSEC. Dynamic credential
+  selection cannot yet be represented by the construction-only VFS groups.
+  Operation/reply budgets, specialized LAYOUTGET phases, accepted pNFS REMOVE
+  cleanup, protocol lifecycle operations and future backend transactions remain.
+
+## NFSv4 runtime-discovered junction LOOKUP (2026-10-03)
+
+- Runtime junction LOOKUP now remains in the shared compound after inherited
+  PUTFH, earlier namespace operations and RESTOREFH. Potential export names
+  encode both the junction path and ordinary child lookup; attempt-private
+  selection skips the unused helpers. Ordinary descendant names that happen
+  to match an export retain the source export's credentials and identity.
+- Added optional VFS group select_cred callout: after cursor reset and dependency
+  checks, before any operation prepare, choose a borrowed immutable credential
+  from earlier execution results. NULL uses the configured/default credential.
+  Selection repeats on retry, cannot publish or transfer ownership, and leaves
+  authorization errors to prepare. Existing group callers are zero-initialized.
+  Groups retain one compound finish/retry lifecycle, without per-wire-op groups.
+- NFS tracks current/saved identity in attempt-private state, restores both on
+  retry, and resolves each operation's identity before policy checks. Group
+  entry reseeds saved/current handles. Frozen source/target policies govern
+  read-only checks, security flavors, squash credentials and signed replies.
+  A first-operation runtime lookup keeps cold root resolution and inherited
+  seeds in a prelude group inside the same compound. Entry-export runs can also
+  resolve a cold root for later namespace comparisons.
+- Shared v4.0/v4.2 regressions cover exact compound spans, distinct squash ids,
+  saved identity restoration, ROFS/WRONGSEC mutation suppression, and target
+  policy replacement at finish. A new retry test replaces the root's backing
+  directory at the same configured path while read-only finish is pending:
+  junction-to-physical and physical-to-junction retries return the correctly
+  signed final handles. VFS tests cover selection from prior results, empty
+  entry cursors, retry, default credentials and dependency-skipped groups.
+- Cold LOOKUP retry fixtures now stop at a failing VERIFY before CREATE,
+  because the formerly deferred suffix executes inline. Accepted finish preserves
+  that operation error; rejected finish revalidates the changed snapshot. No
+  synthetic rejection is allowed after an executed mutation; backend rollback
+  remains future work. During development, tests caught use of GETFH attributes
+  when checking the selected branch's LOOKUP result; that result gate is fixed.
+- The old Release binary fails the cold inherited PUTFH/LOOKUP/GETFH exact-span
+  assertion (two compounds instead of one). Focused final Debug and Release
+  each pass 58/58. Full quick Debug and rebuilt Release each pass 270/275 with
+  the five persistent remote-pNFS and POSIX-over-SMB failures. Final full quick
+  reruns after the identity guard also pass 270/275 each, with exactly the
+  baseline failures and mismatch signatures. No new/missing normalized mismatch.
+- Full-check startup hit a stale Release CMAKE_MAKE_PROGRAM pointing to a
+  deleted temporary Ninja wrapper. Reconfigured with /usr/bin/ninja and ran
+  the complete Release build/quick suite separately. Focused results from the
+  old binary are invalid and were replaced by a passing rebuilt run. An initial
+  formatting failure was fixed; make syntax and syntax-check now pass.
+- Clang found a new hypothetical NULL identity reaching junction path validation.
+  Construction requires a target, but prepare now rejects its absence explicitly.
+  Final targeted Debug analysis of the changed encoder reports only the two
+  preceding findings (combine and open_replay); ClangRelease's full stage includes
+  the guard and reports the same two encoder findings. Both full Clang stages
+  completed all model generation. Replacing the initial Debug encoder diagnostics
+  with its final rerun yields exactly the baseline 41 warning signatures and
+  110 occurrences, with nothing new/excess or missing. The comparison script
+  explicitly retains and replaces the initial three-finding result.
+- Production delta: +280/-77, net +203 lines across the shared NFS encoder and
+  VFS group API/executor. The executor adds seven lines; no independent builder.
+- Snapshot: /tmp/chimera-nfs4-runtime-before/. Logs use
+  /tmp/chimera-nfs4-runtime-{before,syntax,syntax-check,focused-debug,
+  focused-release,check,release-check}.log. Patch and comparison evidence use
+  /tmp/chimera-nfs4-runtime-production.patch and
+  /tmp/chimera-nfs4-runtime-compare.{py,txt}.
+- Final rerun logs are /tmp/chimera-nfs4-runtime-{debug-final,release-final,
+  clang-debug-final}.log; focused logs above were overwritten by the final
+  passing runs. make syntax, syntax-check, SDK include boundaries, REUSE,
+  copyright and final git diff --check pass. Full make -k check completed
+  with exit 2; its initial formatting/Release-cache failures were resolved by
+  the separate checks/reruns, while known test and analyzer failures remain.
+  The overall sweep is not green. The previously recorded intermittent FUSE
+  teardown abort did not recur and remains unresolved. No production edits
+  followed final focused validation. No commit or push.
+- Remaining namespace boundaries: mount-root LOOKUPP; real/synthetic transitions;
+  deferred ROOT/PUB WRONGSEC. Existing operation/reply budgets, specialized
+  LAYOUTGET phases, accepted pNFS backing cleanup and protocol lifecycle paths
+  also remain. No independent builder added; backend transaction hooks are
+  still future work. No commit or push requested.
+
+## NFSv4 full remaining-work census (2026-10-03)
+
+- User challenged the repeated discovery of more conversion work. Short prior
+  reports listed the next namespace tasks, not the complete remaining tail.
+  Keep filesystem API adoption, shared-builder consolidation and wire-to-VFS
+  finish/retry scope separate in future progress reports.
+- Source audit recorded in docs/reviews/nfs4-compound-remaining-2026-10-03.md.
+  Four NFS4 allocation/submission sites: shared encoder, accepted pNFS REMOVE
+  cleanup, and two LAYOUTGET phases. Internal-procedure name scan found only
+  the allowed release function. Shared whitelist recognizes 46 of 68 named
+  dispatcher opcodes; all 22 others are accounted for in the report. Counts
+  are not completion percentages or guarantees about every execution shape.
+- Stable workstreams N4-01 namespace transitions; N4-02 state-owner binding and
+  standalone state/claim fallback consolidation; N4-03 special-stateid admission
+  after private CLOSE/CONFIRM/DOWNGRADE; N4-04 LAYOUTGET; N4-05 pNFS REMOVE batching;
+  N4-06 operation/reply budgets; N4-07 error/protocol checkpoints; N4-08 protocol
+  state retirement (DELEGRETURN/LAYOUTRETURN/FREE_STATEID/RELEASE_LOCKOWNER).
+- Explicitly retain N4-02: v4.0 OPEN client binding can force a standalone OPEN;
+  LOCK/LOCKU/CLOSE/CONFIRM/DOWNGRADE still have independent direct state mutation
+  handlers when coalescing declines, even though common shapes are journaled.
+  N4-04 completion callbacks honor aggregate finish errors but have no explicit
+  server-side EAGAIN retry loop. Do not call either area complete.
+- Session/replay admission, reference drops, transport/recovery maintenance and
+  accepted DS cleanup have different scope from filesystem coalescing. State
+  return operations are not automatically exempt merely because they are
+  protocol-only: they require explicit boundary design to avoid recall deadlocks.
+- Future passes should close named inventory subcases with exact-span and finish
+  tests. No production edits or new test runs in this source-report-only pass.
+
+## NFSv4 parallel completion pass (2026-10-03)
+
+- User requested a dynamic fleet in this worktree, no worker builds/tests, then
+  root integration and combined validation. Ownership was split across namespace,
+  state/claim admission, pNFS, capacity/checkpoints, retirement, and mixed v4.0
+  binding. Shared encoder/procs/common headers and VFS were integrated by one
+  writer from frozen worker deltas. Workers also supplied source-only corrections
+  and read-only integration reviews. No worker built, tested or formatted.
+- Stable inventory updated in docs/reviews/nfs4-compound-remaining-2026-10-03.md.
+  NFSv4 shared encoder now recognizes 56 dispatcher opcodes (51 switch cases
+  plus five protocol predicates); the other twelve are client/session lifecycle.
+  Explicit alloc/submit sites fell from four to two: shared encoder and accepted
+  DS maintenance. Internal-procedure name scan finds only allowed release.
+- NFS top-level production delta against the pre-fleet snapshot: 25 files,
+  +3244/-3427 lines (net -183); excludes tests, VFS and SMB/FUSE follow-up fixes.
+- N4-01: runtime mount-parent, synthetic/real cursor transitions, synthetic export
+  lookup, conditional READDIR and ROOT/PUB security placement share attempts and
+  frozen identity. Keep unsupported synthetic stateful shapes and the namespace
+  fallback visible; do not report every possible cursor shape as complete.
+- N4-02/03: removed independent direct state/claim handler implementations for
+  OPEN/CLOSE/CONFIRM/DOWNGRADE/LOCK/LOCKU; standalone calls use shared admission.
+  Per-operation v4.0 client pins, owner keys and accepted connection binding allow
+  mixed clients in one run. Dynamic parent/range storage replaces standing-state
+  scratch caps. Sparse/range/size I/O now carries private claim views and recall
+  exclusions. CLONE destination is scoped; source still needs normal authorized
+  state. COPY retains anonymous/scoped support.
+- N4-04/05: LAYOUTGET native/materialized alternatives use one prebuilt sequence
+  and accepted-only grant/device publication. Multiple pNFS REMOVEs share the
+  namespace run, retaining victim identity/credentials for accepted DS cleanup.
+  Cleanup remains an independent maintenance compound. External DS replacement
+  atomicity and actual cross-backend rollback are future backend work.
+- N4-06/07: separate 128 wire-map and 1024 helper limits; keep fitting prefixes;
+  GETATTR uses actual compacted reply sizing before successors. Static/protocol
+  errors and five pure response opcodes are shared checkpoints. Conservative
+  READDIR/READ_PLUS/xattr bounds and the general reply floor still split runs.
+- N4-08: DELEGRETURN/LAYOUTRETURN/FREE_STATEID/RELEASE_LOCKOWNER stage private
+  retirement until accepted finish. Pending CB_GETATTR can coexist with return;
+  combine publication revalidates lifetime. Wrong-client FREE and FILE layout
+  return are rejected. Three same-object cases remain terminal DELAY in the same
+  finish: returned-delegation namespace recall, layout grant/return then truncate,
+  and layout return then regrant. FSID no-op, ALL ignoring layout type and partial
+  layout return semantics are preexisting limitations, not closed by conversion.
+- Integration/testing caught and fixed: delegation-disabled OPEN binding skip;
+  pending-CB_GETATTR return rejection; saved synthetic LINK/RENAME error order;
+  lone GETATTR/LAYOUTGET duplicate response floor; FREE swallowing principal
+  admission failure; ALL retiring a retained but not-yet-staged fresh candidate
+  on retry; grant reuse of an ALL-reserved layout destroyed by recall. Added
+  identity, pending finish accept/retry/error, journal lifetime and exact-span
+  coverage. Deliberately invalid SETXATTR enum tests bypass pynfs's client-side
+  enum restriction. Old span assertions were updated only for verified larger
+  runs, preserving protocol outcomes and suppressed-suffix checks.
+- New anonymous WRITE_SAME wire case exposed memfs overwriting bytes outside a
+  partial block with zeroes. Copy existing fragmented/shared block content before
+  replacing the requested range; initialize holes with zeroes. New peer-claim and
+  subsequent-unscoped VFS checks verify exclusions cannot escape their attempt.
+- Full quick testing exposed SMB claim-rerun CREATE missing its truncate actor:
+  only the initial opening gate had set it. The new correct anonymous admission
+  rejected overwrite against its own deny-W. Bind actor/lease key when a truncate
+  is built using a lent handle. Also release the separately owned seq_oh on generic
+  retry-run error; the preceding failure leaked it and wedged shutdown. Existing
+  durable and lease MBT traces reproduce both contexts. Preserve VFS admission.
+- Optimized Release build fixes: IO_ADVISE rejects a missing state FH explicitly;
+  device-cache insertion builds a local complete entry before assignment to avoid
+  GCC's incorrect lock-subobject size inference. Tests include the shared layout
+  constants header. No warning suppression or change to cache bounds.
+- Removed direct-handler lock replay stub after handler removal; real wire tests
+  cover replay/error order but not the old artificial GRACE-to-NO_GRACE policy
+  toggle's exact call counts. No forced-revocation wire case for FREE was added;
+  common ownership admission is source-audited. Finish rejection only targets
+  read-only executed backend work; none of this proves backend mutation rollback.
+- Intermediate SMB correction initially used op_edit during construction, which
+  is allowed only inside an execution gate; changed it to op_args. The interim
+  Release quick run was also invalidated by an overlapping shared-library rebuild
+  (file-too-short loader errors). Preserve both logs as superseded; use only the
+  later stable-binary runs. Debug's superseded run was interrupted before rebuilding.
+- Focused final Debug and Release each pass 79/79. An intermediate stable full
+  Release quick run passed 269/275: the prior five failures plus FUSE batch_memfs
+  READDIR ESTALE on an old open/unlinked directory at trace step219. Three
+  isolated repeats passed, but source review identified a concrete retention
+  bug: OPENDIR's INFERRED|PATH flags could yield an unbacked descriptor. The
+  non-root descriptor in the failing trace temporarily masked it by pinning
+  the inode. This is not shared Debug/Release test storage or mount interference.
+- A new root-only FUSE simulator regression deterministically failed with
+  ESTALE after MKDIR/OPENDIR/RMDIR on the pre-fix Release binary. OPENDIR now
+  uses READ_ONLY|DIRECTORY and keeps a backend reference through RELEASEDIR.
+  READDIR to EOF and rewind after removal pass. All four quick and nine
+  extended FUSE checks pass in both builds, including real kernel mounts;
+  final targeted Clang FUSE analysis has no findings. This fixes the observed
+  unlinked-directory ESTALE, not the separately recorded older teardown abort.
+- Final Clang source diagnostics are 42 signatures/116 occurrences versus the
+  prior 41/110: the sole added signature is delegation-retirement use-after-free,
+  repeated in six compile units/configurations. Review confirms the reservation
+  owns the extra reference across destroy; the analyzer assumes a lone reference.
+  Existing NULL-file range-publication and the two encoder warnings remain.
+  Final targeted SMB Debug analysis replaces that unit's earlier diagnostics
+  and has the same five warnings; no new SMB warning from the retry correction.
+- Final full Debug quick and final full Release quick each pass 270/275, with
+  exactly the baseline five suites and normalized mismatch signatures, none
+  added or missing: three remote-pNFS and two POSIX-over-SMB failures. Debug's
+  full run precedes the FUSE-only correction and is supplemented by the final
+  13 FUSE checks; Release's full run includes it. Final logs are
+  quick-debug-stable.log and quick-release-fuse-final.log. Earlier Release
+  quick-release-stable.log is superseded, preserved as failure evidence.
+- Required make -k check completed with exit 2. Both full Clang stages and model
+  generation completed. Intermediate compilation/test problems were corrected
+  and validated separately; the baseline five tests and analyzer findings
+  remain unresolved, so the overall sweep is not green. Final make syntax,
+  syntax-check, SDK boundaries, REUSE, copyright and git diff --check pass.
+  Final compare-final.txt retains/replaces the earlier SMB diagnostic unit
+  and compares final full tests against the preceding baseline. No production
+  edits followed final FUSE verification.
+- Evidence: /tmp/chimera-nfs4-fleet-20261003/ (initial snapshots, ownership ledger,
+  worker patches/reports, builds, focused/full tests and reviewed fixes). The
+  layout arena case (60360-byte xattrs then compact GETATTR) returns RESOURCE on
+  the pre-fix binary after a fitting LAYOUTGET, and passes on the fixed Release
+  and Debug binaries. No commit or push requested or performed.
+
+## 2026-10-03 — NFSv4 second dynamic fleet pass
+
+User requested another review, parallel source-only changes, then centralized
+build/test. Three workers handled synthetic identities, reply staging and layout
+transitions; root handled namespace recall views and integration. All preexisting
+worktree changes were preserved; no commit/push requested or performed.
+
+Evidence: `/tmp/chimera-nfs4-fleet2-20261003/`, including immutable `before/`,
+WORKFLOW.md, frozen scratch patches, worker reports and all failed/final logs.
+Inventory: `docs/reviews/nfs4-compound-remaining-2026-10-03.md`.
+
+Changes and verified regressions:
+- Removed blanket synthetic scanner boundaries. State checks use protocol FHs,
+  preventing attrdir DELEGRETURN/FILE LAYOUTRETURN from retiring base inode state.
+  FILE LAYOUTRETURN rejects synthetic identities before COORDINATE needs a real
+  backend cursor. Extended explicit/runtime/saved root and attrdir coverage.
+- Removed obsolete deferred namespace dispatcher handoff, namespace_boundary,
+  suffix skipping and split WRITE payload ownership; supported runtime junction
+  selections already had prebuilt branches. Kept export snapshot fences/caps.
+- Private DELEGRETURN now permits REMOVE, both RENAME endpoints and saved-source
+  LINK in one span. Scoped VFS queries/recall honor pinned excluded claims; peers
+  still block. Internal LINK/RENAME entrances carry copied actor + borrowed view
+  through async DAC/request gates; SMB interposing probes follow new signatures.
+  Cross-review caught missing LINK result-prepare. Runtime tests caught RENAME's
+  second lower-VFS recall, fixed by stamping the view in namespace_ready without
+  overwriting that readiness callback with generic operation_prepare.
+- Multi-entry layout journal supports FILE/ALL return/regrant with fresh state
+  identities, cancellation, and retained own-barrier counts. Returned/canceled
+  layout -> truncate and truncate -> grant coalesce without exempting peer holds.
+  UNCHECKED OPEN truncation now enters the same layout coordination as SETATTR;
+  public peer recall waits, private return avoids self-recall, active private
+  grant -> truncate remains terminal DELAY with bytes preserved.
+- Actual READDIR/READ_PLUS/GETXATTR/LISTXATTRS replies stage before successors;
+  synthetic-root pages use runtime compact marshalling and retry reset. Retained
+  exact static scratch/fixed reply estimates and separately reserved transport
+  array/view space. The first removal of the old floor exposed an actual TCP
+  send failure after WRITE (TEST_STATEID transport-headroom regression); corrected
+  with generated adapter's real 260-iovec reserve. Tight fitting xattr/layout
+  response tests remain successful. RDMA shared staging additionally reserves
+  cursor partitions (807 descriptors total on this build).
+- Fixed test-only finish control race: a visible empty release file must remain
+  pending rather than being interpreted as retry; older touch-only producers now
+  write an explicit reject action. New layout test callback uses pynfs-required
+  op_cb_layoutrecall name; unsupported layouttype test uses a valid enum.
+
+Final focused suites: 101/101 Debug and 101/101 Release, logs
+`focused-debug-verified.log`, `focused-release-verified.log`. Both final builds
+and make syntax pass. Full required make -k check completed with exit 2: both quick suites are
+270/275 with exactly the five baseline failed suites and normalized mismatch
+signatures. Both Clang stages completed with the same 42 warning signatures /
+116 occurrences, no additions or reductions. Syntax, SDK include boundaries,
+REUSE and copyright validation pass. `compare-final.txt` records this comparison. Earlier failed runs are kept
+and must not be substituted for final verified logs.
+
+Residual inventory (keep bounded; do not call all compound correctness done):
+- Intentional active unseen private layout grant -> truncate DELAY; contention
+  and changed snapshots also reject without an independent filesystem builder.
+- 128 wire maps / 1024 helpers, entry admission, fixed/construction/transport
+  capacities still split. Twelve client/session admin opcodes stay outside the
+  shared filesystem encoder; only explicit second submit site is accepted DS
+  REMOVE maintenance. Backend begin/end/rollback remains separate work.
+- N4-09 transport source findings: standalone TEST_STATEID/dispatcher RDMA
+  headroom does not use new shared reserve; generated reply caps aggregate260
+  iovecs but each READ permits256 without a wire-wide count; multiple RDMA READ
+  zcopaque fields overwrite selected write-chunk vector. Need targeted tests
+  and unified admission/compaction/transport work. No hardware reproduction
+  claimed; quick-tier inproc RDMA coverage does not prove these edge cases.
+- Existing FSID layout return no-op, ALL type filtering and range/iomode return
+  gaps are protocol feature work. Native CLONE source admission still requires
+  supported normal state; no general anonymous source API added.
+- Finish-rejection fixtures only repeat read-only executed filesystem work;
+  they do not prove backend mutation rollback or distributed transactions.
+
+N4-09 classification follow-up: all three residual transport concerns predate
+this round, verified against the before snapshot. Expanded mixed-operation
+staging can increase their exposure. Inproc RDMA quick tests exercise write
+chunks and the new conn->rdma reservation branch, but not worst-case fragmented
+responses or reply chunks. No physical RDMA hardware claim.
+
+## 2026-10-03 NFSv4 fleet round 3 — transport admission and multi-READ
+
+User authorized another planned parallel round. Three source-only workers owned
+arena admission, aggregate READ vectors, and libevpl/xdrzcc RDMA placement;
+parent integrated, formatted, built and tested. No commits/pushes. Evidence and
+snapshots: `/tmp/chimera-nfs4-fleet3-20261003/`; current inventory remains
+`docs/reviews/nfs4-compound-remaining-2026-10-03.md`.
+
+N4-09 implemented:
+- New nfs4_reply.h centralizes256 READ /260 generated-reply vectors and TCP6240 /
+  RDMA19368 arena bytes (64-bit platform). Shared, single, dispatcher fallback,
+  initial resarray and standalone TEST_STATEID preserve the same reserve.
+- READ completion admits actual niov+framing before successors; counters and
+  first-READ selection live in attempt context, reset from accepted request on
+  retry, publish only on accepted finish and persist across independent spans.
+  An oversized first nonzero-capacity RDMA Write chunk rejects before suffix.
+- libevpl nested xdrzcc consumes only first eligible zcopaque for Write chunk,
+  including empty first READ. Later READs inline; decoder claims chunk once,
+  validates/clips actual length, permits positioned Read roundup. RPC2 honors
+  returned Write lengths with Reply chunks, rejects short/unsupported offers,
+  and releases internally owned buffers on the new decoder rejection paths.
+- Fully decoded COMPOUND requests lacking reply scratch return tiny RPC
+  SYSTEM_ERR before NFS entry. Fully decoded WRITE references release on this
+  path and trailing-garbage GARBAGE_ARGS. Full-capacity generated decode is
+  retained; no partial uninitialized argarray is walked. Existing partial
+  decode cleanup limitations remain separate.
+
+Integration corrections: original fragmentation fixture edited completed op
+storage and hit the VFS purity fingerprint. It now interposes internal READ
+completion before the compound stores its results; no product contract change.
+Read-only cross-review caught an introduced malformed-chunk destination leak;
+fixed before final tests. Initial failed logs are retained and superseded.
+
+Final focused114/114 pass Debug and Release;55/55 RPC transport suites pass in
+both (the corrected-*.log files also include six vector tests, total61).
+Focused selection adds actual TEST_STATEID arena test, six fragmented/retried
+wire cases, three raw decoded-arena cases, and existing replay/persistence
+checks. No physical RDMA test; inproc tests perform registered-memory placement.
+Required make -k check completed exit2: both quick runs270/275 with exactly
+five baseline failed suites and identical normalized mismatch signatures.
+Both full Clang stages completed; a new rpc2 write_list initialization warning
+was corrected by guarding the loop with write_chunk_present as well as segment
+count. Final targeted analysis of rpc2.c reports no findings in both modes.
+Replacing its pre-correction diagnostics yields unchanged42 signatures/116
+occurrences, no additions/reductions. Final focused114, transport55 and NFS4
+RDMA model1 rerun passes in both after guard correction. Evidence:
+compare-final.txt, analysis-debug-final.log, analysis-release-final.log,
+focused-*-verified.log, transport-*-verified.log, nfs-rdma-*-verified.log.
+make syntax, final syntax/SDK checks, REUSE, copyright and diffcheck pass.
+Full check is still not green because of the five baseline failures and
+existing analyzer findings; do not relabel them as expected passes.
+
+N4-10 remaining correctness work, not new independent filesystem builders:
+- ca_maxresponsesize is checked only after VFS acceptance. Independent ctest
+  diagnostic reproduced READ+WRITE returning REP_TOO_BIG at WRITE after data
+  changed; log late-response-limit.log. This diagnostic expects the bug and
+  must not be counted as a passing product regression.
+- ca_maxresponsesize_cached checks SEQUENCE alone, then capture may silently
+  discard oversized reply. RFC8881 2.10.6.4 requires cachethis TRUE be honored
+  after successful SEQUENCE, including early size-error replies. Corrected
+  misleading existing nfs4_session.c comment; functionality remains to fix.
+- RDMA replay capture sees reduced inline message without first READ payload;
+  need full logical capture and replay placement into current offered chunks.
+  Simply disabling capture would violate requested caching.
+- Undersized RDMA Reply chunks still fail at send after operations execute.
+  Group with negotiated/cached wire-byte admission, not arena memory bounds.
+- All-zero-length nonempty Write offers remain conflated with empty/no usable
+  offer. General malformed-peer partial-decode ownership/Read-list complexity
+  remain a separate transport audit.
+
+No VFS production changes this round. Net production increase254 lines:
+NFS7files +239/-81(net158), libevpl RPC +70/-27(net43), xdrzcc builtins
++77/-24(net53), excluding tests/CMake/docs. Nested submodule worktrees contain
+source changes; no submodule commits were made.
+
+## 2026-10-03 NFSv4 wire-response admission follow-up
+
+User requested the next gap after fleet3. Implemented reply-size admission;
+no new agents, commits or pushes this turn. Snapshot/log root:
+`/tmp/chimera-nfs4-wire-budget-20261003/`. Inventory remains
+`docs/reviews/nfs4-compound-remaining-2026-10-03.md` (N4-10).
+
+- Removed the final success-to-REP_TOO_BIG rewrite, which could report failure
+  after WRITE had already changed the file. The dispatcher accounts accepted
+  wire results across spans; VFS attempts reset private counters on retry.
+  Mutation success bounds are admitted before their first helper. Variable
+  read-only results, including READ/READ_PLUS/GETATTR/READDIR/GETFH/xattrs,
+  charge actual encoded bytes before successors. Leave a following error
+  result, including SETATTR's mandatory empty bitmap.
+- Checks include tag, fixed XDR fields, external READ bytes and RPC/security
+  overhead. Both ca_maxresponsesize and requested cache limits apply. The
+  original SEQUENCE session stays authoritative across CREATE_SESSION. Zero
+  cached capacity rejects SEQUENCE without advancing its slot.
+- Cache storage and session capacity are reserved before successful SEQUENCE.
+  Allocation/quota failure restores the previous state word and cached answer.
+  Capture transfers that buffer; optional failed shrink retains and charges its
+  full capacity. A new replay-slot test covers capacity exhaustion, preservation
+  of an old answer, retry, successful advance, and capacity accounting.
+- libevpl exposes pre-dispatch RPC/security overhead and RDMA Reply capacity.
+  The reduced Reply body excludes only the first eligible READ payload; the
+  logical negotiated/cache budget includes it. Capacity sums are 64-bit.
+- Exact-boundary tests exposed xdrzcc's fixed-opaque size bug (only padding was
+  counted), plus missing odd fixed-opaque padding in encoding/decoding. Fixed
+  both and bounded contiguous fixed-field decode. Unit coverage compares actual
+  encoding lengths and checks aligned, odd, typedef, fragmented and truncated
+  fields. This changes generated codecs beyond NFS; broad validation required.
+
+Final focused194/194 pass in Debug and Release. Four new wire fixtures cover
+v4.1/v4.2 accepted/finish-retried cases, exact fit, padding, WRITE/SETATTR
+suppression, actual short READ/FH sizes, span transitions, cached-size error
+replay with an accepted WRITE prefix, and zero cache limits. No backend mutation
+rollback claim: finish-rejection fixtures only repeat read-only executed work.
+Both full quick runs270/275: exactly the five known failures and identical
+normalized mismatch signatures (three remote pNFS, two SMB suites).
+Both full Clang stages completed: unchanged42 normalized warning signatures/
+116 occurrences, no additions or reductions. Required make -k check completed
+exit2. Initial syntax check caught unstable initializer alignment in the new
+transport-budget test; changed to one field per line (formatting only), and
+final syntax/SDK checks pass. REUSE, copyright and all three worktree diff checks
+pass. The five baseline tests and existing analyzer findings still prevent a
+green sweep. Final evidence: compare-final.txt, check.log, repository-final.log,
+focused-debug-final.log and focused-release-final.log in the snapshot/log root.
+
+Initial focused Linux failures used unsupported /tmp overlay handles; corrected
+CHIMERA_TEST_ROOT=/worktrees/compounds/build/mbt-scratch reruns pass. Initial
+wire test failed on its pynfs channel attribute spelling; exact-fit failures
+then revealed the product XDR bug. Intermediate logs are retained separately.
+
+Remaining N4-10: RDMA capture still omits selected Write-chunk READ data;
+complete logical capture and replay into the retry's offered chunks remain.
+All-zero nonempty Write offers and general partial-decode ownership/Read-list
+complexity remain transport audits. No physical RDMA or malicious short-Reply
+wire reproduction claimed; admission has unit plus transport/model regression
+coverage. Mutation/GSS bounds are deliberately conservative. No VFS production
+changes; net production +335 lines across NFS, RPC metadata and the generator
+(excludes tests/docs/CMake; nested submodule edits remain uncommitted).
+
+
+## 2026-10-04 NFSv4 complete RDMA replay follow-up
+
+User requested the next gap. No agents/commits/pushes this turn. Snapshot and
+logs: `/tmp/chimera-nfs4-rdma-replay-20261004/`. Scope is complete logical reply
+capture plus first-READ placement using each retry's offered chunks.
+
+Capture callback now receives the omitted Write chunk and a logical length
+including its XDR padding. Shared NFS copy restores bytes/padding without a new
+cache envelope. NFSv4 cached replay scans prefix results using the generated
+codec (recycled scratch, no successful READ decode/ref acquisition), separates
+the first READ into current Write targets, and sends through normal RPC/Reply/
+GSS machinery. Empty first READ does not select a later one. Original cache
+bytes and persistent-record format remain unchanged. Core checks Reply
+capacity before issuing any Write/Reply RDMA IO. Cache-hit preparation failure
+uses a new exported RPC SYSTEM_ERR helper; v3/v4.0 no longer fall through and
+re-execute when replay preparation fails.
+
+New live wire probes (minor0/1/2) use two READs plus WRITE and empty SETATTR
+(the latter makes the v4.0 request DRC-eligible). Compare full logical replies;
+change file bytes before retries and verify WRITE is not repeated. Vary odd/
+empty first READ, original/retry chunk offers, distinct destinations, short
+Write/Reply capacity, and stream/RDMA session transitions. Original destination
+stays alive and is overwritten with a sentinel to detect stale remote targets.
+Unit copy test covers fragmented omitted payload, padding, short output and
+incomplete vectors. No physical RDMA test or backend rollback claim.
+
+Initial fixtures failed: borrowed read-into data cannot be consumed directly
+by re-marshalling (fixed with an owned clone); WRITE alone does not make v4.0
+DRC-eligible (added SETATTR). Three wire probes then passed. Full build caught
+missing EVPL_RPC2_API on new helper (fixed). Test array formatting is stable
+with trailing commas. Final Debug and Release builds pass; broad focused
+ctests pass231/231 in both (focused-*-final.log). Full quick suites273/278
+in both; exactly the five baseline failed suites and identical normalized
+mismatch signatures (tests-comparison.txt). The three new probes are also
+in quick. Both full Clang stages completed: unchanged42 normalized warning
+signatures/116 occurrences, no additions or reductions. Required make -k check
+completed exit2, only the five baseline test failures and existing analyzer
+findings. Syntax/SDK, REUSE, copyright and final root/libevpl/xdrzcc diff checks
+pass. Evidence: compare-final.txt, check.log, focused-*-final.log and
+build-*-verified.log. No new final failure/signature remains. Net production
++161 lines, excluding tests/docs/CMake; no codec or VFS production changes.
+
+Remaining N4-10: all-zero nonempty Write offers and malformed-peer partial
+decode ownership/inbound Read-list complexity. Existing finite admission and
+backend transaction limits remain as recorded in the review. No new VFS
+production changes in this pass.
+
+
+## 2026-10-04 NFS transport ownership follow-up
+
+User requested the next transport cases. No new agents, commit or push.
+Evidence and starting snapshots: `/tmp/chimera-nfs4-transport-20261004/`.
+
+Implemented: explicit RDMA Write segment count, preserving nonempty zero-byte
+Write offers in XDR, NFS admission and replay; early bounded chunk metadata
+before RPC arena views; checked nonzero Read position/size/address validation;
+all program/procedure checks and allocations before Read submission; submission
+reference and error draining to avoid premature request release/server abort.
+Truncated/bad-version transport headers now reject safely and complete matching
+client calls with decode error. Generated XDR wrappers and RPC adapters use
+scoped clone ownership, including NFS post-decode reply admission; borrowed
+RDMA chunks remain transport/caller owned. Truncated fragmented padding now
+returns failure without reading past the vector array. See current review
+`docs/reviews/nfs4-compound-remaining-2026-10-03.md` for the remaining inventory.
+
+Regressions: raw absent/empty/all-zero Write offers; bad Read positions, totals,
+address wrap, excessive counts (including near/exhausted decode arenas), valid
+sixteen-segment reads, zero-length segments, invalid keys and mixed successful/
+failed segments, unknown procedure before I/O, partial/bad-version reply headers,
+late reply after failure; contiguous/vector decode refcount restoration after
+truncation/padding/arena failure/trailing data; late bad result with owned and
+borrowed chunks; NFSv4.0/v4.1/v4.2 partial WRITE argument decode failures.
+
+Newly explicit remaining transport work: Position Zero / Long Call reception
+and reconstruction of multiple positions; stricter returned Write/Reply segment
+identity/count validation (Reply length sum still uint32_t); explicitly tracking
+whether a successful result decoder claimed an offered nonempty chunk, instead
+of inferring this solely from returned length. These are transport correctness/
+feature work, not independent north-facing VFS operations. Physical RDMA/provider
+cancellation coverage remains absent.
+
+Final validation: complete Debug/Release builds pass; focused231/231 in each,
+plus final targeted19/19 in each (RPC/RDMA, NFS decode/replay, NFS backend ownership).
+Required make -k check completed exit2: both quick273/278, exactly the five baseline
+failures and unchanged normalized mismatch signatures. Both complete Clang stages
+match the baseline42 warning signatures/116 occurrences with no additions or
+reductions; compare-final.txt records the comparison. Final fixture-only Clang
+rebuilds report no bugs. Syntax (root/libevpl/xdrzcc/header), SDK, REUSE, copyright
+and final diff checks pass. No new VFS production changes.
+
+Initial failures retained in evidence: newly exposed/fixed padding overrun,
+unknown NFS opcode incorrectly treated as undecodable (replaced by truncated
+SETATTR), test linkage and fixture corrections. Final stable fixture formatting
+uses host-order constants converted to wire order in a loop, and valid read keys
+distinguish admission failures from provider errors. Disk exhaustion interrupted
+an early Debug sweep and Release build; reclaimed disposable compiler cache and
+old analyzer build trees, preserved diagnostics, then reran the affected checks.
+
+## 2026-10-04 — NFSv4 conversion review restricted to PR regressions
+
+User requested a fresh regression review, explicitly excluding unrelated
+protocol/transport feature work. Reviewed the current dirty compound-boilerplate
+worktree against PR base c971e5a5d1e423296640c163fdf5ca0adfe92ae7 (HEAD a9e0efe078).
+Report: docs/reviews/nfs4-compound-regressions-2026-10-04.md; linked from the
+remaining-work inventory. No production code changes in this review.
+
+Two confirmed P2 fixes remain:
+
+1. nfs4_reply.h:118-125 charges every OPEN except WANT_NO_DELEG for the largest
+   optional delegation reply even with grants disabled. The pre-execution gate
+   in nfs4_compound_vfs.c:7054 rejects a normal no-preference OPEN on a 256-byte
+   session with REP_TOO_BIG although its measured successful reply is 160 bytes
+   including SEQUENCE/tag/RPC framing. WANT_NO_DELEG succeeds with 168 bytes.
+   Keep admission before mutation, but select a feasible per-OPEN response
+   bound and retain any decision to decline through publication/retry. Existing
+   Probe.open_op always supplies WANT_NO_DELEG and misses this default-flag case.
+2. nfs4_compound_vfs.c:4174-4176 skips the grant/decline helper when a later CLOSE
+   closes the private OPEN state. OPEN(WANT_NO_DELEG) alone returns NONE_EXT;
+   the same OPEN followed by CLOSE(current) returns bare NONE. Preserve each
+   OPEN's WANT-aware decline even when no grant is possible at final finish.
+   Actual grants must still wait for accepted finish; keep replay consistent.
+   RFC8881 section18.16.3 requires NONE_EXT for supported explicit WANT flags.
+   Named-stream bare-decline behavior existed at base and is not this finding.
+
+Both reproduced on v4.1/v4.2, Debug/Release, via eight observational CTests.
+These diagnostics pass while displaying defective behavior; they are not
+assertions that the bugs are fixed. Existing selected Debug tests passed103/103
+with ^chimera/server/nfs/(compound_|open_owner|replay_slot|layout_barrier), using
+CHIMERA_TEST_ROOT=/worktrees/compounds/build/mbt-scratch. Evidence and temporary
+CTest registrations/scripts: /tmp/chimera-nfs4-regression-review-20261004/;
+focused-debug.log, probe-matrix.log, probe.py, reply_size_probe.py. The initial
+diagnostic had a fixture IndexError (pynfs strips SEQUENCE); corrected before
+the recorded matrix. No full build/check or baseline binary run this turn.
+
+Also traced private OPEN/LOCK state, claim views, retry reset, reservations,
+retirement, namespace/credentials, successful-prefix gates, variable staging,
+and accepted publication; no additional confirmed regression from this pass.
+General RPC/RDMA descriptor validation, remote consumption bookkeeping and
+Position Zero/Long Calls remain separate preexisting work, not PR blockers
+without a demonstrated conversion dependency. Do not revive those as remaining
+compound-conversion defects. Future backend rollback remains out of scope.
+
+## 2026-10-04 — Fixed both NFSv4 OPEN review regressions
+
+User authorized fixing the two findings above. Both are now fixed; the review
+and remaining-work inventory link this resolution. No subagents/commit/push.
+
+- Session OPEN pre-execution reply bounds cover the mandatory NONE/NONE_EXT
+  response and applicable create attributes. Optional grants receive separate
+  admission after accepted finish against the whole accepted response prefix,
+  including its terminal error and lookahead error space. Successful grants
+  retain their space across later grants/parked callbacks. v4.0 reserves the
+  larger form because owner replay can already carry a delegation.
+- A later CLOSE no longer skips the successful OPEN's grant/decline helper.
+  The helper receives allow_grant=false for closed states or insufficient
+  space, while still producing WANT-aware declines. NO_DELEG and CANCEL
+  always report NOT_WANTED and CANCELLED respectively, including when grants
+  are disabled. State/delegation publication remains after accepted finish.
+- Extended wire-budget fixtures now cover disabled/enabled delegation grants,
+  a warm callback path, v4.1/v4.2, finish retries, 256-byte reply/cache limits,
+  cache replay, OPEN/CLOSE plus failed suffixes, two coalesced OPENs, and a
+  real WRITE successor. New CLOSE assertion fails on the old binary.
+
+Validation: final selected compound/state suites107/107 in Debug and Release,
+including eight wire-budget variants. Required make -k check CTEST_PARALLEL=8
+completed exit2. Debug quick273/278 has exactly the five known baseline failures.
+Release quick272/278 adds leases_memfs_plain: trace
+smb2Leases_stepLease_300_0x21_4, state45, unexpected lease break 1->0 epoch4.
+That suite passed three consecutive reruns without changes; retain the original
+failure as an observed transient, not as a green full sweep. All baseline
+mismatch signatures remain unchanged. Both complete Clang stages match baseline
+42 warning signatures/116 occurrences with no additions/reductions. Syntax,
+SDK include checks, REUSE, copyright and diff checks pass.
+
+Evidence: /tmp/chimera-nfs4-open-fixes-20261004/ includes before/ source snapshots,
+per-file diffs, before-test.log, build logs, focused-debug.log,
+focused-release.log, check.log, smb-lease-rerun.log, compare-final.txt. First
+sandboxed build hit the configured REQUIRE_NETNS_TESTS capability check; reran
+outside the sandbox successfully. No backend or unrelated SMB fixes in this pass.
+
+## 2026-10-04 — Overall protocol and northside VFS API review
+
+New current report: docs/reviews/compound-overall-review-2026-10-04.md. Reviewed
+the dirty compound-boilerplate tree at a9e0efe078, with behavioral comparisons
+to main c971e5a5. No production/test code changes. Do not revive superseded
+NFSv4, multipart MOVE, S3 metadata-pagination, SMB capability/identity findings.
+
+Stripped-comment production inventory finds exactly eight northside call sites
+to seven functions declared in vfs_internal_procs.h, all SMB: five ordinary
+filesystem sites (overwrite, disposition getattr/readdir, DOC open_fh and
+matched remove), two recall_handle_lease sites (one already in COORDINATE), and
+one pure dirent_match utility. No ordinary direct per-op call in NFS filesystem
+handlers/MOUNT, S3, FUSE, SDK/POSIX or REST. NFSv4 has two allocation/submission
+sites: shared encoder and accepted DS removal maintenance. NLM TEST is compound;
+LOCK opens in a compound then directly acquires/publishes a live claim. NLM
+pending/held/cancel/recovery lifecycle remains incomplete conversion.
+
+API privacy is only nominal: 19 production frontend translation units include
+vfs_internal_procs.h (10 S3, 1 FUSE, 8 SMB). Backend SDK include checker does not
+enforce northside privacy. nm confirms low-level symbols still exported, and
+the separately linked VFS root module imports getattr/open_fh; blindly hiding
+all internal symbols would also break core linkage. Fifty frontend files include
+vfs_release.h, transitively exposing open-cache and vfs_internal implementation.
+Use opaque out-of-line retain/release, narrow control/query/helper headers and
+an enforced northside allowlist. Existing release_handle wrapper declaration is
+misplaced in internal_procs. Keep per-op implementation vocabulary inside VFS.
+
+Priority findings: reproduced FUSE parked-lock shutdown abort again; unresolved
+SMB LockSequence snapshot -> RANGE publish -> replay-cache publish serialization
+concern (not runtime reproduced); SET_REPARSE support narrowed to eligible regular
+placeholders on memfs (only in-tree backend advertising REMOVE_MATCH_FH), with
+cached/durable/locked/stream/DOC/peer cases safely rejected. Unsafe identity-only
+fallback is gone; safe rejection still narrows former supported behavior and
+is not completion. FUSE has 27 raw submits versus 2 shared-retry submits and no
+own retry. SMB has 41 raw versus 9 adapter submits; generic CLAIM/RECALL mark
+attempts nonretryable. NFS raw submits have their own policy, not the same gap.
+
+Remaining appropriate public facilities: admin/config/mount lifecycle; handle
+and result lifetime; credentials/ACL/idmap/capability/root-FH helpers; independent
+ACK/revoke/cancel/teardown; notify watches and invalidation ACK; narrow optional
+cache-grant/accepted-publication hooks; pNFS control/query helpers. DOC setters,
+raw acquisition/range mutation and cache internals are not blanket lifecycle
+exemptions. NFS persistence makes 21 plain KV calls: either retain an explicit
+protocol-state store interface or add typed default-KV operations. vfs_kv.h's
+claim that keys cannot be compound ops contradicts existing typed *_KEY_AT ops.
+Backend association/rollback/cache-notify publication/commit admission remain
+deferred, but need a drain and infallible accepted-publication contract. FUSE/
+POSIX typed locks remain dedicated one-lock compounds; projected mutation rejects
+optimistic finish, and SEEK_END backend-only arbitration has cross-protocol limits.
+
+Fresh existing Debug CTests: 133/134 passed. Failure:
+chimera/fuse/sim/compound_locks, fatal fuse.c:267 "fuse thread destroyed with 1
+active requests". Preserved current server diagnostic before reruns. Source:
+FUSE cancels locks then worker destruction follows; VFS drain only counts backend
+num_active_requests, not parked/finishing compounds. Need stop-admission/cancel/
+drain while workers live; exact introduction relative to main remains unproven.
+The prior full-check five persistent failures and analyzer findings are still
+unresolved; no fresh full/Release/Windows/physical-RDMA run for this review.
+
+Evidence: /tmp/chimera-overall-compound-review-20261004/ contains inventories,
+tests.json, focused-debug.log, fuse_compound_locks.debug.log. git diff --check
+passes. Detailed report records source locations, compatibility classification,
+public/private API decisions and prioritized next work. No commit or push.
+
+## 2026-10-05 — Review refinement: drain, SMB replay/API boundary, FUSE retry
+
+Implemented the first two refinement priorities and ordinary FUSE retry in the
+existing dirty compound-boilerplate worktree. No commit/push; backend transaction
+implementation remains deferred. Evidence is in
+/tmp/chimera-compound-refinement-20261005/.
+
+- VFS drain now counts submitted compound attempts through parked execution,
+  asynchronous finish, and terminal callback return, including inline retry and
+  callback-side compound free. The counter drops using a saved thread pointer,
+  never a potentially freed/recycled compound. A bounded drain wakeup is needed
+  because evpl_continue can otherwise enter its kernel wait after the last timer
+  callback. The new compound_retry regression reproduced that timer-only hang
+  during development and now passes. FUSE compound_locks passed 50 consecutive
+  runs; its previously reproduced shutdown abort is fixed by this accounting.
+- SMB LockSequence is now reserved per open/bucket for the entire native batch,
+  before DOC preflight or execution, across retry, until replay publication and
+  journal teardown. Batch admission releases partial reservations before waiting
+  (no opposite-order bucket deadlock). Other buckets and CLOSE remain runnable;
+  waiters use existing interim/CANCEL handling. Private CREATE opens reserve
+  their buckets before publication as well. A real authenticated two-channel
+  resilient-open fixture holds finish, holds accepted completion before SMB
+  publication, rejects/retries finish, and cancels an admission waiter. It also
+  exercises unrelated buckets. With admission temporarily disabled, it
+  deterministically reproduces the stale-replay failure. Restored test passed
+  20 consecutive runs. This is now a reproduced-and-fixed concern, not merely
+  the earlier source-review hypothesis.
+- Converted the five direct SMB filesystem call sites: fallback overwrite is a
+  compound; disposition validation combines GETATTR and bounded READDIR, skips
+  enumeration after the readonly veto, and publishes only at accepted completion;
+  last-close deletion combines parent resolution and matched REMOVE. Removed the
+  obsolete callbacks and request fields, preserving actor and parent-lease skip.
+- All 19 production frontend includes of vfs_internal_procs.h are gone. Recall
+  coordination declarations moved to vfs_claim.h; pure directory matching to
+  vfs_dirent.h; release_handle declaration to vfs_release.h. LINK_NO_NOTIFY lives
+  with the other operation flags. The private header requires the VFS-only
+  build definition; five explicit white-box fixtures receive it independently.
+  check_vfs_northside.py also rejects private symbol references, private includes
+  and frontend attempts to opt into the core API. It runs in make check and
+  through CTest. Current audit: 71 private functions, zero production northside
+  uses or includes. ELF exports are deliberately unchanged: the separate root
+  VFS module still imports core operations.
+- All ordinary FUSE submissions (including mount resolution) now use the shared
+  finish-aware retry adapter. Existing streaming reset/publication keeps
+  READDIRPLUS staging private. New real-wire regression covers LOOKUP, GETATTR,
+  OPEN, READ, OPENDIR, READDIRPLUS, terminal retry exhaustion and rejected negative
+  lookup. Rejection is injected only into read-only operations, not filesystem
+  mutations lacking rollback. No direct FUSE compound submissions remain.
+
+Validation so far: make syntax and git diff --check pass. Initial focused Debug
+set passed 70/70. Final focused sets passed 24/24 in both Debug and Release,
+including the new API checker. make check stopped on the five established quick
+suite failures; make -k check completed every remaining required stage. Its
+Release and Debug quick runs each passed 274/279, with exactly the three remote
+pNFS and two POSIX-over-SMB failures. Normalized mismatch comparison against the
+previous saved full-check log found no new signatures. Both Clang stages finished:
+42 warning signatures / 116 occurrences, exactly matching the baseline, with no
+new or increased warnings. Fresh scan-build report counts are 41 Debug / 45
+Release; older runs generated fewer fresh reports because ccache replayed warning
+text. Compare normalized compiler diagnostics, not just fresh HTML report counts.
+REUSE lint and copyright-year checks pass. The full sweep remains red on those
+existing tests/analyzer findings. Final comparison: compare-final.txt in the
+evidence directory.
+
+Still pending from the accepted refinement order: NLM acquisition/publication
+and cancel/reap ownership integration; standalone SMB retry audit; broader SMB
+cache/DOC/durable, namespace and SET_REPARSE coverage; out-of-line retain/release
+and narrower lifecycle/control/query headers. vfs_release.h still transitively
+exposes open-cache internals, so header/symbol enforcement above is not a claim
+that the whole public control surface is already narrow. NLM still acquires a
+live raw claim after its OPEN compound, and its interval-carving, pending ticket,
+CANCEL and remote GRANTED paths must move together. Also audit pending OPEN
+lifetime during client reaping: nfs_nlm_state.c currently only hands pending
+entries back to their callback when file_state is already set (source concern,
+not yet independently reproduced). Do not implement backend transactions in
+this frontend pass.
+
+### 2026-10-05 SMB refinement (current pass)
+
+Evidence and the before snapshot: `/tmp/chimera-smb-remaining-20261005/`.
+Detailed scope and remaining boundaries:
+`docs/reviews/smb-compound-refinement-2026-10-05.md`.
+
+- All production SMB submissions now use the shared finish-aware retry adapter.
+  WRITE no longer reports per-op success after rejected finish. EA enumeration,
+  rename discovery/mutation and fallback CREATE now reject tentative results
+  before publication or handle transfer. Fallback CREATE resets early-attempt
+  gate state, but its live generic CLAIM remains an executor replay barrier:
+  finish rejection after CLAIM fails and cleans up instead of replaying it.
+- CREATE-time DOC uses native admission/publication and coalesces safe related
+  metadata/I/O suffixes. The wire fixture verifies CREATE + WRITE + READ is one
+  submission with three groups, and rejected DOC attempts never arm deletion.
+  A delete-only DOC opener must complete after notification, not wait for a
+  lease ACK. The new unacknowledging RH-holder case reproduced a 20-second hang;
+  notification-only coordination now passes (doc-notify-before/after.log).
+  Data/cache requests still require coherence. DOC CREATE + CLOSE remains an
+  acceptance boundary.
+- Fallback rename's destination directory probe now shares the mutation run;
+  transient claim/state refs are dropped before coordinate completion. Child
+  recalls use explicit coordination. Preserve BOTH existing probe exemptions:
+  POSIX mode and moving a directory into itself (backend must return EINVAL).
+  Accidentally applying the probe there caused new mismatches/leaks during
+  development; restoring the bypass removed both. The native builder also
+  lacked the POSIX exemption: fixing it makes batch_smb_memfs and strict_smb
+  pass (posix-smb7.log), eliminating two previously established failures.
+- Diskfs/cairn now implement REMOVE_MATCH_FH with complete identity checks in
+  their existing per-operation transactions, enabling ordinary SET_REPARSE.
+  All three backend primitive tests passed in Debug and Release. This is not
+  backend compound transaction support. Passthrough/proxy conditional unlink
+  remains unsupported; do not reintroduce lookup-then-unlink as a substitute.
+- New standalone retry wire test covers data/metadata/EA/directory/rename/flush,
+  bounded exhaustion, early CREATE retries and terminal live-CLAIM rejection.
+  Its fake transactional WRITE returns op success without changing storage,
+  then rejects finish. Other mutation injections stop before dispatch; none
+  claims that memfs rolls back filesystem effects.
+
+Still incomplete: durable/AppInstance/recovery and some cache admission paths;
+stateful SET_REPARSE identity journals and coalescing; unbounded directory-rename
+recall/scan and cross-share/occupied-target boundaries; some DOC/cache/durable
+CLOSE boundaries. Zero raw submissions is not full lifecycle replayability.
+A further source-level lifetime audit should examine borrowed fallback handles
+across concurrent native CLOSE and delayed finish/retry: SMB open refs preserve
+object storage, whereas native CLOSE can clear/release open->handle. This was
+not independently reproduced or changed in this pass; do not label it a fixed
+or confirmed regression.
+
+Final validation so far: make syntax, git diff --check and the northside API
+check pass. The final make -k check CTEST_PARALLEL=8 log is check-complete.log;
+do not use the earlier interrupted check-final.log. Release quick: 277/280,
+only the three baseline remote pNFS failures. Debug quick: 274/280; in addition
+to those three, mbtaux/batch_linux and mbt4/batch_deleg_{linux,io_uring} aborted
+creating host fixtures with ENOSPC. All three passed serial rerun unchanged
+(storage-rerun-debug.log). Both modes passed all 56 server SMB suites, including
+the final standalone retry/notification fixture; both formerly failing POSIX
+SMB suites also pass. Identity-scoped REMOVE passed all three backends in each
+mode (remove-release.log, remove-debug-final.log). Both final Clang stages
+completed: 42 normalized warning signatures / 116 occurrences, exactly the
+baseline, with no new or increased warnings. The comparison found no new model
+mismatch signatures. REUSE lint, copyright-year checks and include/API guards
+pass. make check remains red on the established pNFS/analyzer findings and the
+three recorded fixture-space aborts (which passed rerun). Final comparison:
+compare-final.txt. No source changes followed the final check sweep.
+
+### 2026-10-05 NLM compound conversion
+
+Evidence, before snapshots and a task-only diff:
+`/tmp/chimera-nlm-compound-20261005/`.
+Detailed design and scope: `docs/reviews/nlm-compound-conversion-2026-10-05.md`.
+
+- LOCK/NM_LOCK now submit PUTFH + OPEN_CURRENT + GETHANDLE + typed LOCK_CHANGE
+  as one compound. UNLOCK borrows an accepted handle or uses PUTFH + local
+  LOCK_CHANGE without opening a stale/unlinked object. TEST, LOCK and UNLOCK
+  use the shared bounded finish-retry adapter. Raw claim acquisition,
+  cancellation, interval carving/publication, and the frontend completion
+  doorbell have been removed from NLM.
+- Each NLM client owns a VFS lock domain. VFS owns canonical accepted intervals
+  and pending attempts; NLM retains pending request sentinels and at most one
+  backend handle anchor per canonical owner/file. Wire handles remain available
+  for CANCEL identity and GRANTED payloads. Admission generation and the typed
+  attempt are allocated before asynchronous OPEN, under the recovery mutex.
+- CANCEL protects compound lifetime with the NLM registry mutex and invokes
+  typed cancellation; it cannot remove a grant whose acceptance already won.
+  FREE_ALL, SM_NOTIFY, disconnect cleanup and shutdown invalidate admissions
+  and retire coverage. Pending entries always belong to terminal completion,
+  fixing the old pending-OPEN reaping lifetime gap. Reaped live synchronous
+  requests that have not sent BLOCKED get DENIED; disconnected request encodings
+  are never reused by the lock callback. Worker teardown drains callbacks before
+  destroying RPC/VFS resources. Multiple connections can keep client locks alive.
+- Final replies, handle transfer, NSM monitoring and GRANTED scheduling follow
+  journal acceptance. The explicit wait coordination hook may send BLOCKED once
+  per logical RPC. Only rejected finish EAGAIN triggers a whole-compound retry;
+  a lock conflict is an ordinary operation result. Nonblocking NLM continues
+  to refuse cache recalls, and length overflow retains its saturating behavior.
+- Compatibility discoveries: use carry-bit exclusive endpoints for 2^64 so
+  unlock-to-EOF removes the final byte; release client ranges in acquisition
+  order and pump between removals to preserve waiter ordering; serialize local
+  same-owner publication by arbiter admission order, not doorbell order. Keep
+  the existing POSIX projected-lock/unlock lane exempt from that last ordering.
+- NM_LOCK is non-monitored, not necessarily nonblocking. It can send BLOCKED.
+  During development the new recovery reply path sent a second NM_LOCK reply,
+  corrupting the RPC request pool and causing runaway async-result logs. Both
+  synchronous lock forms now discard their encoding after BLOCKED and suppress
+  any later response on that RPC. The new wire probe covers this case; the full
+  Debug memfs corpus also passes after the fix. Interrupted preliminary/check
+  and reproduction logs are not final verification evidence.
+- The first complete sweep added a Release analyzer warning in client cleanup:
+  DL_DELETE's singleton branch followed by another iteration allowed an
+  impossible list shape in the analyzer. Rebuilding the pending list directly
+  preserves order, makes ownership explicit, and removes that diagnostic. A
+  targeted Release analysis is clean, and both final focused suites pass after
+  this change. The old full sweep is check-list-warning.log; the final sweep is
+  check-complete.log. Production code is 702 lines smaller than the before
+  snapshot (regression coverage counted separately).
+
+The new quick-tier NLM compound wire probe covers retry/exhaustion, rejected and
+partial unlock, final-byte geometry, held finish, CANCEL/recovery before submit
+and during finish, synchronous recovery replies, one BLOCKED across retry,
+waiter/publication order, NM_LOCK reaping, unlink then unlock and blocked shutdown.
+Only local journals and bookkeeping opens are rejected by the fixture; it does
+not claim backend filesystem rollback. Final focused Debug and Release runs
+each pass 26/26 NLM auxiliary/shared-lock/FUSE/POSIX and VFS compound/claim unit
+tests. The final make -k check CTEST_PARALLEL=8 sweep sets
+SPECS_CORPUS_PREBUILT=ON and
+SPECS_CORPUS_ROOT=/worktrees/compounds/build/Debug/specs-corpus for all builds;
+this reuses the same locally generated corpus already used by the Debug/Release
+tests while avoiding redundant generation in Clang. All replay suites remain
+registered; no test/model/config exclusions are added.
+
+Final verification: make syntax and git diff --check pass. Both Debug and Release
+quick suites pass 278/281; the only failures are the established remote pNFS
+memfs/diskfs/cairn suites. No fixture-space aborts occurred in this final sweep.
+Both Clang stages completed, with exactly the baseline 42 normalized warning
+signatures / 116 occurrences and no new or increased diagnostics. Ccache replayed
+the warnings in the final sweep (no fresh HTML reports); the cleanup function
+also passed a separate uncached Release clang --analyze run after its revision.
+Do not interpret scan-build's empty report directory as zero baseline warnings.
+Syntax, SDK/include and northside API guards, REUSE lint, and copyright checks
+pass. make check remains red on the three baseline pNFS suites. Final logs:
+check-complete.log, focused-{debug,release}-final.log, nlm-cleanup-analysis.log;
+comparison: compare-final.txt. No production or test changes followed this sweep.
+
+Remaining scope: CANCEL, recovery, reference release and shutdown are appropriate
+control APIs. SHARE/UNSHARE retain their preexisting no-enforcement response;
+DOS share enforcement is separate feature work. NLM range arbitration was already
+local (backend projection only supported POSIX owners); backend NLM projection
+and compound transactions remain future work. Typed local locking compounds
+exclude unrelated filesystem mutations because cancellation/recovery can veto
+publication during finish without backend rollback. Broader public-header
+narrowing remains a separate recommendation, as do the SMB boundaries above.
+
+## SMB handle lifetime follow-up (2026-10-05)
+
+User asked to continue the remaining SMB items. This pass addresses the previously
+source-only concern about fallback borrowers racing native CLOSE. No agents were
+launched and no commit/push was requested. Before snapshots and evidence are in
+`/tmp/chimera-smb-lifetime-20261005/`; review:
+`docs/reviews/smb-handle-lifetime-2026-10-05.md`.
+
+Confirmed with a signed SMB3 bound-channel wire probe: pause EA LISTXATTRS finish,
+CLOSE its FileId on the other channel, resume, and the next GETXATTR compound
+returns INTERNAL_ERROR (0xc00000e5) because open->handle was cleared. The final
+probe still reproduces this against an isolated library rebuilt from the pre-pass
+SMB source snapshot (`repro-final-baseline.log`), so this is no longer only a
+source audit finding. Fallback CLOSE had the same borrowed-handle lifetime gap.
+
+CLOSE now retires FileId/claims/DOC immediately but defers the original VFS handle
+release until all SMB-open references and claim owners drain. The explicit
+handle_close_deferred flag skips duplicate logical DOC at final retirement;
+open_file_free releases the retained descriptor. Fallback release_doc consumes an
+independent cache/synthetic reference when borrowers remain. Retaining the
+original descriptor preserves canonical actor identity and protects multi-stage
+compounds and finish retry without per-handler pins. Existing SET_REPARSE's
+exclusive refcount gate prevents identity replacement while borrowers remain.
+QUERY_DIRECTORY's redundant handle pin and field were removed. Production code
+is 28 lines smaller than the pre-pass snapshot; new regression probes are separate.
+
+The quick-tier handle_lifetime_probe covers native/fallback CLOSE, delayed EA,
+READ, named streams, EAGAIN retry, two-handle/two-chunk COPYCHUNK after both
+FileIds close, accepted READ across DOC, and rejection of fresh I/O on a closed
+FileId. Only read-only compounds are rejected; no backend rollback is invented.
+The existing DOC probe had an independent injection race: its global arm could
+catch a delayed disconnected request from another session. Its hook now matches
+SessionId and MessageId; coalescing/group-count assertions are unchanged. Both
+probes passed 30 iterations each in both Debug and Release (120 passes total).
+
+Extended smbtorture compound/compound_async/compound_find: memfs passes 3/3;
+Linux fails 3/3. An isolated pre-pass SMB library reproduces all seven failure
+signatures identically (`extended-{debug,baseline}.log`). Detailed logging
+(`linux-cleanup-debug.log`) confirms fallback DOC removal returns ENOTSUP (95):
+it unconditionally requests matched-FH removal and Linux lacks that capability.
+This is a newly confirmed remaining PR regression, not caused by this batch.
+Deletion/cleanup INTERNAL_ERROR leaves names behind, causing subsequent
+OBJECT_NAME_COLLISION failures. Prioritize this next, preserving identity safety;
+do not claim the Linux suites pass or silently remove the matching safeguard.
+Add quick Linux DOC coverage: the existing SMB model/probe matrix mainly exercises
+memfs and therefore missed this backend-capability gap.
+
+Other remaining SMB items: durable reconnect/recovery and AppInstance lifecycle,
+remaining cache admission and CLOSE batch boundaries, stateful SET_REPARSE and
+following-command identity overlay, broader directory rename boundaries, and
+command-scoped cancellation. Fallback CREATE's generic live CLAIM is still a
+retry barrier; backend transactions remain deferred. Public-header narrowing and
+three established remote pNFS failures also remain from the overall assessment.
+
+Final verification for the SMB lifetime pass: `make syntax` and `git diff --check`
+pass. The final `make -k check CTEST_PARALLEL=8` reuses the prebuilt Debug corpus
+for all configurations, without excluding any suites. Debug and Release each
+pass 279/282 quick tests; all 57 SMB tests pass in each. Only the three established
+remote pNFS suites fail, with exactly the previous mismatch signatures. Both
+Clang stages complete with exactly the baseline 42 normalized warning signatures
+/ 116 occurrences; no new or increased diagnostics. Syntax, northside/include
+API guards, REUSE, and copyright checks pass. `make check` remains red on those
+three baseline suites. Final evidence: `check-complete.log`, `compare-final.txt`,
+`probes-repeat-{debug,release}.log`; `check-before-fixture-fix.log` includes the
+intermittent DOC injection failure and is not the final result. No production or
+test code changed after the final sweep. The three Linux extended suite failures
+above remain independently reproduced pre-pass failures and are not part of the
+quick-tier result.
+
+## Publication checkpoint (2026-10-06)
+
+User requested committing and pushing accumulated work to draft Chimera PR1692,
+updating its remaining-work description, then rebasing onto latest main.
+The PR initially still pointed to a9e0efe0; all subsequent refinement was local.
+Published dependency branches named compound-boilerplate with human Git identity:
+- xdrzcc a7f0fb8a94230633110d4c6f8f1656275853daf2, draft PR22.
+- libevpl c9a9a376e5bc2f8dab08f7788f5b3dd371e1caf7, draft PR207,
+  including the XDR pin.
+- Existing specs8dfc579 remains published through draft PR33.
+
+The root checkpoint collects the accumulated source, tests and review documents.
+PR description now distinguishes remaining SMB lifecycle/identity/cancellation
+work, Linux matched-FH DOC failures, public-header cleanup and validation debt
+from explicitly deferred backend transactions. Latest pre-rebase verification is
+the October5 lifetime sweep above:279/282 quick in each build, all57 SMB pass,
+three remote pNFS failures, unchanged42 analyzer signatures/116 occurrences.
+Publication only removed extra EOF blank lines in two newly staged files; no
+behavior changed. Staged/root/nested diff checks and the northside API guard
+were rechecked. Rebase and its
+validation follow publication; this checkpoint is not post-rebase evidence.

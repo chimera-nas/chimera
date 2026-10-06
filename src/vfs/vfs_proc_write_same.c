@@ -4,6 +4,7 @@
 
 #include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_pnfs.h"
+#include "vfs/vfs_claim.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
 #include "vfs_attr_cache.h"
@@ -34,6 +35,8 @@ struct chimera_vfs_write_same_fallback {
     struct chimera_vfs_thread        *thread;
     struct chimera_vfs_cred           cred;
     struct chimera_vfs_open_handle   *handle;
+    struct chimera_vfs_io_view        view;
+    struct chimera_claim_actor        owner;
     uint64_t                          offset;       /* next write offset */
     uint64_t                          remaining;    /* bytes left (block multiple) */
     uint64_t                          written;
@@ -142,7 +145,7 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
     ctx->chunk_niov = (int) k;
     chunk           = (uint32_t) (k * ctx->block_size);
 
-    chimera_vfs_write(
+    chimera_vfs_write_view(
         ctx->thread,
         &ctx->cred,
         ctx->handle,
@@ -153,6 +156,7 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
         ctx->post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE,
         ctx->chunk_iov,
         ctx->chunk_niov,
+        &ctx->view,
         chimera_vfs_write_same_fallback_write_cb,
         ctx);
 } /* chimera_vfs_write_same_fallback_step */
@@ -171,6 +175,7 @@ chimera_vfs_write_same_fallback(
     uint32_t                          sync,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_write_same_callback_t callback,
     void                             *private_data)
 {
@@ -204,6 +209,7 @@ chimera_vfs_write_same_fallback(
         memcpy((uint8_t *) ctx->tmpl.data + reloff_pattern, pattern, pattern_len);
     }
 
+    chimera_vfs_io_view_copy(&ctx->view, &ctx->owner, view);
     ctx->thread         = thread;
     ctx->cred           = *cred;
     ctx->handle         = handle;
@@ -266,6 +272,7 @@ chimera_vfs_write_same_finish(struct chimera_vfs_request *request)
                                       &request->write_same.r_post_attr);
     }
 
+    chimera_vfs_io_claim_release(request);
     chimera_vfs_complete(request);
 
     if (request->io_pnfs_backing) {
@@ -283,8 +290,14 @@ chimera_vfs_write_same_finish(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_write_same_finish */
 
+static void
+chimera_vfs_write_same_dispatch(struct chimera_vfs_request *request)
+{
+    chimera_vfs_pnfs_dispatch(request, 1, CHIMERA_VFS_CAP_WRITE_SAME);
+} /* chimera_vfs_write_same_dispatch */
+
 SYMBOL_EXPORT void
-chimera_vfs_write_same(
+chimera_vfs_write_same_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
@@ -297,6 +310,7 @@ chimera_vfs_write_same(
     uint32_t                          sync,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_write_same_callback_t callback,
     void                             *private_data)
 {
@@ -316,7 +330,7 @@ chimera_vfs_write_same(
         chimera_vfs_write_same_fallback(thread, cred, handle, offset, block_size,
                                         block_count, pattern, pattern_len,
                                         reloff_pattern, sync, pre_attr_mask,
-                                        post_attr_mask, callback, private_data);
+                                        post_attr_mask, view, callback, private_data);
         return;
     }
 
@@ -346,5 +360,9 @@ chimera_vfs_write_same(
     request->proto_callback                     = callback;
     request->proto_private_data                 = private_data;
 
-    chimera_vfs_pnfs_dispatch(request, 1, CHIMERA_VFS_CAP_WRITE_SAME);
-} /* chimera_vfs_write_same */
+    request->io_handle = handle;
+    chimera_vfs_io_view_copy(&request->io_view, &request->io_owner, view);
+    request->io_owner_valid = request->io_view.owner != NULL;
+    chimera_vfs_io_claim_acquire(request, request->io_view.owner,
+                                 chimera_vfs_write_same_dispatch);
+} /* chimera_vfs_write_same_view */

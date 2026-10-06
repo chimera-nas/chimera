@@ -237,6 +237,10 @@ struct chimera_vfs_thread {
     struct chimera_vfs_request          *free_requests;
     struct chimera_vfs_request          *active_requests;
     uint64_t                             num_active_requests;
+    /* Submitted attempts, including parked execution, asynchronous finish and
+    * terminal callbacks. Retries acquire their own count before the previous
+    * callback returns, so drain cannot miss a handoff with no backend I/O. */
+    uint64_t                             num_active_compounds;
     struct chimera_vfs_open_handle      *free_synth_handles;
     /* Spent compounds, kept to be handed out again: a compound is large
      * enough that allocating one per request is a real cost on a local

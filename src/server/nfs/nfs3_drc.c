@@ -462,11 +462,12 @@ struct nfs3_drc_capture_ctx {
 
 static void
 nfs3_drc_capture_reply(
-    const struct evpl_iovec *iov,
-    int                      niov,
-    int                      total_length,
-    uint32_t                 body_offset,
-    void                    *private_data)
+    const struct evpl_iovec           *iov,
+    int                                niov,
+    int                                total_length,
+    uint32_t                           body_offset,
+    const struct evpl_rpc2_rdma_chunk *write_chunk,
+    void                              *private_data)
 {
     struct nfs3_drc_capture_ctx      *ctx    = private_data;
     struct chimera_server_nfs_thread *thread = ctx->thread;
@@ -489,7 +490,7 @@ nfs3_drc_capture_reply(
         return;  /* OOM: skip caching this reply (degrade to a cache miss) */
     }
 
-    if (nfs_drc_copy_rpc_reply(iov, niov, body_offset, buf, rpc_len) != rpc_len) {
+    if (nfs_drc_copy_rpc_reply(iov, niov, body_offset, write_chunk, buf, rpc_len) != rpc_len) {
         free(buf);
         return;
     }
@@ -596,11 +597,9 @@ nfs3_drc_lookup_or_forward(
         int rc = nfs_drc_send_cached_reply(thread, encoding, cached, cached_len);
 
         free(cached);
-        if (rc == 0) {
-            return 0;  /* retransmit replayed from cache */
-        }
-        /* Unparseable cached reply (should not happen for a TCP MSG_ACCEPTED
-         * reply): fall through and re-execute. */
+        /* Delivery failure is an RPC error, never permission to repeat the
+         * mutations represented by a cache hit. */
+        return rc;
     }
 
     cctx = xdr_dbuf_alloc_space(sizeof(*cctx), encoding->dbuf);

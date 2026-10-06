@@ -35,7 +35,7 @@ static struct {
     const uint8_t                  *lease_key;
     struct chimera_vfs_open_handle *handle;
     struct chimera_claim_actor      actor;
-    bool                            have_actor;
+    struct chimera_vfs_io_view      view;
     chimera_vfs_link_at_callback_t  callback;
     void                           *private_data;
 } link_gate;
@@ -48,18 +48,18 @@ link_poll(
     if (!atomic_exchange(&release_link, 0)) {
         evpl_add_oneshot_timer(evpl, timer, link_poll, 1000); return;
     }
-    __typeof__(&chimera_vfs_link_at_flags_actor) next = dlsym(RTLD_NEXT, "chimera_vfs_link_at_flags_actor");
+    __typeof__(&chimera_vfs_link_at_flags_view) next = dlsym(RTLD_NEXT, "chimera_vfs_link_at_flags_view");
     assert(next);
     atomic_store(&link_held, 0);
     next(link_gate.thread, link_gate.cred, link_gate.fh, link_gate.fhlen,
          link_gate.dir_fh, link_gate.dir_fhlen, link_gate.name, link_gate.namelen,
          link_gate.replace, link_gate.flags, link_gate.attr_mask, link_gate.pre_mask,
          link_gate.post_mask, link_gate.lease_key, link_gate.handle,
-         link_gate.have_actor ? &link_gate.actor : NULL, link_gate.callback, link_gate.private_data);
+         &link_gate.view, link_gate.callback, link_gate.private_data);
 } /* link_poll */
 
 __attribute__((visibility("default"))) void
-chimera_vfs_link_at_flags_actor(
+chimera_vfs_link_at_flags_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     const void                       *fh,
@@ -75,11 +75,11 @@ chimera_vfs_link_at_flags_actor(
     uint64_t                          post_mask,
     const uint8_t                    *lease_key,
     struct chimera_vfs_open_handle   *handle,
-    const struct chimera_claim_actor *actor,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_link_at_callback_t    callback,
     void                             *private_data)
 {
-    __typeof__(&chimera_vfs_link_at_flags_actor) next = dlsym(RTLD_NEXT, "chimera_vfs_link_at_flags_actor");
+    __typeof__(&chimera_vfs_link_at_flags_view) next = dlsym(RTLD_NEXT, "chimera_vfs_link_at_flags_view");
 
     assert(next);
     if (atomic_load(&armed)) {
@@ -89,24 +89,21 @@ chimera_vfs_link_at_flags_actor(
         }
     }
     if (!replace && atomic_exchange(&hold_link, 0)) {
-        link_gate.thread     = thread; link_gate.cred = cred;
-        link_gate.fh         = fh; link_gate.fhlen = fhlen;
-        link_gate.dir_fh     = dir_fh; link_gate.dir_fhlen = dir_fhlen;
-        link_gate.name       = name; link_gate.namelen = namelen;
-        link_gate.replace    = replace; link_gate.flags = flags;
-        link_gate.attr_mask  = attr_mask; link_gate.pre_mask = pre_mask; link_gate.post_mask = post_mask;
-        link_gate.lease_key  = lease_key; link_gate.handle = handle;
-        link_gate.have_actor = actor != NULL;
-        if (actor) {
-            link_gate.actor = *actor;
-        }
+        link_gate.thread    = thread; link_gate.cred = cred;
+        link_gate.fh        = fh; link_gate.fhlen = fhlen;
+        link_gate.dir_fh    = dir_fh; link_gate.dir_fhlen = dir_fhlen;
+        link_gate.name      = name; link_gate.namelen = namelen;
+        link_gate.replace   = replace; link_gate.flags = flags;
+        link_gate.attr_mask = attr_mask; link_gate.pre_mask = pre_mask; link_gate.post_mask = post_mask;
+        link_gate.lease_key = lease_key; link_gate.handle = handle;
+        chimera_vfs_io_view_copy(&link_gate.view, &link_gate.actor, view);
         link_gate.callback = callback; link_gate.private_data = private_data;
         evpl_add_oneshot_timer(thread->evpl, &link_gate.timer, link_poll, 1000);
         atomic_store(&link_held, 1); return;
     }
     next(thread, cred, fh, fhlen, dir_fh, dir_fhlen, name, namelen, replace,
-         flags, attr_mask, pre_mask, post_mask, lease_key, handle, actor, callback, private_data);
-} /* chimera_vfs_link_at_flags_actor */
+         flags, attr_mask, pre_mask, post_mask, lease_key, handle, view, callback, private_data);
+} /* chimera_vfs_link_at_flags_view */
 
 __attribute__((visibility("default"))) void
 chimera_vfs_notify_emit_lease(

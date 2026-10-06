@@ -292,6 +292,7 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
                                       &request->setattr.r_post_attr);
     }
 
+    chimera_vfs_io_claim_release(request);
     chimera_vfs_complete(request);
 
     if (request->io_pnfs_backing) {
@@ -381,7 +382,7 @@ chimera_vfs_setattr_dispatch(
     uint64_t                          post_attr_mask,
     bool                              overwrite,
     bool                              after_write,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_setattr_callback_t    callback,
     void                             *private_data)
 {
@@ -398,10 +399,8 @@ chimera_vfs_setattr_dispatch(
     request->complete          = chimera_vfs_setattr_complete;
     request->setattr.handle    = handle;
     request->setattr.overwrite = overwrite;
-    if (io_owner) {
-        request->io_owner       = *io_owner;
-        request->io_owner_valid = 1;
-    }
+    chimera_vfs_io_view_copy(&request->io_view, &request->io_owner, view);
+    request->io_owner_valid = request->io_view.owner != NULL;
     /* Identify the mutating handle so the caching recall below skips a
      * claim anchored to this same handle (the holder is coherent with its own
      * setattr -- the trigger engine's HOLDER-circle op_handle exemption). */
@@ -441,11 +440,20 @@ chimera_vfs_setattr_dispatch(
      * Run after authorization, before the blocking peer recall and mutation.
      * CREATE overwrites already invalidate old grants before admitting their
      * new caching grant; do not invalidate that fresh grant here. */
-    if (!flush_only && io_owner && !overwrite) {
-        chimera_vfs_claim_invalidate(thread->vfs->vfs_state,
-                                     request->fh, request->fh_len,
-                                     request->fh_hash, CHIMERA_TRIGGER_WRITE,
-                                     io_owner, 0);
+    /* Anonymous data changes use the compound's private share view. This
+     * path admits an implicit write claim, including cache recall, instead
+     * of the namespace recall below; the two cannot share a request loan. */
+    if (!flush_only && view && !view->owner && !overwrite) {
+        chimera_vfs_io_claim_acquire(request, NULL,
+                                     chimera_vfs_setattr_pnfs_dispatch);
+        return;
+    }
+
+    if (!flush_only && request->io_owner_valid && !overwrite) {
+        chimera_vfs_claim_invalidate_view(thread->vfs->vfs_state,
+                                          request->fh, request->fh_len,
+                                          request->fh_hash, CHIMERA_TRIGGER_WRITE,
+                                          &request->io_view, 0);
     }
 
     chimera_vfs_io_recall(request, request->fh, request->fh_len,
@@ -466,7 +474,8 @@ struct chimera_vfs_setattr_gate {
     uint64_t                        pre_attr_mask;
     uint64_t                        post_attr_mask;
     bool                            overwrite;
-    bool                            has_io_owner;
+    bool                            has_view;
+    struct chimera_vfs_io_view      view;
     struct chimera_claim_actor      io_owner;
     chimera_vfs_setattr_callback_t  callback;
     void                           *private_data;
@@ -660,7 +669,7 @@ chimera_vfs_setattr_gate_complete(
     chimera_vfs_setattr_dispatch(gate->thread, gate->cred, gate->handle,
                                  gate->set_attr, gate->pre_attr_mask,
                                  gate->post_attr_mask, gate->overwrite, false,
-                                 gate->has_io_owner ? &gate->io_owner : NULL, gate->callback,
+                                 gate->has_view ? &gate->view : NULL, gate->callback,
                                  gate->private_data);
     chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_setattr_gate_complete */
@@ -675,7 +684,7 @@ chimera_vfs_setattr_common(
     uint64_t                          post_attr_mask,
     int                               fd_rights,
     bool                              overwrite,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_setattr_callback_t    callback,
     void                             *private_data)
 {
@@ -721,10 +730,8 @@ chimera_vfs_setattr_common(
             gate->pre_attr_mask  = pre_attr_mask;
             gate->post_attr_mask = post_attr_mask;
             gate->overwrite      = overwrite;
-            gate->has_io_owner   = io_owner != NULL;
-            if (io_owner) {
-                gate->io_owner = *io_owner;
-            }
+            gate->has_view       = view != NULL;
+            chimera_vfs_io_view_copy(&gate->view, &gate->io_owner, view);
             gate->callback     = callback;
             gate->private_data = private_data;
 
@@ -738,7 +745,7 @@ chimera_vfs_setattr_common(
     }
 
     chimera_vfs_setattr_dispatch(thread, cred, handle, set_attr,
-                                 pre_attr_mask, post_attr_mask, overwrite, false, io_owner,
+                                 pre_attr_mask, post_attr_mask, overwrite, false, view,
                                  callback, private_data);
 } /* chimera_vfs_setattr_common */
 
@@ -759,21 +766,21 @@ chimera_vfs_setattr(
 } /* chimera_vfs_setattr */
 
 SYMBOL_EXPORT void
-chimera_vfs_setattr_owned(
+chimera_vfs_setattr_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
     struct chimera_vfs_attrs         *set_attr,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_setattr_callback_t    callback,
     void                             *private_data)
 {
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
-                               pre_attr_mask, post_attr_mask, 0, false, io_owner,
+                               pre_attr_mask, post_attr_mask, 0, false, view,
                                callback, private_data);
-} /* chimera_vfs_setattr_owned */
+} /* chimera_vfs_setattr_view */
 
 /* Descriptor-originated setattr (ftruncate/futimens family): mutations whose
  * whole requirement is WRITE_DATA are authorized by the descriptor's
@@ -796,21 +803,21 @@ chimera_vfs_fsetattr(
 } /* chimera_vfs_fsetattr */
 
 SYMBOL_EXPORT void
-chimera_vfs_fsetattr_owned(
+chimera_vfs_fsetattr_view(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
     struct chimera_vfs_attrs         *set_attr,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
-    const struct chimera_claim_actor *io_owner,
+    const struct chimera_vfs_io_view *view,
     chimera_vfs_setattr_callback_t    callback,
     void                             *private_data)
 {
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
-                               pre_attr_mask, post_attr_mask, 1, false, io_owner,
+                               pre_attr_mask, post_attr_mask, 1, false, view,
                                callback, private_data);
-} /* chimera_vfs_fsetattr_owned */
+} /* chimera_vfs_fsetattr_view */
 
 SYMBOL_EXPORT void
 chimera_vfs_overwrite(
@@ -823,12 +830,14 @@ chimera_vfs_overwrite(
     chimera_vfs_setattr_callback_t    callback,
     void                             *private_data)
 {
+    struct chimera_vfs_io_view view = { .owner = io_owner };
+
     if (!(set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) || set_attr->va_size != 0) {
         callback(CHIMERA_VFS_EINVAL, NULL, NULL, NULL, private_data);
         return;
     }
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
-                               0, post_attr_mask, 0, true, io_owner,
+                               0, post_attr_mask, 0, true, &view,
                                callback, private_data);
 } /* chimera_vfs_overwrite */
 

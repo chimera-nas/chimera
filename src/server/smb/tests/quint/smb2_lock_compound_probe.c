@@ -5,6 +5,7 @@
 #endif /* ifndef _GNU_SOURCE */
 #include <dlfcn.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #undef NDEBUG
 #include <assert.h>
 #include "smb2_mbt_common.h"
@@ -18,8 +19,52 @@ extern atomic_int lock_test_arm, lock_test_seen, lock_test_claims, lock_test_reh
 void lock_test_inspect(
     struct chimera_vfs_compound *compound);
 static atomic_int armed, submissions, attempts, last_execution;
+static atomic_int hold_next, held, release_held;
 static unsigned   reject_count, expected_groups;
-struct injection { chimera_vfs_compound_callback_t callback; void *private_data; unsigned seen; };
+struct evpl * lock_test_evpl(
+    struct chimera_vfs_compound *compound);
+struct injection {
+    chimera_vfs_compound_callback_t callback;
+    void                           *private_data;
+    unsigned                        seen, rejects, hold;
+    struct evpl_timer               timer;
+    struct chimera_vfs_compound    *compound;
+    chimera_vfs_compound_callback_t resume;
+};
+static void
+held_tick(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct injection *ctx = (struct injection *) ((char *) timer - offsetof(struct injection, timer));
+
+    if (!atomic_load(&release_held)) {
+        evpl_add_oneshot_timer(evpl, timer, held_tick, 1000);
+        return;
+    }
+    ctx->resume(ctx->compound, ctx);
+} /* held_tick */
+static void
+hold_completion(
+    struct chimera_vfs_compound    *cp,
+    struct injection               *ctx,
+    chimera_vfs_compound_callback_t resume)
+{
+    ctx->hold     = 0;
+    ctx->compound = cp;
+    ctx->resume   = resume;
+    atomic_store(&held, 1);
+    evpl_add_oneshot_timer(lock_test_evpl(cp), &ctx->timer, held_tick, 1000);
+} /* hold_completion */
+static void
+finish_result(
+    struct chimera_vfs_compound *cp,
+    void                        *private_data)
+{
+    struct injection *ctx = private_data;
+
+    chimera_vfs_compound_finish_result(cp, ctx->seen <= ctx->rejects ? CHIMERA_VFS_EAGAIN : CHIMERA_VFS_OK);
+} /* finish_result */
 static void
 finish(
     struct chimera_vfs_compound *cp,
@@ -29,7 +74,11 @@ finish(
 
     atomic_store(&last_execution, chimera_vfs_compound_execution_status(cp));
     atomic_store(&attempts, ++ctx->seen);
-    chimera_vfs_compound_finish_result(cp, ctx->seen <= reject_count ? CHIMERA_VFS_EAGAIN : CHIMERA_VFS_OK);
+    if (ctx->hold == 1 || ctx->hold == 3) {
+        hold_completion(cp, ctx, finish_result);
+        return;
+    }
+    finish_result(cp, ctx);
 } /* finish */
 static void
 complete(
@@ -40,6 +89,10 @@ complete(
     chimera_vfs_compound_callback_t callback = ctx->callback;
     void                           *arg      = ctx->private_data;
 
+    if (ctx->hold == 2 && chimera_vfs_compound_finish_status(cp) == CHIMERA_VFS_OK) {
+        hold_completion(cp, ctx, complete);
+        return;
+    }
     lock_test_inspect(cp);
     if (chimera_vfs_compound_finish_status(cp) != CHIMERA_VFS_EAGAIN ||
         ctx->seen == CHIMERA_FRONTEND_COMPOUND_RETRIES + 1) {
@@ -63,9 +116,15 @@ chimera_vfs_compound_submit(
     assert(ctx);
     ctx->callback     = callback;
     ctx->private_data = private_data;
+    ctx->hold         = atomic_exchange(&hold_next, 0);
     if (!atomic_load(&armed)) {
+        if (ctx->hold) {
+            ctx->rejects = ctx->hold == 3 ? 1 : 0;
+            chimera_vfs_compound_set_finish_handler(cp, finish, ctx);
+        }
         next(cp, complete, ctx); return;
     }
+    ctx->rejects = reject_count;
     assert(atomic_fetch_add(&submissions, 1) == 0);
     assert(chimera_vfs_compound_num_groups(cp) == expected_groups);
     if (reject_count) {
@@ -768,6 +827,131 @@ canonical_owner_cases(
     assert(smb2_close(reclaimer, same.file_id) == ST_SUCCESS);
 } /* canonical_owner_cases */
 
+static uint32_t
+replay_bind_leg(
+    struct smb2_conn *c,
+    const uint8_t    *blob,
+    int               length)
+{
+    int      offset = smb2c_begin(c, SMB2_SESSION_SETUP, 0);
+    uint8_t *body   = c->sbuf + offset;
+
+    p16(body, 0, 25); body[2] = 1; body[3] = 1;
+    p16(body, 12, SMB2_HDR_SIZE + 24); p16(body, 14, length);
+    memcpy(body + 24, blob, length);
+    return smb2c_xfer(c, 24 + length);
+} /* replay_bind_leg */
+
+static struct smb2_conn *
+replay_bind_channel(
+    struct smb2_env  *env,
+    struct smb2_conn *first)
+{
+    struct smb2_conn *c = smb2_conn_open(env);
+
+    c->guid_tag = first->guid_tag;
+    assert(smb2_negotiate(c) == ST_SUCCESS && c->dialect == 0x0300);
+    c->session_id = first->session_id; c->tree_id = first->tree_id;
+    memcpy(c->signing_key, first->signing_key, sizeof(c->signing_key));
+    c->signing_on = 1;
+    uint8_t           blob[2048];
+    int               length = smb2w_ntlm_negotiate(blob, false);
+    assert(replay_bind_leg(c, blob, length) == ST_MORE_PROCESSING_REQUIRED);
+    const uint8_t    *body = c->rbuf + 4 + SMB2_HDR_SIZE;
+    uint16_t          offset = g16(body, 4), size = g16(body, 6);
+    length = smb2w_ntlm_auth_ntlmv2(c->rbuf + 4 + offset, size,
+                                    SMB2W_USER, SMB2W_PASSWORD, SMB2W_DOMAIN, blob, c->session_key);
+    assert(replay_bind_leg(c, blob, length) == ST_SUCCESS);
+    smb2c_arm_protection(c, NULL);
+    return c;
+} /* replay_bind_channel */
+
+static uint64_t
+post_replay_lock(
+    struct smb2_conn *c,
+    const uint8_t    *fid,
+    uint32_t          sequence,
+    uint64_t          offset,
+    uint32_t          flags)
+{
+    uint64_t mid   = c->msg_id;
+    int      start = smb2c_begin(c, SMB2_LOCK, 0);
+    uint8_t *body  = c->sbuf + start;
+
+    p16(body, 0, 48); p16(body, 2, 1); p32(body, 4, sequence);
+    memcpy(body + 8, fid, 16);
+    p64(body, 24, offset); p64(body, 32, 4); p32(body, 40, flags);
+    smb2c_send(c, 48);
+    return mid;
+} /* post_replay_lock */
+
+static void
+replay_admission_cases(const struct smb2_env_opts *options)
+{
+    struct smb2_env   env;
+
+    smb2_env_open_wire(&env, options, smb2_wire_profile_find("signed30"));
+    smb2_env_fs_setup(&env, "fs0");
+    struct smb2_conn *c       = smb2_conn_open(&env); smb2_handshake(c);
+    struct smb2_conn *channel = replay_bind_channel(&env, c);
+    struct smb2_conn *other   = smb2_conn_open(&env); smb2_handshake(other);
+    const uint32_t    acquire = SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY;
+    for (unsigned mode = 1; mode <= 4; mode++) {
+        struct smb2_create_out owner, peer;
+        assert(smb2_create(c, "serialized-replay", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                           MBT_FILE_SHARE_RWD, NULL, &owner) == ST_SUCCESS);
+        assert(smb2_resiliency(c, owner.file_id, 30000) == ST_SUCCESS);
+        assert(smb2_create(other, "serialized-replay", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                           MBT_FILE_SHARE_RWD, NULL, &peer) == ST_SUCCESS);
+        atomic_store(&held, 0); atomic_store(&release_held, 0);
+        atomic_store(&hold_next, mode == 4 ? 2 : mode);
+        uint64_t               first    = post_replay_lock(c, owner.file_id, 0x10, 0, acquire);
+        uint64_t               deadline = smb2c_now_ms() + SMB2C_HANG_MS;
+        while (!atomic_load(&held)) {
+            smb2_pump(&env); assert(smb2c_now_ms() < deadline);
+        }
+        int                    interim = channel->ninterim, replies = channel->nreply_app;
+        uint64_t               second = post_replay_lock(channel, owner.file_id, 0x10, 0, acquire);
+        while (channel->ninterim == interim) {
+            smb2_pump(&env);
+            /* Without admission this executes against stale replay state and
+            * reports LOCK_NOT_GRANTED instead of waiting for publication. */
+            assert(channel->nreply_app == replies);
+            assert(smb2c_now_ms() < deadline);
+        }
+        if (mode == 4) {
+            smb2c_post_cancel_async(channel, channel->last_async_id);
+            assert(smb2c_pump_for_nreply(channel, replies, "cancel replay admission"));
+            assert(g64(channel->rbuf + 4, 24) == second && g32(channel->rbuf + 4, 8) == ST_CANCELLED);
+        } else {
+            /* Other sequence buckets on the same open remain runnable. */
+            post_replay_lock(channel, owner.file_id, 0x20, 64, acquire);
+            assert(smb2c_wait(channel) == ST_SUCCESS);
+            post_replay_lock(channel, owner.file_id, 0x21, 64, SMB2_LOCKFLAG_UNLOCK);
+            assert(smb2c_wait(channel) == ST_SUCCESS);
+        }
+        replies = channel->nreply_app;
+        atomic_store(&release_held, 1);
+        assert(smb2c_wait(c) == ST_SUCCESS && g64(c->rbuf + 4, 24) == first);
+        if (mode != 4) {
+            assert(smb2c_pump_for_nreply(channel, replies, "serialized replay"));
+            fprintf(stderr, "replay mode %u mid=%llu expected=%llu status=%08x\n", mode,
+                    (unsigned long long) g64(channel->rbuf + 4, 24), (unsigned long long) second,
+                    g32(channel->rbuf + 4, 8));
+            assert(g64(channel->rbuf + 4, 24) == second && g32(channel->rbuf + 4, 8) == ST_SUCCESS);
+        }
+        /* Rejection and cancellation never leave an admission bit behind;
+         * accepted replay never inserts a second range. */
+        post_replay_lock(channel, owner.file_id, 0x11, 0, SMB2_LOCKFLAG_UNLOCK);
+        assert(smb2c_wait(channel) == ST_SUCCESS);
+        uint32_t written;
+        assert(smb2_write(other, peer.file_id, 0, "free", 4, &written) == ST_SUCCESS);
+        assert(smb2_close(c, owner.file_id) == ST_SUCCESS);
+        assert(smb2_close(other, peer.file_id) == ST_SUCCESS);
+    }
+    smb2_env_fs_teardown(&env, "fs0"); smb2_env_stop(&env);
+} /* replay_admission_cases */
+
 int
 main(void)
 {
@@ -935,5 +1119,6 @@ main(void)
     assert(smb2_close(peer, p.file_id) == ST_SUCCESS);
     smb2_conn_reset(&env);
     smb2_env_fs_teardown(&env, "fs0"); smb2_env_stop(&env);
+    replay_admission_cases(&options);
     return 0;
 } /* main */

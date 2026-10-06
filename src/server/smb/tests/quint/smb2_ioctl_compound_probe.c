@@ -809,8 +809,8 @@ reparse_native_checks(
         assert(smb2_close(c, open.file_id) == ST_SUCCESS);
     }
 
-    /* A read-only nonregular classification cannot launch the legacy
-     * destructive fallback after a CANCEL received during held finish. */
+    /* A nonregular source is rejected before mutation. CANCEL during the
+     * held read-only finish takes precedence over that rejection. */
     assert(smb2_create(c, "reparse-fallback-cancel", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &
                        open) ==
            ST_SUCCESS);
@@ -819,7 +819,8 @@ reparse_native_checks(
     reparse_arm_case();
     assert(smb2_ioctl(c, SMB2_FSCTL_SET_REPARSE_POINT, open.file_id, input, 16) == ST_SUCCESS);
     reparse_wait_flag(env, &reparse_completed);
-    input_len           = reparse_symlink_input(input, "target");
+    input_len = reparse_symlink_input(input, "target");
+    assert(smb2_ioctl(c, SMB2_FSCTL_SET_REPARSE_POINT, open.file_id, input, input_len) == ST_NOT_SUPPORTED);
     reparse_finish_hold = 1; reparse_arm_case();
     id                  = reparse_post(c, open.file_id, input, input_len);
     reparse_wait_flag(env, &reparse_pause); reparse_cancel(c, id);
@@ -882,6 +883,81 @@ reparse_native_checks(
     reparse_teardown = 0;
     assert(!atomic_load(&reparse_arm));
 } /* reparse_native_checks */
+
+/* Each state excluded from migration must fail before unlinking, and keep
+ * both the FileId's identity and the pathname usable with its original bytes. */
+static void
+reparse_unsupported_checks(struct smb2_conn *c)
+{
+    uint8_t  input[256], bytes[16], identity[8], after[8];
+    unsigned input_len = reparse_symlink_input(input, "target");
+
+    for (unsigned kind = 0; kind < 6; kind++) {
+        char                   name[64];
+        snprintf(name, sizeof(name), "reparse-state-%u%s", kind, kind == 5 ? ":data" : "");
+        struct smb2_create_out open, peer;
+        struct smb2_oplock_req lease = {
+            .is_lease = 1, .lease_state = SMB2_LEASE_RWH, .lease_key = { 0xef },
+        };
+        uint32_t               count, length, status;
+        assert(smb2_create_opts(c, name, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
+                                MBT_FILE_NON_DIRECTORY_FILE | (kind == 2 ? MBT_FILE_DELETE_ON_CLOSE : 0),
+                                kind == 1 ? &lease : NULL, &open) == ST_SUCCESS);
+        assert(smb2_write(c, open.file_id, 0, "keep", 4, &count) == ST_SUCCESS);
+        assert(smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_INTERNAL_INFO_T, open.file_id,
+                               0, identity, sizeof(identity), &length) == ST_SUCCESS && length == 8);
+        if (kind == 0) {
+            assert(smb2_lock(c, open.file_id, 0, 4,
+                             SMB2_LOCKFLAG_EXCLUSIVE | SMB2_LOCKFLAG_FAIL_IMMEDIATELY) == ST_SUCCESS);
+        } else if (kind == 1) {
+            assert(open.has_lease && open.lease_state == SMB2_LEASE_RWH);
+        } else if (kind == 3) {
+            assert(smb2_create(c, name, MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                               MBT_FILE_SHARE_RWD, NULL, &peer) == ST_SUCCESS);
+        } else if (kind == 4) {
+            assert(smb2_resiliency(c, open.file_id, 25000) == ST_SUCCESS);
+        }
+        assert(smb2_ioctl(c, SMB2_FSCTL_SET_REPARSE_POINT, open.file_id, input, input_len) == ST_NOT_SUPPORTED);
+        assert(smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_INTERNAL_INFO_T, open.file_id,
+                               0, after, sizeof(after), &length) == ST_SUCCESS && length == 8);
+        assert(!memcmp(identity, after, sizeof(identity)));
+        assert(smb2_read(c, open.file_id, 0, 4, bytes, &length) == ST_SUCCESS && length == 4 &&
+               !memcmp(bytes, "keep", 4));
+        (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, open.file_id, NULL, 0, 4096, &status, &length);
+        assert(status == 0xC0000275u); /* NOT_A_REPARSE_POINT */
+        if (kind == 0) {
+            assert(smb2_create(c, name, MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                               MBT_FILE_SHARE_RWD, NULL, &peer) == ST_SUCCESS);
+            assert(smb2_write(c, peer.file_id, 0, "fail", 4, &count) == ST_FILE_LOCK_CONFLICT);
+            assert(smb2_close(c, peer.file_id) == ST_SUCCESS);
+            assert(smb2_lock(c, open.file_id, 0, 4, SMB2_LOCKFLAG_UNLOCK) == ST_SUCCESS);
+        } else if (kind == 1) {
+            assert(!smb2_conn_nbreaks(c));
+        } else if (kind == 2) {
+            assert(smb2_set_disposition(c, open.file_id, 0) == ST_SUCCESS);
+        } else if (kind == 3) {
+            assert(smb2_read(c, peer.file_id, 0, 4, bytes, &length) == ST_SUCCESS && length == 4 &&
+                   !memcmp(bytes, "keep", 4));
+            assert(smb2_close(c, peer.file_id) == ST_SUCCESS);
+        }
+        assert(smb2_close(c, open.file_id) == ST_SUCCESS);
+        if (kind == 2) {
+            /* CREATE-time DOC survives clearing ordinary disposition. Its
+            * promised removal must still apply to the original object. */
+            assert(smb2_create(c, name, MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                               MBT_FILE_SHARE_RWD, NULL, &peer) == ST_OBJECT_NAME_NOT_FOUND);
+            continue;
+        }
+        assert(smb2_create(c, name, MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
+                           MBT_FILE_SHARE_RWD, NULL, &peer) == ST_SUCCESS);
+        assert(smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_INTERNAL_INFO_T, peer.file_id,
+                               0, after, sizeof(after), &length) == ST_SUCCESS && length == 8);
+        assert(!memcmp(identity, after, sizeof(identity)));
+        assert(smb2_read(c, peer.file_id, 0, 4, bytes, &length) == ST_SUCCESS && length == 4 &&
+               !memcmp(bytes, "keep", 4));
+        assert(smb2_close(c, peer.file_id) == ST_SUCCESS);
+    }
+} /* reparse_unsupported_checks */
 
 static void
 reparse_identity_checks(struct smb2_conn *c)
@@ -975,7 +1051,7 @@ int
 main(void)
 {
     struct smb2_env        env;
-    struct smb2_env_opts   opts = { .named_streams = 1 };
+    struct smb2_env_opts   opts = { .named_streams = 1, .oplocks = 1, .leases = 1 };
     struct smb2_create_out src, dst, stream;
     struct packet          p = { 0 };
     uint8_t                input[544] = { 0 }, token[512];
@@ -1197,6 +1273,7 @@ main(void)
     ioctl_send(&p, c);
     inspect_resiliency = 0;
 
+    reparse_unsupported_checks(c);
     reparse_identity_checks(c);
     reparse_native_checks(&env, c);
 

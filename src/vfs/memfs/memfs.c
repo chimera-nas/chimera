@@ -230,6 +230,7 @@ struct memfs_inode {
      * reused so a stale stream file handle resolves to nothing). */
     struct memfs_named_stream *streams;
     uint32_t                   next_stream_id;
+    uint64_t                   stream_change; /* namespace generation for stream cookies */
 
     /* Streams that have been unlinked from `streams` (via remove_stream or a
      * stream delete-on-close) while a handle still holds them open: an unlinked
@@ -890,6 +891,7 @@ memfs_inode_alloc(
     inode->dead_streams   = NULL;
     inode->stream_opens   = NULL;
     inode->next_stream_id = 0;
+    inode->stream_change  = 0;
 
     return inode;
 
@@ -1038,6 +1040,9 @@ memfs_streams_free_all(
 {
     struct memfs_named_stream *stream;
 
+    if (inode->streams) {
+        inode->stream_change++;
+    }
     while (inode->streams) {
         stream         = inode->streams;
         inode->streams = stream->next;
@@ -5896,14 +5901,16 @@ memfs_write_same(
                                        CHIMERA_MEMFS_BLOCK_MAX_IOV,
                                        EVPL_IOVEC_FLAG_SHARED, block->iov);
 
-        /* Zero any prefix/suffix of this memfs block that the ADB region does
-         * not cover (partial leading/trailing block). */
-        if (block_offset) {
-            memset(block->iov[0].data, 0, block_offset);
-        }
-        if (block_offset + block_len < block_size) {
-            memset((char *) block->iov[0].data + block_offset + block_len, 0,
-                   block_size - block_offset - block_len);
+        /* WRITE_SAME replaces only its byte range. Preserve existing bytes
+         * outside partial blocks, including shared or fragmented old blocks. */
+        if (block_offset || block_len < block_size) {
+            if (old_block) {
+                struct evpl_iovec_cursor old_cursor;
+                evpl_iovec_cursor_init(&old_cursor, old_block->iov, old_block->niov);
+                evpl_iovec_cursor_copy(&old_cursor, block->iov[0].data, block_size);
+            } else {
+                memset(block->iov[0].data, 0, block_size);
+            }
         }
 
         /* Tile the ADB pattern into the covered span. */
@@ -7116,6 +7123,7 @@ memfs_open_stream(
         for (tail = &inode->streams; *tail; tail = &(*tail)->next) {
         }
         *tail        = stream;
+        inode->stream_change++;
         inode->mtime = now;
         inode->ctime = now;
         inode->change++;
@@ -7172,88 +7180,81 @@ memfs_list_streams(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct memfs_inode             *inode;
-    struct memfs_named_stream      *stream;
-    uint8_t                        *buf     = request->list_streams.buffer;
-    uint32_t                        max     = request->list_streams.max_bytes;
-    int                             want_fh = request->list_streams.want_fh;
-    uint32_t                        offset  = 0;
-    uint32_t                        count   = 0;
-    struct chimera_vfs_stream_entry entry;
-    uint8_t                         fhbuf[CHIMERA_VFS_FH_SIZE + 16];
-    uint32_t                        fh_len;
-    uint32_t                        rec;
+    struct memfs_inode        *inode;
+    struct memfs_named_stream *stream;
+    uint8_t                   *buf = request->list_streams.buffer;
+    uint32_t                   max = request->list_streams.max_bytes;
+    uint32_t                   offset = 0, count = 0, eof = 1;
+    uint64_t                   cookie = 2;
+    bool                       unnamed;
 
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
-
     if (unlikely(!inode)) {
         request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
-
-    /* Default unnamed data fork ("::$DATA"), reported first with an empty name
-     * so the SMB layer can format it as the default stream.  Only regular files
-     * have a data fork -- a directory reports no streams (smb2.streams.dir
-     * expects an empty stream list on a directory).  When the caller requested
-     * handles (NFSv4 named-attr READDIR), the default fork carries the base fh
-     * and each named stream carries its own stream fh. */
-    if (S_ISREG(inode->mode)) {
-        fh_len = want_fh ? request->fh_len : 0;
-        if (want_fh) {
-            memcpy(fhbuf, request->fh, request->fh_len);
-        }
-        rec = sizeof(entry) + fh_len;
-        if (offset + rec > max) {
-            evpl_mutex_unlock(&inode->lock);
-            request->status = CHIMERA_VFS_ERANGE;
-            request->complete(request);
-            return;
-        }
-        entry.size     = inode->size;
-        entry.alloc    = inode->space_used;
-        entry.name_len = 0;
-        entry.fh_len   = fh_len;
-        memcpy(buf + offset, &entry, sizeof(entry));
-        memcpy(buf + offset + sizeof(entry), fhbuf, fh_len);
-        offset += rec;
-        offset  = (offset + 7) & ~7u;
-        count++;
+    /* Only namespace edits invalidate positions; writes and metadata changes
+     * must not force an otherwise unchanged enumeration to restart. */
+    request->list_streams.r_verifier = XXH3_64bits_withSeed(request->fh, request->fh_len, inode->stream_change);
+    if (request->list_streams.cookie && request->list_streams.verifier != request->list_streams.r_verifier) {
+        request->status = CHIMERA_VFS_EBADCOOKIE;
+        goto out;
     }
-
-    for (stream = inode->streams; stream; stream = stream->next) {
-        if (want_fh) {
-            fh_len = memfs_encode_stream_fh(request->fh, inode->inum,
-                                            inode->gen, stream->id, fhbuf);
+    unnamed = S_ISREG(inode->mode);
+    stream  = inode->streams;
+    while (unnamed || stream) {
+        if (++cookie > request->list_streams.cookie) {
+            struct chimera_vfs_stream_entry entry = { 0 };
+            uint8_t                         fh[CHIMERA_VFS_FH_SIZE + 16];
+            entry.cookie   = cookie;
+            entry.size     = unnamed ? inode->size : stream->size;
+            entry.alloc    = unnamed ? inode->space_used : stream->space_used;
+            entry.name_len = unnamed ? 0 : stream->name_len;
+            if (request->list_streams.want_fh) {
+                if (unnamed) {
+                    entry.fh_len = request->fh_len;
+                    memcpy(fh, request->fh, entry.fh_len);
+                } else {
+                    entry.fh_len = memfs_encode_stream_fh(request->fh, inode->inum, inode->gen, stream->id, fh);
+                }
+            }
+            /* Include alignment in the fit test, including for the last
+            * record. Never write padding beyond the caller's buffer. */
+            uint32_t rec = (sizeof(entry) + entry.name_len + entry.fh_len + 7) & ~7u;
+            if (rec > max - offset) {
+                cookie--;
+                eof = 0;
+                if (!count) {
+                    request->status = CHIMERA_VFS_ERANGE;
+                    goto out;
+                }
+                break;
+            }
+            memset(buf + offset, 0, rec);
+            memcpy(buf + offset, &entry, sizeof(entry));
+            if (entry.name_len) {
+                memcpy(buf + offset + sizeof(entry), stream->name, entry.name_len);
+            }
+            if (entry.fh_len) {
+                memcpy(buf + offset + sizeof(entry) + entry.name_len, fh, entry.fh_len);
+            }
+            offset += rec;
+            count++;
+        }
+        if (unnamed) {
+            unnamed = false;
         } else {
-            fh_len = 0;
+            stream = stream->next;
         }
-        rec = sizeof(entry) + stream->name_len + fh_len;
-        if (offset + rec > max) {
-            evpl_mutex_unlock(&inode->lock);
-            request->status = CHIMERA_VFS_ERANGE;
-            request->complete(request);
-            return;
-        }
-        entry.size     = stream->size;
-        entry.alloc    = stream->space_used;
-        entry.name_len = stream->name_len;
-        entry.fh_len   = fh_len;
-        memcpy(buf + offset, &entry, sizeof(entry));
-        memcpy(buf + offset + sizeof(entry), stream->name, stream->name_len);
-        memcpy(buf + offset + sizeof(entry) + stream->name_len, fhbuf, fh_len);
-        offset += rec;
-        offset  = (offset + 7) & ~7u;
-        count++;
     }
-
-    evpl_mutex_unlock(&inode->lock);
-
     request->list_streams.r_len    = offset;
     request->list_streams.r_count  = count;
-    request->list_streams.r_eof    = 1;
-    request->list_streams.r_cookie = 0;
+    request->list_streams.r_eof    = eof;
+    request->list_streams.r_cookie = cookie;
     request->status                = CHIMERA_VFS_OK;
+ out:
+    evpl_mutex_unlock(&inode->lock);
     request->complete(request);
 } /* memfs_list_streams */
 
@@ -7318,6 +7319,7 @@ memfs_remove_stream(
      * that close arrives. */
     *pprev         = stream->next;
     stream->linked = 0;
+    inode->stream_change++;
 
     if (stream->refcnt == 0) {
         memfs_stream_node_free(thread, inode->fs, stream);

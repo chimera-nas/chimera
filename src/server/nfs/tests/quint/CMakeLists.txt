@@ -53,6 +53,10 @@ target_include_directories(nfs3_mbt_probe PRIVATE
 target_link_libraries(nfs3_mbt_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs3_mbt_probe)
+add_test(NAME chimera/server/nfs/mbt/remove_types_remote
+    COMMAND $<TARGET_FILE:nfs3_mbt_probe> --remove-types-remote)
+set_tests_properties(chimera/server/nfs/mbt/remove_types_remote PROPERTIES
+    LABELS "quint;nfs3_mbt;pnfs;memfs" TIMEOUT 60)
 
 add_executable(nfs_pnfs_probe nfs_pnfs_probe.c)
 target_include_directories(nfs_pnfs_probe PRIVATE
@@ -82,6 +86,13 @@ endforeach()
 # One real RPC must submit one compound; read-only finish fault injection also
 # covers accepted-only replies, bounded retry, guard reset and directory staging.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(nlm_compound_probe nlm_compound_probe.c)
+    set_target_properties(nlm_compound_probe PROPERTIES ENABLE_EXPORTS ON)
+    target_include_directories(nlm_compound_probe PRIVATE ${CMAKE_BINARY_DIR}/src/nfs_common)
+    target_link_libraries(nlm_compound_probe chimera_server chimera_nfs_common chimera_metrics chimera_vfs jansson ${CMAKE_DL_LIBS})
+    mbt_add_krb5(nlm_compound_probe)
+    add_test(NAME chimera/server/nfs/mbtaux/compound_probe COMMAND nlm_compound_probe)
+    set_tests_properties(chimera/server/nfs/mbtaux/compound_probe PROPERTIES LABELS "quint;nfsaux_mbt;memfs" TIMEOUT 120)
     add_executable(nfs3_compound_probe nfs3_compound_probe.c)
     set_target_properties(nfs3_compound_probe PROPERTIES ENABLE_EXPORTS ON)
     target_include_directories(nfs3_compound_probe PRIVATE
@@ -234,6 +245,22 @@ set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_probe_memfs"
     LABELS "functional;probe;nfsaux_mbt;memfs"
     TIMEOUT 120)
+
+# Cached READ placement on retransmit, including changed transports/offers.
+add_executable(nfs4_rdma_replay_probe nfs4_rdma_replay_probe.c)
+target_include_directories(nfs4_rdma_replay_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_rdma_replay_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_rdma_replay_probe)
+foreach(minor 0 1 2)
+    add_test(NAME chimera/server/nfs/rdma_replay_v4${minor}
+        COMMAND $<TARGET_FILE:nfs4_rdma_replay_probe> ${minor})
+    set_tests_properties(chimera/server/nfs/rdma_replay_v4${minor} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_rdma_replay_v4${minor}"
+        LABELS "functional;probe;nfsdrc_mbt;rdma;memfs"
+        TIMEOUT 120)
+endforeach()
 
 # Duplicate-request-cache ground truth: pins the properties the nfsdrc model
 # turns into a corpus -- that a retransmit replays, that a different XID,

@@ -20,6 +20,7 @@
 #endif /* ifdef _WIN32 */
 
 #include "smb_internal.h"
+#include "common/compound_retry.h"
 #include "smb_procs.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_compound.h"
@@ -975,9 +976,9 @@ chimera_smb_set_security_dispatch(struct chimera_smb_request *request)
                                      request->set_info.open_file->handle,
                                      vfs_attrs, 0, 0);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_set_security_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_set_security_sequence_complete,
+                                     request);
 } /* chimera_smb_set_security_dispatch */
 
 /* Fan-out join: once the unresolved SIDs are warm, re-decode (now resolving
@@ -1361,9 +1362,9 @@ chimera_smb_query_security(struct chimera_smb_request *request)
                                      CHIMERA_VFS_ATTR_MASK_STAT |
                                      CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_OWNER_SID | CHIMERA_VFS_ATTR_GROUP_SID);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_query_security_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_query_security_sequence_complete,
+                                     request);
 } /* chimera_smb_query_security */
 
 void

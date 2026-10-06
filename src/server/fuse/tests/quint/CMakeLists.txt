@@ -14,6 +14,16 @@ target_link_libraries(fuse_sim_probe chimera_server chimera_vfs chimera_common c
 
 add_test(NAME chimera/fuse/sim/probe COMMAND fuse_sim_probe)
 
+add_executable(fuse_compound_retry_test fuse_compound_retry_test.c)
+target_link_libraries(fuse_compound_retry_test
+    chimera_server chimera_vfs chimera_common chimera_metrics ${CMAKE_DL_LIBS})
+set_target_properties(fuse_compound_retry_test PROPERTIES ENABLE_EXPORTS ON)
+add_test(NAME chimera/fuse/sim/compound_retry COMMAND fuse_compound_retry_test)
+set_tests_properties(chimera/fuse/sim/compound_retry PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=fuse_compound_retry"
+    TIMEOUT 60
+    LABELS "fuse")
+
 add_executable(fuse_lock_compound_test fuse_lock_compound_test.c)
 target_link_libraries(fuse_lock_compound_test
     chimera_server chimera_vfs chimera_common chimera_metrics dl)

@@ -16,7 +16,6 @@
 #include <stdatomic.h>
 #include <stdarg.h>
 #include <stddef.h>
-#include <errno.h>
 #include <unistd.h>
 #undef NDEBUG
 #include <assert.h>
@@ -71,38 +70,57 @@ fixture_log(
     va_end(args);
     assert(length > 0 && (size_t) length < sizeof(record));
 
-    /* stderr's fprintf can issue the body and newline separately. The
-     * server's asynchronous stdout logger shares this descriptor's file
-     * offset, so that split can splice a log line into our final field.
-     * Emit the complete bounded record atomically, including its newline. */
-    ssize_t written;
-    do {
-        written = write(STDERR_FILENO, record, (size_t) length);
-    } while (written < 0 && errno == EINTR);
-    assert(written == length);
+    /* Share the server logger's stdout stream, buffer and stdio lock.
+     * A separate stderr write can bisect a multi-write stdout flush even
+     * when the fixture emits its entire record in one write. */
+    assert(fwrite(record, 1, (size_t) length, stdout) == (size_t) length);
+    assert(fflush(stdout) == 0);
 } /* fixture_log */
 
 static int
 eligible(struct chimera_vfs_compound *compound)
 {
-    const char *prefix = getenv("CHIMERA_COMPOUND_RETRY_PREFIX");
-    int         marker = 0;
+    const char *prefix   = getenv("CHIMERA_COMPOUND_RETRY_PREFIX");
+    const char *feature  = getenv("CHIMERA_COMPOUND_FEATURE");
+    int         metadata = feature && (!strcmp(feature, "metadata") || !strncmp(feature, "readdir", 7));
+    int         marker   = 0;
 
     if (!prefix) {
         prefix = "retry-";
     }
     for (uint32_t i = 0; i < chimera_vfs_compound_num_ops(compound); i++) {
         const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, i);
+        /* A deferred namespace suffix may contain mutations that never ran.
+         * Only executed operations determine whether rejection is safe. */
+        if (op->status == CHIMERA_VFS_UNSET || op->skipped) {
+            marker |= 2;
+            continue;
+        }
         if (op->set_attr.va_set_mask ||
             (op->open_flags & (CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_TRUNCATE))) {
             return 0;
         }
         switch (op->type) {
+            case CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM:
+                if (!metadata) {
+                    return 0;
+                }
+                marker |= 4;
+            /* fall through */
             case CHIMERA_VFS_COMPOUND_OP_OPEN:
                 if (op->name_len >= strlen(prefix) &&
                     memcmp(op->name, prefix, strlen(prefix)) == 0) {
                     marker |= 1;
                 }
+                break;
+            case CHIMERA_VFS_COMPOUND_OP_SETATTR:
+                /* LAYOUTCOMMIT starts with empty attributes and computes them
+                * during prepare. Recheck at finish: only an unexecuted or
+                * skipped metadata update is safe without backend rollback. */
+                if (!op->setattr_after_write || (op->completed && !op->skipped)) {
+                    return 0;
+                }
+                marker |= 2;
                 break;
             case CHIMERA_VFS_COMPOUND_OP_COPY_RANGE:
                 /* Only a zero-byte COPY is read-only. The frontend resolves
@@ -128,32 +146,50 @@ eligible(struct chimera_vfs_compound *compound)
                 }
                 break;
             case CHIMERA_VFS_COMPOUND_OP_LOOKUP:
+            case CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH:
                 if (getenv("CHIMERA_COMPOUND_JUNCTION_GATE")) {
+                    marker |= 2;
+                }
+                break;
+            case CHIMERA_VFS_COMPOUND_OP_PUTROOT:
+                if (feature && !strcmp(feature, "cold_root")) {
                     marker |= 2;
                 }
                 break;
             case CHIMERA_VFS_COMPOUND_OP_PUTFH:
             case CHIMERA_VFS_COMPOUND_OP_LOOKUPP:
-            case CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH:
-            case CHIMERA_VFS_COMPOUND_OP_GETATTR:
-            case CHIMERA_VFS_COMPOUND_OP_ACCESS:
             case CHIMERA_VFS_COMPOUND_OP_GETFH:
-            case CHIMERA_VFS_COMPOUND_OP_READLINK:
             case CHIMERA_VFS_COMPOUND_OP_SAVEFH:
             case CHIMERA_VFS_COMPOUND_OP_RESTOREFH:
-            case CHIMERA_VFS_COMPOUND_OP_READDIR:
             case CHIMERA_VFS_COMPOUND_OP_READ:
-            case CHIMERA_VFS_COMPOUND_OP_GETXATTR:
-            case CHIMERA_VFS_COMPOUND_OP_LISTXATTRS:
             case CHIMERA_VFS_COMPOUND_OP_SEEK:
             case CHIMERA_VFS_COMPOUND_OP_READ_PLUS:
             case CHIMERA_VFS_COMPOUND_OP_PUTHANDLE:
-            case CHIMERA_VFS_COMPOUND_OP_PUTROOT:
             case CHIMERA_VFS_COMPOUND_OP_OPEN_CURRENT:
             case CHIMERA_VFS_COMPOUND_OP_GETHANDLE:
             case CHIMERA_VFS_COMPOUND_OP_CLOSE:
             case CHIMERA_VFS_COMPOUND_OP_SAVEHANDLE:
             case CHIMERA_VFS_COMPOUND_OP_RESTOREHANDLE:
+                break;
+            /* COMMIT may repeat a flush, but changes neither namespace nor
+             * file contents; mutation operations remain excluded below. */
+            case CHIMERA_VFS_COMPOUND_OP_COMMIT:
+            case CHIMERA_VFS_COMPOUND_OP_READLINK:
+            case CHIMERA_VFS_COMPOUND_OP_GETXATTR:
+            case CHIMERA_VFS_COMPOUND_OP_LISTXATTRS:
+            case CHIMERA_VFS_COMPOUND_OP_GETATTR:
+            case CHIMERA_VFS_COMPOUND_OP_GET_LAYOUT:
+            case CHIMERA_VFS_COMPOUND_OP_ACCESS:
+            case CHIMERA_VFS_COMPOUND_OP_READDIR:
+                if (metadata) {
+                    marker |= 4;
+                }
+                break;
+            case CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS:
+                if (!metadata) {
+                    return 0;
+                }
+                marker |= 4;
                 break;
             default:
                 return 0;
@@ -167,16 +203,36 @@ reject_attempt(
     struct chimera_vfs_compound *compound,
     struct retry_fixture        *fixture)
 {
+    unsigned stream_lists = 0, stream_pages = 0, readlinks = 0, xattrs = 0, commits = 0, layout_noops = 0, paths = 0;
+    unsigned readdirs = 0;
+
+    for (uint32_t i = 0; i < chimera_vfs_compound_num_ops(compound); i++) {
+        const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, i);
+        paths        += op->type == CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH && op->completed;
+        layout_noops += op->type == CHIMERA_VFS_COMPOUND_OP_SETATTR && op->setattr_after_write &&
+            op->completed && op->skipped;
+        readlinks += op->type == CHIMERA_VFS_COMPOUND_OP_READLINK && op->completed;
+        readdirs  += op->type == CHIMERA_VFS_COMPOUND_OP_READDIR && op->completed;
+        commits   += op->type == CHIMERA_VFS_COMPOUND_OP_COMMIT && op->completed && op->status == CHIMERA_VFS_OK;
+        xattrs    += (op->type == CHIMERA_VFS_COMPOUND_OP_GETXATTR ||
+                      op->type == CHIMERA_VFS_COMPOUND_OP_LISTXATTRS) && op->completed;
+        if (op->type == CHIMERA_VFS_COMPOUND_OP_LIST_STREAMS && op->completed) {
+            stream_lists++;
+            stream_pages += op->status == CHIMERA_VFS_OK && !op->eof;
+        }
+    }
     fixture_log(
-        "NFS4_FINISH_RETRY injected compound=%p execution=%d open=%d id=%llu name=%s named_opens=%u reads=%u\n",
+        "NFS4_FINISH_RETRY injected compound=%p execution=%d open=%d id=%llu name=%s named_opens=%u reads=%u metadata=%d stream_lists=%u stream_pages=%u readlinks=%u xattrs=%u commits=%u layout_noops=%u paths=%u readdirs=%u\n",
         (void *) compound, chimera_vfs_compound_execution_status(compound),
         !!(eligible(compound) & 1), fixture->id,
-        fixture->first_name[0] ? fixture->first_name : "-", fixture->named_opens, fixture->reads);
+        fixture->first_name[0] ? fixture->first_name : "-", fixture->named_opens, fixture->reads,
+        !!(eligible(compound) & 4), stream_lists, stream_pages, readlinks, xattrs, commits, layout_noops, paths,
+        readdirs);
     chimera_vfs_compound_finish_result(compound, CHIMERA_VFS_EAGAIN);
 } /* reject_attempt */
 
 static void
-junction_gate_poll(
+finish_gate_poll(
     struct evpl       *evpl,
     struct evpl_timer *timer)
 {
@@ -185,46 +241,136 @@ junction_gate_poll(
 
     if (access(fixture->gate_release, F_OK)) {
         assert(++fixture->gate_polls < 1000);
-        evpl_add_oneshot_timer(evpl, timer, junction_gate_poll, 10000);
+        evpl_add_oneshot_timer(evpl, timer, finish_gate_poll, 10000);
         return;
     }
-    /* A one-shot timer is removed before entry; retry may free its fixture. */
-    reject_attempt(fixture->gate_compound, fixture);
-} /* junction_gate_poll */
+    FILE                 *release = fopen(fixture->gate_release, "r");
+    assert(release);
+    int                   action       = fgetc(release);
+    int                   close_status = fclose(release);
+    assert(close_status == 0);
+    (void) close_status;
+    /* The Python peer creates the file before writing its action. Seeing
+     * that brief empty state must not turn a terminal error into a retry. */
+    if (action == EOF) {
+        assert(++fixture->gate_polls < 1000);
+        evpl_add_oneshot_timer(evpl, timer, finish_gate_poll, 10000);
+        return;
+    }
+    /* A one-shot timer is removed before entry; completion may free its fixture. */
+    if (action == 'a') {
+        fixture_log("NFS4_FINISH_GATE accepted compound=%p id=%llu\n",
+                    (void *) fixture->gate_compound, fixture->id);
+        chimera_vfs_compound_finish_result(fixture->gate_compound, CHIMERA_VFS_OK);
+    } else if (action == 'e') {
+        fixture_log("NFS4_FINISH_GATE failed compound=%p id=%llu\n",
+                    (void *) fixture->gate_compound, fixture->id);
+        chimera_vfs_compound_finish_result(fixture->gate_compound, CHIMERA_VFS_EIO);
+    } else {
+        reject_attempt(fixture->gate_compound, fixture);
+    }
+} /* finish_gate_poll */
 
-/* Let REST run even when its connection uses this same event-loop thread.
-* The finish stays pending while a timer waits for the client's update. */
+/* Let REST or LAYOUTRETURN run on this event loop while finish is pending.
+ * The client changes protocol state before releasing the rejected attempt. */
 static int
-junction_update_gate(
+revalidation_gate(
     struct chimera_vfs_compound *compound,
     struct retry_fixture        *fixture)
 {
     const char *gate   = getenv("CHIMERA_COMPOUND_JUNCTION_GATE");
     const char *prefix = "retry-junction-";
     char        ready[1024];
+    bool        layout     = false;
+    bool        retirement = false;
 
+    if (!gate) {
+        gate   = getenv("CHIMERA_COMPOUND_LAYOUT_GATE");
+        prefix = "retry-layoutcommit-return";
+        layout = true;
+    }
+    /* LAYOUTGET must keep its public grant/version unchanged while finish is
+     * pending. The Python peer inspects it, then accepts/rejects/fails finish.
+     * A mapped object avoids pretending DS materialization can be rolled back. */
+    const char *layoutget_gate = getenv("CHIMERA_COMPOUND_LAYOUTGET_GATE");
+    if (layoutget_gate) {
+        const char *layoutget_prefix = "retry-layoutget-pending";
+        for (uint32_t i = 0; i < chimera_vfs_compound_num_ops(compound); i++) {
+            const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, i);
+            if (op->type == CHIMERA_VFS_COMPOUND_OP_LOOKUP && op->completed &&
+                op->name_len >= strlen(layoutget_prefix) &&
+                !memcmp(op->name, layoutget_prefix, strlen(layoutget_prefix))) {
+                gate   = layoutget_gate;
+                prefix = layoutget_prefix;
+                layout = false;
+                break;
+            }
+        }
+    }
+    const char *retirement_gate = getenv("CHIMERA_COMPOUND_RETIREMENT_GATE");
+    if (retirement_gate) {
+        const char *retirement_prefix = "retry-retirement-terminal-";
+        for (uint32_t i = 0; i < chimera_vfs_compound_num_ops(compound); i++) {
+            const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, i);
+            if (op->type == CHIMERA_VFS_COMPOUND_OP_OPEN && op->completed &&
+                op->name_len >= strlen(retirement_prefix) &&
+                !memcmp(op->name, retirement_prefix, strlen(retirement_prefix))) {
+                gate       = retirement_gate;
+                prefix     = retirement_prefix;
+                layout     = false;
+                retirement = true;
+                break;
+            }
+        }
+    }
     if (!gate) {
         return 0;
     }
+    if (layout) {
+        bool noop = false;
+        for (uint32_t i = 0; i < chimera_vfs_compound_num_ops(compound); i++) {
+            const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, i);
+            noop |= op->type == CHIMERA_VFS_COMPOUND_OP_SETATTR && op->setattr_after_write &&
+                op->completed && op->skipped;
+        }
+        if (!noop) {
+            return 0;
+        }
+    }
     for (uint32_t i = 0; i < chimera_vfs_compound_num_ops(compound); i++) {
-        const struct chimera_vfs_compound_op *op = chimera_vfs_compound_op(compound, i);
-        if (op->type != CHIMERA_VFS_COMPOUND_OP_LOOKUP ||
-            op->name_len < strlen(prefix) || memcmp(op->name, prefix, strlen(prefix))) {
+        const struct chimera_vfs_compound_op *op      = chimera_vfs_compound_op(compound, i);
+        bool                                  matched = (op->type == CHIMERA_VFS_COMPOUND_OP_LOOKUP ||
+                                                         (retirement && op->type == CHIMERA_VFS_COMPOUND_OP_OPEN)) &&
+            op->name_len >= strlen(prefix) && !memcmp(op->name, prefix, strlen(prefix));
+        if (!layout && op->type == CHIMERA_VFS_COMPOUND_OP_LOOKUP_PATH) {
+            const char *prefixes[] = { "rootfs/retry-export-", "share/retry-export-" };
+            const char *path       = op->path;
+            size_t      length     = op->path_len;
+            while (length && *path == '/') {
+                path++;
+                length--;
+            }
+            for (uint32_t n = 0; n < sizeof(prefixes) / sizeof(prefixes[0]); n++) {
+                matched |= length >= strlen(prefixes[n]) &&
+                    !memcmp(path, prefixes[n], strlen(prefixes[n]));
+            }
+        }
+        if (!matched) {
             continue;
         }
         assert(snprintf(ready, sizeof(ready), "%s.ready", gate) < (int) sizeof(ready));
         assert(snprintf(fixture->gate_release, sizeof(fixture->gate_release), "%s.release", gate) <
                (int) sizeof(fixture->gate_release));
-        FILE                                 *marker = fopen(ready, "w");
+        FILE *marker = fopen(ready, "w");
         assert(marker);
         assert(fclose(marker) == 0);
         assert(fixture->evpl);
         fixture->gate_compound = compound;
-        evpl_add_oneshot_timer(fixture->evpl, &fixture->gate_timer, junction_gate_poll, 10000);
+        evpl_add_oneshot_timer(fixture->evpl, &fixture->gate_timer, finish_gate_poll, 10000);
         return 1;
     }
     return 0;
-} /* junction_update_gate */
+} /* revalidation_gate */
 
 static void
 finish_attempt(
@@ -245,7 +391,7 @@ finish_attempt(
             }
             assert(chimera_vfs_compound_take_handle(compound, i) == NULL);
         }
-        if (!junction_update_gate(compound, fixture)) {
+        if (!revalidation_gate(compound, fixture)) {
             reject_attempt(compound, fixture);
         }
         return;
@@ -288,10 +434,8 @@ chimera_vfs_compound_submit(
     struct retry_fixture *fixture;
 
     assert(next);
-    if (!eligible(compound)) {
-        next(compound, callback, private_data);
-        return;
-    }
+    /* Eligibility is decided at finish: groups and namespace callouts can
+     * leave an entire mutation suffix unexecuted. */
     fixture = calloc(1, sizeof(*fixture));
     assert(fixture);
     fixture->id = atomic_fetch_add_explicit(&next_fixture_id, 1, memory_order_relaxed) + 1;
@@ -300,7 +444,8 @@ chimera_vfs_compound_submit(
         if (op->type == CHIMERA_VFS_COMPOUND_OP_READ) {
             fixture->reads++;
         }
-        if (op->type == CHIMERA_VFS_COMPOUND_OP_OPEN && op->name_len) {
+        if ((op->type == CHIMERA_VFS_COMPOUND_OP_OPEN || op->type == CHIMERA_VFS_COMPOUND_OP_OPEN_STREAM) && op->
+            name_len) {
             if (!fixture->named_opens) {
                 size_t len = op->name_len;
                 if (len >= sizeof(fixture->first_name)) {

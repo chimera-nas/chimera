@@ -92,7 +92,8 @@ layout_admission_begin(
     struct nfs_layout_table *table,
     const uint8_t           *fh,
     uint16_t                 fh_len,
-    bool                     barrier)
+    bool                     barrier,
+    uint32_t                 own_holds)
 {
     if (!fh || !fh_len || fh_len > NFS4_FHSIZE) {
         return false;
@@ -102,7 +103,8 @@ layout_admission_begin(
 
     evpl_mutex_lock(&shard->lock);
     HASH_FIND(hh, shard->by_fh, fh, fh_len, entry);
-    if (entry && (barrier ? entry->grants != 0 : (entry->barriers || entry->waiters))) {
+    uint32_t                 conflicting = entry ? (barrier ? entry->grants : entry->barriers) : 0;
+    if (conflicting != own_holds || (!barrier && entry && entry->waiters)) {
         evpl_mutex_unlock(&shard->lock);
         return false;
     }
@@ -154,7 +156,7 @@ nfs_layout_table_barrier_acquire(
     const uint8_t           *fh,
     uint16_t                 fh_len)
 {
-    return layout_admission_begin(table, fh, fh_len, true);
+    return layout_admission_begin(table, fh, fh_len, true, 0);
 } /* nfs_layout_table_barrier_acquire */
 
 void
@@ -172,8 +174,18 @@ nfs_layout_table_grant_begin(
     const uint8_t           *fh,
     uint16_t                 fh_len)
 {
-    return layout_admission_begin(table, fh, fh_len, false);
+    return layout_admission_begin(table, fh, fh_len, false, 0);
 } /* nfs_layout_table_grant_begin */
+
+bool
+nfs_layout_table_grant_begin_scoped(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len,
+    uint32_t                 own_barriers)
+{
+    return layout_admission_begin(table, fh, fh_len, false, own_barriers);
+} /* nfs_layout_table_grant_begin_scoped */
 
 void
 nfs_layout_table_grant_end(
@@ -183,6 +195,42 @@ nfs_layout_table_grant_end(
 {
     layout_admission_end(table, fh, fh_len, false);
 } /* nfs_layout_table_grant_end */
+
+bool
+nfs_layout_table_barrier_acquire_view(
+    struct nfs_layout_table             *table,
+    const uint8_t                       *fh,
+    uint16_t                             fh_len,
+    const struct nfs_layout_recall_view *view)
+{
+    return layout_admission_begin(table, fh, fh_len, true, view ? view->grants : 0);
+} /* nfs_layout_table_barrier_acquire_view */
+
+static bool
+layout_recall_excluded(
+    const struct nfs_layout_recall_view *view,
+    struct nfs_layout_state             *holder)
+{
+    for (uint32_t i = 0; view && i < view->num_excluded; i++) {
+        if (view->excluded[i] == holder) {
+            return true;
+        }
+    }
+    return false;
+} /* layout_recall_excluded */
+
+static bool
+layout_recall_blocked(
+    struct nfs_layout_entry             *entry,
+    const struct nfs_layout_recall_view *view)
+{
+    for (struct nfs_layout_state *holder = entry->holders; holder; holder = holder->global_next) {
+        if (!layout_recall_excluded(view, holder)) {
+            return true;
+        }
+    }
+    return false;
+} /* layout_recall_blocked */
 
 void
 nfs_layout_table_deregister(
@@ -208,15 +256,23 @@ nfs_layout_table_deregister(
         }
         ls->global_next = NULL;
 
-        /* Last holder gone: resume waiters, retaining any request barrier so
-         * a new LAYOUTGET cannot slip in before the conflicting op finishes. */
-        if (!e->holders) {
-            waiters    = e->waiters;
-            e->waiters = NULL;
-            if (!e->barriers && !e->grants) {
-                HASH_DEL(shard->by_fh, e);
-                free(e);
+        /* Each waiter sees its own private returns. Ordinary waiters still
+         * wait for every public holder; scoped waiters can resume when the
+         * remaining slots are all their own accepted-pending retirements. */
+        struct nfs_layout_recall_waiter **link = &e->waiters;
+        while (*link) {
+            w = *link;
+            if (layout_recall_blocked(e, w->view)) {
+                link = &w->next;
+            } else {
+                *link   = w->next;
+                w->next = waiters;
+                waiters = w;
             }
+        }
+        if (!e->holders && !e->waiters && !e->barriers && !e->grants) {
+            HASH_DEL(shard->by_fh, e);
+            free(e);
         }
     }
 
@@ -234,12 +290,13 @@ nfs_layout_table_deregister(
 } /* nfs_layout_table_deregister */
 
 int
-nfs_layout_table_recall_prepare(
-    struct nfs_layout_table         *table,
-    const uint8_t                   *fh,
-    uint16_t                         fh_len,
-    struct nfs_layout_recall_waiter *waiter,
-    struct nfs_layout_state       ***out_holders)
+nfs_layout_table_recall_prepare_view(
+    struct nfs_layout_table             *table,
+    const uint8_t                       *fh,
+    uint16_t                             fh_len,
+    struct nfs_layout_recall_waiter     *waiter,
+    struct nfs_layout_state           ***out_holders,
+    const struct nfs_layout_recall_view *view)
 {
     struct nfs_layout_shard *shard = &table->shards[layout_shard_index(fh, fh_len)];
     struct nfs_layout_entry *e;
@@ -247,11 +304,12 @@ nfs_layout_table_recall_prepare(
     int                      n = 0;
 
     *out_holders = NULL;
+    waiter->view = view;
 
     evpl_mutex_lock(&shard->lock);
 
     HASH_FIND(hh, shard->by_fh, fh, fh_len, e);
-    if (!e || !e->holders) {
+    if (!e || !layout_recall_blocked(e, view)) {
         evpl_mutex_unlock(&shard->lock);
         return 0;
     }
@@ -259,7 +317,7 @@ nfs_layout_table_recall_prepare(
     /* Snapshot every holder; a fixed-size prefix would leave unnotified
      * holders keeping the waiter asleep indefinitely. */
     for (ls = e->holders; ls; ls = ls->global_next) {
-        n++;
+        n += !layout_recall_excluded(view, ls);
     }
     *out_holders = calloc(n, sizeof(**out_holders));
     chimera_nfs_abort_if(!*out_holders, "layout recall snapshot alloc OOM");
@@ -271,12 +329,26 @@ nfs_layout_table_recall_prepare(
     e->waiters   = waiter;
 
     for (ls = e->holders; ls; ls = ls->global_next) {
+        if (layout_recall_excluded(view, ls)) {
+            continue;
+        }
         nfs_layout_state_get(ls);
         (*out_holders)[n++] = ls;
     }
 
     evpl_mutex_unlock(&shard->lock);
     return n;
+} /* nfs_layout_table_recall_prepare_view */
+
+int
+nfs_layout_table_recall_prepare(
+    struct nfs_layout_table         *table,
+    const uint8_t                   *fh,
+    uint16_t                         fh_len,
+    struct nfs_layout_recall_waiter *waiter,
+    struct nfs_layout_state       ***out_holders)
+{
+    return nfs_layout_table_recall_prepare_view(table, fh, fh_len, waiter, out_holders, NULL);
 } /* nfs_layout_table_recall_prepare */
 
 bool

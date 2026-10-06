@@ -6,6 +6,7 @@
 #include <sys/xattr.h>
 
 #include "fuse_internal.h"
+#include "common/compound_retry.h"
 
 /* Reply payloads are staged in the request buffer's reply area. */
 #define CHIMERA_FUSE_XATTR_MAX (CHIMERA_FUSE_BUFSZ - CHIMERA_FUSE_REPLY_OFF)
@@ -90,8 +91,8 @@ chimera_fuse_op_getxattr(
     chimera_vfs_compound_add_getxattr(req->compound, name, (int) strlen(name),
                                       CHIMERA_FUSE_XATTR_MAX);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_getxattr_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_getxattr_sequence_complete, req);
 } /* chimera_fuse_op_getxattr */
 
 /* --- SETXATTR --- */
@@ -164,8 +165,8 @@ chimera_fuse_op_setxattr(
                                       name, (int) strlen(name),
                                       value, size);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_xattr_status_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_xattr_status_complete, req);
 } /* chimera_fuse_op_setxattr */
 
 /* --- LISTXATTR --- */
@@ -244,8 +245,8 @@ chimera_fuse_op_listxattr(
     chimera_vfs_compound_add_listxattrs(req->compound, 0,
                                         CHIMERA_FUSE_XATTR_MAX);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_listxattr_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_listxattr_sequence_complete, req);
 } /* chimera_fuse_op_listxattr */
 
 /* --- REMOVEXATTR --- */
@@ -276,6 +277,6 @@ chimera_fuse_op_removexattr(
     chimera_vfs_compound_add_removexattr(req->compound, name,
                                          (int) strlen(name));
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_xattr_status_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_xattr_status_complete, req);
 } /* chimera_fuse_op_removexattr */

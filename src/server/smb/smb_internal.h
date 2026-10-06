@@ -982,7 +982,6 @@ struct chimera_smb_request {
             uint16_t                        flags;
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
-            struct chimera_vfs_open_handle *parent_handle;
             struct chimera_vfs_doc_info     doc_info;
             enum chimera_vfs_error          stream_delete_status;
             uint8_t                         doc_parent_lease_key[16];
@@ -1008,9 +1007,8 @@ struct chimera_smb_request {
             struct chimera_smb_open_file   *open_file;
             /* The VFS handle the write sequence borrowed, captured before it
              * was submitted.  The sticky-mtime restore inside the sequence
-             * addresses this rather than re-reading open_file->handle, which a
-             * pipelined CLOSE on the same FileId NULLs out from under an
-             * in-flight request (chimera_smb_close_release). */
+             * addresses the same admitted handle on every attempt. The open
+             * reference keeps it alive through a concurrent CLOSE. */
             struct chimera_vfs_open_handle *handle;
             /* The WRITE and, for a write-time-sticky handle, the SETATTR that
              * puts its pre-write mtime back -- the op the gate fills in from
@@ -1131,9 +1129,6 @@ struct chimera_smb_request {
              * means the SET itself failed -- anything behind it failing leaves
              * the reparse point set and only the re-bind undone. */
             uint32_t                        rp_create_index;
-            struct chimera_vfs_open_handle *rp_parent_handle;
-            uint8_t                         rp_new_fh[CHIMERA_VFS_FH_SIZE];
-            uint32_t                        rp_new_fh_len;
             /* GET response buffer.  Sized for the largest layout: a SYMLINK-tag
              * SYMBOLIC_LINK_REPARSE_BUFFER (20-byte header + Substitute and Print
              * names, each up to the full UTF-16 target). */
@@ -1154,10 +1149,8 @@ struct chimera_smb_request {
             uint8_t                         rp_dir_nonempty;
             /* SET_SPARSE / SET_ZERO_DATA / QUERY_ALLOCATED_RANGES fields */
             struct chimera_smb_open_file   *sp_open_file;
-            /* The open's VFS handle, captured once before the first of the
-             * QUERY_ALLOCATED_RANGES scan's sequences.  Each SEEK is its own
-             * sequence, so re-reading open_file->handle between them would pick
-             * up the NULL a pipelined CLOSE leaves there. */
+            /* Borrowed by every scan compound; sp_open_file retains it
+             * through concurrent CLOSE and compound retry. */
             struct chimera_vfs_open_handle *sp_handle;
             uint8_t                         sp_set_sparse;
             uint64_t                        sp_zero_offset;
@@ -1177,10 +1170,8 @@ struct chimera_smb_request {
             /* SRV_REQUEST_RESUME_KEY / SRV_COPYCHUNK fields */
             struct chimera_smb_open_file   *cc_src_open_file;
             struct chimera_smb_open_file   *cc_dst_open_file;
-            /* The two opens' VFS handles, captured once before the first
-             * chunk's sequence is built.  Every chunk is its own sequence, so
-             * re-reading open_file->handle between them would pick up the NULL
-             * a pipelined CLOSE leaves there (chimera_smb_close_release). */
+            /* Borrowed by every chunk compound; the source and destination
+             * open references retain these through concurrent CLOSE. */
             struct chimera_vfs_open_handle *cc_src_handle;
             struct chimera_vfs_open_handle *cc_dst_handle;
             struct chimera_smb_file_id      cc_src_file_id;
@@ -1373,7 +1364,8 @@ struct chimera_smb_request {
             struct chimera_vfs_claim           dp_probe;
             struct chimera_vfs_file_state     *dp_file_state;
             struct chimera_vfs_pending_acquire dp_ticket;
-            uint8_t                            dp_probe_active;
+            uint8_t                            dp_probe_denied;
+            uint64_t                           coordinate_token;
             /* Directory-rename contained-open recall
              * (smb2.lease.rename_dir_openfile): renaming a directory breaks the
              * handle leases of files open INSIDE it.  readdir the source dir
@@ -1422,7 +1414,6 @@ struct chimera_smb_request {
             uint8_t                           *ea_buf;
             uint32_t                           ea_buf_len;
             uint32_t                           ea_off;
-            uint8_t                            disposition_nonempty;
             struct chimera_vfs_open_handle    *disposition_recall_handle;
             struct chimera_vfs_open_handle    *disposition_validation_handle;
             uint8_t                            ea_list[4096];
@@ -1433,38 +1424,28 @@ struct chimera_smb_request {
         } set_info;
 
         struct {
-            uint8_t                         info_class;
-            uint8_t                         flags;
+            uint8_t                       info_class;
+            uint8_t                       flags;
             /* `flags` as it arrived on the wire.  The entry callback clears
              * SMB2_INDEX_SPECIFIED once it reaches the resume point, so a
              * sequence retry -- which re-enumerates from the top -- has to put
              * it back.  See chimera_smb_query_directory_reset. */
-            uint8_t                         wire_flags;
+            uint8_t                       wire_flags;
             /* The open's enumeration cursor as it stood before this query ran.
              * The entry callback advances it per entry, so a retry has to wind
              * it back with everything else. */
-            uint64_t                        start_position;
-            uint64_t                        staged_position;
-            uint32_t                        file_index;
-            uint8_t                         eof;
-            uint16_t                        pattern_len;
-            struct chimera_smb_file_id      file_id;
-            uint16_t                        pattern_length;
-            uint32_t                        output_length;
-            uint32_t                        max_output_length;
-            struct evpl_iovec               iov;
-            struct chimera_smb_open_file   *open_file;
-            /* The extra reference chimera_smb_query_directory takes on the
-             * directory's VFS handle for the life of the readdir, captured
-             * here so the completion releases exactly what was dup'd.  It
-             * cannot be re-read from open_file->handle afterwards: a
-             * pipelined CLOSE on the same FileId NULLs that regardless of
-             * this reference (chimera_smb_close_release), and the reference
-             * would leak.  NULL when no dup was taken (a synthetic handle). */
-            struct chimera_vfs_open_handle *handle;
+            uint64_t                      start_position;
+            uint64_t                      staged_position;
+            uint32_t                      file_index;
+            uint8_t                       eof;
+            uint16_t                      pattern_len;
+            struct chimera_smb_file_id    file_id;
+            uint16_t                      pattern_length;
+            uint32_t                      output_length;
+            uint32_t                      max_output_length;
+            struct evpl_iovec             iov;
+            struct chimera_smb_open_file *open_file;
             uint32_t                     *last_file_offset;
-            /* Where the last entry's name ends: the reply stops there, not at
-             * the alignment padding that would precede a further entry. */
             uint32_t                      last_entry_end;
             char                          pattern[SMB_FILENAME_MAX];
         } query_directory;
@@ -2439,9 +2420,8 @@ chimera_smb_open_file_alloc(struct chimera_server_smb_thread *thread)
     return open_file;
 } /* chimera_smb_open_file_alloc */
 
-/* A request reference protects open_file, but CLOSE can retire its VFS handle
- * before that request finishes. Pin the validation input under the same lock
- * as close retirement; synthetic handles require an independent copy. */
+/* Independent sequence-owned references, including typed CLOSE inputs, must
+* not consume the open's canonical handle. Synthetic handles need a copy. */
 static inline struct chimera_vfs_open_handle *
 chimera_smb_retain_vfs_handle(
     struct chimera_vfs_thread      *thread,
@@ -2545,6 +2525,11 @@ chimera_smb_open_file_free(
         chimera_vfs_claim_access_owner_retire(open_file->base_access_owner);
         chimera_vfs_claim_access_owner_put(open_file->base_access_owner);
         open_file->base_access_owner = NULL;
+    }
+    if (open_file->handle_close_deferred) {
+        chimera_vfs_release(thread->vfs_thread, open_file->handle);
+        open_file->handle                = NULL;
+        open_file->handle_close_deferred = false;
     }
     /* Release any undrained ncacn_np pipe response and reset the stash so a
      * reused open_file (the free list does not zero) starts clean. */

@@ -10,6 +10,7 @@
 #endif /* ifdef _WIN32 */
 
 #include "fuse_internal.h"
+#include "common/compound_retry.h"
 #include "fuse_attr.h"
 #include "vfs/vfs_release.h"
 
@@ -115,9 +116,8 @@ chimera_fuse_op_opendir(
 
     chimera_vfs_compound_add_putfh(req->compound, req->fh, (int) req->fh_len);
 
-    /* One open, and ACCESS shares it: a directory open carries everything a
-    * metadata op asks for and sits on the same side of OPEN_PATH, so the
-    * sequence does not open the object twice to ask two questions of it. */
+    /* Keep a real directory open through RELEASEDIR. ACCESS shares its handle;
+     * the permission check does not require another open. */
     chimera_vfs_compound_add_open_current(req->compound,
                                           CHIMERA_FUSE_OPENDIR_FLAGS, 0);
 
@@ -126,8 +126,8 @@ chimera_fuse_op_opendir(
     /* The handle outlives the sequence -- it is what the kernel's fh names. */
     chimera_vfs_compound_add_gethandle(req->compound);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_opendir_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_opendir_sequence_complete, req);
 } /* chimera_fuse_op_opendir */
 
 /* --- READDIR / READDIRPLUS --- */
@@ -414,8 +414,8 @@ chimera_fuse_op_readdir(
                                             chimera_fuse_readdir_entry,
                                             req);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_readdir_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_readdir_sequence_complete, req);
 } /* chimera_fuse_op_readdir */
 
 /* --- RELEASEDIR --- */
@@ -489,6 +489,6 @@ chimera_fuse_op_fsyncdir(
 
     chimera_vfs_compound_add_commit(req->compound, 0, 0, 0, 0);
 
-    chimera_vfs_compound_submit(req->compound,
-                                chimera_fuse_fsyncdir_sequence_complete, req);
+    chimera_frontend_compound_submit(req->compound,
+                                     chimera_fuse_fsyncdir_sequence_complete, req);
 } /* chimera_fuse_op_fsyncdir */

@@ -139,8 +139,24 @@ class Probe:
             time.sleep(0.02)
         for tag, count in counts.items():
             if tag in self.expected_runs:
-                runs = [(int(start), int(length)) for start, length in re.findall(
-                    rf"NFS4_VFS_SUBMIT tag={re.escape(tag)} start=(\d+) count=(\d+)", text)]
+                # A runtime namespace checkpoint can accept a shorter prefix
+                # than construction planned. Match its accepted boundary to
+                # the preceding submission; retries must never publish one.
+                runs = []
+                pattern = (rf"NFS4_VFS_(SUBMIT|BOUNDARY) tag={re.escape(tag)} "
+                           r"start=(\d+) (?:count|index)=(\d+) compound=(\S+)")
+                last_compound = None
+                for kind, start, value, compound in re.findall(pattern, text):
+                    start, value = int(start), int(value)
+                    if kind == "SUBMIT":
+                        runs.append((start, value))
+                        last_compound = compound
+                    else:
+                        require(runs and compound == last_compound and runs[-1][0] == start and
+                                start <= value < start + runs[-1][1],
+                                f"{tag}: unmatched or repeated accepted namespace boundary")
+                        runs[-1] = (start, value - start)
+                        last_compound = None
                 require(runs == self.expected_runs[tag],
                         f"{tag}: expected VFS runs {self.expected_runs[tag]}, observed {runs}")
                 print(f"PASS boundary {tag}: expected VFS runs {runs}", flush=True)
@@ -237,6 +253,83 @@ def test_open_suffix(p):
     p.files.append((name, fh, sid))
     require(p.read(fh, sid) == b"ABCDABCD" + b"\0" * 8,
             "OPEN sparse/WRITE_SAME suffix produced incorrect bytes")
+
+
+def test_openattr_disabled(p):
+    _, fh, sid = p.create("openattr-disabled")
+    p.call([op.putfh(fh), op.openattr(False), op.write(sid, 0, FILE_SYNC4, b"BAD")],
+           "openattr_disabled_stops_write", NFS4ERR_NOTSUPP)
+    require(p.read(fh, sid) == b"", "disabled OPENATTR executed its mutation suffix")
+
+
+def test_standalone_open(p):
+    name, fh, initial = p.create("standalone-open")
+    p.call([op.putfh(fh), op.write(initial, 0, FILE_SYNC4, b"original")])
+    # A large requested directory page shares OPEN's attempt. Its type error
+    # must still accept the preceding OPEN's state and filehandle.
+    suffix = op.readdir(0, b"", 4096, 1024 * 1024, 1 << FATTR4_TYPE)
+    result = p.call([op.putfh(p.directory), p.open_op(name, create=False), suffix],
+                   "standalone_open_reopen", NFS4ERR_NOTDIR, runs=[(1, 3)])
+    reopened = result.resarray[1].stateid
+    p.replace_stateid(fh, reopened)
+    check_open_version(initial, reopened, "standalone reopen lost its owner state")
+    require(p.read(fh, reopened) == b"original", "standalone OPEN changed the file")
+
+    # Principal mismatch is a permanent admission failure, not retryable DELAY.
+    previous = p.session.cred
+    p.session.cred = AuthSys().init_cred(uid=0, gid=0, name=b"other-open-principal")
+    try:
+        p.call([op.putfh(p.directory), p.open_op(name, create=False), suffix],
+               "standalone_open_principal", NFS4ERR_ACCESS, runs=[(1, 3)])
+    finally:
+        p.session.cred = previous
+
+    result = p.call([op.putfh(p.directory), p.open_op(name, create_mode=UNCHECKED4,
+                    attrs={FATTR4_SIZE: 0}), suffix],
+                   "standalone_open_truncate", NFS4ERR_NOTDIR, runs=[(1, 3)])
+    truncated = result.resarray[1].stateid
+    p.replace_stateid(fh, truncated)
+    check_open_version(reopened, truncated, "standalone truncate advanced state twice")
+    require(p.read(fh, truncated) == b"", "standalone OPEN did not truncate")
+
+
+def test_reopen_held_locks(p):
+    name, fh, opened = p.create("reopen-held-lock")
+    result = p.call([op.putfh(fh), new_lock(opened, b"reopen-held-child")])
+    locked = result.resarray[1].lock_stateid
+    result = p.call([op.putfh(p.directory), p.open_op(name, create=False),
+                    op.read(locked, 0, 1), op.lockt(WRITE_LT, 0, 1, lock_owner4(0, b"reopen-outsider"))],
+                   "open_preserves_held_lock", NFS4ERR_DENIED)
+    reopened = result.resarray[1].stateid
+    p.replace_stateid(fh, reopened)
+    check_open_version(opened, reopened, "reopen with held locks lost its parent identity")
+    check_lock_denied(result.resarray[-1], b"reopen-held-child", WRITE_LT, 0, 32)
+    result = p.call([op.putfh(p.directory), p.open_op(name, create=False),
+                    op.readdir(0, b"", 4096, 1024 * 1024, 1 << FATTR4_TYPE)],
+                   "standalone_open_held_lock", NFS4ERR_NOTDIR, runs=[(1, 3)])
+    check_open_version(reopened, result.resarray[1].stateid, "standalone locked reopen lost its identity")
+    reopened = result.resarray[1].stateid
+    p.replace_stateid(fh, reopened)
+    p.call([op.putfh(fh), op.locku(WRITE_LT, 0, locked, 0, 32), op.close(0, reopened)],
+           "open_preserved_child_unlock")
+    p.mark_closed(fh)
+
+
+def test_open_owner_capacity(p):
+    owner = b"many-open-files"
+    first = None
+    for index in range(130):
+        name = f"owner-capacity-{index}".encode()
+        result = p.call([op.putfh(p.directory), p.open_op(name, owner=owner), op.getfh()])
+        fh, sid = result.resarray[-1].object, result.resarray[1].stateid
+        p.files.append((name, fh, sid))
+        if first is None:
+            first = name, fh, sid
+    name, fh, sid = first
+    result = p.call([op.putfh(p.directory), p.open_op(name, create=False, owner=owner),
+                    op.read(CURRENT, 0, 1), op.close(0, CURRENT)], "open_large_owner_journal")
+    check_open_version(sid, result.resarray[1].stateid, "large owner reopen lost its identity")
+    p.mark_closed(fh)
 
 
 def test_lockt_veto(p):
@@ -778,19 +871,38 @@ def test_acl_reply_budget(p):
     original = b"budget-veto-preserves-data"
     p.call([op.putfh(fh), op.setattr(sid, {FATTR4_ACL: acl}),
             op.write(sid, 0, FILE_SYNC4, original)])
-    # Each staged ACL response reserves 4096 + 272 bytes per ACE. At 180 ACEs,
-    # two fit alongside fixed successor reservations and the 8192-byte floor;
-    # the third must fail before the following write is dispatched.
+    # Short numeric ACE names consume their actual encoded bytes. Three ACL
+    # snapshots fit comfortably; the former worst-case reservation did not.
     res = p.call([op.putfh(fh), op.getattr(1 << FATTR4_ACL),
                   op.getattr(1 << FATTR4_ACL), op.getattr(1 << FATTR4_ACL),
-                  op.write(sid, 0, FILE_SYNC4, b"BAD")],
-                 "acl_reply_budget", NFS4ERR_RESOURCE)
-    require(len(res.resarray) == 4 and res.resarray[-1].resop == OP_GETATTR,
-            "oversized ACL result did not fail at the third GETATTR: "
-            f"received {[nfs_opnum4[item.resop] for item in res.resarray]}")
-    check_named_acl(res.resarray[1].obj_attributes[FATTR4_ACL], acl)
-    check_named_acl(res.resarray[2].obj_attributes[FATTR4_ACL], acl)
-    require(p.read(fh, sid) == original, "ACL reply budget failure allowed its WRITE suffix")
+                  op.write(sid, 0, FILE_SYNC4, b"fit")],
+                 "acl_reply_budget_compact", runs=[(1, 5)])
+    for result in res.resarray[1:4]:
+        check_named_acl(result.obj_attributes[FATTR4_ACL], acl)
+    updated = b"fit" + original[3:]
+    require(p.read(fh, sid) == updated, "compact ACL replies suppressed a fitting WRITE suffix")
+
+    if p.args.minor >= 2:
+        # These actual xattr and ACL values fit together despite exceeding
+        # their former maximum reservations and the redundant reply floor.
+        large_value = b"x" * (58 * 1024)
+        p.call([op.putfh(fh), op.setxattr(SETXATTR4_EITHER, b"tight-arena", large_value)])
+        tight = p.call([op.putfh(fh), op.getxattr(b"tight-arena"),
+                        op.getxattr(b"tight-arena"), op.getattr(1 << FATTR4_ACL)],
+                       "acl_reply_budget_last_getattr", runs=[(1, 4)])
+        require(tight.resarray[1].gxr_value == large_value and
+                tight.resarray[2].gxr_value == large_value,
+                "tight reply arena changed preceding xattr values")
+        check_named_acl(tight.resarray[3].obj_attributes[FATTR4_ACL], acl)
+
+    operations = [op.putfh(fh)] + [op.getattr(1 << FATTR4_ACL) for _ in range(40)]
+    operations += [op.write(sid, 0, FILE_SYNC4, b"BAD")]
+    res = p.call(operations, "acl_reply_budget", NFS4ERR_RESOURCE, runs=[(1, len(operations))])
+    require(2 < len(res.resarray) < len(operations) and res.resarray[-1].resop == OP_GETATTR,
+            "actual ACL arena exhaustion did not fail at a GETATTR before WRITE")
+    for result in res.resarray[1:-1]:
+        check_named_acl(result.obj_attributes[FATTR4_ACL], acl)
+    require(p.read(fh, sid) == updated, "ACL reply budget failure allowed its WRITE suffix")
 
 
 def check_read_plus(result, kind, offset, value, eof):
@@ -1264,6 +1376,156 @@ def test_anonymous_v42_after_close(p):
     p.replace_stateid(source, res.resarray[1].stateid)
     require(len(res.resarray) == 5 and p.read(dest, ds) == b"unchanged",
             "anonymous COPY bypassed an unpublished OPEN deny or executed its WRITE suffix")
+
+
+def test_private_state_data_admission(p):
+    """Every anonymous data shape uses the private CLOSE/DOWNGRADE share view."""
+    operations = [("size", lambda: op.setattr(ANONYMOUS, {FATTR4_SIZE: 3}))]
+    if p.args.minor >= 2:
+        pattern = app_data_block4(0, 3, 1, NFS4_UINT64_MAX, 0, 0, b"new")
+        operations.extend([
+            ("allocate", lambda: op.allocate(ANONYMOUS, 0, 12)),
+            ("deallocate", lambda: op.deallocate(ANONYMOUS, 0, 3)),
+            ("write_same", lambda: op.write_same(ANONYMOUS, FILE_SYNC4, pattern)),
+            ("seek", lambda: op.seek(ANONYMOUS, 0, NFS4_CONTENT_DATA)),
+        ])
+    for transition in ("close", "downgrade"):
+        for kind, operation in operations:
+            label = f"anonymous_{kind}_after_{transition}"
+            owner = label.encode()
+            # READ access and deny-WRITE permit an independent READ holder,
+            # which exercises retained peer denies without conflicting OPENs.
+            name, fh, sid = coalesced_fixture(p, label, owner,
+                                              OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_WRITE)
+            if transition == "downgrade":
+                res = p.call([op.putfh(p.directory), p.open_op(name, create=False,
+                              owner=owner, access=OPEN4_SHARE_ACCESS_READ)])
+                sid = res.resarray[-1].stateid
+                p.replace_stateid(fh, sid)
+                change = op.open_downgrade(sid, 0, OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE)
+            else:
+                change = op.close(0, sid)
+            res = p.call([op.putfh(fh), change, operation(), op.getattr(1 << FATTR4_SIZE)], label)
+            if transition == "close":
+                p.mark_closed(fh)
+            else:
+                p.replace_stateid(fh, res.resarray[1].open_stateid)
+            expected = {"size": b"bef", "allocate": b"before" + b"\0" * 6,
+                        "deallocate": b"\0" * 3 + b"ore", "write_same": b"newore", "seek": b"before"}[kind]
+            require(p.read(fh, ANONYMOUS) == expected,
+                    f"{label}: private share admission or data result was incorrect")
+
+            if kind == "seek":
+                # SEEK's anonymous access check is READ, so this WRITE-deny
+                # fixture intentionally permits it. The retry fixture covers
+                # the read-only checkpoint and replays its CLOSE privately.
+                continue
+            label += "_peer_deny"
+            owner = label.encode()
+            name, fh, sid = coalesced_fixture(p, label, owner,
+                                              OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_WRITE)
+            res = p.call([op.putfh(p.directory), p.open_op(name, create=False,
+                          owner=b"peer-" + owner, access=OPEN4_SHARE_ACCESS_READ,
+                          deny=OPEN4_SHARE_DENY_WRITE)])
+            peer_sid = res.resarray[-1].stateid
+            if transition == "downgrade":
+                res = p.call([op.putfh(p.directory), p.open_op(name, create=False,
+                              owner=owner, access=OPEN4_SHARE_ACCESS_READ)])
+                sid = res.resarray[-1].stateid
+                p.replace_stateid(fh, sid)
+                change = op.open_downgrade(sid, 0, OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_DENY_NONE)
+            else:
+                change = op.close(0, sid)
+            res = p.call([op.putfh(fh), change, operation(),
+                          op.write(ANONYMOUS, 0, FILE_SYNC4, b"BAD")], label, NFS4ERR_LOCKED)
+            if transition == "close":
+                p.mark_closed(fh)
+            else:
+                p.replace_stateid(fh, res.resarray[1].open_stateid)
+            require(len(res.resarray) == 3 and p.read(fh, peer_sid) == b"before",
+                    f"{label}: peer deny or suppressed mutation suffix was lost")
+            p.call([op.putfh(fh), op.close(0, peer_sid)])
+
+    if p.args.minor >= 2:
+        name, fh, sid = p.create("retry-private-close-seek")
+        p.call([op.putfh(fh), op.write(sid, 0, FILE_SYNC4, b"retry")])
+        # Named read-only OPEN marks this span for synthetic finish rejection.
+        # The special-stateid SEEK follows its private CLOSE in both attempts.
+        res = p.call([op.putfh(p.directory), p.open_op(name, create=False),
+                      op.close(0, CURRENT), op.seek(ANONYMOUS, 0, NFS4_CONTENT_DATA),
+                      op.getattr(1 << FATTR4_SIZE)], "retry_private_close_anonymous_seek")
+        p.mark_closed(fh)
+        require(res.resarray[-1].obj_attributes[FATTR4_SIZE] == 5 and p.read(fh, ANONYMOUS) == b"retry",
+                "retried private CLOSE/SEEK lost data or published the rejected state")
+
+
+def test_private_state_read_classifiers(p):
+    read_shapes = [("read", lambda sid: op.read(sid, 0, 6))]
+    if p.args.minor >= 2:
+        read_shapes.extend([("read_plus", lambda sid: op.read_plus(sid, 0, 6)),
+                            ("seek", lambda sid: op.seek(sid, 0, NFS4_CONTENT_DATA))])
+    for special_name, special in (("anonymous", ANONYMOUS), ("ones", stateid4(0xffffffff, b"\xff" * 12))):
+        for kind, operation in read_shapes:
+            for peer in (False, True):
+                label = f"{special_name}_{kind}_close_read_deny_{int(peer)}"
+                owner = label.encode()
+                name, fh, sid = coalesced_fixture(p, label, owner,
+                                                  OPEN4_SHARE_ACCESS_WRITE, OPEN4_SHARE_DENY_READ)
+                if peer:
+                    res = p.call([op.putfh(p.directory), p.open_op(name, create=False,
+                                  owner=b"peer-" + owner, access=OPEN4_SHARE_ACCESS_WRITE,
+                                  deny=OPEN4_SHARE_DENY_READ)])
+                    peer_sid = res.resarray[-1].stateid
+                res = p.call([op.putfh(fh), op.close(0, sid), operation(special),
+                              op.getattr(1 << FATTR4_SIZE)], label,
+                             NFS4ERR_LOCKED if peer else NFS4_OK)
+                p.mark_closed(fh)
+                if peer:
+                    require(len(res.resarray) == 3, "retained READ deny did not stop classifier suffix")
+                    p.call([op.putfh(fh), op.close(0, peer_sid)])
+                else:
+                    require(res.resarray[-1].obj_attributes[FATTR4_SIZE] == 6,
+                            "classifier lost its current file after private CLOSE")
+                require(p.read(fh, ANONYMOUS) == b"before", "classifier modified file contents")
+
+
+def test_large_connected_lock_owners(p):
+    """One lock owner spanning many OPEN owners requires an unbounded frozen population."""
+    lock_owner = b"many-connected-locks"
+    first = None
+    for index in range(130):
+        name = f"lock-owner-capacity-{index}".encode()
+        res = p.call([op.putfh(p.directory), p.open_op(name),
+                      new_lock(CURRENT, lock_owner, offset=0, length=1), op.getfh()])
+        fh, sid, locked = res.resarray[3].object, res.resarray[1].stateid, res.resarray[2].lock_stateid
+        p.files.append((name, fh, sid))
+        if first is None:
+            first = fh, sid, locked
+    fh, sid, locked = first
+    res = p.call([op.putfh(fh), op.locku(WRITE_LT, 0, locked, 0, 1),
+                  op.lockt(WRITE_LT, 0, 1, lock_owner4(0, b"many-connected-probe")),
+                  op.close(0, sid), op.getattr(1 << FATTR4_SIZE)], "large_connected_owner_unlock_close")
+    p.mark_closed(fh)
+    require(res.resarray[1].lock_stateid.seqid == locked.seqid + 1,
+            "large connected owner journal lost a child state or advanced it twice")
+
+
+def test_large_lock_range_journal(p):
+    """A large standing lock set must not force a direct LOCKU/CLOSE fallback."""
+    _, fh, sid = p.create("large-standing-ranges")
+    owner = b"large-standing-range-owner"
+    res = p.call([op.putfh(fh), new_lock(sid, owner, offset=0, length=1)])
+    locked = res.resarray[-1].lock_stateid
+    for index in range(1, 258):
+        res = p.call([op.putfh(fh), op.lock(WRITE_LT, False, 2 * index, 1,
+                      locker4(False, lock_owner=exist_lock_owner4(locked, 0)))])
+        locked = res.resarray[-1].lock_stateid
+    res = p.call([op.putfh(fh), op.locku(WRITE_LT, 0, locked, 0, NFS4_UINT64_MAX),
+                  op.lockt(WRITE_LT, 0, 516, lock_owner4(0, b"large-standing-probe")),
+                  op.close(0, sid), op.getattr(1 << FATTR4_SIZE)], "large_range_unlock_close")
+    p.mark_closed(fh)
+    require(res.resarray[1].lock_stateid.seqid == locked.seqid + 1,
+            "large range journal did not advance exactly once")
 
 
 def test_secinfo_continuation(p):
@@ -1766,22 +2028,22 @@ def test_stateid_checkpoints(p):
         p.session = original
 
 
-def test_stateid_refused_build_budget(p):
+def test_stateid_decode_error_budget(p):
     _, fh, sid = p.create("stateid-refused-build-budget")
     p.call([op.putfh(fh), op.write(sid, 0, FILE_SYNC4, b"unchanged")])
     # A 16 KiB status array plus its 64 KiB input leaves room for response
-    # structures and transport iovecs in the 128 KiB arena. Empty OWNER refuses
-    # construction after the status allocation. Each leading PUTFH falls back
-    # and retries construction; without rewind discarded arrays exhaust it.
-    # OWNER avoids a separate large legacy ACL scratch allocation.
+    # structures and transport iovecs in the 128 KiB arena. Empty OWNER is an
+    # execution checkpoint error after the status allocation. The whole run
+    # stays coalesced, including on finish retry, without accumulating staging.
     ids = [sid] * 4000
     leading = [op.putfh(fh) for _ in range(8)]
     res = p.call(leading + [op.test_stateid(ids), op.setattr(sid, {FATTR4_OWNER: b""}),
                            op.write(sid, 0, FILE_SYNC4, b"BAD")],
-                 "test_stateid_refused_build_budget", NFS4ERR_INVAL, runs=[])
+                 "test_stateid_decode_error_budget", NFS4ERR_INVAL,
+                 runs=[(1, len(leading) + 3)])
     require(len(res.resarray) == len(leading) + 2 and
             res.resarray[len(leading)].tsr_status_codes == [NFS4_OK] * len(ids),
-            "refused construction leaked reply budget or corrupted the accepted TEST_STATEID prefix")
+            "attribute decode failure corrupted the accepted TEST_STATEID prefix")
     require(p.read(fh, sid) == b"unchanged", "malformed SETATTR allowed its mutation suffix")
 
     # A larger, valid request leaves too little shared decode/encode storage
@@ -1789,7 +2051,8 @@ def test_stateid_refused_build_budget(p):
     # while preserving the successful prefix and stopping the WRITE suffix.
     res = p.call(leading + [op.test_stateid([sid] * 6000),
                            op.write(sid, 0, FILE_SYNC4, b"BAD")],
-                 "test_stateid_transport_headroom", NFS4ERR_REP_TOO_BIG, runs=[])
+                 "test_stateid_transport_headroom", NFS4ERR_REP_TOO_BIG,
+                 runs=[(1, len(leading))])
     require(len(res.resarray) == len(leading) + 1,
             "oversized TEST_STATEID did not stop at the failing operation")
     require(p.read(fh, sid) == b"unchanged", "oversized TEST_STATEID allowed its WRITE suffix")
@@ -1809,11 +2072,11 @@ def test_secinfo_no_name_checkpoints(p):
            "secinfo_no_name_consumed_fh", NFS4ERR_NOFILEHANDLE)
     p.call([op.putfh(fh), op.secinfo_no_name(SECINFO_STYLE4_PARENT),
             op.putfh(fh), op.write(sid, 0, FILE_SYNC4, b"restored")], "secinfo_no_name_putfh")
-    # The synthetic NFS namespace root remains a deliberate legacy boundary;
-    # its missing parent is rejected before any VFS compound submission.
+    # The synthetic root's missing parent is an execution checkpoint in the
+    # same span, so neither export selection nor the WRITE suffix executes.
     p.call([op.putrootfh(), op.secinfo_no_name(SECINFO_STYLE4_PARENT),
             op.putfh(fh), op.write(sid, 0, FILE_SYNC4, b"BAD")],
-           "secinfo_no_name_root_parent", NFS4ERR_NOENT, runs=[])
+           "secinfo_no_name_root_parent", NFS4ERR_NOENT, runs=[(1, 4)])
     p.call([op.putfh(fh), op.secinfo_no_name(99), op.write(sid, 0, FILE_SYNC4, b"BAD")],
            "secinfo_no_name_invalid_style", NFS4ERR_INVAL, checks=False)
     require(p.read(fh, sid) == b"restored", "failed SECINFO_NO_NAME allowed mutation suffix")
@@ -1880,6 +2143,10 @@ def main():
     try:
         test_resolved_io(probe)
         test_open_suffix(probe)
+        test_openattr_disabled(probe)
+        test_standalone_open(probe)
+        test_reopen_held_locks(probe)
+        test_open_owner_capacity(probe)
         test_lockt_veto(probe)
         test_lock_open_current_retry(probe)
         test_lock_open_mode_parity(probe)
@@ -1908,6 +2175,10 @@ def main():
         test_same_owner_closes(probe)
         test_anonymous_private_deny(probe)
         test_anonymous_v42_after_close(probe)
+        test_private_state_data_admission(probe)
+        test_large_lock_range_journal(probe)
+        test_private_state_read_classifiers(probe)
+        test_large_connected_lock_owners(probe)
         test_secinfo_continuation(probe)
         test_saved_fh_through_stateid(probe)
         test_coalesced_open_upgrade(probe)
@@ -1922,7 +2193,7 @@ def main():
         test_downgrade_stateids(probe)
         test_downgrade_deny_shrink(probe)
         test_stateid_checkpoints(probe)
-        test_stateid_refused_build_budget(probe)
+        test_stateid_decode_error_budget(probe)
         test_secinfo_no_name_checkpoints(probe)
         test_io_advise_checkpoints(probe)
         test_retryable_open_reads(probe)

@@ -844,6 +844,51 @@ compound_search_keys_release(struct chimera_vfs_compound_op *op)
     op->kv_error       = CHIMERA_VFS_OK;
 } /* compound_search_keys_release */
 
+/* Release only attempt results. Build-owned inputs and lock attempts survive
+ * a restart; cursor and reservation consumers must already have drained. */
+static void
+chimera_vfs_compound_release_results(
+    struct chimera_vfs_compound    *compound,
+    struct chimera_vfs_compound_op *op)
+{
+    struct chimera_vfs_thread *thread = compound->thread;
+
+    if (op->closed_output_handle) {
+        chimera_vfs_release(thread, op->closed_output_handle);
+    }
+    chimera_vfs_compound_attr_release(&op->attr);
+    chimera_vfs_compound_attr_release(&op->pre_attr);
+    chimera_vfs_compound_attr_release(&op->dir_pre_attr);
+    chimera_vfs_compound_attr_release(&op->dir_post_attr);
+    chimera_vfs_compound_attr_release(&op->from_dir_pre_attr);
+    chimera_vfs_compound_attr_release(&op->from_dir_post_attr);
+    free(op->layout_segments);
+    free(op->layout_devices);
+    if (op->lock_file_state) {
+        chimera_vfs_state_put(thread->vfs->vfs_state, op->lock_file_state);
+    }
+    free(op->applied_acl);
+    /* An open handle the caller did not take: see OPEN HANDLE OWNERSHIP.
+     * Releasing here is what makes "take it if you want it" safe, rather
+     * than making every one of the caller's error paths responsible. */
+    if (op->out_handle) {
+        chimera_vfs_release(thread, op->out_handle);
+    }
+    /* Data the caller did not take, for the same reason and on the same
+     * terms as the handle above. */
+    if (op->niov && !op->dest_published) {
+        evpl_iovecs_release(thread->evpl,
+                            op->iov,
+                            op->niov);
+    }
+    free(op->target);
+    compound_search_keys_release(op);
+    free(op->entries);
+    free(op->buffer);
+    free(op->journal_excluded);
+    free(op->journal_src_excluded);
+} /* chimera_vfs_compound_release_results */
+
 static void
 chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
 {
@@ -886,45 +931,12 @@ chimera_vfs_compound_reset(struct chimera_vfs_compound *compound)
         if (compound->finish_status == CHIMERA_VFS_OK && compound->ops[i]->close_handle) {
             chimera_vfs_release(thread, compound->ops[i]->close_handle);
         }
-        if (compound->ops[i]->closed_output_handle) {
-            chimera_vfs_release(thread, compound->ops[i]->closed_output_handle);
-        }
-        chimera_vfs_compound_attr_release(&compound->ops[i]->attr);
-        chimera_vfs_compound_attr_release(&compound->ops[i]->pre_attr);
-        chimera_vfs_compound_attr_release(&compound->ops[i]->dir_pre_attr);
-        chimera_vfs_compound_attr_release(&compound->ops[i]->dir_post_attr);
-        chimera_vfs_compound_attr_release(&compound->ops[i]->from_dir_pre_attr);
-        chimera_vfs_compound_attr_release(&compound->ops[i]->from_dir_post_attr);
-        free(compound->ops[i]->layout_segments);
-        free(compound->ops[i]->layout_devices);
-        if (compound->ops[i]->lock_file_state) {
-            chimera_vfs_state_put(thread->vfs->vfs_state, compound->ops[i]->lock_file_state);
-        }
-        free(compound->ops[i]->applied_acl);
-        /* An open handle the caller did not take: see OPEN HANDLE OWNERSHIP.
-         * Releasing here is what makes "take it if you want it" safe, rather
-         * than making every one of the caller's error paths responsible. */
-        if (compound->ops[i]->out_handle) {
-            chimera_vfs_release(thread, compound->ops[i]->out_handle);
-        }
-        /* Data the caller did not take, for the same reason and on the same
-         * terms as the handle above. */
-        if (compound->ops[i]->niov && !compound->ops[i]->dest_published) {
-            evpl_iovecs_release(thread->evpl,
-                                compound->ops[i]->iov,
-                                compound->ops[i]->niov);
-        }
-        free(compound->ops[i]->target);
+        chimera_vfs_compound_release_results(compound, compound->ops[i]);
         free(compound->ops[i]->link_target);
         free(compound->ops[i]->path);
         free(compound->ops[i]->new_path);
-        compound_search_keys_release(compound->ops[i]);
         free(compound->ops[i]->kv_key);
         free(compound->ops[i]->kv_value);
-        free(compound->ops[i]->entries);
-        free(compound->ops[i]->buffer);
-        free(compound->ops[i]->journal_excluded);
-        free(compound->ops[i]->journal_src_excluded);
 
         memset(compound->ops[i], 0, sizeof(*compound->ops[i]));
     }
@@ -1304,6 +1316,43 @@ chimera_vfs_compound_add_lock_change(
 {
     return chimera_vfs_compound_add_lock(compound, domain, handle, request, CHIMERA_VFS_COMPOUND_OP_LOCK_CHANGE);
 } /* chimera_vfs_compound_add_lock_change */
+
+SYMBOL_EXPORT int
+chimera_vfs_compound_add_lock_change_fh(
+    struct chimera_vfs_compound           *compound,
+    struct chimera_vfs_lock_domain        *domain,
+    const uint8_t                         *fh,
+    uint32_t                               fh_len,
+    const struct chimera_vfs_lock_request *request)
+{
+    int                             index;
+    struct chimera_vfs_compound_op *op;
+
+    if (compound->running || compound->original_ops || compound->num_ops ||
+        !request || request->project_backend || !domain) {
+        compound->build_failed = 1;
+        compound->build_error  = CHIMERA_VFS_ENOTSUP;
+        return -1;
+    }
+    chimera_vfs_compound_add_putfh(compound, fh, fh_len);
+    if (request->type != CHIMERA_VFS_LOCK_UNLOCK) {
+        chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_INFERRED, 0);
+        chimera_vfs_compound_add_gethandle(compound);
+    }
+    op = chimera_vfs_compound_next_op(compound, CHIMERA_VFS_COMPOUND_OP_LOCK_CHANGE, &index);
+    if (!op) {
+        return -1;
+    }
+    op->lock_request = *request;
+    op->lock_from_fh = true;
+    op->lock_attempt = chimera_vfs_lock_attempt_alloc_fh(compound->thread, domain, fh, fh_len, request);
+    if (!op->lock_attempt) {
+        compound->build_failed = 1;
+        compound->build_error  = CHIMERA_VFS_ENOSPC;
+        return -1;
+    }
+    return index;
+} /* chimera_vfs_compound_add_lock_change_fh */
 
 SYMBOL_EXPORT int
 chimera_vfs_compound_add_lock_release_owner(
@@ -3026,6 +3075,7 @@ SYMBOL_EXPORT int
 chimera_vfs_compound_add_list_streams(
     struct chimera_vfs_compound *compound,
     uint64_t                     cookie,
+    uint64_t                     verifier,
     uint32_t                     max_bytes,
     bool                         want_fh)
 {
@@ -3037,6 +3087,7 @@ chimera_vfs_compound_add_list_streams(
         return -1;
     }
     op->cookie         = cookie;
+    op->verifier       = verifier;
     op->buffer_max     = max_bytes;
     op->stream_want_fh = want_fh;
     return index;
@@ -4012,6 +4063,7 @@ chimera_vfs_compound_finish_result(
     if (!compound->finishing) {
         return;
     }
+    struct chimera_vfs_thread *thread = compound->thread;
     /* Local locks publish their preallocated range journal only now. Close
      * generation invalidation can veto publication even while finish waited.
      * Mandatory legacy release cleanup has already finalized independently. */
@@ -4094,6 +4146,9 @@ chimera_vfs_compound_finish_result(
         }
     }
     compound->callback(compound, compound->private_data);
+    /* Completion may free/recycle compound or submit a retry inline. Only the
+    * thread remains ours to access, and the callback is part of the drain. */
+    thread->num_active_compounds--;
 } /* chimera_vfs_compound_finish_result */
 
 static void
@@ -4845,8 +4900,14 @@ chimera_vfs_compound_list_streams_callback(
     uint32_t               count,
     uint32_t               eof,
     uint64_t               cookie,
+    uint64_t               verifier,
     void                  *private_data)
 {
+    struct chimera_vfs_compound *compound = private_data;
+
+    if (error == CHIMERA_VFS_OK) {
+        compound->ops[compound->index]->r_verifier = verifier;
+    }
     chimera_vfs_compound_list_xattrs_callback(error, records, length, count, eof, cookie, private_data);
 } /* chimera_vfs_compound_list_streams_callback */
 
@@ -6593,18 +6654,19 @@ compound_range_wait(void *private_data)
 
 /* Each endpoint keeps its own array alive through asynchronous backend I/O. */
 static bool
-compound_journal_view(
-    struct chimera_vfs_compound          *compound,
-    const struct chimera_vfs_open_handle *target,
-    struct chimera_vfs_io_view           *view,
-    const struct chimera_vfs_claim     ***storage)
+compound_journal_view_fh(
+    struct chimera_vfs_compound      *compound,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    struct chimera_vfs_io_view       *view,
+    const struct chimera_vfs_claim ***storage)
 {
-    if (!compound->claim_journal || !target) {
+    if (!compound->claim_journal || !fh_len) {
         return true;
     }
     struct chimera_vfs_state      *state = compound->thread->vfs->vfs_state;
-    struct chimera_vfs_file_state *file  = chimera_vfs_state_get(state, target->fh,
-                                                                 target->fh_len, target->fh_hash, false);
+    struct chimera_vfs_file_state *file  = chimera_vfs_state_get(state, fh, fh_len,
+                                                                 chimera_vfs_hash(fh, fh_len), false);
     uint32_t                       count = file ? chimera_vfs_claim_journal_excluded(
         compound->claim_journal, file, NULL, 0) : 0;
     bool                           ok = true;
@@ -6626,6 +6688,17 @@ compound_journal_view(
         chimera_vfs_state_put(state, file);
     }
     return ok;
+} /* compound_journal_view_fh */
+
+static bool
+compound_journal_view(
+    struct chimera_vfs_compound          *compound,
+    const struct chimera_vfs_open_handle *target,
+    struct chimera_vfs_io_view           *view,
+    const struct chimera_vfs_claim     ***storage)
+{
+    return compound_journal_view_fh(compound, target ? target->fh : NULL,
+                                    target ? target->fh_len : 0, view, storage);
 } /* compound_journal_view */
 
 static void chimera_vfs_compound_step_once(
@@ -6711,6 +6784,13 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
             compound->groups[group->config.dependency].status != CHIMERA_VFS_OK) {
             chimera_vfs_compound_group_done(compound, group->config.dependency_error);
             return;
+        }
+        if (group->config.select_cred) {
+            const struct chimera_vfs_cred *selected = group->config.select_cred(
+                compound, compound->group_index, group->config.context);
+            if (selected) {
+                compound->cred = selected;
+            }
         }
     }
     if (compound->index >= compound->num_ops) {
@@ -6806,7 +6886,8 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
      * asking for a PATH open first would reject the very handle it supplied.
      * The dispatch skips the check on the same condition. */
     op->io_typechecked_flag = compound->io_typechecked ||
-        compound->handle_explicit;
+        (compound->handle_explicit &&
+         !(compound->handle_flags & CHIMERA_VFS_OPEN_PATH));
 
     open_flags = chimera_vfs_compound_op_open_flags(op);
 
@@ -7136,6 +7217,7 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_SETATTR:
+        {
             if (op->setattr_after_write) {
                 chimera_vfs_setattr_after_write(compound->thread, compound->cred,
                                                 target, &op->applied_attr,
@@ -7144,42 +7226,29 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
                                                 compound);
                 break;
             }
-            /* With the caller's own handle the change is authorized by that
-             * open's grant rather than re-checked against the object's mode --
-             * the difference between ftruncate(2) and truncate(2), and the
-             * whole reason a caller hands a handle in. */
-            if (op->have_io_owner) {
-                if (op->in_handle || (op->handle_from >= 0 &&
-                                      compound->ops[op->handle_from]->type != CHIMERA_VFS_COMPOUND_OP_OPEN_PATH &&
-                                      !(compound->ops[op->handle_from]->open_flags & CHIMERA_VFS_OPEN_PATH))) {
-                    chimera_vfs_fsetattr_owned(compound->thread, compound->cred,
-                                               target, &op->applied_attr,
-                                               compound_pre_mask(op, 0), compound_post_mask(op, op->attr_mask),
-                                               &op->io_owner, chimera_vfs_compound_setattr_callback, compound);
-                } else {
-                    chimera_vfs_setattr_owned(compound->thread, compound->cred,
-                                              target, &op->applied_attr,
-                                              compound_pre_mask(op, 0), compound_post_mask(op, op->attr_mask),
-                                              &op->io_owner, chimera_vfs_compound_setattr_callback, compound);
-                }
-            } else if (op->in_handle || (op->handle_from >= 0 &&
-                                         compound->ops[op->handle_from]->type != CHIMERA_VFS_COMPOUND_OP_OPEN_PATH &&
-                                         !(compound->ops[op->handle_from]->open_flags & CHIMERA_VFS_OPEN_PATH))) {
-                chimera_vfs_fsetattr(compound->thread, compound->cred,
-                                     target,
-                                     &op->applied_attr,
-                                     compound_pre_mask(op, 0), compound_post_mask(op, op->attr_mask),
-                                     chimera_vfs_compound_setattr_callback,
-                                     compound);
+            struct chimera_vfs_io_view view = op->io_view;
+            view.owner = op->have_io_owner ? &op->io_owner : NULL;
+            if (!compound_journal_view(compound, target, &view, &op->journal_excluded)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOSPC);
+                break;
+            }
+            /* Descriptor-originated size changes retain their open grant;
+            * path operations retain the per-operation permission gate. */
+            if (op->in_handle || (op->handle_from >= 0 &&
+                                  compound->ops[op->handle_from]->type != CHIMERA_VFS_COMPOUND_OP_OPEN_PATH &&
+                                  !(compound->ops[op->handle_from]->open_flags & CHIMERA_VFS_OPEN_PATH))) {
+                chimera_vfs_fsetattr_view(compound->thread, compound->cred,
+                                          target, &op->applied_attr,
+                                          compound_pre_mask(op, 0), compound_post_mask(op, op->attr_mask),
+                                          &view, chimera_vfs_compound_setattr_callback, compound);
             } else {
-                chimera_vfs_setattr(compound->thread, compound->cred,
-                                    target,
-                                    &op->applied_attr,
-                                    compound_pre_mask(op, 0), compound_post_mask(op, op->attr_mask),
-                                    chimera_vfs_compound_setattr_callback,
-                                    compound);
+                chimera_vfs_setattr_view(compound->thread, compound->cred,
+                                         target, &op->applied_attr,
+                                         compound_pre_mask(op, 0), compound_post_mask(op, op->attr_mask),
+                                         &view, chimera_vfs_compound_setattr_callback, compound);
             }
             break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_REMOVE:
             if (op->remove_match_child_fh) {
@@ -7213,54 +7282,69 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
          * the adder cannot tell, because whether a SAVEFH ran is a property of
          * the sequence as it executes and not of the op being added. */
         case CHIMERA_VFS_COMPOUND_OP_RENAME:
+        {
             if (compound->saved_fh_len == 0) {
                 chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
                 break;
             }
-            chimera_vfs_rename_at_checked_result_actor(compound->thread, compound->cred,
-                                                       compound->saved_fh, compound->saved_fh_len,
-                                                       op->name, op->name_len,
-                                                       compound->fh, compound->fh_len,
-                                                       op->new_name, op->new_name_len,
-                                                       op->rename_target_fh_len ? op->rename_target_fh : NULL,
-                                                       op->rename_target_fh_len, op->remove_flags,
-                                                       compound_pre_mask(op, CHIMERA_VFS_ATTR_CHANGE |
+            struct chimera_vfs_io_view view = op->io_view;
+            if (op->have_io_owner) {
+                view.owner = &op->io_owner;
+            }
+            chimera_vfs_rename_at_checked_result_view(compound->thread, compound->cred,
+                                                      compound->saved_fh, compound->saved_fh_len,
+                                                      op->name, op->name_len,
+                                                      compound->fh, compound->fh_len,
+                                                      op->new_name, op->new_name_len,
+                                                      op->rename_target_fh_len ? op->rename_target_fh : NULL,
+                                                      op->rename_target_fh_len, op->remove_flags,
+                                                      compound_pre_mask(op, CHIMERA_VFS_ATTR_CHANGE |
+                                                                        CHIMERA_VFS_ATTR_CTIME),
+                                                      compound_post_mask(op, CHIMERA_VFS_ATTR_CHANGE |
                                                                          CHIMERA_VFS_ATTR_CTIME),
-                                                       compound_post_mask(op, CHIMERA_VFS_ATTR_CHANGE |
-                                                                          CHIMERA_VFS_ATTR_CTIME),
-                                                       op->namespace_parent_lease_key_valid ? op->
-                                                       namespace_parent_lease_key : NULL,
-                                                       op->have_io_owner ? op->io_owner.op_handle : op->op_exempt_handle
-                                                       ,
-                                                       op->have_io_owner ? &op->io_owner : NULL,
-                                                       (op->remove_flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) ? op->
-                                                       arg_fh : NULL,
-                                                       (op->remove_flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) ? op->
-                                                       arg_fh_len : 0,
-                                                       &op->rename_outcome,
-                                                       chimera_vfs_compound_rename_callback,
-                                                       compound);
+                                                      op->namespace_parent_lease_key_valid ? op->
+                                                      namespace_parent_lease_key : NULL,
+                                                      op->have_io_owner ? op->io_owner.op_handle : op->op_exempt_handle
+                                                      ,
+                                                      &view,
+                                                      (op->remove_flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) ? op->
+                                                      arg_fh : NULL,
+                                                      (op->remove_flags & CHIMERA_VFS_RENAME_MATCH_SOURCE_FH) ? op->
+                                                      arg_fh_len : 0,
+                                                      &op->rename_outcome,
+                                                      chimera_vfs_compound_rename_callback,
+                                                      compound);
             break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_LINK:
+        {
             if (compound->saved_fh_len == 0) {
                 chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
                 break;
             }
-            chimera_vfs_link_at_flags_actor(compound->thread, compound->cred,
-                                            compound->saved_fh, compound->saved_fh_len,
-                                            compound->fh, compound->fh_len,
-                                            op->name, op->name_len,
-                                            op->open_opts, op->namespace_flags, compound_object_mask(op, op->attr_mask),
-                                            compound_pre_mask(op, CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
-                                            compound_post_mask(op, CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
-                                            op->namespace_parent_lease_key_valid ? op->namespace_parent_lease_key : NULL
-                                            ,
-                                            op->have_io_owner ? op->io_owner.op_handle : op->op_exempt_handle,
-                                            op->have_io_owner ? &op->io_owner : NULL,
-                                            chimera_vfs_compound_link_callback,
-                                            compound);
+            struct chimera_vfs_io_view view = op->io_view;
+            view.owner = op->have_io_owner ? &op->io_owner : NULL;
+            if (!compound_journal_view_fh(compound, compound->saved_fh, compound->saved_fh_len,
+                                          &view, &op->journal_excluded)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOSPC);
+                break;
+            }
+            chimera_vfs_link_at_flags_view(compound->thread, compound->cred,
+                                           compound->saved_fh, compound->saved_fh_len,
+                                           compound->fh, compound->fh_len,
+                                           op->name, op->name_len,
+                                           op->open_opts, op->namespace_flags, compound_object_mask(op, op->attr_mask),
+                                           compound_pre_mask(op, CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                           compound_post_mask(op, CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                           op->namespace_parent_lease_key_valid ? op->namespace_parent_lease_key : NULL
+                                           ,
+                                           op->have_io_owner ? op->io_owner.op_handle : op->op_exempt_handle,
+                                           &view,
+                                           chimera_vfs_compound_link_callback,
+                                           compound);
             break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_LOOKUP:
             chimera_vfs_lookup_at(compound->thread, compound->cred,
@@ -7325,26 +7409,24 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
         }
 
         case CHIMERA_VFS_COMPOUND_OP_CLONE_RANGE:
+        {
+            struct chimera_vfs_io_view view = op->io_view;
+            view.owner = op->have_io_owner ? &op->io_owner : NULL;
             if (!range_src || !range_dst) {
                 chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
                 break;
             }
-            if (op->have_io_owner && op->have_src_io_owner) {
-                chimera_vfs_clone_range_owned(compound->thread, compound->cred,
-                                              range_src, op->src_offset, range_dst, op->offset,
-                                              op->length, op->attr_mask, op->post_attr_mask,
-                                              &op->src_io_owner, &op->io_owner,
-                                              chimera_vfs_compound_clone_range_callback, compound);
+            if (!compound_journal_view(compound, range_dst, &view, &op->journal_excluded)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOSPC);
                 break;
             }
-            chimera_vfs_clone_range(compound->thread, compound->cred,
-                                    range_src, op->src_offset,
-                                    range_dst, op->offset,
-                                    op->length,
-                                    op->attr_mask, op->post_attr_mask,
-                                    chimera_vfs_compound_clone_range_callback,
-                                    compound);
+            chimera_vfs_clone_range_view(compound->thread, compound->cred,
+                                         range_src, op->src_offset, range_dst, op->offset,
+                                         op->length, op->attr_mask, op->post_attr_mask,
+                                         op->have_src_io_owner ? &op->src_io_owner : NULL, &view,
+                                         chimera_vfs_compound_clone_range_callback, compound);
             break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_MOVE_RANGE:
             if (!range_src || !range_dst) {
@@ -7362,24 +7444,42 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_WRITE_SAME:
-            chimera_vfs_write_same(compound->thread, compound->cred,
-                                   target,
-                                   op->offset,
-                                   op->block_size, op->block_count,
-                                   op->pattern, op->pattern_len,
-                                   op->reloff_pattern, op->sync,
-                                   op->attr_mask, op->post_attr_mask,
-                                   chimera_vfs_compound_write_same_callback,
-                                   compound);
+        {
+            struct chimera_vfs_io_view view = op->io_view;
+            view.owner = op->have_io_owner ? &op->io_owner : NULL;
+            if (!compound_journal_view(compound, target, &view, &op->journal_excluded)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOSPC);
+                break;
+            }
+            chimera_vfs_write_same_view(compound->thread, compound->cred,
+                                        target,
+                                        op->offset,
+                                        op->block_size, op->block_count,
+                                        op->pattern, op->pattern_len,
+                                        op->reloff_pattern, op->sync,
+                                        op->attr_mask, op->post_attr_mask,
+                                        &view,
+                                        chimera_vfs_compound_write_same_callback,
+                                        compound);
             break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_READ_PLUS:
-            chimera_vfs_read_plus(compound->thread, compound->cred,
-                                  target,
-                                  op->offset, op->length,
-                                  chimera_vfs_compound_read_plus_callback,
-                                  compound);
+        {
+            struct chimera_vfs_io_view view = op->io_view;
+            view.owner = op->have_io_owner ? &op->io_owner : NULL;
+            if (!compound_journal_view(compound, target, &view, &op->journal_excluded)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOSPC);
+                break;
+            }
+            chimera_vfs_read_plus_view(compound->thread, compound->cred,
+                                       target,
+                                       op->offset, op->length,
+                                       &view,
+                                       chimera_vfs_compound_read_plus_callback,
+                                       compound);
             break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_PUTROOT:
         {
@@ -7717,6 +7817,11 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
         case CHIMERA_VFS_COMPOUND_OP_LOCK_TEST:
         case CHIMERA_VFS_COMPOUND_OP_LOCK_CHANGE:
         case CHIMERA_VFS_COMPOUND_OP_LOCK_RELEASE_OWNER:
+            if (op->lock_from_fh && !chimera_vfs_lock_attempt_matches_fh(op->lock_attempt, compound->fh, compound->
+                                                                         fh_len)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_EINVAL);
+                break;
+            }
             op->nonretryable = !chimera_vfs_lock_attempt_retryable(op->lock_attempt);
             chimera_vfs_lock_attempt_execute(op->lock_attempt, compound->finish_handler != NULL,
                                              chimera_vfs_compound_lock_complete, compound);
@@ -7953,23 +8058,40 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
             break;
 
         case CHIMERA_VFS_COMPOUND_OP_ALLOCATE:
-            chimera_vfs_allocate_owned(compound->thread, compound->cred,
-                                       target,
-                                       op->offset, op->length,
-                                       op->allocate_flags,
-                                       op->attr_mask, op->post_attr_mask,
-                                       op->have_io_owner ? &op->io_owner : NULL,
-                                       chimera_vfs_compound_allocate_callback,
-                                       compound);
+        {
+            struct chimera_vfs_io_view view = op->io_view;
+            view.owner = op->have_io_owner ? &op->io_owner : NULL;
+            if (!compound_journal_view(compound, target, &view, &op->journal_excluded)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOSPC);
+                break;
+            }
+            chimera_vfs_allocate_view(compound->thread, compound->cred,
+                                      target,
+                                      op->offset, op->length,
+                                      op->allocate_flags,
+                                      op->attr_mask, op->post_attr_mask,
+                                      &view,
+                                      chimera_vfs_compound_allocate_callback,
+                                      compound);
             break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_SEEK:
-            chimera_vfs_seek(compound->thread, compound->cred,
-                             target,
-                             op->offset, op->seek_what,
-                             chimera_vfs_compound_seek_callback,
-                             compound);
+        {
+            struct chimera_vfs_io_view view = op->io_view;
+            view.owner = op->have_io_owner ? &op->io_owner : NULL;
+            if (!compound_journal_view(compound, target, &view, &op->journal_excluded)) {
+                chimera_vfs_compound_op_done(compound, CHIMERA_VFS_ENOSPC);
+                break;
+            }
+            chimera_vfs_seek_view(compound->thread, compound->cred,
+                                  target,
+                                  op->offset, op->seek_what,
+                                  &view,
+                                  chimera_vfs_compound_seek_callback,
+                                  compound);
             break;
+        }
 
         case CHIMERA_VFS_COMPOUND_OP_READDIR:
             if (op->readdir_reset) {
@@ -8020,7 +8142,7 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
                 }
             }
             chimera_vfs_list_streams(compound->thread, compound->cred, target,
-                                     op->cookie, op->buffer, op->buffer_max, op->stream_want_fh,
+                                     op->cookie, op->verifier, op->buffer, op->buffer_max, op->stream_want_fh,
                                      chimera_vfs_compound_list_streams_callback, compound);
             break;
 
@@ -8351,23 +8473,32 @@ chimera_vfs_compound_step_once(struct chimera_vfs_compound *compound)
     } /* switch */
 } /* chimera_vfs_compound_step */
 
-SYMBOL_EXPORT bool
-chimera_vfs_compound_retry(struct chimera_vfs_compound *compound)
+static bool
+chimera_vfs_compound_can_restart(const struct chimera_vfs_compound *compound)
 {
-    uint32_t i;
-
-    /* Ownership transfer marks publication. Retrying after that would release
-     * resources the caller now owns and repeat an accepted operation. */
+    /* Publication may consume borrowed inputs or expose state that cannot be
+     * replayed. A second submit must respect the same barriers as retry. */
     if (compound->running || compound->canceled || compound->ownership_taken ||
-        compound->claim_journal_published || compound->access_journal_published || !compound->original_ops) {
+        compound->claim_journal_published || compound->access_journal_published ||
+        !compound->original_ops ||
+        atomic_load(&compound->cancel_post_state) != CHIMERA_VFS_COMPOUND_CANCEL_IDLE) {
         return false;
     }
-
-    for (i = 0; i < compound->num_ops; i++) {
-        if (compound->ops[i]->nonretryable) {
+    for (uint32_t i = 0; i < compound->num_ops; i++) {
+        const struct chimera_vfs_compound_op *op = compound->ops[i];
+        if (op->nonretryable ||
+            (op->close_handle && compound->finish_status == CHIMERA_VFS_OK)) {
             return false;
         }
     }
+    return true;
+} /* chimera_vfs_compound_can_restart */
+
+static void
+chimera_vfs_compound_restart(struct chimera_vfs_compound *compound)
+{
+    uint32_t i;
+
     if (compound->claim_journal) {
         chimera_vfs_claim_journal_reset(compound->claim_journal);
     }
@@ -8384,33 +8515,10 @@ chimera_vfs_compound_retry(struct chimera_vfs_compound *compound)
     chimera_vfs_compound_release_saved(compound);
     for (i = 0; i < compound->num_ops; i++) {
         struct chimera_vfs_compound_op *op = compound->ops[i];
-        if (op->closed_output_handle) {
-            chimera_vfs_release(compound->thread, op->closed_output_handle);
-        }
         if (op->lock_attempt) {
             chimera_vfs_lock_attempt_reset(op->lock_attempt);
         }
-        if (op->out_handle) {
-            chimera_vfs_release(compound->thread, op->out_handle);
-        }
-        if (op->niov && !op->dest_published) {
-            evpl_iovecs_release(compound->thread->evpl, op->iov, op->niov);
-        }
-        chimera_vfs_compound_attr_release(&op->attr);
-        chimera_vfs_compound_attr_release(&op->pre_attr);
-        chimera_vfs_compound_attr_release(&op->dir_pre_attr);
-        chimera_vfs_compound_attr_release(&op->dir_post_attr);
-        chimera_vfs_compound_attr_release(&op->from_dir_pre_attr);
-        chimera_vfs_compound_attr_release(&op->from_dir_post_attr);
-        free(op->layout_segments);
-        free(op->layout_devices);
-        free(op->applied_acl);
-        free(op->target);
-        free(op->entries);
-        free(op->buffer);
-        free(op->journal_excluded);
-        free(op->journal_src_excluded);
-        compound_search_keys_release(op);
+        chimera_vfs_compound_release_results(compound, op);
         if (i < compound->original_num_ops) {
             *op = compound->original_ops[i];
         } else {
@@ -8451,14 +8559,24 @@ chimera_vfs_compound_retry(struct chimera_vfs_compound *compound)
     compound->open_retried       = 0;
     compound->io_typechecked     = 0;
     compound->running            = 1;
+    compound->thread->num_active_compounds++;
     if (compound->attempt_reset) {
         compound->attempt_reset(compound, compound->attempt_private);
     }
     if (compound->build_failed) {
         chimera_vfs_compound_finish(compound, compound->build_error ? compound->build_error : CHIMERA_VFS_EINVAL);
-        return true;
+        return;
     }
     chimera_vfs_compound_step(compound);
+} /* chimera_vfs_compound_restart */
+
+SYMBOL_EXPORT bool
+chimera_vfs_compound_retry(struct chimera_vfs_compound *compound)
+{
+    if (!chimera_vfs_compound_can_restart(compound)) {
+        return false;
+    }
+    chimera_vfs_compound_restart(compound);
     return true;
 } /* chimera_vfs_compound_retry */
 
@@ -8468,11 +8586,27 @@ chimera_vfs_compound_submit(
     chimera_vfs_compound_callback_t callback,
     void                           *private_data)
 {
+    chimera_vfs_abort_if(compound->running, "submitting an executing compound");
+    if (compound->original_ops) {
+        if (!chimera_vfs_compound_can_restart(compound)) {
+            /* Preserve accepted ownership and finish status for free/take.
+             * No new attempt or finish adapter runs on a refused submission. */
+            compound->status = CHIMERA_VFS_EINVAL;
+            callback(compound, private_data);
+            return;
+        }
+        compound->callback     = callback;
+        compound->private_data = private_data;
+        chimera_vfs_compound_restart(compound);
+        return;
+    }
+
     compound->callback     = callback;
     compound->private_data = private_data;
     compound->index        = 0;
     compound->completed    = 0;
     compound->running      = 1;
+    compound->thread->num_active_compounds++;
 
     if (compound->num_groups) {
         struct chimera_vfs_compound_group *last = &compound->groups[compound->num_groups - 1];
@@ -8529,11 +8663,17 @@ chimera_vfs_compound_submit(
         lock_ops += compound->ops[i]->lock_attempt != NULL;
     }
     if (lock_ops) {
+        bool local_open = compound->num_ops == 4 &&
+            compound->ops[0]->type == CHIMERA_VFS_COMPOUND_OP_PUTFH &&
+            compound->ops[1]->type == CHIMERA_VFS_COMPOUND_OP_OPEN_CURRENT &&
+            compound->ops[2]->type == CHIMERA_VFS_COMPOUND_OP_GETHANDLE &&
+            compound->ops[3]->lock_from_fh;
         for (uint32_t i = 0; i < compound->num_ops; i++) {
             struct chimera_vfs_compound_op *op = compound->ops[i];
             if (lock_ops != 1 || (!op->lock_attempt &&
                                   op->type != CHIMERA_VFS_COMPOUND_OP_PUTFH &&
-                                  op->type != CHIMERA_VFS_COMPOUND_OP_PUTHANDLE)) {
+                                  op->type != CHIMERA_VFS_COMPOUND_OP_PUTHANDLE &&
+                                  !(local_open && (i == 1 || i == 2)))) {
                 compound->build_failed = 1;
                 compound->build_error  = CHIMERA_VFS_ENOTSUP;
             }

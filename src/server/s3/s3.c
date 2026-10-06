@@ -23,7 +23,6 @@
 #include "s3_tagging.h"
 #include "s3.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_internal_procs.h"
 
 static inline int
 chimera_s3_hexval(int c)

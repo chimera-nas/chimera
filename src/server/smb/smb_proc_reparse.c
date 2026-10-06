@@ -7,7 +7,6 @@
 #include "common/platform.h"
 #endif /* ifdef _WIN32 */
 #include "smb_internal.h"
-#include "vfs/vfs_internal_procs.h"
 #include "smb_procs.h"
 #include "smb_string.h"
 #include "smb_common/smb2.h"
@@ -20,40 +19,15 @@
 /* SET_REPARSE_POINT guarded identity replacement                     */
 /* ------------------------------------------------------------------ */
 
-/*
- * PUTFH(parent), OPEN_CURRENT(dir), REMOVE(name, matching the old object),
- * CREATE(symlink | node), OPEN_CURRENT, GETHANDLE.
- *
- * One sequence, because every step addresses what the step before it resolved:
- * the name is unlinked from the parent the sequence is standing on, the
- * replacement is created in that same parent and becomes the current object,
- * and the handle the client's open is re-bound to is an open of THAT object --
- * not of a file handle carried by hand between four callbacks.
- *
- * The REMOVE matches the doomed object's file handle (op_set_remove_match), so
- * a name that has since come to mean something else is left alone rather than
- * destroyed on this open's behalf; the CREATE then collides on it, which is the
- * honest answer.
- *
- * Re-binding is what the tail is for.  The SET replaces the original inode and
- * the client's open still references it, so a following GET_REPARSE -- or any
- * handle op -- must resolve the link rather than the now-orphaned original
- * (pike reparse test_set_get_reparse_point).  The re-open takes real flags (0,
- * not INFERRED/PATH) because the close path closes it through chimera_vfs_close
- * and needs a backend handle.  Re-arming the delete-on-close reservation stays
- * out of band: it sets a flag on the new handle, addresses no object through
- * the cursors, and cannot fail.
- */
-/* The retained source identity must survive asynchronous parent lookup and
- * must be compared atomically by REMOVE. A stale FileId must never replace a
- * different object subsequently installed at the same name. This legacy chain
- * remains a boundary until open claims and namespace identity can migrate as
- * one accepted compound publication. */
+/* Replace a regular placeholder in one standalone compound. The source
+ * identity is pinned and REMOVE compares its FH atomically. The accepted
+ * suffix transfers handle, ACCESS owner, file state and namespace membership
+ * together. Opens with additional state cannot use this migration yet and
+ * must be rejected before any filesystem mutation. */
 struct smb_set_reparse_ctx {
     struct chimera_smb_request                *request;
     struct chimera_vfs_open_handle            *source;
-    uint8_t                                    unmatched;
-    bool                                       gated, fallback, created;
+    bool                                       gated, unsupported, created;
     struct chimera_vfs_cred                    cred;
     struct chimera_smb_namespace_replace_token replacement;
     struct chimera_vfs_claim_access_fence      old_admission, new_admission;
@@ -103,10 +77,6 @@ smb_set_reparse_done(
     struct chimera_smb_request *request = ctx->request;
     struct chimera_vfs_thread  *thread  = request->compound->thread->vfs_thread;
 
-    if (request->ioctl.rp_parent_handle) {
-        chimera_vfs_release(thread, request->ioctl.rp_parent_handle);
-        request->ioctl.rp_parent_handle = NULL;
-    }
     smb_set_reparse_target_release(ctx);
     chimera_vfs_claim_access_fence_release(&ctx->old_admission);
     chimera_smb_namespace_replace_end(&ctx->replacement);
@@ -127,321 +97,7 @@ smb_set_reparse_done(
     chimera_smb_complete_request(request, status);
 } /* smb_set_reparse_done */
 
-static void
-chimera_smb_set_reparse_rebind_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data);
-
-static void
-chimera_smb_set_reparse_create_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *set_attr,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
-{
-    struct smb_set_reparse_ctx *ctx        = private_data;
-    struct chimera_smb_request *request    = ctx->request;
-    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
-
-    (void) set_attr;
-    (void) dir_pre_attr;
-    (void) dir_post_attr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        smb_set_reparse_done(ctx, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    /* Re-bind the open handle to the new special-file inode (exactly as the
-     * symlink path does) so the client's follow-up owner/mode SET_SECURITY
-     * lands on the node rather than the removed placeholder.  Without this the
-     * device/FIFO/socket keeps the server's default owner (root) and mode
-     * (0666) that mknod_at laid down. */
-    if (attr && (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) && attr->va_fh_len &&
-        attr->va_fh_len <= sizeof(attr->va_fh)) {
-        memcpy(request->ioctl.rp_new_fh, attr->va_fh, attr->va_fh_len);
-        request->ioctl.rp_new_fh_len = attr->va_fh_len;
-
-        chimera_vfs_open_fh(
-            vfs_thread,
-            &ctx->cred,
-            request->ioctl.rp_new_fh,
-            request->ioctl.rp_new_fh_len,
-            0,
-            chimera_smb_set_reparse_rebind_cb,
-            ctx);
-        return;
-    }
-
-    /* A successful mutation without its new identity cannot complete SET. */
-    smb_set_reparse_done(ctx, SMB2_STATUS_INTERNAL_ERROR);
-} /* chimera_smb_set_reparse_create_cb */
-
-/* The SET created a new symlink inode, replacing the original object that the
- * client's open still references.  Re-bind the open's VFS handle (open_file->
- * handle) to the new inode so a following GET_REPARSE_POINT -- or any handle op
- * -- resolves the link rather than the now-orphaned original
- * (pike reparse test_set_get_reparse_point). */
-static void
-chimera_smb_set_reparse_rebind_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct smb_set_reparse_ctx   *ctx        = private_data;
-    struct chimera_smb_request   *request    = ctx->request;
-    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
-    struct chimera_smb_open_file *open_file  = request->ioctl.rp_open_file;
-
-    if (error_code != CHIMERA_VFS_OK || !oh) {
-        if (oh) {
-            chimera_vfs_release(vfs_thread, oh);
-        }
-        smb_set_reparse_done(ctx, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    struct chimera_smb_tree        *tree   = open_file->tree;
-    unsigned int                    bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
-    struct chimera_vfs_file_state  *file   = open_file->share_file_state;
-    struct chimera_vfs_open_handle *old    = NULL;
-    evpl_mutex_lock(&tree->open_files_lock[bucket]);
-    if (file) {
-        evpl_mutex_lock(&file->lock);
-    }
-    if (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) && open_file->handle) {
-        /* Arm only the handle we are actually installing. Bucket/file locks
-         * protect it against concurrent CLOSE; cache locking nests inside
-         * the file lock, as it does in the ordinary DOC paths. */
-        if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) {
-            chimera_vfs_set_delete_on_close(vfs_thread, oh,
-                                            open_file->parent_fh, open_file->parent_fh_len,
-                                            open_file->name, open_file->name_len,
-                                            &ctx->cred);
-        }
-        old                   = open_file->handle;
-        open_file->handle     = oh;
-        open_file->open_flags = chimera_smb_open_handle_flags(oh, 0);
-    }
-    if (file) {
-        evpl_mutex_unlock(&file->lock);
-    }
-    evpl_mutex_unlock(&tree->open_files_lock[bucket]);
-    if (!old) {
-        /* Teardown can win while the replacement is being opened. Never
-         * resurrect its handle or report a usable FileId after that cutoff. */
-        chimera_vfs_release(vfs_thread, oh);
-        smb_set_reparse_done(ctx, SMB2_STATUS_FILE_CLOSED);
-        return;
-    }
-
-    chimera_vfs_release(vfs_thread, old);
-    smb_set_reparse_done(ctx, SMB2_STATUS_SUCCESS);
-} /* chimera_smb_set_reparse_rebind_cb */
-
-static void
-chimera_smb_set_reparse_symlink_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    struct chimera_vfs_attrs *dir_pre_attr,
-    struct chimera_vfs_attrs *dir_post_attr,
-    void                     *private_data)
-{
-    struct smb_set_reparse_ctx *ctx        = private_data;
-    struct chimera_smb_request *request    = ctx->request;
-    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_error("SET_REPARSE: symlink failed error=%d target='%s' target_len=%d",
-                          error_code,
-                          request->ioctl.rp_target,
-                          request->ioctl.rp_target_len);
-        smb_set_reparse_done(ctx, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    /* Re-bind the open handle to the new symlink inode (its file handle was
-     * returned in attr->va_fh).  rp_parent_handle and rp_open_file are released
-     * in the rebind callback. */
-    if (attr && (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) && attr->va_fh_len &&
-        attr->va_fh_len <= sizeof(attr->va_fh)) {
-        memcpy(request->ioctl.rp_new_fh, attr->va_fh, attr->va_fh_len);
-        request->ioctl.rp_new_fh_len = attr->va_fh_len;
-
-        /* Open a real (backend) handle on the new inode -- not an INFERRED/PATH
-         * handle -- so the open keeps a valid backend handle for delete-on-close
-         * (the close path closes it via chimera_vfs_close). */
-        chimera_vfs_open_fh(
-            vfs_thread,
-            &ctx->cred,
-            request->ioctl.rp_new_fh,
-            request->ioctl.rp_new_fh_len,
-            0,
-            chimera_smb_set_reparse_rebind_cb,
-            ctx);
-        return;
-    }
-
-    /* Missing result identity cannot be reported as a usable replacement. */
-    smb_set_reparse_done(ctx, SMB2_STATUS_INTERNAL_ERROR);
-} /* chimera_smb_set_reparse_symlink_cb */
-
-static void
-chimera_smb_set_reparse_remove_cb(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct smb_set_reparse_ctx   *ctx        = private_data;
-    struct chimera_smb_request   *request    = ctx->request;
-    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
-    struct chimera_smb_open_file *open_file  = request->ioctl.rp_open_file;
-    struct chimera_vfs_attrs     *set_attr   = &request->ioctl.rp_set_attr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_error("SET_REPARSE: remove failed error=%d name='%.*s'",
-                          error_code, open_file->name_len, open_file->name);
-        smb_set_reparse_done(ctx, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    if (ctx->unmatched) {
-        smb_set_reparse_done(ctx, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
-        return;
-    }
-
-    memset(set_attr, 0, sizeof(*set_attr));
-
-    switch (request->ioctl.rp_nfs_type) {
-        case SMB2_NFS_SPECFILE_LNK:
-            chimera_vfs_symlink_at(
-                vfs_thread,
-                &ctx->cred,
-                request->ioctl.rp_parent_handle,
-                open_file->name,
-                open_file->name_len,
-                request->ioctl.rp_target,
-                request->ioctl.rp_target_len,
-                set_attr,
-                CHIMERA_VFS_ATTR_FH,
-                0,
-                0,
-                chimera_smb_set_reparse_symlink_cb,
-                ctx);
-            break;
-        case SMB2_NFS_SPECFILE_CHR:
-            set_attr->va_mode = S_IFCHR | 0666;
-            set_attr->va_rdev = ((uint64_t) request->ioctl.rp_device_major << 32) |
-                request->ioctl.rp_device_minor;
-            set_attr->va_req_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
-            set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
-            chimera_vfs_mknod_at(
-                vfs_thread,
-                &ctx->cred,
-                request->ioctl.rp_parent_handle,
-                open_file->name,
-                open_file->name_len,
-                set_attr,
-                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV | CHIMERA_VFS_ATTR_FH,
-                0,
-                0,
-                chimera_smb_set_reparse_create_cb,
-                ctx);
-            break;
-        case SMB2_NFS_SPECFILE_BLK:
-            set_attr->va_mode = S_IFBLK | 0666;
-            set_attr->va_rdev = ((uint64_t) request->ioctl.rp_device_major << 32) |
-                request->ioctl.rp_device_minor;
-            set_attr->va_req_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
-            set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
-            chimera_vfs_mknod_at(
-                vfs_thread,
-                &ctx->cred,
-                request->ioctl.rp_parent_handle,
-                open_file->name,
-                open_file->name_len,
-                set_attr,
-                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV | CHIMERA_VFS_ATTR_FH,
-                0,
-                0,
-                chimera_smb_set_reparse_create_cb,
-                ctx);
-            break;
-        case SMB2_NFS_SPECFILE_FIFO:
-            set_attr->va_mode     = S_IFIFO | 0666;
-            set_attr->va_req_mask = CHIMERA_VFS_ATTR_MODE;
-            set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE;
-            chimera_vfs_mknod_at(
-                vfs_thread,
-                &ctx->cred,
-                request->ioctl.rp_parent_handle,
-                open_file->name,
-                open_file->name_len,
-                set_attr,
-                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_FH,
-                0,
-                0,
-                chimera_smb_set_reparse_create_cb,
-                ctx);
-            break;
-        case SMB2_NFS_SPECFILE_SOCK:
-            set_attr->va_mode     = S_IFSOCK | 0666;
-            set_attr->va_req_mask = CHIMERA_VFS_ATTR_MODE;
-            set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE;
-            chimera_vfs_mknod_at(
-                vfs_thread,
-                &ctx->cred,
-                request->ioctl.rp_parent_handle,
-                open_file->name,
-                open_file->name_len,
-                set_attr,
-                CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_FH,
-                0,
-                0,
-                chimera_smb_set_reparse_create_cb,
-                ctx);
-            break;
-        default:
-            smb_set_reparse_done(ctx, SMB2_STATUS_NOT_IMPLEMENTED);
-            break;
-    } /* switch */
-} /* chimera_smb_set_reparse_remove_cb */
-
-static void
-chimera_smb_set_reparse_open_parent_cb(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct smb_set_reparse_ctx   *ctx        = private_data;
-    struct chimera_smb_request   *request    = ctx->request;
-    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
-    struct chimera_smb_open_file *open_file  = request->ioctl.rp_open_file;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_smb_error("SET_REPARSE: open_parent failed error=%d", error_code);
-        if (oh) {
-            chimera_vfs_release(vfs_thread, oh);
-        }
-        smb_set_reparse_done(ctx, SMB2_STATUS_INTERNAL_ERROR);
-        return;
-    }
-
-    request->ioctl.rp_parent_handle = oh;
-
-    chimera_vfs_remove_at_match_fh_flags(
-        vfs_thread, &ctx->cred, oh,
-        open_file->name, open_file->name_len,
-        ctx->source->fh, ctx->source->fh_len, 0, 0, 0, NULL, NULL,
-        &ctx->unmatched, chimera_smb_set_reparse_remove_cb, ctx);
-} /* chimera_smb_set_reparse_open_parent_cb */
-
-/* The first native slice deliberately excludes every owner whose state needs
- * its own migration journal. Excluded opens keep the guarded legacy boundary. */
+/* Each excluded owner needs its own identity migration journal. */
 static bool
 smb_set_reparse_native_eligible(struct chimera_smb_open_file *open)
 {
@@ -479,7 +135,7 @@ smb_set_reparse_reset(
 
     (void) compound;
     smb_set_reparse_target_release(ctx);
-    ctx->fallback = ctx->created = false;
+    ctx->unsupported = ctx->created = false;
     memset(&ctx->template, 0, sizeof(ctx->template));
 } /* smb_set_reparse_reset */
 
@@ -495,8 +151,8 @@ smb_set_reparse_regular(
 
     if (*status == CHIMERA_VFS_OK && (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) ||
                                       !S_ISREG(attr->va_mode))) {
-        ctx->fallback = true;
-        *status       = CHIMERA_VFS_ENOTSUP;
+        ctx->unsupported = true;
+        *status          = CHIMERA_VFS_ENOTSUP;
     }
 } /* smb_set_reparse_regular */
 
@@ -639,6 +295,7 @@ smb_set_reparse_native_done(
             old_handle                                = open->handle;
             old_owner                                 = open->access_owner;
             open->handle                              = handle;
+            open->open_flags                          = chimera_smb_open_handle_flags(handle, 0);
             open->access_owner                        = owner;
             open->share_file_state                    = new_file;
             open->share_lease_inserted                = true;
@@ -679,24 +336,8 @@ smb_set_reparse_native_done(
     if (old_handle) {
         chimera_vfs_release(thread->vfs_thread, old_handle);
     }
-    if (accepted && ctx->fallback && !canceled) {
-        unsigned bucket = open->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
-        evpl_mutex_lock(&open->tree->open_files_lock[bucket]);
-        bool     closed = !!(open->flags & CHIMERA_SMB_OPEN_FILE_CLOSED);
-        evpl_mutex_unlock(&open->tree->open_files_lock[bucket]);
-        if (closed) {
-            smb_set_reparse_done(ctx, SMB2_STATUS_FILE_CLOSED); return;
-        }
-        smb_set_reparse_target_release(ctx);
-        chimera_vfs_claim_access_fence_release(&ctx->old_admission);
-        chimera_smb_namespace_replace_end(&ctx->replacement);
-        chimera_vfs_open_fh(thread->vfs_thread, &ctx->cred, open->parent_fh, open->parent_fh_len,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH, chimera_smb_set_reparse_open_parent_cb,
-                            ctx);
-        return;
-    }
-    if (ctx->fallback && canceled) {
-        reply = SMB2_STATUS_CANCELLED;
+    if (accepted && ctx->unsupported) {
+        reply = canceled ? SMB2_STATUS_CANCELLED : SMB2_STATUS_NOT_SUPPORTED;
     }
     smb_set_reparse_done(ctx, reply);
 } /* smb_set_reparse_native_done */
@@ -1392,7 +1033,7 @@ chimera_smb_ioctl_set_reparse(struct chimera_smb_request *request)
 
     /* VFS mknod requires a privileged caller for device nodes. SET replaces
      * an existing placeholder: enforce this known failure before unlinking it,
-     * on both the typed and legacy routes. FIFO/socket creation has no such
+     * before constructing the replacement. FIFO/socket creation has no such
      * privilege requirement. */
     if ((request->ioctl.rp_nfs_type == SMB2_NFS_SPECFILE_CHR ||
          request->ioctl.rp_nfs_type == SMB2_NFS_SPECFILE_BLK) &&
@@ -1408,10 +1049,9 @@ chimera_smb_ioctl_set_reparse(struct chimera_smb_request *request)
         chimera_smb_complete_request(request, SMB2_STATUS_INSUFFICIENT_RESOURCES);
         return;
     }
-    ctx->request                    = request;
-    ctx->cred                       = request->session_handle->session->cred;
-    request->ioctl.rp_open_file     = open_file;
-    request->ioctl.rp_parent_handle = NULL;
+    ctx->request                = request;
+    ctx->cred                   = request->session_handle->session->cred;
+    request->ioctl.rp_open_file = open_file;
     if (!smb_set_reparse_gate(ctx)) {
         smb_set_reparse_done(ctx, SMB2_STATUS_FILE_NOT_AVAILABLE);
         return;
@@ -1435,14 +1075,9 @@ chimera_smb_ioctl_set_reparse(struct chimera_smb_request *request)
     if (smb_set_reparse_native_start(ctx)) {
         return;
     }
-    chimera_vfs_open_fh(
-        vfs_thread,
-        &ctx->cred,
-        open_file->parent_fh,
-        open_file->parent_fh_len,
-        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-        chimera_smb_set_reparse_open_parent_cb,
-        ctx);
+    /* No handle-only fallback: it would leave claims and namespace entries
+     * attached to the removed inode after installing the replacement handle. */
+    smb_set_reparse_done(ctx, SMB2_STATUS_NOT_SUPPORTED);
 } /* chimera_smb_ioctl_set_reparse */
 
 /* ------------------------------------------------------------------ */
@@ -1783,7 +1418,7 @@ chimera_smb_get_reparse_sequence_complete(
 
             chimera_vfs_compound_add_readlink(request->vfs_compound);
 
-            chimera_vfs_compound_submit(
+            chimera_frontend_compound_submit(
                 request->vfs_compound,
                 chimera_smb_get_reparse_readlink_complete, request);
             return;
@@ -1855,9 +1490,9 @@ chimera_smb_ioctl_get_reparse(struct chimera_smb_request *request)
                                      CHIMERA_VFS_ATTR_MODE |
                                      CHIMERA_VFS_ATTR_RDEV | CHIMERA_VFS_ATTR_DOS_ATTRIBUTES);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_get_reparse_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_get_reparse_sequence_complete,
+                                     request);
 } /* chimera_smb_ioctl_get_reparse */
 
 /* GET_REPARSE uses attempt-owned attributes and link data; only wire scratch

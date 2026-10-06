@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
+#include "common/compound_retry.h"
 #include "smb_procs.h"
 #include "smb_common/smb2.h"
 #include "smb_session.h"
@@ -304,9 +305,9 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
         copy_op->have_io_owner     = 1;
     }
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_copychunk_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_copychunk_sequence_complete,
+                                     request);
 } /* chimera_smb_copychunk_next */
 
 /*
@@ -460,8 +461,8 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
 
     /* Capture both VFS handles now, once: the copy is one sequence per chunk,
      * built after the previous chunk's sequence has completed, and a pipelined
-     * CLOSE on either FileId NULLs open_file->handle between them.  Every
-     * chunk addresses the handles the copy started with. */
+     * CLOSE may retire either FileId between them. The open references keep
+     * these handles alive for every chunk and retry. */
     request->ioctl.cc_src_handle = src_open_file->handle;
     request->ioctl.cc_dst_handle = dst_open_file->handle;
 
@@ -478,9 +479,9 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
     chimera_vfs_compound_add_getattr(request->vfs_compound,
                                      CHIMERA_VFS_ATTR_MASK_STAT);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_copychunk_src_getattr_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_copychunk_src_getattr_complete,
+                                     request);
 } /* chimera_smb_ioctl_copychunk */
 
 struct smb_copychunk_compound {

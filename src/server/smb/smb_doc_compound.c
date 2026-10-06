@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
-#include "vfs/vfs_internal_procs.h"
 #include "smb_compound.h"
 #include "smb_doc_compound.h"
 #include "smb_doc_stream.h"

@@ -593,6 +593,59 @@ test_false_retry_other_principal(void)
     destroy_session_table(&table, session);
 } /* test_false_retry_other_principal */
 
+/* A successful SEQUENCE must have cache storage before any mutation runs.
+ * Admission failure preserves the previous answer and sequence number. */
+static void
+test_cache_reservation(void)
+{
+    struct nfs4_client_table  table;
+    struct nfs4_session      *session  = make_session(&table, TEST_SLOTS, TEST_MAXRESP);
+    struct evpl_rpc2_encoding encoding = { 0 };
+    struct nfs_request        req      = { .encoding = &encoding, .session = session };
+    bool                      replay;
+    char                      bytes[] = "cached error reply";
+    struct evpl_iovec         iov     = { .data = bytes, .length = sizeof(bytes) };
+
+    CHECK(nfs4_replay_slot_acquire(session, 0, 1, true, &req, &replay) == NFS4_OK);
+    CHECK(req.replay_buffer && req.replay_capacity == TEST_MAXRESP);
+    CHECK(atomic_load(&session->replay_bytes_in_use) == TEST_MAXRESP);
+    encoding.reply_capture_cb(&iov, 1, sizeof(bytes), 0, NULL, encoding.reply_capture_private);
+    nfs4_replay_slot_finalize(&req);
+    CHECK(!req.replay_buffer && !req.replay_capacity);
+    struct nfs4_replay_slot  *slot = &session->replay_slots[0];
+    CHECK(nfs4_slot_state(slot) == NFS4_SLOT_CACHED);
+    CHECK(slot->cached_len == sizeof(bytes) && !memcmp(slot->cached_buf, bytes, sizeof(bytes)));
+    size_t                    retained = slot->cached_capacity;
+    CHECK(atomic_load(&session->replay_bytes_in_use) == retained);
+
+    /* Account other busy slots as consuming the rest of the session cap. */
+    atomic_store(&session->replay_bytes_in_use, NFS4_MAX_REPLY_CACHE_BYTES);
+    uint64_t                  original = atomic_load(&slot->state_word);
+    reset_request(&req);
+    req.encoding = &encoding;
+    req.session  = session;
+    CHECK(nfs4_replay_slot_acquire(session, 0, 2, true, &req, &replay) == NFS4ERR_RESOURCE);
+    CHECK(atomic_load(&slot->state_word) == original && !req.replay_slot && !req.replay_buffer);
+    CHECK(!memcmp(slot->cached_buf, bytes, sizeof(bytes)));
+    CHECK(atomic_load(&session->replay_bytes_in_use) == NFS4_MAX_REPLY_CACHE_BYTES);
+    CHECK(nfs4_replay_slot_acquire(session, 1, 1, true, &req, &replay) == NFS4ERR_RESOURCE);
+    CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_UNUSED);
+
+    CHECK(nfs4_replay_slot_acquire(session, 0, 1, true, &req, &replay) == NFS4_OK && replay);
+    nfs4_replay_slot_replay_done(&req);
+    atomic_store(&session->replay_bytes_in_use, retained);
+    reset_request(&req);
+    req.encoding = &encoding;
+    req.session  = session;
+    CHECK(nfs4_replay_slot_acquire(session, 0, 2, true, &req, &replay) == NFS4_OK && !replay);
+    CHECK(atomic_load(&session->replay_bytes_in_use) == TEST_MAXRESP);
+    encoding.reply_capture_cb(&iov, 1, sizeof(bytes), 0, NULL, encoding.reply_capture_private);
+    nfs4_replay_slot_finalize(&req);
+    CHECK(nfs4_slot_state(slot) == NFS4_SLOT_CACHED);
+    CHECK(atomic_load(&session->replay_bytes_in_use) == slot->cached_capacity);
+    destroy_session_table(&table, session);
+} /* test_cache_reservation */
+
 int
 main(
     int   argc,
@@ -617,6 +670,7 @@ main(
     test_slots_independent();
     test_implicit_session_no_slots();
     test_false_retry_other_principal();
+    test_cache_reservation();
 
     printf("nfs4_replay_slot: all tests passed\n");
     return 0;

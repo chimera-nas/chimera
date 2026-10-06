@@ -18,7 +18,6 @@
 #include "common/platform.h"
 #endif /* ifdef _WIN32 */
 #include "vfs/vfs.h"
-#include "vfs/vfs_internal_procs.h"
 #include "common/format.h"
 #include "s3_internal.h"
 #include "s3_compound.h"

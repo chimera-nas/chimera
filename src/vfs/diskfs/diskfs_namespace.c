@@ -1299,6 +1299,20 @@ diskfs_remove_at_child_cb(
 
     p->inode_stash[1] = inode;
 
+    /* Parent and child are locked by this write transaction through dirent
+     * removal. Compare the complete identity, including filesystem and inode
+     * generation, before changing either the link or its attributes. */
+    if (request->remove_at.match_child_fh) {
+        uint8_t  fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t len = diskfs_inum_to_fh(p->fs, fh, inode->inum, inode->gen);
+        if (!request->remove_at.child_fh || len != request->remove_at.child_fh_len ||
+            memcmp(fh, request->remove_at.child_fh, len)) {
+            request->remove_at.r_unmatched = 1;
+            diskfs_remove_at_finish(request);
+            return;
+        }
+    }
+
     /* Enforce the caller's type assertion (RMDIR/ISDIR vs REMOVE/ISNOTDIR);
      * neither flag removes whichever kind is present. */
     if (((request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) && !S_ISDIR(inode->mode)) ||

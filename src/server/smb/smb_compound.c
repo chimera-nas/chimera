@@ -44,6 +44,7 @@ struct chimera_smb_vfs_batch {
     struct smb_vfs_binding           *bindings;
     struct smb_vfs_file              *files;
     struct smb_doc_batch             *doc;
+    struct evpl_timer                 lock_seq_timer;
     struct smb_vfs_command            commands[CHIMERA_SMB_COMPOUND_MAX_REQUESTS];
 };
 
@@ -593,6 +594,22 @@ smb_vfs_prepare(
 } /* smb_vfs_prepare */
 
 static void
+smb_vfs_lock_seq_release(struct chimera_smb_vfs_batch *batch)
+{
+    for (unsigned i = 0; i < batch->num_states; i++) {
+        struct smb_vfs_open_state *state = &batch->states[i];
+        if (!state->lock_seq_admitted) {
+            continue;
+        }
+        unsigned                   bucket = state->open->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+        evpl_mutex_lock(&batch->tree->open_files_lock[bucket]);
+        state->open->lock_seq_busy &= ~state->lock_seq_admitted;
+        state->lock_seq_admitted    = 0;
+        evpl_mutex_unlock(&batch->tree->open_files_lock[bucket]);
+    }
+} /* smb_vfs_lock_seq_release */
+
+static void
 smb_vfs_terminal(struct chimera_smb_vfs_batch *batch)
 {
     struct chimera_smb_compound *wire     = batch->wire;
@@ -637,6 +654,7 @@ smb_vfs_terminal(struct chimera_smb_vfs_batch *batch)
     chimera_vfs_compound_free(compound);
     smb_doc_batch_free(batch->doc);
     batch->doc = NULL;
+    smb_vfs_lock_seq_release(batch);
     /* Preserve CLOSE/lock retirement semantics in a following legacy command;
      * only context snapshots, not open references, survive through the reply. */
     /* Consumers can retain pointers into an earlier private CREATE slot (LOCK
@@ -858,6 +876,83 @@ smb_vfs_submit_ready(void *private_data)
     chimera_frontend_compound_submit(batch->compound, smb_vfs_complete, batch);
 } /* smb_vfs_submit_ready */
 
+/* Reserve every LockSequence bucket this batch could use before taking DOC
+ * fences or running any operation. Retain admission across finish retries and
+ * until terminal publication. In particular, a second channel cannot snapshot
+ * old replay state after the first channel's RANGE journal has committed.
+ * Never wait with a partial set: compounds can name files/buckets in opposite
+ * orders. Mutexes are not nested and no other open operation takes this gate. */
+static void
+smb_vfs_lock_seq_tick(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_smb_vfs_batch *batch = (struct chimera_smb_vfs_batch *)
+        ((char *) timer - offsetof(struct chimera_smb_vfs_batch, lock_seq_timer));
+    struct chimera_smb_compound  *wire    = batch->wire;
+    bool                          invalid = wire->conn->generation != wire->conn_generation || wire->conn->disconnecting
+        ||
+        batch->tree->compound_tearing_down ||
+        (batch->session_handle.session->flags & CHIMERA_SMB_SESSION_DELETED);
+
+    for (unsigned i = 0; i < batch->num_states; i++) {
+        batch->states[i].lock_seq_needed = 0;
+    }
+    for (unsigned i = 0; !invalid && i < batch->count; i++) {
+        struct smb_vfs_command     *command = &batch->commands[i];
+        struct chimera_smb_request *request = command->request;
+        if (command->ops != &chimera_smb_lock_compound_ops || !command->initial_state ||
+            command->input_status != SMB2_STATUS_SUCCESS) {
+            continue;
+        }
+        unsigned                    cancel = __atomic_load_n(&request->lock.compound_cancel_status, __ATOMIC_ACQUIRE);
+        if (cancel) {
+            command->input_status = cancel;
+            continue;
+        }
+        unsigned                    seq = request->lock.lock_sequence >> 4;
+        if (seq < 1 || seq > 64) {
+            continue;
+        }
+        for (unsigned s = 0; s < batch->num_states; s++) {
+            struct smb_vfs_open_state *state = &batch->states[s];
+            /* Related FileId resolution can depend on earlier execution. */
+            if (state->open && (command->inherits_file || state == command->initial_state)) {
+                state->lock_seq_needed |= UINT64_C(1) << (seq - 1);
+            }
+        }
+    }
+    for (unsigned i = 0; i < batch->num_states; i++) {
+        struct smb_vfs_open_state *state = &batch->states[i];
+        if (!state->lock_seq_needed) {
+            continue;
+        }
+        unsigned                   bucket = state->open->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+        evpl_mutex_lock(&batch->tree->open_files_lock[bucket]);
+        bool                       closed = state->open->flags & CHIMERA_SMB_OPEN_FILE_CLOSED;
+        bool                       busy   = !closed && (state->open->lock_seq_busy & state->lock_seq_needed);
+        if (!closed && !busy) {
+            state->open->lock_seq_busy |= state->lock_seq_needed;
+            state->lock_seq_admitted    = state->lock_seq_needed;
+        }
+        evpl_mutex_unlock(&batch->tree->open_files_lock[bucket]);
+        if (busy) {
+            smb_vfs_lock_seq_release(batch);
+            for (unsigned c = 0; c < batch->count; c++) {
+                struct smb_vfs_command *command = &batch->commands[c];
+                if (command->ops == &chimera_smb_lock_compound_ops && command->open &&
+                    command->input_status == SMB2_STATUS_SUCCESS && !command->request->lock.parked) {
+                    chimera_smb_lock_compound_admission_wait(command);
+                }
+            }
+            evpl_add_oneshot_timer(evpl, timer, smb_vfs_lock_seq_tick, 1000);
+            return;
+        }
+    }
+    /* submit's attempt reset snapshots replay state only after admission. */
+    smb_doc_batch_preflight(batch->doc, smb_vfs_submit_ready, batch);
+} /* smb_vfs_lock_seq_tick */
+
 static void
 smb_vfs_mutation_coordinate(
     struct chimera_vfs_compound *compound,
@@ -965,7 +1060,7 @@ smb_vfs_build(struct chimera_smb_vfs_batch *batch)
     }
     chimera_vfs_compound_set_attempt_reset(compound, smb_vfs_reset, batch);
     batch->compound = compound;
-    smb_doc_batch_preflight(batch->doc, smb_vfs_submit_ready, batch);
+    smb_vfs_lock_seq_tick(wire->thread->evpl, &batch->lock_seq_timer);
 } /* smb_vfs_build */
 
 static void smb_vfs_gather_next(
@@ -1160,7 +1255,8 @@ chimera_smb_vfs_compound_try(struct chimera_smb_compound *wire)
         bool wants_wait = request->smb2_hdr.command == SMB2_LOCK && request->lock.lock_count == 1 &&
             !(request->lock.l_flags & (0x00000004U /* UNLOCK */ | 0x00000010U /* FAIL_IMMEDIATELY */));
         wants_wait |= request->smb2_hdr.command == SMB2_CREATE &&
-            ((request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+            ((request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
+             (request->create.create_disposition == SMB2_FILE_OVERWRITE ||
               request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
               request->create.create_disposition == SMB2_FILE_SUPERSEDE) ||
              ((request->create.create_disposition == SMB2_FILE_OPEN ||

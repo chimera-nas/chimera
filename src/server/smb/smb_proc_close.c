@@ -3,12 +3,12 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
-#include "vfs/vfs_internal_procs.h"
 #include "smb_procs.h"
 #include "smb_doc_stream.h"
 #include "smb_sharemode.h"
 #include "smb_notify.h"
 #include "common/misc.h"
+#include "common/compound_retry.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_compound.h"
 #include "vfs/vfs_kv.h"
@@ -64,7 +64,7 @@ smb_open_retire_tick(
     chimera_smb_open_file_drain_cache(thread, open);
     struct chimera_vfs_file_state    *file = open->base_share_file_state ?
         open->base_share_file_state : open->share_file_state;
-    if (!open->retire_skip_doc && open->handle && file) {
+    if (!open->retire_skip_doc && !open->handle_close_deferred && open->handle && file) {
         if (!chimera_smb_doc_fence_acquire(&open->retire_doc_fence,
                                            &thread->shared->namespace_registry, file->fh, file->fh_len, open) ||
             !chimera_vfs_claim_access_fence_acquire(&open->retire_access_fence, file, open)) {
@@ -74,7 +74,7 @@ smb_open_retire_tick(
             return;
         }
     }
-    if (!open->retire_skip_doc && open->handle) {
+    if (!open->retire_skip_doc && !open->handle_close_deferred && open->handle) {
         struct chimera_smb_teardown_doc_ctx *ctx = &open->retire_doc_ctx;
         memset(ctx, 0, sizeof(*ctx));
         ctx->vfs_thread    = thread->vfs_thread;
@@ -278,6 +278,27 @@ smb_doc_namespace_peer(
     }
 } /* smb_doc_namespace_peer */
 
+/* The caller has unpublished the FileId and owns a reference. Preserve the
+ * original descriptor whenever another admitted request may still use it;
+ * this also preserves synthetic-handle actor identity. Logical SMB DOC is
+ * selected below independently of the cache's physical reference count. */
+static int
+smb_open_release_doc_handle(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open,
+    struct chimera_vfs_doc_info      *doc)
+{
+    struct chimera_vfs_open_handle *closing = open->handle;
+
+    if (atomic_load(&open->refcnt) > 1) {
+        closing                     = chimera_smb_retain_vfs_handle(thread->vfs_thread, closing);
+        open->handle_close_deferred = true;
+    } else {
+        open->handle = NULL;
+    }
+    return chimera_vfs_release_doc(thread->vfs_thread, closing, doc);
+} /* smb_open_release_doc_handle */
+
 /* Cache handles are not SMB opens: RO/RW and detached handles may differ for
  * one inode. Serialize close retirement and delete ownership at the file's
  * SMB share reservations instead. This runs before those claims are drained. */
@@ -298,13 +319,12 @@ chimera_smb_release_doc(
     struct chimera_smb_stream_delete *stream_delete;
 
     memset(doc_out, 0, sizeof(*doc_out));
-    if (!handle) {
+    if (!handle || open_file->handle_close_deferred) {
         return 0;
     }
     stream_delete = chimera_smb_stream_doc_retire(thread, open_file);
     if (!file) {
-        backend_doc                = chimera_vfs_release_doc(thread->vfs_thread, handle, doc_out);
-        open_file->handle          = NULL;
+        backend_doc                = smb_open_release_doc_handle(thread, open_file, doc_out);
         doc_out->smb_stream_delete = stream_delete;
         return backend_doc || stream_delete != NULL;
     }
@@ -395,8 +415,7 @@ chimera_smb_release_doc(
     }
     free(pending);
 
-    backend_doc       = chimera_vfs_release_doc(thread->vfs_thread, handle, &backend);
-    open_file->handle = NULL;
+    backend_doc = smb_open_release_doc_handle(thread, open_file, &backend);
     if (backend_doc) {
         if (remove) {
             doc_out->close_ref = backend.close_ref;
@@ -476,7 +495,7 @@ chimera_smb_teardown_doc_start(void *private_data)
                                                                               ctx->doc_info.name_len, 0, 0, 0);
     chimera_vfs_compound_op_set_remove_match(compound, op, ctx->doc_info.target_fh,
                                              ctx->doc_info.target_fh_len, 1, NULL);
-    chimera_vfs_compound_submit(compound, smb_teardown_doc_compound_done, ctx);
+    chimera_frontend_compound_submit(compound, smb_teardown_doc_compound_done, ctx);
 } /* chimera_smb_teardown_doc_start */
 
 static void
@@ -703,8 +722,8 @@ chimera_smb_close_finish(struct chimera_smb_request *request)
                                            request->close.open_file->handle, request->close.open_file->open_flags);
         chimera_vfs_compound_add_getattr(request->vfs_compound,
                                          CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME);
-        chimera_vfs_compound_submit(request->vfs_compound,
-                                    chimera_smb_close_getattr_callback, request);
+        chimera_frontend_compound_submit(request->vfs_compound,
+                                         chimera_smb_close_getattr_callback, request);
 
     } else {
         memset(&request->close.r_attrs, 0, sizeof(request->close.r_attrs));
@@ -1356,25 +1375,23 @@ smb_close_compound_publish(
         }
         command->request->close.r_attrs = attempt->attrs;
         if (!command->state->producer) {
-            struct chimera_server_smb_thread *thread = command->request->compound->thread;
-            struct chimera_smb_tree          *tree   = open->tree;
+            struct chimera_smb_tree *tree = open->tree;
             /* Typed CLOSE owns the independently retained input reference. */
             if (attempt->consumed) {
                 command->owned_handle = NULL;
             }
             if (removed) {
                 if (attempt->cache_grant) {
-                    /* Membership publication is accepted-only. Keep rights
-                     * conservative until all journal publication has finished;
-                     * release() below runs after compound_free. */
+                    /* Journal publication has accepted the ACCESS retirement.
+                     * Retire an empty cache before compound_free pumps the
+                     * waiting CREATEs; retain storage until release() below. */
                     chimera_smb_grant_remove_member(attempt->cache_grant, open);
+                    chimera_vfs_claim_grant_revoke_empty(attempt->cache_grant);
                     attempt->cache_detached = true;
                 }
-                struct chimera_vfs_open_handle *handle;
                 evpl_mutex_lock(&open->share_file_state->lock);
-                handle                  = open->handle;
-                open->handle            = NULL;
-                open->doc_close_started = 1;
+                open->handle_close_deferred = true;
+                open->doc_close_started     = 1;
                 if (open->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) {
                     open->doc_stream_close_started = 1;
                 }
@@ -1382,9 +1399,6 @@ smb_close_compound_publish(
                 chimera_smb_open_namespace_detach(open);
                 if (tree->share) {
                     chimera_smb_sharemode_release(&tree->share->sharemode, open);
-                }
-                if (handle) {
-                    chimera_vfs_release(thread->vfs_thread, handle);
                 }
                 chimera_smb_open_file_release(command->request, open);
             }
@@ -1590,13 +1604,10 @@ chimera_smb_close_range_tick(
     chimera_smb_close_after_range(request);
 } /* chimera_smb_close_range_tick */
 
-struct chimera_vfs_open_handle;
 static void
-chimera_smb_close_doc_open_parent_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data);
-
+chimera_smb_close_doc_remove_callback(
+    struct chimera_vfs_compound *compound,
+    void                        *private_data);
 
 static void
 chimera_smb_close_stream_done(
@@ -1615,11 +1626,28 @@ chimera_smb_close_finish_doc(void *private_data)
         return;
     }
     if (request->close.doc_info.parent_fh_len) {
-        chimera_vfs_open_fh(request->compound->thread->vfs_thread,
-                            &request->close.doc_info.cred, request->close.doc_info.parent_fh,
-                            request->close.doc_info.parent_fh_len,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                            chimera_smb_close_doc_open_parent_callback, request);
+        struct chimera_vfs_compound *compound = chimera_vfs_compound_alloc(
+            request->compound->thread->vfs_thread, &request->close.doc_info.cred);
+        struct chimera_claim_actor   actor = {
+            .owner     = chimera_smb_open_actor_owner(request->close.open_file),
+            .op_handle = request->close.open_file->handle,
+        };
+        chimera_vfs_compound_add_putfh(compound, request->close.doc_info.parent_fh,
+                                       request->close.doc_info.parent_fh_len);
+        int                          op = chimera_vfs_compound_add_remove(compound, request->close.doc_info.name,
+                                                                          request->close.doc_info.name_len, 0, 0, 0);
+        /* Only spare the directory lease carried by the deleting open; a
+         * different last closer must invalidate every cached directory view. */
+        chimera_vfs_compound_op_set_remove_match(compound, op, request->close.doc_info.target_fh,
+                                                 request->close.doc_info.target_fh_len, 1,
+                                                 request->close.doc_skip_parent ?
+                                                 request->close.doc_parent_lease_key : NULL);
+        if (op >= 0) {
+            struct chimera_vfs_compound_op *args = chimera_vfs_compound_op_args(compound, op);
+            args->io_owner      = actor;
+            args->have_io_owner = true;
+        }
+        chimera_frontend_compound_submit(compound, chimera_smb_close_doc_remove_callback, request);
     } else {
         chimera_smb_doc_finish(request->compound->thread->vfs_thread,
                                &request->close.doc_info);
@@ -1628,74 +1656,6 @@ chimera_smb_close_finish_doc(void *private_data)
                                      chimera_smb_close_doc_status(request->close.stream_delete_status));
     }
 } /* chimera_smb_close_finish_doc */
-
-struct chimera_vfs_attrs;
-static void
-chimera_smb_close_doc_remove_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data);
-
-static void
-chimera_smb_close_doc_open_parent_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_smb_request *request    = private_data;
-    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        /* Cannot open parent directory — skip deletion, but still close backend */
-        chimera_smb_debug("delete-on-close: failed to open parent dir for '%.*s' (error %d)",
-                          request->close.doc_info.name_len,
-                          request->close.doc_info.name,
-                          error_code);
-
-        chimera_smb_doc_finish(vfs_thread, &request->close.doc_info);
-
-        chimera_smb_open_file_release(request, request->close.open_file);
-        chimera_smb_complete_request(request, chimera_smb_close_doc_status(
-                                         request->close.stream_delete_status != CHIMERA_VFS_OK ?
-                                         request->close.stream_delete_status : error_code));
-        return;
-    }
-
-    request->close.parent_handle = oh;
-
-    /* Self-exempt a directory lease ONLY when the handle being closed here is the
-     * one that carried delete-on-close: its ParentLeaseKey names the directory
-     * lease whose cached view is coherent with the removal it caused, so spare it
-     * (dirlease.unlink_same_*).  When the last handle to close is NOT the one that
-     * set delete-on-close (a different open triggers the actual removal), the set
-     * and closing parent keys differ, so no lease is spared and ALL directory
-     * leases break (MS-SMB2; dirlease.unlink_different_*). */
-    const uint8_t             *unlink_skip = NULL;
-
-    if (request->close.doc_skip_parent) {
-        unlink_skip = request->close.doc_parent_lease_key;
-    }
-
-    struct chimera_claim_actor actor = {
-        .owner     = chimera_smb_open_actor_owner(request->close.open_file),
-        .op_handle = request->close.open_file->handle,
-    };
-    chimera_vfs_remove_at_match_fh_actor(
-        vfs_thread,
-        &request->close.doc_info.cred,
-        oh,
-        request->close.doc_info.name,
-        request->close.doc_info.name_len,
-        request->close.doc_info.target_fh,
-        request->close.doc_info.target_fh_len,
-        0,
-        0,
-        unlink_skip,
-        &actor,
-        chimera_smb_close_doc_remove_callback,
-        request);
-} /* chimera_smb_close_doc_open_parent_callback */
 
 static void
 chimera_smb_close_stream_done(
@@ -1710,13 +1670,12 @@ chimera_smb_close_stream_done(
 
 static void
 chimera_smb_close_doc_remove_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
+    struct chimera_vfs_compound *compound,
+    void                        *private_data)
 {
     struct chimera_smb_request *request    = private_data;
     struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+    enum chimera_vfs_error      error_code = chimera_vfs_compound_status(compound);
 
     if (error_code) {
         chimera_smb_debug("delete-on-close: remove_at failed for '%.*s' (error %d)",
@@ -1725,7 +1684,7 @@ chimera_smb_close_doc_remove_callback(
                           error_code);
     }
 
-    chimera_vfs_release(vfs_thread, request->close.parent_handle);
+    chimera_vfs_compound_free(compound);
 
     /* Close the backend VFS module handle that was detached from the cache */
     chimera_smb_doc_finish(vfs_thread, &request->close.doc_info);

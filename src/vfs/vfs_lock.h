@@ -25,6 +25,12 @@ struct chimera_vfs_lock_request {
     uint8_t                    type; /* CHIMERA_VFS_LOCK_READ/WRITE/UNLOCK */
     bool                       wait;
     bool                       project_backend;
+    bool                       fail_on_recall; /* nonblocking NLM also refuses cache breaks */
+    /* Explicit coordination, on the submitting worker, when admission queues.
+     * May send an interim reply; never a final grant. Can recur after retry. */
+    void                       (*on_wait)(
+        void *);
+    void                      *wait_private;
 };
 
 struct chimera_vfs_lock_domain * chimera_vfs_lock_domain_create(
@@ -42,6 +48,21 @@ uint64_t chimera_vfs_lock_domain_admit(
     struct chimera_vfs_lock_domain   *domain,
     struct chimera_vfs_open_handle   *handle,
     const struct chimera_claim_owner *owner);
+/* Local arbitration admission before an asynchronous bookkeeping OPEN. */
+uint64_t chimera_vfs_lock_domain_admit_fh(
+    struct chimera_vfs_lock_domain   *domain,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    const struct chimera_claim_owner *owner);
+/* Client recovery cutoff for a local-only domain. Invalidates pending opens
+ * and attempts as well as accepted coverage; future admissions use new epochs. */
+void chimera_vfs_lock_domain_retire_all(
+    struct chimera_vfs_lock_domain *domain);
+bool chimera_vfs_lock_domain_has_locks(
+    struct chimera_vfs_lock_domain   *domain,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    const struct chimera_claim_owner *owner);
 /* Mandatory close cutoff, callable from any thread; no inline completion.
  * Local standing ranges retire immediately. Backend releases are drained by
  * LOCK_RELEASE_OWNER on an owning worker. New admissions receive a new epoch. */
@@ -58,7 +79,8 @@ void chimera_vfs_lock_domain_shutdown(
     struct chimera_vfs_lock_domain *domain);
 
 /* Initial typed-lock scope is a dedicated compound containing exactly one
- * lock operation, optionally preceded by PUTFH/PUTHANDLE cursor seeds.
+ * lock operation, optionally preceded by PUTFH/PUTHANDLE cursor seeds or the
+ * local bookkeeping-open prefix constructed by add_lock_change_fh.
  * Mutation plus unrelated filesystem operations is rejected before dispatch. */
 int chimera_vfs_compound_add_lock_test(
     struct chimera_vfs_compound           *compound,
@@ -69,6 +91,17 @@ int chimera_vfs_compound_add_lock_change(
     struct chimera_vfs_compound           *compound,
     struct chimera_vfs_lock_domain        *domain,
     struct chimera_vfs_open_handle        *handle,
+    const struct chimera_vfs_lock_request *request);
+/* Local-only PUTFH, OPEN_CURRENT, GETHANDLE, LOCK_CHANGE. The attempt is reserved during
+ * construction, so cancellation/retirement also covers the pending OPEN.
+ * UNLOCK only needs PUTFH, LOCK_CHANGE: retiring local coverage must also work
+ * for a stale/unlinked backend object. For acquisitions, GETHANDLE is operation 2 and can be taken after accepted completion.
+ * No filesystem mutations may accompany this dedicated locking compound. */
+int chimera_vfs_compound_add_lock_change_fh(
+    struct chimera_vfs_compound           *compound,
+    struct chimera_vfs_lock_domain        *domain,
+    const uint8_t                         *fh,
+    uint32_t                               fh_len,
     const struct chimera_vfs_lock_request *request);
 int chimera_vfs_compound_add_lock_release_owner(
     struct chimera_vfs_compound      *compound,
@@ -93,6 +126,16 @@ struct chimera_vfs_lock_attempt * chimera_vfs_lock_attempt_alloc(
     const struct chimera_vfs_lock_request *request,
     bool                                   test,
     bool                                   release);
+struct chimera_vfs_lock_attempt * chimera_vfs_lock_attempt_alloc_fh(
+    struct chimera_vfs_thread             *thread,
+    struct chimera_vfs_lock_domain        *domain,
+    const uint8_t                         *fh,
+    uint32_t                               fh_len,
+    const struct chimera_vfs_lock_request *request);
+bool chimera_vfs_lock_attempt_matches_fh(
+    struct chimera_vfs_lock_attempt *attempt,
+    const uint8_t                   *fh,
+    uint32_t                         fh_len);
 void chimera_vfs_lock_attempt_execute(
     struct chimera_vfs_lock_attempt *attempt,
     bool finish_adapter,

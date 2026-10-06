@@ -79,40 +79,6 @@ nfs4_root_getattr(
  * walk is one op rather than a chain because the path IS one call -- the VFS
  * has always had the multi-component form, and the sequence is how a caller
  * reaches it without holding the root handle itself. */
-#define NFS4_ROOT_EXPORT_LOOKUP_OP 1
-
-static void
-nfs4_root_lookup_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct nfs_request                   *req = private_data;
-    nfsstat4                              status;
-    const struct chimera_vfs_compound_op *vop;
-    struct LOOKUP4res                    *res =
-        &req->res_compound.resarray[req->index].oplookup;
-
-    status = chimera_nfs4_errno_to_nfsstat4(
-        chimera_vfs_compound_status(compound));
-
-    if (status == NFS4_OK) {
-        vop = chimera_vfs_compound_op(compound,
-                                      NFS4_ROOT_EXPORT_LOOKUP_OP);
-
-        if (vop->fh_len) {
-            memcpy(req->fh, vop->fh, vop->fh_len);
-            req->fhlen = (int) vop->fh_len;
-        } else {
-            status = NFS4ERR_SERVERFAULT;
-        }
-    }
-
-    res->status = status;
-
-    chimera_vfs_compound_free(compound);
-
-    chimera_nfs4_compound_complete(req, status);
-} /* nfs4_root_lookup_complete */
 
 SYMBOL_EXPORT void
 nfs4_root_lookup_export(
@@ -121,8 +87,18 @@ nfs4_root_lookup_export(
     const struct chimera_nfs_export  *export,
     const char                       *full_path)
 {
-    struct LOOKUP4res           *res = &req->res_compound.resarray[req->index].oplookup;
-    struct chimera_vfs_compound *compound;
+    struct LOOKUP4res        *res = &req->res_compound.resarray[req->index].oplookup;
+    struct chimera_nfs_export snapshot;
+
+    /* Name lookup may have returned a live record. Keep a locked copy of its
+     * policy across asynchronous work and reject a replaced export. */
+    if (chimera_nfs_get_export_copy(nfs_thread->shared, export->name, &snapshot) != 0 ||
+        snapshot.id != export->id || strcmp(snapshot.path, export->path)) {
+        res->status = NFS4ERR_DELAY;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+    export = &snapshot;
 
     /* Enforce the export's security-flavor policy at the namespace-root
      * boundary: a client traversing into the export under a disallowed flavor
@@ -132,10 +108,6 @@ nfs4_root_lookup_export(
         chimera_nfs4_compound_complete(req, NFS4ERR_WRONGSEC);
         return;
     }
-
-    /* Entering an export: adopt its id (so the handle minted for the client
-     * carries it) and apply its squash policy. */
-    chimera_nfs_set_export(req, export);
 
     while (full_path[0] == '/') {
         full_path++;
@@ -147,16 +119,7 @@ nfs4_root_lookup_export(
         return;
     }
 
-    req->handle = NULL; // Ensure handle is NULL so that the lookup callback does not attempt to release it
-
-    compound = chimera_vfs_compound_alloc(nfs_thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putroot(compound);
-    chimera_vfs_compound_add_lookup_path(compound, full_path,
-                                         (int) strlen(full_path),
-                                         CHIMERA_VFS_ATTR_FH, 0);
-
-    chimera_vfs_compound_submit(compound, nfs4_root_lookup_complete, req);
+    chimera_nfs4_compound_export(nfs_thread, req, export, full_path);
 } /* nfs4_root_lookup_export */
 
 SYMBOL_EXPORT void
@@ -192,153 +155,10 @@ nfs4_root_lookup(
     free(full_path);
 } /* nfs4_root_lookup */
 
-/*
- * "/" (root) export FH resolution.
- *
- * When a "/" export exists the NFSv4 namespace root is that export's real
- * backend directory.  Its FH is needed in two places: PUTROOTFH installs it
- * as the current FH, and LOOKUP/LOOKUPP/SECINFO must recognize "the current
- * FH is the namespace root" to graft sibling exports over it as junctions.
- * The resolved FH is cached in shared state (root_export_fh, guarded by
- * exports_lock) keyed by the export's id, so the recognizers are a memcmp in
- * the steady state; the cache is primed by whichever caller needs it first
- * and is invalidated by removal of the "/" export (id mismatch covers
- * re-addition, which assigns a fresh id).
- *
- * Resolution runs with the requesting client's (squashed) credential, the
- * same choice the v3 MOUNT path makes, and follows symlinks in the export
- * path as v3 MOUNT does.
- */
-
-struct nfs4_root_export_fh_ctx {
-    struct chimera_server_nfs_thread *thread;
-    struct nfs_request               *req;
-    nfs4_root_export_fh_callback_t    callback;
-    uint16_t                          export_id;
-};
-
-static void
-nfs4_root_export_fh_resolve_complete(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct nfs4_root_export_fh_ctx       *ctx    = private_data;
-    struct chimera_server_nfs_shared     *shared = ctx->thread->shared;
-    const struct chimera_vfs_compound_op *vop;
-    enum chimera_vfs_error                error_code;
-    uint8_t                               fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                              fh_len = 0;
-
-    error_code = chimera_vfs_compound_status(compound);
-
-    if (error_code == CHIMERA_VFS_OK) {
-        vop = chimera_vfs_compound_op(compound, NFS4_ROOT_EXPORT_LOOKUP_OP);
-
-        if (vop->fh_len) {
-            memcpy(fh, vop->fh, vop->fh_len);
-            fh_len = vop->fh_len;
-        } else {
-            error_code = CHIMERA_VFS_EIO;
-        }
-    }
-
-    chimera_vfs_compound_free(compound);
-
-    if (error_code != CHIMERA_VFS_OK) {
-        ctx->callback(error_code, NULL, 0, ctx->thread, ctx->req);
-        free(ctx);
-        return;
-    }
-
-    evpl_mutex_lock(&shared->exports_lock);
-    /* Prime the cache unless the "/" export changed while the resolve was in
-     * flight; a stale prime would mis-recognize the old root. */
-    if (shared->root_export_id == ctx->export_id) {
-        memcpy(shared->root_export_fh, fh, fh_len);
-        shared->root_export_fh_len = fh_len;
-        shared->root_export_fh_id  = ctx->export_id;
-    }
-    evpl_mutex_unlock(&shared->exports_lock);
-
-    ctx->callback(CHIMERA_VFS_OK, fh, fh_len, ctx->thread, ctx->req);
-    free(ctx);
-} /* nfs4_root_export_fh_resolve_complete */
-
-SYMBOL_EXPORT void
-nfs4_root_export_fh_resolve(
-    struct chimera_server_nfs_thread *thread,
-    struct nfs_request               *req,
-    nfs4_root_export_fh_callback_t    callback)
-{
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct chimera_nfs_export        *cur, root_export;
-    struct nfs4_root_export_fh_ctx   *ctx;
-    struct chimera_vfs_compound      *compound;
-    uint8_t                           fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                          fh_len;
-    uint16_t                          root_id;
-    int                               found = 0;
-    const char                       *path;
-
-    evpl_mutex_lock(&shared->exports_lock);
-    root_id = shared->root_export_id;
-
-    if (root_id != 0) {
-        LL_FOREACH(shared->exports, cur)
-        {
-            if (cur->id == root_id) {
-                root_export = *cur;
-                found       = 1;
-                break;
-            }
-        }
-    }
-    evpl_mutex_unlock(&shared->exports_lock);
-
-    if (!found) {
-        callback(CHIMERA_VFS_ENOENT, NULL, 0, thread, req);
-        return;
-    }
-
-    path = root_export.path;
-    while (path[0] == '/') {
-        path++;
-    }
-
-    chimera_vfs_get_root_fh(thread->vfs_thread->vfs, fh, &fh_len);
-
-    if (path[0] == '\0') {
-        /* The "/" export's path is the VFS root itself; nothing to resolve. */
-        evpl_mutex_lock(&shared->exports_lock);
-        if (shared->root_export_id == root_id) {
-            memcpy(shared->root_export_fh, fh, fh_len);
-            shared->root_export_fh_len = fh_len;
-            shared->root_export_fh_id  = root_id;
-        }
-        evpl_mutex_unlock(&shared->exports_lock);
-        callback(CHIMERA_VFS_OK, fh, fh_len, thread, req);
-        return;
-    }
-
-    ctx = calloc(1, sizeof(*ctx));
-    chimera_nfs_abort_if(ctx == NULL, "Failed to allocate root export fh context");
-
-    ctx->thread    = thread;
-    ctx->req       = req;
-    ctx->callback  = callback;
-    ctx->export_id = root_id;
-
-    compound = chimera_vfs_compound_alloc(thread->vfs_thread, &req->cred);
-
-    chimera_vfs_compound_add_putroot(compound);
-    chimera_vfs_compound_add_lookup_path(compound, path, (int) strlen(path),
-                                         CHIMERA_VFS_ATTR_FH,
-                                         CHIMERA_VFS_LOOKUP_FOLLOW);
-
-    chimera_vfs_compound_submit(compound,
-                                nfs4_root_export_fh_resolve_complete, ctx);
-} /* nfs4_root_export_fh_resolve */
-
+/* The namespace root cache is published only after the shared encoder accepts
+ * resolution against an unchanged export snapshot. Removing an export clears
+ * the cache; an in-flight resolution also checks path and policy, since callers
+ * may explicitly reuse the removed export's id. */
 SYMBOL_EXPORT void
 nfs4_root_export_fh_get(
     struct chimera_server_nfs_thread *thread,
@@ -369,41 +189,8 @@ nfs4_root_export_fh_get(
         return;
     }
 
-    nfs4_root_export_fh_resolve(thread, req, callback);
+    chimera_nfs4_compound_root_resolve(thread, req, callback);
 } /* nfs4_root_export_fh_get */
-
-SYMBOL_EXPORT int
-nfs4_root_export_fh_peek(
-    struct chimera_server_nfs_thread *thread,
-    uint16_t                          export_id,
-    const uint8_t                    *fh,
-    uint32_t                          fh_len)
-{
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    uint16_t                          root_id;
-    int                               answer;
-
-    /* The same lockless gate nfs4_root_junction_check opens with, and for the
-     * same reason: a handle can only BE the namespace root if it was minted
-     * under the "/" export. */
-    root_id = shared->root_export_id;
-
-    if (root_id == 0 || export_id != root_id) {
-        return 0;
-    }
-
-    evpl_mutex_lock(&shared->exports_lock);
-
-    if (shared->root_export_fh_id == root_id && shared->root_export_fh_len) {
-        answer = (shared->root_export_fh_len == fh_len &&
-                  memcmp(shared->root_export_fh, fh, fh_len) == 0);
-    } else {
-        answer = -1;
-    }
-    evpl_mutex_unlock(&shared->exports_lock);
-
-    return answer;
-} /* nfs4_root_export_fh_peek */
 
 static void
 nfs4_root_junction_check_fh_ready(
@@ -417,6 +204,13 @@ nfs4_root_junction_check_fh_ready(
     int                         at_root;
 
     req->root_junction_resume = NULL;
+
+    if (error_code == CHIMERA_VFS_EAGAIN) {
+        nfs4_fail_undispatched_op(thread, &req->args_compound->argarray[req->index],
+                                  &req->res_compound.resarray[req->index], NFS4ERR_DELAY);
+        chimera_nfs4_compound_complete(req, NFS4ERR_DELAY);
+        return;
+    }
 
     /* A root FH that cannot be resolved just means the junction view is
      * unavailable; the op proceeds as an ordinary VFS operation. */
@@ -450,10 +244,10 @@ nfs4_root_junction_check(
  * Pseudo-fs root READDIR.
  *
  * Each entry's attributes require resolving the export's backing path, a
- * PUTROOT and a LOOKUP_PATH that complete asynchronously, so the exports are
- * walked one at a time by a state machine: issue the lookup for the current
- * export, marshal its attrs in the completion callback, then advance to the
- * next export, and complete the compound only after the walk finishes.
+ * PUTROOT and a LOOKUP_PATH. All entries fitting one response page contribute
+ * their operations to the shared compound. Attribute callbacks stage private
+ * reply bytes, and accepted completion publishes the page. Retry runs every
+ * lookup and overwrites every attribute result before a page can be accepted.
  *
  * The export list is snapshotted up front (under exports_lock, inside
  * chimera_nfs_iterate_exports) because exports may be removed via the REST
@@ -479,24 +273,21 @@ nfs4_root_junction_check(
  */
 
 struct nfs4_root_readdir_export {
-    char    *name;  /* leading '/' stripped, validated single component */
-    char    *path;
-    uint16_t id;
+    char                           *name; /* leading '/' stripped, validated single component */
+    char                           *path;
+    uint16_t                        id;
+    uint64_t                        cookie;
+    struct nfs4_root_readdir_state *state;
 };
 
 struct nfs4_root_readdir_state {
     struct nfs_request              *req;
-    struct chimera_vfs_thread       *vfs_thread;
-    uint64_t                         attrmask;
+    struct READDIR4args             *args;
+    nfsstat4                        *verify_status;
     struct nfs4_root_readdir_export *exports;
     int                              num_exports;
-    int                              pos;         /* current snapshot position */
-    int                              first_pos;   /* resume position from args->cookie */
-    struct entry4                   *entry;       /* entry awaiting its lookup */
-    uint32_t                         dbuf_before; /* dbuf watermark for rollback */
-    enum chimera_vfs_error error_code;
-    int                              in_advance;  /* advance() loop is on the stack */
-    int                              lookup_done; /* current lookup completed synchronously */
+    struct nfs_nfs4_readdir_cursor   cursor;
+    bool                             eof, planned_eof, page_full;
 };
 
 struct nfs4_root_readdir_snap {
@@ -552,274 +343,205 @@ nfs4_root_readdir_snap_cb(
     return 0;
 } /* nfs4_root_readdir_snap_cb */
 
-static void
-nfs4_root_readdir_exports_free(
-    struct nfs4_root_readdir_export *exports,
-    int                              count)
+void
+nfs4_root_readdir_free(struct nfs4_root_readdir_state *state)
 {
-    int i;
-
-    for (i = 0; i < count; i++) {
-        free(exports[i].name);
-        free(exports[i].path);
-    }
-
-    free(exports);
-} /* nfs4_root_readdir_exports_free */
-
-static void
-nfs4_root_readdir_finish(struct nfs4_root_readdir_state *state)
-{
-    struct nfs_request             *req    = state->req;
-    struct READDIR4res             *res    = &req->res_compound.resarray[req->index].opreaddir;
-    struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
-    int                             eof    = 1;
-
-    if (state->error_code == CHIMERA_VFS_EOVERFLOW) {
-        /* Overflow means there are more entries to be read */
-        eof = 0;
-        if (cursor->entries == NULL) {
-            /* RFC 7530 §16.24.4: not even one entry fit in maxcount and we
-             * are not at end-of-directory.  Returning an empty, non-eof page
-             * would stall a paging client. */
-            res->status = NFS4ERR_TOOSMALL;
-        }
-    } else if (state->error_code != CHIMERA_VFS_OK) {
-        chimera_nfs_error("Error iterating exports for readdir: %d", state->error_code);
-        res->status = chimera_nfs4_errno_to_nfsstat4(state->error_code);
-    }
-
-    /* The pseudo-root export list has no change verifier; cookies are
-     * positional and best-effort across list mutations. */
-    memset(res->resok4.cookieverf, 0, sizeof(res->resok4.cookieverf));
-
-    res->resok4.reply.eof     = eof;
-    res->resok4.reply.entries = res->status == NFS4_OK ? cursor->entries : NULL;
-
-    nfs4_root_readdir_exports_free(state->exports, state->num_exports);
-
-    chimera_nfs4_compound_complete(req, res->status);
-
-    free(state);
-} /* nfs4_root_readdir_finish */
-
-static void nfs4_root_readdir_advance(
-    struct nfs4_root_readdir_state *state);
-
-static void
-nfs4_root_readdir_lookup_callback(
-    struct chimera_vfs_compound *compound,
-    void                        *private_data)
-{
-    struct nfs4_root_readdir_state       *state  = private_data;
-    struct nfs_request                   *req    = state->req;
-    struct READDIR4args                  *args   = &req->args_compound->argarray[req->index].opreaddir;
-    struct nfs_nfs4_readdir_cursor       *cursor = &req->readdir4_cursor;
-    struct entry4                        *entry  = state->entry;
-    const struct chimera_vfs_compound_op *vop;
-    struct chimera_vfs_attrs             *attrs;
-    enum chimera_vfs_error                error_code;
-    uint32_t                              dbuf_cur;
-
-    state->lookup_done = 1;
-
-    error_code = chimera_vfs_compound_status(compound);
-    vop        = chimera_vfs_compound_op(compound,
-                                         NFS4_ROOT_EXPORT_LOOKUP_OP);
-    /* The op owns its attribute copies -- an ACL among them -- until the
-     * compound is freed, so the marshalling below runs first and the free is
-     * the last thing this callback does with the sequence. */
-    attrs = (struct chimera_vfs_attrs *) &vop->attr;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        /* An export root that fails to resolve (deleted directory, config
-         * typo, momentarily unavailable backend) is a routine condition, not
-         * a server fault.  Surface it as an NFS4ERR_* READDIR status instead
-         * of aborting the whole process (RFC 7530 §16.24 / RFC 8881 §18.23:
-         * report errors as status). */
-        req->encoding->dbuf->used = state->dbuf_before;
-        state->error_code         = error_code;
-    } else {
-        chimera_nfs4_marshall_attrs(attrs,
-                                    args->num_attr_request,
-                                    args->attr_request,
-                                    &entry->attrs.num_attrmask,
-                                    entry->attrs.attrmask,
-                                    3,
-                                    entry->attrs.attr_vals.data,
-                                    &entry->attrs.attr_vals.len,
-                                    256,
-                                    0,
-                                    0, /* pNFS not advertised on the pseudo-fs root */
-                                    0, /* pseudo-fs root has no xattr-capable backend */
-                                    0,
-                                    req->thread->shared->nfs_lease_time_s,
-                                    state->exports[state->pos].id,
-                                    req->thread->shared->fh_key,
-                                    req->thread->shared->fh_sign,
-                                    0); /* pseudo-fs root: no named-attr type override */
-
-        dbuf_cur = req->encoding->dbuf->used - state->dbuf_before;
-
-        if (cursor->count + dbuf_cur > args->maxcount ||
-            req->encoding->dbuf->used + 8192 > (uint32_t) req->encoding->dbuf->size) {
-            req->encoding->dbuf->used = state->dbuf_before;
-            state->error_code         = CHIMERA_VFS_EOVERFLOW;
-        } else {
-            cursor->count += dbuf_cur;
-
-            if (cursor->entries) {
-                cursor->last->nextentry = entry;
-                cursor->last            = entry;
-            } else {
-                cursor->entries = entry;
-                cursor->last    = entry;
-            }
-            state->pos++;
-        }
-    }
-
-    chimera_vfs_compound_free(compound);
-
-    /* If the lookup completed synchronously the advance() loop is still on
-     * the stack and continues the walk itself; re-entering it here would
-     * recurse once per export. */
-    if (!state->in_advance) {
-        nfs4_root_readdir_advance(state);
-    }
-} /* nfs4_root_readdir_lookup_callback */
-
-static void
-nfs4_root_readdir_advance(struct nfs4_root_readdir_state *state)
-{
-    struct nfs_request              *req = state->req;
-    struct nfs4_root_readdir_export *export;
-    struct chimera_vfs_compound     *compound;
-    struct entry4                   *entry;
-    int                              rc;
-
-    state->in_advance = 1;
-
-    while (state->error_code == CHIMERA_VFS_OK && state->pos < state->num_exports) {
-
-        if (state->pos < state->first_pos) {
-            state->pos++;
-            continue;
-        }
-
-        export             = &state->exports[state->pos];
-        state->dbuf_before = req->encoding->dbuf->used;
-
-        /* allocate a new entry and populate it with the export name */
-        entry = xdr_dbuf_alloc_space(sizeof(*entry), req->encoding->dbuf);
-        if (!entry) {
-            state->error_code = CHIMERA_VFS_EOVERFLOW;
-            break;
-        }
-
-        rc = xdr_dbuf_opaque_copy(&entry->name, export->name, strlen(export->name), req->encoding->dbuf);
-        if (rc) {
-            req->encoding->dbuf->used = state->dbuf_before;
-            state->error_code         = CHIMERA_VFS_EOVERFLOW;
-            break;
-        }
-
-        /* Resuming with this cookie skips every export up to and including
-         * this one; the bias keeps clear of reserved cookies 0-2.  Paired with
-         * nfs4_root_readdir_cookie_first_pos, which inverts it. */
-        entry->cookie    = nfs4_root_readdir_pos_cookie(state->pos);
-        entry->nextentry = NULL;
-
-        rc = xdr_dbuf_alloc_array(&entry->attrs, attrmask, 3, req->encoding->dbuf);
-        if (rc) {
-            req->encoding->dbuf->used = state->dbuf_before;
-            state->error_code         = CHIMERA_VFS_EOVERFLOW;
-            break;
-        }
-
-        /* Per-entry attribute buffer.  test_pseudo_root sizes its export list
-         * off this to force a multi-page listing; shrinking it means raising
-         * that test's PSEUDO_ROOT_MAX_PAGE_ENTRIES too, or its page-boundary
-         * coverage lapses. */
-        rc = xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals,
-                                   256,
-                                   req->encoding->dbuf);
-        if (rc) {
-            req->encoding->dbuf->used = state->dbuf_before;
-            state->error_code         = CHIMERA_VFS_EOVERFLOW;
-            break;
-        }
-
-        state->entry       = entry;
-        state->lookup_done = 0;
-
-        compound = chimera_vfs_compound_alloc(state->vfs_thread, &req->cred);
-
-        chimera_vfs_compound_add_putroot(compound);
-        chimera_vfs_compound_add_lookup_path(compound, export->path,
-                                             (int) strlen(export->path),
-                                             CHIMERA_VFS_ATTR_FH |
-                                             state->attrmask, 0);
-
-        chimera_vfs_compound_submit(compound,
-                                    nfs4_root_readdir_lookup_callback, state);
-
-        if (!state->lookup_done) {
-            /* Lookup is in flight; its callback resumes the walk. */
-            state->in_advance = 0;
-            return;
-        }
-    }
-
-    state->in_advance = 0;
-
-    nfs4_root_readdir_finish(state);
-} /* nfs4_root_readdir_advance */
-
-SYMBOL_EXPORT void
-nfs4_root_readdir(
-    struct chimera_server_nfs_thread *nfs_thread,
-    struct nfs_request               *req)
-{
-    struct READDIR4args              *args   = &req->args_compound->argarray[req->index].opreaddir;
-    struct chimera_server_nfs_shared *shared = nfs_thread->shared;
-    struct READDIR4res               *res    = &req->res_compound.resarray[req->index].opreaddir;
-    struct nfs_nfs4_readdir_cursor   *cursor;
-    struct nfs4_root_readdir_state   *state;
-    struct nfs4_root_readdir_snap     snap      = { NULL, 0, 0 };
-    int                               first_pos = 0;
-
-    chimera_nfs_iterate_exports(shared, nfs4_root_readdir_snap_cb, &snap);
-
-    /* The valid cookie range depends on the export count, so the cookie is
-     * validated against the snapshot -- before any walk state is allocated. */
-    res->status = nfs4_root_readdir_cookie_first_pos(args->cookie, snap.count,
-                                                     &first_pos);
-
-    if (res->status != NFS4_OK) {
-        nfs4_root_readdir_exports_free(snap.exports, snap.count);
-        chimera_nfs4_compound_complete(req, res->status);
+    if (!state) {
         return;
     }
+    for (int i = 0; i < state->num_exports; i++) {
+        free(state->exports[i].name);
+        free(state->exports[i].path);
+    }
+    free(state->exports);
+    free(state);
+} /* nfs4_root_readdir_free */
 
-    cursor                    = &req->readdir4_cursor;
-    res->resok4.reply.entries = NULL;
+void
+nfs4_root_readdir_reset(
+    struct nfs4_root_readdir_state *state,
+    uint64_t                        reply_reserve)
+{
+    if (!state) {
+        return;
+    }
+    memset(&state->cursor, 0, sizeof(state->cursor));
+    state->cursor.count         = 16;
+    state->cursor.reply_reserve = reply_reserve;
+    state->eof                  = state->planned_eof;
+    state->page_full            = false;
+} /* nfs4_root_readdir_reset */
 
-    cursor->count   = 256;
-    cursor->entries = NULL;
-    cursor->last    = NULL;
+void
+nfs4_root_readdir_fill(
+    const struct nfs4_root_readdir_state *state,
+    struct READDIR4res                   *res)
+{
+    /* Positional cookies retain their existing best-effort mutation semantics. */
+    memset(res->resok4.cookieverf, 0, sizeof(res->resok4.cookieverf));
+    res->resok4.reply.eof     = state->eof;
+    res->resok4.reply.entries = state->cursor.entries;
+} /* nfs4_root_readdir_fill */
 
-    state = calloc(1, sizeof(*state));
-    chimera_nfs_abort_if(state == NULL, "Failed to allocate readdir state");
+static void
+nfs4_root_readdir_prepare(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct nfs4_root_readdir_export  *entry  = private_data;
+    struct chimera_server_nfs_shared *shared = entry->state->req->thread->shared;
 
-    state->req         = req;
-    state->vfs_thread  = nfs_thread->vfs_thread;
-    state->exports     = snap.exports;
-    state->num_exports = snap.count;
-    state->first_pos   = first_pos;
-    state->error_code  = CHIMERA_VFS_OK;
-    state->attrmask    = chimera_nfs4_attr2mask(args->attr_request,
-                                                args->num_attr_request);
+    /* Refuse an entry whose fixed wire fields cannot fit before resolving
+    * its backing export. Attribute bytes are checked after the lookup. */
+    uint64_t                          minimum = 24 + ((strlen(entry->name) + 3) & ~(size_t) 3);
 
-    nfs4_root_readdir_advance(state);
-} /* nfs4_root_readdir */
+    if (entry->state->page_full ||
+        entry->state->cursor.count + minimum > entry->state->args->maxcount) {
+        entry->state->page_full = true;
+        entry->state->eof       = false;
+        chimera_vfs_compound_op_skip(compound, index);
+        return;
+    }
+    /* A rejected finish must not replay a removed or repointed export and
+     * mint its old object's handle under a reused export id. */
+    evpl_mutex_lock(&shared->exports_lock);
+    const struct chimera_nfs_export *current = shared->exports_by_id[entry->id];
+    const char                      *name    = current ? current->name : "";
+    while (*name == '/') {
+        name++;
+    }
+    bool                             valid = current && !strcmp(name, entry->name) && !strcmp(current->path, entry->
+                                                                                              path);
+    evpl_mutex_unlock(&shared->exports_lock);
+    if (!valid) {
+        *entry->state->verify_status = NFS4ERR_DELAY;
+        *status                      = CHIMERA_VFS_EAGAIN;
+    }
+} /* nfs4_root_readdir_prepare */
+
+static void
+nfs4_root_readdir_lookup_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct nfs4_root_readdir_export      *export = private_data;
+    struct nfs4_root_readdir_state       *state  = export->state;
+    struct nfs_request                   *req    = state->req;
+    const struct chimera_vfs_compound_op *vop    = chimera_vfs_compound_op(compound, index);
+
+    if (*status != CHIMERA_VFS_OK || vop->skipped) {
+        return;
+    }
+    struct chimera_vfs_attrs              attrs = vop->attr;
+    if (!(attrs.va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        memcpy(attrs.va_fh, vop->fh, vop->fh_len);
+        attrs.va_fh_len    = vop->fh_len;
+        attrs.va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    }
+    /* Marshal while backend-owned attributes, including ACLs, are valid.
+     * Page limits count actual wire bytes; arena limits retain the enclosing
+     * compound's pending fixed results. A retry rebuilds this private page. */
+    if (chimera_nfs4_readdir_entry_fill(req, export->id, state->args, &state->cursor,
+                                        NULL, 0, export->cookie, export->name, strlen(export->name), &attrs)) {
+        state->eof       = false;
+        state->page_full = true;
+    }
+} /* nfs4_root_readdir_lookup_complete */
+
+static void
+nfs4_root_readdir_complete(
+    struct chimera_vfs_compound *compound,
+    uint32_t                     index,
+    enum chimera_vfs_error      *status,
+    void                        *private_data)
+{
+    struct nfs4_root_readdir_state *state = private_data;
+
+    if (chimera_vfs_compound_op(compound, index)->skipped) {
+        return;
+    }
+    if (*status == CHIMERA_VFS_OK && !state->eof && !state->cursor.entries) {
+        *state->verify_status = NFS4ERR_TOOSMALL;
+        *status               = CHIMERA_VFS_ERANGE;
+    }
+} /* nfs4_root_readdir_complete */
+
+int
+nfs4_root_readdir_add(
+    struct chimera_vfs_compound     *compound,
+    struct nfs_request              *req,
+    struct READDIR4args             *args,
+    struct nfs4_root_readdir_state **out,
+    nfsstat4                        *input_status,
+    nfsstat4                        *verify_status)
+{
+    struct nfs4_root_readdir_snap   snap  = { NULL, 0, 0 };
+    struct nfs4_root_readdir_state *state = calloc(1, sizeof(*state));
+    int                             first = 0;
+    uint64_t                        mask  = chimera_nfs4_attr2mask(args->attr_request, args->num_attr_request);
+
+    chimera_nfs_abort_if(!state, "Failed to allocate root readdir state");
+    *out = state;
+    chimera_nfs_iterate_exports(req->thread->shared, nfs4_root_readdir_snap_cb, &snap);
+    state->req           = req;
+    state->args          = args;
+    state->verify_status = verify_status;
+    state->exports       = snap.exports;
+    state->num_exports   = snap.count;
+    state->planned_eof   = true;
+    *input_status        = nfs4_root_readdir_cookie_first_pos(args->cookie, snap.count, &first);
+    if (*input_status != NFS4_OK) {
+        return chimera_vfs_compound_add_checkpoint(compound);
+    }
+
+    for (int pos = first; pos < snap.count; pos++) {
+        struct nfs4_root_readdir_export *export = &state->exports[pos];
+        const char                      *path   = export->path;
+        while (*path == '/') {
+            path++;
+        }
+        /* Build descriptors only. The runtime page stops at the first actual
+         * entry that does not fit; its suffix helpers then skip themselves. */
+        if (chimera_vfs_compound_num_ops(compound) + (*path ? 3 : 4) > CHIMERA_VFS_COMPOUND_MAX_OPS) {
+            state->planned_eof = false;
+            break;
+        }
+        export->cookie = nfs4_root_readdir_pos_cookie(pos);
+        export->state  = state;
+        int putroot = chimera_vfs_compound_add_putroot(compound);
+        if (putroot < 0) {
+            return -1;
+        }
+        chimera_vfs_compound_set_op_prepare(compound, putroot, nfs4_root_readdir_prepare, export);
+        int index;
+        if (*path) {
+            index = chimera_vfs_compound_add_lookup_path(compound, path, strlen(path),
+                                                         mask | CHIMERA_VFS_ATTR_FH, 0);
+        } else {
+            /* An empty path has no final component to supply LOOKUP attrs. */
+            index = chimera_vfs_compound_add_open(compound, NULL, 0,
+                                                  CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                                                  0, NULL, 0, 0, 0);
+            if (index < 0) {
+                return -1;
+            }
+            chimera_vfs_compound_set_op_prepare(compound, index, nfs4_root_readdir_prepare, export);
+            index = chimera_vfs_compound_add_getattr(compound, mask | CHIMERA_VFS_ATTR_FH);
+        }
+        if (index < 0) {
+            return -1;
+        }
+        chimera_vfs_compound_set_op_callbacks(compound, index,
+                                              nfs4_root_readdir_prepare,
+                                              nfs4_root_readdir_lookup_complete, export);
+    }
+    int checkpoint = chimera_vfs_compound_add_checkpoint(compound);
+    if (checkpoint >= 0) {
+        chimera_vfs_compound_set_op_callbacks(compound, checkpoint, NULL, nfs4_root_readdir_complete, state);
+    }
+    return checkpoint;
+} /* nfs4_root_readdir_add */

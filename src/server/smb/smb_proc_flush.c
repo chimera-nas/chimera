@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
+#include "common/compound_retry.h"
 #include "smb_procs.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
@@ -97,8 +98,8 @@ chimera_smb_flush(struct chimera_smb_request *request)
     chimera_vfs_compound_add_commit(request->vfs_compound, 0,
                                     0xffffffffffffffffULL, 0, 0);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_flush_sequence_complete, request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_flush_sequence_complete, request);
 } /* chimera_smb_ioctl */
 
 void

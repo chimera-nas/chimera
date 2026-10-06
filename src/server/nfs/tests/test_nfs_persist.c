@@ -1596,7 +1596,7 @@ test_nfs_drc_copy_results(void)
     iov[1].data   = b;
     iov[1].length = 16;
 
-    n = nfs_drc_copy_rpc_reply(iov,2,8,out,16);
+    n = nfs_drc_copy_rpc_reply(iov,2,8,NULL,out,16);
     CHECK(n == 16);
     CHECK(memcmp(out,b,16) == 0);
 
@@ -1609,13 +1609,33 @@ test_nfs_drc_copy_results(void)
     iov[2].data   = c;
     iov[2].length = 16;
 
-    n = nfs_drc_copy_rpc_reply(iov,3,10,out,26);
+    n = nfs_drc_copy_rpc_reply(iov,3,10,NULL,out,26);
     CHECK(n == 26);
     CHECK(memcmp(out,b + 6,10) == 0);
     CHECK(memcmp(out + 10,c,16) == 0);
 
     /* A destination too small is refused rather than truncated. */
-    CHECK(nfs_drc_copy_rpc_reply(iov,3,10,out,25) == 0);
+    CHECK(nfs_drc_copy_rpc_reply(iov,3,10,NULL,out,25) == 0);
+
+    /* Omitted odd payload split across vectors, inserted inside an inline
+     * vector. The padding must be restored before the remaining results. */
+    struct evpl_iovec           data[] = { { .data = (void*) "ABC",.length = 3 },
+                                           { .data = (void*) "DE", .length = 2 } };
+    struct evpl_rpc2_rdma_chunk chunk = {
+        .xdr_position = 7,.length = 5,.iov = data,.niov = 2,
+    };
+    n = nfs_drc_copy_rpc_reply(iov,3,10,&chunk,out,34);
+    CHECK(n == 34);
+    CHECK(memcmp(out,b + 6,7) == 0);
+    CHECK(memcmp(out + 7,"ABCDE\0\0\0",8) == 0);
+    CHECK(memcmp(out + 15,b + 13,3) == 0);
+    CHECK(memcmp(out + 18,c,16) == 0);
+    CHECK(nfs_drc_copy_rpc_reply(iov,3,10,&chunk,out,33) == 0);
+    chunk.niov = 1;
+    CHECK(nfs_drc_copy_rpc_reply(iov,3,10,&chunk,out,34) == 0);
+    chunk.niov         = 2;
+    chunk.xdr_position = 27;
+    CHECK(nfs_drc_copy_rpc_reply(iov,3,10,&chunk,out,34) == 0);
 
     printf("ok: nfs_drc_copy_results\n");
 } /* test_nfs_drc_copy_results */

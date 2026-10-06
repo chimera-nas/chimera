@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
+#include "common/compound_retry.h"
 #include "smb_procs.h"
 #include "smb_session.h"
 #include "vfs/vfs.h"
@@ -181,13 +182,15 @@ chimera_smb_write_sequence_complete(
     const struct chimera_vfs_compound_op *op;
     enum chimera_vfs_error                status;
 
-    /* The WRITE's own status, not the sequence's: a failed sticky-mtime restore
-     * behind a successful write is not a failed write, exactly as it was not
-     * when the restore was a call of its own. */
+    /* A failed sticky-mtime restore does not fail an accepted WRITE. A finish
+     * rejection does: none of the attempt's operation results were accepted. */
     op = chimera_vfs_compound_op(compound,
                                  (uint32_t) request->write.seq_write_idx);
 
-    status = op->status;
+    status = chimera_vfs_compound_finish_status(compound);
+    if (status == CHIMERA_VFS_OK) {
+        status = op->completed ? op->status : chimera_vfs_compound_status(compound);
+    }
 
     chimera_vfs_compound_free(compound);
     request->vfs_compound = NULL;
@@ -213,10 +216,8 @@ chimera_smb_write_submit(
 {
     struct chimera_vfs_attrs restore;
 
-    /* The handle this write runs on, captured once so the restore behind it
-     * acts on the same one the sequence borrowed: open_file->handle is not
-     * re-read, because a pipelined CLOSE on the same FileId NULLs it whether or
-     * not a write is in flight. */
+    /* The write and sticky-time restore borrow the same admitted handle.
+     * The open reference keeps it alive through CLOSE and compound retry. */
     request->write.handle = request->write.open_file->handle;
 
     request->vfs_compound = chimera_vfs_compound_alloc(
@@ -258,8 +259,8 @@ chimera_smb_write_submit(
                                       chimera_smb_write_gate, request);
     }
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_write_sequence_complete, request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_write_sequence_complete, request);
 } /* chimera_smb_write_submit */
 
 static void

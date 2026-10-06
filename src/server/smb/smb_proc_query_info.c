@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
+#include "common/compound_retry.h"
 #include "smb_doc_compound.h"
 #include "smb_procs.h"
 #include "smb_string.h"
@@ -354,8 +355,8 @@ chimera_smb_query_stream_info_default_callback(
     const struct chimera_vfs_attrs *attr,
     void                           *private_data)
 {
-    struct chimera_smb_request     *request = private_data;
-    struct chimera_vfs_stream_entry entry;
+    struct chimera_smb_request     *request     = private_data;
+    struct chimera_vfs_stream_entry entry       = { 0 };
     uint32_t                        records_len = 0;
     uint32_t                        count       = 0;
 
@@ -431,6 +432,9 @@ chimera_smb_query_stream_info_sequence_complete(
         op = chimera_vfs_compound_op(compound,
                                      chimera_vfs_compound_num_ops(compound) - 1);
 
+        if (!op->eof) {
+            status = CHIMERA_VFS_ERANGE;
+        }
         records_len = op->buffer_len;
         count       = op->buffer_count;
 
@@ -477,7 +481,7 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
         chimera_vfs_compound_add_getattr(request->vfs_compound,
                                          CHIMERA_VFS_ATTR_MASK_STAT);
 
-        chimera_vfs_compound_submit(
+        chimera_frontend_compound_submit(
             request->vfs_compound,
             chimera_smb_query_stream_info_default_complete, request);
         return;
@@ -489,11 +493,11 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
 
     chimera_vfs_compound_add_list_streams(
         request->vfs_compound,
-        0,
+        0, 0,
         sizeof(request->query_info.stream_records),
         0 /* SMB FILE_STREAM_INFORMATION does not need per-stream handles */);
 
-    chimera_vfs_compound_submit(
+    chimera_frontend_compound_submit(
         request->vfs_compound,
         chimera_smb_query_stream_info_sequence_complete, request);
 } /* chimera_smb_query_stream_info */
@@ -907,6 +911,7 @@ chimera_smb_query_full_ea_info(struct chimera_smb_request *request)
 static unsigned int
 smb_query_info_plan(
     struct chimera_smb_request *request,
+    uint64_t                    capabilities,
     uint64_t                   *getattr_mask)
 {
     unsigned int status = SMB2_STATUS_SUCCESS;
@@ -1050,6 +1055,8 @@ smb_query_info_plan(
                     request->query_info.output_length = 8;
                     break;
                 case SMB2_FILE_FS_ATTRIBUTE_INFO:
+                    request->query_info.r_fs_attrs.smb_fs_attributes = chimera_smb_fs_attributes(
+                        capabilities, request->compound->thread->shared->config.named_streams);
                     request->query_info.output_length = 16;
                     break;
                 case SMB2_FILE_FS_CONTROL_INFO:
@@ -1229,7 +1236,8 @@ chimera_smb_query_info(struct chimera_smb_request *request)
             return;
         }
     }
-    status = smb_query_info_plan(request, &getattr_mask);
+    status = smb_query_info_plan(request, request->query_info.open_file->handle->vfs_module->capabilities,
+                                 &getattr_mask);
 
     if (status != SMB2_STATUS_SUCCESS) {
         chimera_smb_open_file_release(request, request->query_info.open_file);
@@ -1250,9 +1258,9 @@ chimera_smb_query_info(struct chimera_smb_request *request)
 
         chimera_vfs_compound_add_getattr(request->vfs_compound, getattr_mask);
 
-        chimera_vfs_compound_submit(request->vfs_compound,
-                                    chimera_smb_query_info_sequence_complete,
-                                    request);
+        chimera_frontend_compound_submit(request->vfs_compound,
+                                         chimera_smb_query_info_sequence_complete,
+                                         request);
     } else {
         chimera_smb_open_file_release(request, request->query_info.open_file);
         chimera_smb_complete_request(request, chimera_smb_query_info_ok(request));
@@ -1728,7 +1736,7 @@ smb_query_info_compound_prepare(
         request->query_info.output_length     = 0;
         return;
     }
-    command->status = smb_query_info_plan(request, &ctx->attr_mask);
+    command->status = smb_query_info_plan(request, command->handle->vfs_module->capabilities, &ctx->attr_mask);
 } /* smb_query_info_compound_prepare */
 
 static void
@@ -1755,6 +1763,11 @@ smb_query_stream_compound_complete(
             request->query_info.stream_record_count = 1;
         }
     } else {
+        /* This reply format has no continuation token. Preserve the bounded
+        * query's overflow failure rather than publishing a partial list. */
+        if (!op->eof) {
+            *status = CHIMERA_VFS_ERANGE; return;
+        }
         if (op->buffer_len > sizeof(request->query_info.stream_records)) {
             *status = CHIMERA_VFS_EIO; return;
         }
@@ -1818,7 +1831,8 @@ smb_query_info_compound_complete(
                 chimera_vfs_compound_add_putfh(compound, command->open->base_fh, command->open->base_fh_len);
                 chimera_vfs_compound_add_open_current(compound, CHIMERA_VFS_OPEN_PATH, 0);
             }
-            next = chimera_vfs_compound_add_list_streams(compound, 0, sizeof(request->query_info.stream_records), false)
+            next = chimera_vfs_compound_add_list_streams(compound, 0, 0, sizeof(request->query_info.stream_records),
+                                                         false)
             ;
             if (!(command->state->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
                 chimera_vfs_compound_op_set_handle(compound, next, command->handle);

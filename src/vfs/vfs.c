@@ -1629,12 +1629,34 @@ chimera_vfs_register(
 
 } /* chimera_vfs_register */
 
+static void
+chimera_vfs_drain_wakeup(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    (void) evpl;
+    (void) timer;
+} /* chimera_vfs_drain_wakeup */
+
 SYMBOL_EXPORT void
 chimera_vfs_thread_drain(struct chimera_vfs_thread *thread)
 {
-    while (thread->num_active_requests) {
+    struct evpl_timer wakeup = { 0 };
+
+    if (!thread->num_active_requests && !thread->num_active_compounds) {
+        return;
+    }
+    /* A final completion can run in a timer callback, before evpl_continue
+    * enters its kernel wait. Bound that wait so we recheck the drain even
+    * when that callback removed the last source of event-loop activity. */
+    evpl_add_timer(thread->evpl, &wakeup, chimera_vfs_drain_wakeup, 1000);
+    /* The caller first stops admission and cancels externally blocked work.
+     * A parked lock or finish may own no backend request but still needs this
+     * loop and its frontend state to deliver terminal completion. */
+    while (thread->num_active_requests || thread->num_active_compounds) {
         evpl_continue(thread->evpl);
     }
+    evpl_remove_timer(thread->evpl, &wakeup);
 } /* chimera_vfs_thread_drain */
 
 SYMBOL_EXPORT void

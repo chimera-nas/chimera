@@ -12,6 +12,15 @@ atomic_int                lock_test_arm, lock_test_seen, lock_test_claims, lock_
 static                    _Thread_local struct chimera_smb_request *checked_request;
 static _Thread_local bool allocation_failure;
 
+struct evpl *
+lock_test_evpl(struct chimera_vfs_compound *compound)
+{
+    struct smb_vfs_command *command = chimera_vfs_compound_group_context(compound, 0);
+
+    assert(command);
+    return command->request->compound->thread->evpl;
+} /* lock_test_evpl */
+
 /* Mode 1 reproduces dispatcher refusal after an initial batch-allocation
  * failure. Mode 2 proves the ordinary route is compound-native and inspects
  * the accepted RANGE owner before frontend completion releases its pin. */

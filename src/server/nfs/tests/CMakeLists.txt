@@ -27,18 +27,21 @@ target_include_directories(test_open_state_lookup PRIVATE
 set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/server/nfs/open_state_lookup COMMAND test_open_state_lookup)
 set(CHIMERA_TEST_TIER extended)
-# Exercise the actual legacy LOCKU early-error and replay paths without RPC.
-add_executable(test_legacy_lock_replay test_legacy_lock_replay.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_proc_locku.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_proc_lock.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_proc_open_confirm.c)
-target_link_libraries(test_legacy_lock_replay chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB})
-target_include_directories(test_legacy_lock_replay PRIVATE
+# Run the production TEST_STATEID handler against TCP/RDMA arena boundaries.
+# The test supplies state lookup and dispatcher-continuation fixtures.
+add_executable(nfs4_compound_transport_budget
+    nfs4_compound_transport_budget.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_proc_test_stateid.c)
+target_include_directories(nfs4_compound_transport_budget PRIVATE
     ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/src/server/nfs
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${NFS_COMMON_INCLUDE_DIR})
-add_test(NAME chimera/server/nfs/legacy_lock_replay
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_legacy_lock_replay)
+target_link_libraries(nfs4_compound_transport_budget chimera_common evpl evpl_rpc2)
+add_dependencies(nfs4_compound_transport_budget chimera_nfs_common)
+add_test(NAME chimera/server/nfs/compound_transport_budget COMMAND nfs4_compound_transport_budget)
+
+# Owner sequence/replay integration is exercised through the shared encoder by
+# compound_boundaries_v4.0; private publication/reset is in open_owner_lifetime.
 
 add_executable(test_delegation_io test_delegation_io.c)
 target_link_libraries(test_delegation_io chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB})
@@ -106,8 +109,7 @@ target_include_directories(test_nfs_persist PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_SOURCE_DIR}/src
     ${NFS_COMMON_INCLUDE_DIR})
-target_link_libraries(test_nfs_persist chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
-add_dependencies(test_nfs_persist chimera_nfs_common)
+target_link_libraries(test_nfs_persist chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
 add_test(NAME chimera/server/nfs/nfs_persist COMMAND test_nfs_persist)
 
 # NSM/statd persistence: KV key/value formats, odd-state bump, monitor table.
@@ -256,10 +258,43 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py")
 endif()
 
 if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
+    foreach(minor 0 1 2)
+        add_test(NAME chimera/server/nfs/compound_decode_budget_v4.${minor}
+            COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                    ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                    /opt/pynfs
+                    ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_decode_budget.py
+                    ${minor})
+        set_tests_properties(chimera/server/nfs/compound_decode_budget_v4.${minor} PROPERTIES
+            SKIP_RETURN_CODE 77 TIMEOUT 180 ENVIRONMENT "PYTHONUNBUFFERED=1")
+    endforeach()
+
     # Test-only fault injection; never linked into or configured by the daemon.
     add_library(nfs4_compound_finish_retry SHARED nfs4_compound_finish_retry.c)
     target_include_directories(nfs4_compound_finish_retry PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(nfs4_compound_finish_retry chimera_vfs ${CMAKE_DL_LIBS})
+    add_library(nfs4_compound_vectors SHARED nfs4_compound_vectors.c)
+    target_compile_definitions(nfs4_compound_vectors PRIVATE CHIMERA_VFS_INTERNAL_API)
+    target_include_directories(nfs4_compound_vectors PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(nfs4_compound_vectors chimera_vfs ${CMAKE_DL_LIBS})
+    foreach(minor 0 1 2)
+        foreach(mode accepted retry)
+            set(vector_preload $<TARGET_FILE:nfs4_compound_vectors>)
+            if(mode STREQUAL "retry")
+                string(APPEND vector_preload ":$<TARGET_FILE:nfs4_compound_finish_retry>")
+            endif()
+            add_test(NAME chimera/server/nfs/compound_vectors_v4.${minor}_${mode}
+                COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                        ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                        /opt/pynfs
+                        ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_vectors.py
+                        ${minor}
+                        ${vector_preload})
+            set_tests_properties(chimera/server/nfs/compound_vectors_v4.${minor}_${mode} PROPERTIES
+                SKIP_RETURN_CODE 77 TIMEOUT 180
+                ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_VECTOR_RETRY=${mode}")
+        endforeach()
+    endforeach()
     foreach(minor 0 1 2)
         if(minor EQUAL 0)
             set(compound_boundary_script ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_v40_boundaries.py)
@@ -288,7 +323,24 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
             TIMEOUT 180
             ENVIRONMENT "PYTHONUNBUFFERED=1")
     endforeach()
-    foreach(feature namespace proxy3 proxy4)
+    foreach(feature delegation metadata namespace cold_root pseudo readdir readdir_linux)
+        foreach(mode accepted retry)
+            set(retry_preload)
+            if(mode STREQUAL "retry")
+                set(retry_preload $<TARGET_FILE:nfs4_compound_finish_retry>)
+            endif()
+            add_test(NAME chimera/server/nfs/compound_v40_${feature}_${mode}
+                COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                        ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                        /opt/pynfs
+                        ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_v40_boundaries.py
+                        0 ${retry_preload})
+            set_tests_properties(chimera/server/nfs/compound_v40_${feature}_${mode} PROPERTIES
+                SKIP_RETURN_CODE 77 TIMEOUT 180
+                ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=${feature}")
+        endforeach()
+    endforeach()
+    foreach(feature namespace cold_root pseudo proxy3 proxy4 readdir readdir_linux)
         foreach(mode accepted retry)
             set(retry_preload)
             if(mode STREQUAL "retry")
@@ -305,7 +357,130 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
                 ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=${feature}")
         endforeach()
     endforeach()
-    foreach(feature delegation pnfs pnfs_unsupported)
+    foreach(minor 0 1 2)
+        foreach(feature none delegation pnfs)
+            if(minor EQUAL 0 AND NOT feature STREQUAL "none")
+                continue()
+            endif()
+            foreach(mode accepted retry)
+                set(retry_preload)
+                if(mode STREQUAL "retry")
+                    set(retry_preload $<TARGET_FILE:nfs4_compound_finish_retry>)
+                endif()
+                add_test(NAME chimera/server/nfs/compound_retirement_v4.${minor}_${feature}_${mode}
+                    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                            ${CMAKE_BINARY_DIR}/src/daemon/chimera /opt/pynfs
+                            ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_retirement.py
+                            ${minor} ${retry_preload})
+                set_tests_properties(chimera/server/nfs/compound_retirement_v4.${minor}_${feature}_${mode} PROPERTIES
+                    SKIP_RETURN_CODE 77 TIMEOUT 180
+                    ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=${feature}")
+            endforeach()
+        endforeach()
+    endforeach()
+    foreach(mode accepted retry)
+        set(retry_preload)
+        if(mode STREQUAL "retry")
+            set(retry_preload $<TARGET_FILE:nfs4_compound_finish_retry>)
+        endif()
+        add_test(NAME chimera/server/nfs/compound_multiclient_${mode}
+            COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                    ${CMAKE_BINARY_DIR}/src/daemon/chimera /opt/pynfs
+                    ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_multiclient.py
+                    0 ${retry_preload})
+        set_tests_properties(chimera/server/nfs/compound_multiclient_${mode} PROPERTIES
+            SKIP_RETURN_CODE 77 TIMEOUT 180 ENVIRONMENT "PYTHONUNBUFFERED=1")
+    endforeach()
+    foreach(minor 1 2)
+        foreach(mode accepted retry)
+            set(retry_preload)
+            if(mode STREQUAL "retry")
+                set(retry_preload $<TARGET_FILE:nfs4_compound_finish_retry>)
+            endif()
+            add_test(NAME chimera/server/nfs/compound_layout_transitions_v4.${minor}_${mode}
+                COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                        ${CMAKE_BINARY_DIR}/src/daemon/chimera /opt/pynfs
+                        ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_layout_transitions.py
+                        ${minor} ${retry_preload})
+            set_tests_properties(chimera/server/nfs/compound_layout_transitions_v4.${minor}_${mode} PROPERTIES
+                SKIP_RETURN_CODE 77 TIMEOUT 180
+                ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=pnfs")
+        endforeach()
+    endforeach()
+    foreach(minor 0 1 2)
+        foreach(feature synthetic synthetic_delegation pnfs_synthetic)
+            if(minor EQUAL 0 AND NOT feature STREQUAL "synthetic")
+                continue()
+            endif()
+            foreach(mode accepted retry)
+                set(retry_preload)
+                if(mode STREQUAL "retry")
+                    set(retry_preload $<TARGET_FILE:nfs4_compound_finish_retry>)
+                endif()
+                add_test(NAME chimera/server/nfs/compound_${feature}_v4.${minor}_${mode}
+                    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                            ${CMAKE_BINARY_DIR}/src/daemon/chimera /opt/pynfs
+                            ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_synthetic.py
+                            ${minor} ${retry_preload})
+                set_tests_properties(chimera/server/nfs/compound_${feature}_v4.${minor}_${mode} PROPERTIES
+                    SKIP_RETURN_CODE 77 TIMEOUT 180
+                    ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=${feature}")
+            endforeach()
+        endforeach()
+    endforeach()
+    foreach(mode accepted retry)
+        set(retry_preload)
+        if(mode STREQUAL "retry")
+            set(retry_preload $<TARGET_FILE:nfs4_compound_finish_retry>)
+        endif()
+        add_test(NAME chimera/server/nfs/compound_reply_budget_${mode}
+            COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                    ${CMAKE_BINARY_DIR}/src/daemon/chimera /opt/pynfs
+                    ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_reply_budget.py
+                    2 ${retry_preload})
+        set_tests_properties(chimera/server/nfs/compound_reply_budget_${mode} PROPERTIES
+            SKIP_RETURN_CODE 77 TIMEOUT 180
+            ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=checkpoints")
+    endforeach()
+    foreach(minor 1 2)
+        foreach(mode accepted retry)
+            set(retry_preload)
+            if(mode STREQUAL "retry")
+                set(retry_preload $<TARGET_FILE:nfs4_compound_finish_retry>)
+            endif()
+            add_test(NAME chimera/server/nfs/compound_wire_budget_v4.${minor}_${mode}
+                COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                        ${CMAKE_BINARY_DIR}/src/daemon/chimera /opt/pynfs
+                        ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_wire_budget.py ${minor} ${retry_preload})
+            set_tests_properties(chimera/server/nfs/compound_wire_budget_v4.${minor}_${mode} PROPERTIES
+                SKIP_RETURN_CODE 77 TIMEOUT 180
+                ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=checkpoints;CHIMERA_WIRE_RETRY=${mode}")
+            add_test(NAME chimera/server/nfs/compound_wire_budget_delegation_v4.${minor}_${mode}
+                COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                        ${CMAKE_BINARY_DIR}/src/daemon/chimera /opt/pynfs
+                        ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_wire_budget.py ${minor} ${retry_preload})
+            set_tests_properties(chimera/server/nfs/compound_wire_budget_delegation_v4.${minor}_${mode} PROPERTIES
+                SKIP_RETURN_CODE 77 TIMEOUT 180
+                ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=delegation;CHIMERA_COMPOUND_RETRY_PREFIX=;CHIMERA_WIRE_RETRY=${mode}")
+        endforeach()
+    endforeach()
+    foreach(feature checkpoints pnfs_checkpoints)
+        foreach(mode accepted retry)
+            set(retry_preload)
+            if(mode STREQUAL "retry")
+                set(retry_preload $<TARGET_FILE:nfs4_compound_finish_retry>)
+            endif()
+            add_test(NAME chimera/server/nfs/compound_${feature}_${mode}
+                COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
+                        ${CMAKE_BINARY_DIR}/src/daemon/chimera /opt/pynfs
+                        ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_compound_checkpoints.py
+                        2 ${retry_preload})
+            set_tests_properties(chimera/server/nfs/compound_${feature}_${mode} PROPERTIES
+                SKIP_RETURN_CODE 77 TIMEOUT 180
+                ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=${feature}")
+        endforeach()
+    endforeach()
+    foreach(feature delegation pnfs pnfs_resident pnfs_unsupported metadata)
         add_test(NAME chimera/server/nfs/compound_features_${feature}
             COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
                     ${CMAKE_BINARY_DIR}/src/daemon/chimera
@@ -316,6 +491,10 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
             SKIP_RETURN_CODE 77
             TIMEOUT 180
             ENVIRONMENT "PYTHONUNBUFFERED=1;CHIMERA_COMPOUND_FEATURE=${feature}")
+        # The finish fixture cannot roll back namespace mutations.
+        if(feature STREQUAL "pnfs_resident")
+            continue()
+        endif()
         add_test(NAME chimera/server/nfs/compound_features_${feature}_retry
             COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_compound_boundaries_test_wrapper.sh
                     ${CMAKE_BINARY_DIR}/src/daemon/chimera

@@ -94,6 +94,7 @@ main(
     struct mbt_env_opts opts;
     const char         *backend = "memfs";
     int                 i;
+    int                 remove_types_remote = 0;
     struct mbt_result  *res;
     struct mbt_fh       root;
     struct mbt_fh       sl;
@@ -110,6 +111,8 @@ main(
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
             backend = argv[++i];
+        } else if (strcmp(argv[i], "--remove-types-remote") == 0) {
+            remove_types_remote = 1;
         }
     }
 
@@ -119,6 +122,10 @@ main(
     memset(&opts, 0, sizeof(opts));
     opts.sec    = mbt_sec_scan_argv(argc, argv);
     opts.module = backend;
+    if (remove_types_remote) {
+        opts.pnfs_num_ds     = 2;
+        opts.pnfs_ds_version = 3;
+    }
     mbt_env_start_opts(env, &opts);
 
     printf("backend: %s\n", backend);
@@ -129,6 +136,9 @@ main(
         return 1;
     }
     root = res->obj_fh;
+    if (remove_types_remote) {
+        goto remove_types;
+    }
 
     printf("F3 symlink LOOKUP/READDIR -> NOTDIR (fixed; was D1/D2):\n");
     res = mbt_symlink(env, &root, "sl", 2, "target", 0777);
@@ -161,6 +171,7 @@ main(
            mbt_create(env, &root, "ex", 2, EXCLUSIVE, -1, verf_b)->status,
            NFS3ERR_EXIST);
 
+ remove_types:
     printf("F5 RMDIR/REMOVE type enforcement (fixed; was D4):\n");
     res = mbt_create(env, &root, "reg", 3, UNCHECKED, 0644, NULL);
     if (res->status != NFS3_OK) {
@@ -180,6 +191,22 @@ main(
            mbt_remove(env, &root, "adir", 4)->status, NFS3ERR_ISDIR);
     expect("  directory survives the rejected REMOVE",
            mbt_lookup(env, &root, "adir", 4)->status, NFS3_OK);
+
+    expect("SYMLINK to directory", mbt_symlink(env, &root, "ds", 2, "adir", 0777)->status, NFS3_OK);
+    expect("RMDIR of symlink to directory -> NOTDIR",
+           mbt_rmdir(env, &root, "ds", 2)->status, NFS3ERR_NOTDIR);
+    expect("symlink survives rejected RMDIR", mbt_lookup(env, &root, "ds", 2)->status, NFS3_OK);
+    expect("SYMLINK dangling", mbt_symlink(env, &root, "dangling", 8, "absent", 0777)->status, NFS3_OK);
+    expect("RMDIR of dangling symlink -> NOTDIR",
+           mbt_rmdir(env, &root, "dangling", 8)->status, NFS3ERR_NOTDIR);
+    expect("dangling symlink survives", mbt_lookup(env, &root, "dangling", 8)->status, NFS3_OK);
+    expect("REMOVE symlink", mbt_remove(env, &root, "ds", 2)->status, NFS3_OK);
+    expect("REMOVE dangling symlink", mbt_remove(env, &root, "dangling", 8)->status, NFS3_OK);
+    expect("REMOVE regular file", mbt_remove(env, &root, "reg", 3)->status, NFS3_OK);
+    expect("RMDIR directory", mbt_rmdir(env, &root, "adir", 4)->status, NFS3_OK);
+    if (remove_types_remote) {
+        goto cleanup;
+    }
 
     printf("F1 LINK self-alias deadlock (fixed; must not hang):\n");
     res = mbt_mkdir(env, &root, "d1", 2, 0755);
@@ -275,6 +302,7 @@ main(
     /* Unmount before stopping: the module-level UMOUNT owns per-mount state
      * (the linux module's root identity), and only an explicit teardown runs
      * it -- otherwise LSAN reports the final mount's allocation. */
+ cleanup:
     mbt_env_fs_teardown(env, "fs0");
     mbt_env_stop(env);
     free(env);

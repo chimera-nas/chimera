@@ -387,6 +387,9 @@ edit_gate(
         ahead = chimera_vfs_compound_op_edit(compound, e->size_index);
         assert(ahead != NULL);
 
+        /* A resubmission must restore the original input before this edit. */
+        assert(ahead->set_attr.va_size == 0);
+
         /* Round the size just read up to the allocation unit and ASSIGN it.
          * A gate that added to what it wrote last time would get a different
          * sequence on the second execution; this one gets the same. */
@@ -1954,7 +1957,7 @@ main(
         assert(op->dir_post_attr.va_acl != op->dir_pre_attr.va_acl);
         chimera_vfs_compound_free(cp);
 
-        /* The retry shape: the same compound executed twice without a free
+        /* Resubmission: the same compound executed twice without a free
          * between.  The second execution's copy replaces the first; a first
          * copy left behind would be a leak, and one freed twice a crash at
          * compound_free -- both of which ASAN reports here. */
@@ -2784,7 +2787,8 @@ main(
         assert(chimera_vfs_compound_op(cp, i_commit)->status == CHIMERA_VFS_OK);
         chimera_vfs_compound_free(cp);
 
-        /* ...and neither a READ nor a WRITE. */
+        /* ...and neither a READ nor a WRITE. A PATH handle must establish
+         * the object type before attempting any data open. */
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_puthandle(cp, dh,
                                            CHIMERA_VFS_OPEN_INFERRED |
@@ -2795,8 +2799,8 @@ main(
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
-        assert(chimera_vfs_compound_op(cp, i_rd)->status == CHIMERA_VFS_EINVAL);
-        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_op(cp, i_rd)->status == CHIMERA_VFS_EISDIR);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EISDIR);
         chimera_vfs_compound_free(cp);
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
@@ -2809,8 +2813,8 @@ main(
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
-        assert(chimera_vfs_compound_op(cp, i_wr)->status == CHIMERA_VFS_EINVAL);
-        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EINVAL);
+        assert(chimera_vfs_compound_op(cp, i_wr)->status == CHIMERA_VFS_EISDIR);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_EISDIR);
         chimera_vfs_compound_free(cp);
 
         /* Lent means lent: both are still ours. */
@@ -5178,15 +5182,56 @@ main(
         chimera_vfs_compound_free(cp);
         evpl_iovec_release(ctx.evpl, &wiov);
 
+        /* A small backend page must resume after the default fork. Include
+         * alignment in capacity checks even when the raw payload would fit. */
+        uint32_t first_size = (sizeof(struct chimera_vfs_stream_entry) + sf_fh_len + 7) & ~7u;
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, sf_fh, sf_fh_len);
+        i_ls          = chimera_vfs_compound_add_list_streams(cp, 0, 0, first_size - 1, true);
+        i_fh          = chimera_vfs_compound_add_getfh(cp);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_ERANGE);
+        assert(chimera_vfs_compound_op(cp, i_ls)->status == CHIMERA_VFS_ERANGE);
+        assert(!chimera_vfs_compound_op(cp, i_fh)->completed);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, sf_fh, sf_fh_len);
+        i_ls          = chimera_vfs_compound_add_list_streams(cp, 0, 0, first_size, true);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        op = chimera_vfs_compound_op(cp, i_ls);
+        assert(op->status == CHIMERA_VFS_OK && !op->eof && op->buffer_count == 1);
+        assert(op->buffer_len == first_size);
+        uint64_t page_cookie = op->r_cookie, page_verifier = op->r_verifier;
+        assert(((const struct chimera_vfs_stream_entry *) op->buffer)->cookie == page_cookie);
+        chimera_vfs_compound_free(cp);
+
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, sf_fh, sf_fh_len);
+        i_ls          = chimera_vfs_compound_add_list_streams(cp, page_cookie, page_verifier, 4096, true);
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        op  = chimera_vfs_compound_op(cp, i_ls);
+        ent = op->buffer;
+        assert(op->status == CHIMERA_VFS_OK && op->eof && op->buffer_count == 1);
+        assert(ent->name_len == 2 && ent->size == 8 && ent->cookie > page_cookie);
+        assert(op->r_verifier == page_verifier && op->r_cookie == ent->cookie);
+        chimera_vfs_compound_free(cp);
+
         /* The base's page, addressed on the cursor rules (a PATH open of the
          * current fh): the unnamed fork first, at the base's size of 0, then
          * s1 at 8 -- then REMOVE_STREAM, and the next page has only the
          * unnamed fork. */
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, sf_fh, (int) sf_fh_len);
-        i_ls  = chimera_vfs_compound_add_list_streams(cp, 0, 4096, 1);
+        i_ls  = chimera_vfs_compound_add_list_streams(cp, 0, 0, 4096, 1);
         i_rs  = chimera_vfs_compound_add_remove_stream(cp, "s1", 2);
-        i_ls2 = chimera_vfs_compound_add_list_streams(cp, 0, 4096, 0);
+        i_ls2 = chimera_vfs_compound_add_list_streams(cp, 0, 0, 4096, 0);
 
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
@@ -5231,6 +5276,18 @@ main(
         assert(op->buffer_len == ((sizeof(*ent) + 7) & ~7u));
         chimera_vfs_compound_free(cp);
 
+        cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+        chimera_vfs_compound_add_putfh(cp, sf_fh, sf_fh_len);
+        i_ls = chimera_vfs_compound_add_list_streams(cp, page_cookie, page_verifier, 4096, true);
+        i_os = chimera_vfs_compound_add_open_stream(cp, "must-not-exist", 14, CHIMERA_VFS_OPEN_CREATE, NULL, 0)
+        ;
+        ctx.callbacks = 0;
+        chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+        wait_done(&ctx);
+        assert(chimera_vfs_compound_op(cp, i_ls)->status == CHIMERA_VFS_EBADCOOKIE);
+        assert(!chimera_vfs_compound_op(cp, i_os)->completed);
+        chimera_vfs_compound_free(cp);
+
         /* The base stayed current across the list and the remove. */
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putfh(cp, sf_fh, (int) sf_fh_len);
@@ -5260,7 +5317,7 @@ main(
 
         cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
         chimera_vfs_compound_add_putroot(cp);
-        i_ls          = chimera_vfs_compound_add_list_streams(cp, 0, 4096, 0);
+        i_ls          = chimera_vfs_compound_add_list_streams(cp, 0, 0, 4096, 0);
         ctx.callbacks = 0;
         chimera_vfs_compound_submit(cp, compound_cb, &ctx);
         wait_done(&ctx);
@@ -6661,6 +6718,50 @@ main(
         assert(rec.fired == 0);
         assert(cache.break_state == CHIMERA_CLAIM_BREAK_IDLE);
         chimera_vfs_compound_free(cp);
+
+        /* A privately returned cache claim remains public until finish.
+         * Full/flush SETATTR recall and owned write invalidation must honor
+         * the same scoped exclusion as anonymous I/O admission. The following
+         * unscoped write still breaks this claim, proving no public removal. */
+        {
+            const struct chimera_vfs_claim *excluded[] = { &cache };
+            const char                      pattern    = 'r';
+            stranger = g.base;
+            for (int kind = 0; kind < 5; kind++) {
+                int mutation;
+                cp = chimera_vfs_compound_alloc(ctx.vfs_thread, &cred);
+                if (kind < 2) {
+                    memset(&sattr, 0, sizeof(sattr));
+                    if (kind == 0) {
+                        sattr.va_set_mask      = CHIMERA_VFS_ATTR_MTIME;
+                        sattr.va_mtime.tv_nsec = CHIMERA_VFS_TIME_NOW;
+                    } else {
+                        sattr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+                        sattr.va_size     = 4096;
+                    }
+                    mutation = chimera_vfs_compound_add_setattr(cp, oh, &sattr, 0, 0);
+                } else if (kind == 2) {
+                    mutation = chimera_vfs_compound_add_allocate(cp, oh, 0, 4096, 0, 0, 0);
+                } else if (kind == 3) {
+                    mutation = chimera_vfs_compound_add_write_same(cp, oh, 0, 4096, 1,
+                                                                   &pattern, 1, 0, 0, 0, 0);
+                } else {
+                    mutation = chimera_vfs_compound_add_write(cp, oh, 0, 8, 0, &wiov, 1,
+                                                              0, 0, &stranger);
+                }
+                struct chimera_vfs_compound_op *args = chimera_vfs_compound_op_args(cp, mutation);
+                args->io_owner             = stranger;
+                args->have_io_owner        = 1;
+                args->io_view.excluded     = excluded;
+                args->io_view.num_excluded = 1;
+                chimera_vfs_compound_submit(cp, compound_cb, &ctx);
+                wait_done(&ctx);
+                assert(chimera_vfs_compound_status(cp) == CHIMERA_VFS_OK);
+                assert(rec.fired == 0 && cache.file == fs &&
+                       cache.break_state == CHIMERA_CLAIM_BREAK_IDLE);
+                chimera_vfs_compound_free(cp);
+            }
+        }
 
         /* The same run with the owner the caller COULD name unaided -- the
          * half it knows, owner_lo unset because there was nothing to put there

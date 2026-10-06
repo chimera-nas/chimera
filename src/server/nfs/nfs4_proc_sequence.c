@@ -6,6 +6,7 @@
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "nfs4_drc.h"
+#include "nfs4_reply.h"
 
 /*
  * The SEQUENCE result of a successful slot acquisition.
@@ -134,12 +135,12 @@ chimera_nfs4_sequence(
      * cacheability check below also run without disturbing the slot. */
     nfs4_sequence_fill_resok(res, session, args);
 
-    if (args->sa_cachethis &&
-        session->nfs4_session_fore_attrs.ca_maxresponsesize_cached &&
-        marshall_length_nfs_resop4(resop) >
-        (int) session->nfs4_session_fore_attrs.ca_maxresponsesize_cached) {
-        res->sr_status = NFS4ERR_REP_TOO_BIG_TO_CACHE;
-        chimera_nfs4_compound_complete(req, NFS4ERR_REP_TOO_BIG_TO_CACHE);
+    status = chimera_nfs4_reply_check(req, req->index,
+                                      req->reply_bytes + marshall_length_nfs_resop4(resop), req->reply_chunk_bytes, true
+                                      );
+    if (status != NFS4_OK) {
+        res->sr_status = status;
+        chimera_nfs4_compound_complete(req, status);
         return;
     }
 

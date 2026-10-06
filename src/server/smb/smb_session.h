@@ -185,6 +185,10 @@ struct chimera_smb_open_file {
     struct UT_hash_handle                     hh;
     struct chimera_smb_file_id                file_id;
     struct chimera_vfs_open_handle           *handle;
+    /* Logical CLOSE has consumed this open, but admitted requests still borrow
+     * its canonical handle (including across compound retry). Drop the handle
+     * only when the last open reference and its claim owners have drained. */
+    bool                                      handle_close_deferred;
     /* What `handle` was REALLY opened with, as a CHIMERA_VFS_OPEN_* word: what
      * every PUTHANDLE lending this handle to a VFS sequence promises about it
      * (see chimera_vfs_compound_add_puthandle).  Stamped wherever the open is
@@ -303,6 +307,10 @@ struct chimera_smb_open_file {
     uint8_t                                   lock_seq_valid[64];
     uint8_t                                   lock_seq_index[64];
     uint32_t                                  lock_seq_status[64];
+    /* Execution admission, protected by open_files_lock. Each reserved bucket
+     * stays exclusive until its batch publishes replay status and drains the
+     * VFS journal. Different buckets and CLOSE remain independently runnable. */
+    uint64_t                                  lock_seq_busy;
     /* SHARE claim (whole-file access/deny reservation) held by this open
      * once CREATE succeeds.  Released at close. */
     struct chimera_vfs_claim_access_owner    *access_owner;

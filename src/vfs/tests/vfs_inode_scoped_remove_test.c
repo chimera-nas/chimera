@@ -8,9 +8,11 @@
  * caller-supplied child FH.  This guards an asynchronous delete-on-close
  * against a file that was removed and re-created with the SAME name by another
  * opener in the meantime -- the replacement must NOT be destroyed.  Drives
- * memfs directly.
+ * memfs, diskfs and cairn directly.
  */
 
+#include "common/test_host.h"
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #ifdef _WIN32
@@ -25,9 +27,7 @@
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_compound.h"
-/* The pool lifecycle -- mkfs, mount, umount, rmfs -- is not a sequence and
- * is not expressible as one.  It comes from the core's per-op header, which
- * is where those four still live. */
+/* Pool lifecycle remains public outside the compound API. */
 #include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
@@ -47,6 +47,7 @@ struct test_ctx {
     struct chimera_vfs_open_handle *handle;
     uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        fh_len;
+    bool                            unmatched;
 };
 
 static void
@@ -166,7 +167,8 @@ do_remove_match(
     chimera_vfs_compound_op_set_remove_match(cp, (uint32_t) i_remove,
                                              child_fh, child_fh_len, 1, NULL);
 
-    ctx->status = compound_test_run(ctx->evpl, cp);
+    ctx->status    = compound_test_run(ctx->evpl, cp);
+    ctx->unmatched = chimera_vfs_compound_op(cp, i_remove)->remove_unmatched;
     chimera_vfs_compound_free(cp);
 
     return ctx->status;
@@ -185,6 +187,12 @@ main(
     uint32_t                        root_fh_len;
     uint8_t                         fh1[CHIMERA_VFS_FH_SIZE], fh2[CHIMERA_VFS_FH_SIZE];
     uint32_t                        fh1_len, fh2_len;
+    const char                     *module    = argc > 1 ? argv[1] : "memfs";
+    char                            scratch[] = "vfs_match_XXXXXX";
+
+    if (strcmp(module, "memfs")) {
+        assert(mkdtemp(scratch));
+    }
     struct chimera_vfs_open_handle *root_handle, *h1, *h2;
 
     chimera_log_init();
@@ -194,8 +202,28 @@ main(
     assert(metrics != NULL);
 
     memset(module_cfgs, 0, sizeof(module_cfgs));
-    strncpy(module_cfgs[0].module_name, "memfs", sizeof(module_cfgs[0].module_name) - 1);
+    strncpy(module_cfgs[0].module_name, module, sizeof(module_cfgs[0].module_name) - 1);
     strncpy(module_cfgs[1].module_name, "memkv", sizeof(module_cfgs[1].module_name) - 1);
+
+    if (!strcmp(module, "cairn")) {
+        snprintf(module_cfgs[0].config_data, sizeof(module_cfgs[0].config_data),
+                 "{\"initialize\":true,\"path\":\"%s\"}", scratch);
+    }
+#ifndef _WIN32
+    else if (!strcmp(module, "diskfs")) {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/device.img", scratch);
+        int  fd = open(path, O_CREAT | O_RDWR, 0600);
+        assert(fd >= 0 && !ftruncate(fd, (off_t) 1024 * 1024 * 1024));
+        close(fd);
+        snprintf(module_cfgs[0].config_data, sizeof(module_cfgs[0].config_data),
+                 "{\"initialize\":true,\"unsafe_async\":true,\"intent_log_size\":67108864,"
+                 "\"devices\":[{\"type\":\"libaio\",\"size\":1,\"path\":\"%s\"}]}", path);
+    }
+#endif /* ifndef _WIN32 */
+    else {
+        assert(!strcmp(module, "memfs"));
+    }
 
     ctx.evpl = evpl_create(NULL);
     assert(ctx.evpl != NULL);
@@ -206,12 +234,12 @@ main(
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, ctx.vfs);
     assert(ctx.vfs_thread != NULL);
 
-    chimera_vfs_mkfs(ctx.vfs_thread, NULL, "memfs", "fs0", NULL,
+    chimera_vfs_mkfs(ctx.vfs_thread, NULL, module, "fs0", NULL,
                      mount_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
 
-    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", "memfs", "fs0", NULL,
+    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", module, "fs0", NULL,
                       mount_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
@@ -235,12 +263,14 @@ main(
     fh2_len = ctx.fh_len;
     memcpy(fh2, ctx.fh, fh2_len);
     assert(!(fh1_len == fh2_len && memcmp(fh1, fh2, fh1_len) == 0));
+    assert(h2->vfs_module->capabilities & CHIMERA_VFS_CAP_REMOVE_MATCH_FH);
     TEST_PASS("recreate yields a distinct FH");
 
     /* Inode-scoped remove targeting the STALE inode #1 must be a no-op: the
      * name now resolves to inode #2, which must survive. */
     assert(do_remove_match(&ctx, &cred, root_handle, "foo", fh1, fh1_len) ==
            CHIMERA_VFS_OK);
+    assert(ctx.unmatched);
     assert(do_lookup(&ctx, &cred, root_handle, "foo") == CHIMERA_VFS_OK);
     assert(ctx.fh_len == fh2_len && memcmp(ctx.fh, fh2, fh2_len) == 0);
     TEST_PASS("match_fh against a stale FH leaves the recreated file intact");
@@ -248,6 +278,7 @@ main(
     /* Inode-scoped remove targeting the CURRENT inode #2 unlinks it. */
     assert(do_remove_match(&ctx, &cred, root_handle, "foo", fh2, fh2_len) ==
            CHIMERA_VFS_OK);
+    assert(!ctx.unmatched);
     assert(do_lookup(&ctx, &cred, root_handle, "foo") == CHIMERA_VFS_ENOENT);
     TEST_PASS("match_fh against the current FH unlinks the file");
 
@@ -265,7 +296,7 @@ main(
      * closed and released, so the removal below succeeds immediately.  The
      * retry is kept as a backstop only. */
     for (int i = 0; i < 50; i++) {
-        chimera_vfs_rmfs(ctx.vfs_thread, NULL, "memfs", "fs0", mount_cb, &ctx);
+        chimera_vfs_rmfs(ctx.vfs_thread, NULL, module, "fs0", mount_cb, &ctx);
         wait_done(&ctx);
         if (ctx.status != CHIMERA_VFS_EBUSY) {
             break;
@@ -278,6 +309,9 @@ main(
     chimera_vfs_destroy(ctx.vfs);
     evpl_destroy(ctx.evpl);
     prometheus_metrics_destroy(metrics);
+    if (strcmp(module, "memfs")) {
+        assert(!chimera_test_remove_tree(scratch));
+    }
 
     fprintf(stderr, "vfs_inode_scoped_remove_test: ALL PASS\n");
     return 0;

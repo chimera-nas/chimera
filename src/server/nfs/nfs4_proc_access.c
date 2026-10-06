@@ -6,8 +6,6 @@
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "nfs4_access.h"
-#include "vfs/vfs_internal_procs.h"
-#include "vfs/vfs_release.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/sdk/vfs_access.h"
 
@@ -49,10 +47,7 @@ chimera_nfs4_access_requested(
  * (the VFS compound evaluates the client's whole request); the mapping back is
  * limited to `requested` either way.
  *
- * `attr` is the object's, and is needed for the execute rule below -- which
- * lives HERE rather than in either caller because both paths have to give the
- * same answer, and a rule applied on one of them would be the one thing this
- * conversion is not allowed to change.
+ * `attr` is the object's and supplies the execute rule below.
  */
 void
 chimera_nfs4_access_fill(
@@ -95,60 +90,6 @@ chimera_nfs4_access_fill(
     }
 } /* chimera_nfs4_access_fill */
 
-static void
-chimera_nfs4_access_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct nfs_request *req  = private_data;
-    struct ACCESS4args *args = &req->args_compound->argarray[req->index].opaccess;
-    struct ACCESS4res  *res  = &req->res_compound.resarray[req->index].opaccess;
-    uint32_t            requested, granted;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_vfs_release(req->thread->vfs_thread, req->handle);
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    requested = chimera_nfs4_access_requested(req, args, attr,
-                                              req->fh, req->fhlen);
-
-    /* Evaluate the canonical ACL (or mode fallback) once via the shared gate,
-     * then map the granted ACE bits back to the ACCESS4_* result bits. */
-    granted = chimera_vfs_access_check(attr, &req->cred,
-                                       chimera_nfs4_access4_to_mask(requested));
-
-    chimera_nfs4_access_fill(req, res, requested, granted, attr);
-    chimera_vfs_release(req->thread->vfs_thread, req->handle);
-
-    chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_access_complete */
-
-static void
-chimera_nfs4_access_open_callback(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
-{
-    struct nfs_request *req = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_nfs4_compound_complete(req, chimera_nfs4_errno_to_nfsstat4(error_code));
-        return;
-    }
-
-    req->handle = handle;
-
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                        handle,
-                        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
-                        chimera_nfs4_access_complete,
-                        req);
-} /* chimera_nfs4_access_open_callback */
-
 void
 chimera_nfs4_access(
     struct chimera_server_nfs_thread *thread,
@@ -179,10 +120,6 @@ chimera_nfs4_access(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
-                        chimera_nfs4_access_open_callback,
-                        req);
+    chimera_nfs4_compound_single(thread, req);
+
 } /* chimera_nfs4_access */

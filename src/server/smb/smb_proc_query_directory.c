@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "smb_internal.h"
+#include "common/compound_retry.h"
+#include "vfs/vfs_dirent.h"
 #include "smb_procs.h"
 #include "smb_string.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_internal_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_compound.h"
 #include "xxhash.h"
@@ -35,20 +36,6 @@ chimera_smb_query_directory_readdir_complete(
     void                  *private_data)
 {
     struct chimera_smb_request *request = private_data;
-
-    /* Drop the extra handle reference taken in chimera_smb_query_directory.  Do
-     * this before releasing the open_file: once the readdir is done with the
-     * handle it is safe to let a racing CLOSE finish tearing it down.
-     *
-     * The pointer is the one captured at the dup, not open_file->handle: that
-     * same racing CLOSE NULLs the open's handle whether or not this reference
-     * is outstanding, and reading it here would skip the release and leak the
-     * reference the dup exists to hold. */
-    if (request->query_directory.handle) {
-        chimera_vfs_release(request->compound->thread->vfs_thread,
-                            request->query_directory.handle);
-        request->query_directory.handle = NULL;
-    }
 
     if (request->query_directory.last_file_offset) {
         *request->query_directory.last_file_offset = 0;
@@ -615,25 +602,6 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
                      1,
                      0, &request->query_directory.iov);
 
-    /* Hold an extra reference on the directory's VFS handle for the duration of
-     * the readdir.  The readdir is async (e.g. diskfs walks the directory's
-     * b+tree across block I/O), so a separate, pipelined CLOSE for the same
-     * file id can run before it completes.  Without this reference that CLOSE
-     * drops the handle's last open count and -- if the handle was detached (a
-     * second open of the same fh, which the file-creation path does to the
-     * parent directory) -- closes the backend handle immediately, tearing down
-     * the directory inode while the readdir is still iterating it.  The matching
-     * release is in chimera_smb_query_directory_readdir_complete, which
-     * releases the pointer captured here -- the CLOSE that this reference
-     * defends against also NULLs open_file->handle, so it cannot be re-read
-     * once the sequence has finished. */
-    if (request->query_directory.open_file->handle->cache_id != CHIMERA_VFS_OPEN_ID_SYNTHETIC) {
-        chimera_vfs_dup_handle(thread->vfs_thread, request->query_directory.open_file->handle);
-        request->query_directory.handle = request->query_directory.open_file->handle;
-    } else {
-        request->query_directory.handle = NULL;
-    }
-
     uint64_t readdir_mask = CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME;
 
     /* Only the info classes that carry an EaSize field pay for the per-entry EA
@@ -683,9 +651,9 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         chimera_smb_query_directory_append,
         request);
 
-    chimera_vfs_compound_submit(request->vfs_compound,
-                                chimera_smb_query_directory_sequence_complete,
-                                request);
+    chimera_frontend_compound_submit(request->vfs_compound,
+                                     chimera_smb_query_directory_sequence_complete,
+                                     request);
 } /* chimera_smb_query_directory */
 
 void

@@ -570,7 +570,7 @@ record_reserve(
             if (cache->construct != CHIMERA_CONSTRUCT_IMPLICIT &&
                 chimera_vfs_claim_advertised(cache) &&
                 !chimera_claim_owner_equal(&cache->owner, &owner->identity) &&
-                !chimera_claim_owner_same_key(&cache->owner, &owner->identity)) {
+                !chimera_claim_owner_same_cache(&cache->owner, &owner->identity)) {
                 chimera_vfs_claim_conflict_fill(cache, conflict);
                 result = CHIMERA_CLAIM_BREAKING;
                 break;
@@ -790,7 +790,7 @@ chimera_vfs_claim_journal_io_denied(
             continue;
         }
         bool                          self = actor && (chimera_claim_owner_equal(&claim->owner, &actor->owner) ||
-                                                       chimera_claim_owner_same_key(&claim->owner, &actor->owner) ||
+                                                       chimera_claim_owner_same_lease(&claim->owner, &actor->owner) ||
                                                        (actor->op_handle && actor->op_handle == claim->op_handle));
         if ((claim->used & CHIMERA_CLAIM_LW) ? !self : write) {
             denied = true; break;
