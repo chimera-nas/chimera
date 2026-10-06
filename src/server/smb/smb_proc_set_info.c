@@ -11,6 +11,9 @@
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_notify.h"
 
+static inline uint32_t chimera_smb_set_info_error_status(
+    enum chimera_vfs_error error_code);
+
 static void
 chimera_smb_set_info_callback(
     enum chimera_vfs_error    error_code,
@@ -56,7 +59,7 @@ chimera_smb_set_info_callback(
 
     chimera_smb_open_file_release(request, request->set_info.open_file);
 
-    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(request, chimera_smb_set_info_error_status(error_code));
 } /* chimera_smb_set_info_callback */
 
 /* Size mutations are made through an authorized open. Preserve its cache
