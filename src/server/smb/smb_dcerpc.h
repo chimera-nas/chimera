@@ -261,11 +261,10 @@ dce_rpc(
             reply_bind_ack = outputp;
             outputp        = (char *) outputp + sizeof(dce_bind_ack_t);
 
-            reply_bind_ack->max_xmit_frag  = 65535;
-            reply_bind_ack->max_recv_frag  = 65535;
-            reply_bind_ack->assoc_group_id = 0;
-            reply_bind_ack->sec_addr_len   = 0;
-            reply_bind_ack->sec_addr       = 0;
+            reply_bind_ack->max_xmit_frag = 65535;
+            reply_bind_ack->max_recv_frag = 65535;
+            reply_bind_ack->sec_addr_len  = 0;
+            reply_bind_ack->sec_addr      = 0;
 
             rc = evpl_iovec_cursor_get_blob(&input_cursor, &request_bind, sizeof(dce_bind_t));
 
@@ -273,6 +272,19 @@ dce_rpc(
                 chimera_smb_error("failed to get DCE RPC bind");
                 return -1;
             }
+
+            /* C706 12.6.4.4: a bind carrying assoc_group_id 0 asks the server to
+             * open a new association group, and the bind_ack names the group the
+             * connection now belongs to.  Zero is not a group id -- it is the
+             * "allocate one" request -- and the Windows RPC runtime fails the bind
+             * with RPC_S_PROTOCOL_ERROR when it comes back (Explorer and `net view`
+             * then report "A remote procedure call (RPC) protocol error occurred"
+             * without ever sending the NetShareEnumAll).  Samba's rpcclient does
+             * not check, which is how a zero id went unnoticed.  Echo a group the
+             * client already holds, otherwise hand out the fixed id Windows NT
+             * used and Samba and ksmbd reply with for a fresh group. */
+            reply_bind_ack->assoc_group_id = request_bind.assoc_group_id ?
+                request_bind.assoc_group_id : 0x53f0;
 
             reply_result_list = outputp;
             outputp           = (char *) outputp + sizeof(p_result_list_t);
