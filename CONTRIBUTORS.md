@@ -14,5 +14,6 @@ Georgi Damyanov
 Kanaga Shanmugam
 Joshua Lugo-Mclellan
 Ilya Mirsky
+Jihyeon Gim
 Quantum Corporation
 Nasuni Corporation
