@@ -11,8 +11,9 @@
 #include "evpl/evpl_http.h"
 #include "server/server.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_user_cache.h"
+#include "vfs/vfs_user.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 struct user_list_ctx {
     json_t *array;
@@ -47,9 +48,9 @@ user_to_json_callback(
 
 void
 chimera_rest_handle_users_list(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread)
 {
     struct user_list_ctx ctx;
 
@@ -63,10 +64,10 @@ chimera_rest_handle_users_list(
 
 void
 chimera_rest_handle_users_get(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *username)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *username)
 {
     const struct chimera_vfs_user *user;
     json_t                        *obj;
@@ -97,11 +98,11 @@ chimera_rest_handle_users_get(
 
 void
 chimera_rest_handle_users_create(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *body,
-    int                         body_len)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *body,
+    int                          body_len)
 {
     json_t      *root;
     json_error_t error;
@@ -176,10 +177,10 @@ chimera_rest_handle_users_create(
 
 void
 chimera_rest_handle_users_delete(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *username)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *username)
 {
     int rc;
 
@@ -191,5 +192,5 @@ chimera_rest_handle_users_delete(
         return;
     }
 
-    evpl_http_server_dispatch_default(request, 204);
+    chimera_rest_reply(request, 204, NULL, NULL, 0);
 } /* chimera_rest_handle_users_delete */

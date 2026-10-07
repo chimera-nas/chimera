@@ -340,12 +340,12 @@ issue_api(
         tname(o, json_string_value(v), n1, sizeof(n1));
         snprintf(body, sizeof(body),
                  "{\"module\":\"memfs\",\"name\":\"%s\"}", n1);
-        ctl_post(o->api, "/api/v1/filesystems", body, &res);
+        ctl_post(o->api, "/api/core/v1/filesystems", body, &res);
         return res.status;
     }
     if (strcmp(tag, "RFsDelete") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/filesystems/memfs/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/filesystems/memfs/%s", n1);
         ctl_delete(o->api, url, &res);
         return res.status;
     }
@@ -357,14 +357,14 @@ issue_api(
         snprintf(body, sizeof(body),
                  "{\"name\":\"%s\",\"module\":\"memfs\",\"path\":\"%s\"}",
                  n1, n2);
-        ctl_post(o->api, "/api/v1/mounts", body, &res);
+        ctl_post(o->api, "/api/core/v1/mounts", body, &res);
         return res.status;
     }
     if (strcmp(tag, "RMountDelete") == 0) {
         int tries;
 
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/mounts/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/mounts/%s", n1);
 
         /*
          * Two different 409s come back from this endpoint, and only one of
@@ -398,12 +398,12 @@ issue_api(
     }
     if (strcmp(tag, "RMountGet") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/mounts/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/mounts/%s", n1);
         ctl_get(o->api, url, &res);
         return res.status;
     }
     if (strcmp(tag, "RMountList") == 0) {
-        ctl_get(o->api, "/api/v1/mounts", &res);
+        ctl_get(o->api, "/api/core/v1/mounts", &res);
         return res.status;
     }
 
@@ -417,18 +417,18 @@ issue_api(
     }
     if (strcmp(tag, "RExportDelete") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/exports/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/exports/%s", n1);
         ctl_delete(o->api, url, &res);
         return res.status;
     }
     if (strcmp(tag, "RExportGet") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/exports/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/exports/%s", n1);
         ctl_get(o->api, url, &res);
         return res.status;
     }
     if (strcmp(tag, "RExportList") == 0) {
-        ctl_get(o->api, "/api/v1/exports", &res);
+        ctl_get(o->api, "/api/core/v1/exports", &res);
         return res.status;
     }
 
@@ -439,18 +439,18 @@ issue_api(
     }
     if (strcmp(tag, "RShareDelete") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/shares/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/shares/%s", n1);
         ctl_delete(o->api, url, &res);
         return res.status;
     }
     if (strcmp(tag, "RShareGet") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/shares/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/shares/%s", n1);
         ctl_get(o->api, url, &res);
         return res.status;
     }
     if (strcmp(tag, "RShareList") == 0) {
-        ctl_get(o->api, "/api/v1/shares", &res);
+        ctl_get(o->api, "/api/core/v1/shares", &res);
         return res.status;
     }
 
@@ -461,18 +461,18 @@ issue_api(
     }
     if (strcmp(tag, "RBucketDelete") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/buckets/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/buckets/%s", n1);
         ctl_delete(o->api, url, &res);
         return res.status;
     }
     if (strcmp(tag, "RBucketGet") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/buckets/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/buckets/%s", n1);
         ctl_get(o->api, url, &res);
         return res.status;
     }
     if (strcmp(tag, "RBucketList") == 0) {
-        ctl_get(o->api, "/api/v1/buckets", &res);
+        ctl_get(o->api, "/api/core/v1/buckets", &res);
         return res.status;
     }
 
@@ -481,28 +481,28 @@ issue_api(
         tname(o, json_string_value(v), n1, sizeof(n1));
         snprintf(body, sizeof(body),
                  "{\"username\":\"%s\",\"uid\":1000,\"gid\":1000}", n1);
-        ctl_post(o->api, "/api/v1/users", body, &res);
+        ctl_post(o->api, "/api/core/v1/users", body, &res);
         return res.status;
     }
     if (strcmp(tag, "RUserDelete") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/users/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/users/%s", n1);
         ctl_delete(o->api, url, &res);
         return res.status;
     }
     if (strcmp(tag, "RUserGet") == 0) {
         tname(o, json_string_value(v), n1, sizeof(n1));
-        snprintf(url, sizeof(url), "/api/v1/users/%s", n1);
+        snprintf(url, sizeof(url), "/api/core/v1/users/%s", n1);
         ctl_get(o->api, url, &res);
         return res.status;
     }
     if (strcmp(tag, "RUserList") == 0) {
-        ctl_get(o->api, "/api/v1/users", &res);
+        ctl_get(o->api, "/api/core/v1/users", &res);
         return res.status;
     }
 
     if (strcmp(tag, "RConfig") == 0) {
-        ctl_get(o->api, "/api/v1/config", &res);
+        ctl_get(o->api, "/api/core/v1/config", &res);
         return res.status;
     }
 
@@ -569,7 +569,7 @@ issue_export_create(
              op_bool(v, "ro") ? "ro" : "rw", op_str(v, "squash"),
              CTL_ANONUID, CTL_ANONUID);
 
-    ctl_post(o->api, "/api/v1/exports", body, &res);
+    ctl_post(o->api, "/api/core/v1/exports", body, &res);
     return res.status;
 } /* issue_export_create */
 
@@ -704,7 +704,7 @@ trace_teardown(struct oracle *o)
         json_t *root, *elem;
         size_t  i;
 
-        snprintf(url, sizeof(url), "/api/v1/%s", collections[ci]);
+        snprintf(url, sizeof(url), "/api/core/v1/%s", collections[ci]);
         ctl_get(o->api, url, &res);
         root = json_loadb(res.body, res.body_len, 0, NULL);
 
@@ -725,7 +725,7 @@ trace_teardown(struct oracle *o)
                 strncmp(n + (n[0] == '/' ? 1 : 0), prefix, strlen(prefix)) != 0) {
                 continue;
             }
-            snprintf(url, sizeof(url), "/api/v1/%s/%s", collections[ci], n);
+            snprintf(url, sizeof(url), "/api/core/v1/%s/%s", collections[ci], n);
             ctl_delete(o->api, url, &res);
         }
         json_decref(root);
@@ -739,14 +739,14 @@ trace_teardown(struct oracle *o)
         size_t  i;
         int     left = 0;
 
-        ctl_get(o->api, "/api/v1/config", &res);
+        ctl_get(o->api, "/api/core/v1/config", &res);
         root = json_loadb(res.body, res.body_len, 0, NULL);
         json_decref(root);
 
         for (i = 0; i < 2; i++) {
             char url[256];
 
-            snprintf(url, sizeof(url), "/api/v1/filesystems/memfs/t%df%zu",
+            snprintf(url, sizeof(url), "/api/core/v1/filesystems/memfs/t%df%zu",
                      o->seq, i);
             ctl_delete(o->api, url, &res);
             if (res.status != 204 && res.status != 404) {
@@ -868,7 +868,7 @@ check_collection(
 } /* check_collection */
 
 /*
- * GET /api/v1/config is a second, independent rendering of the same facts as
+ * GET /api/core/v1/config is a second, independent rendering of the same facts as
  * the four listings, produced by different code (rest_config.c keys its
  * entries by name; the listing handlers put the name in a field).  Requiring
  * them to agree is what catches a field or a filter added to one and
@@ -907,7 +907,7 @@ check_config(
 
     snprintf(prefix, sizeof(prefix), "t%d", o->seq);
 
-    ctl_get(o->api, "/api/v1/config", &res);
+    ctl_get(o->api, "/api/core/v1/config", &res);
     if (res.status != 200) {
         fail(o, "config: returned %d", res.status);
         return;
@@ -972,11 +972,11 @@ check_state(
     struct oracle *o,
     json_t        *state)
 {
-    check_collection(o, state, "mounts", "/api/v1/mounts", "name", 0);
-    check_collection(o, state, "exports", "/api/v1/exports", "name", 0);
-    check_collection(o, state, "shares", "/api/v1/shares", "name", 0);
-    check_collection(o, state, "buckets", "/api/v1/buckets", "name", 0);
-    check_collection(o, state, "users", "/api/v1/users", "username", 1);
+    check_collection(o, state, "mounts", "/api/core/v1/mounts", "name", 0);
+    check_collection(o, state, "exports", "/api/core/v1/exports", "name", 0);
+    check_collection(o, state, "shares", "/api/core/v1/shares", "name", 0);
+    check_collection(o, state, "buckets", "/api/core/v1/buckets", "name", 0);
+    check_collection(o, state, "users", "/api/core/v1/users", "username", 1);
     check_config(o, state);
 } /* check_state */
 
@@ -1049,10 +1049,10 @@ run_trace(
                 got = issue_export_create(o, req, state);
             } else if (strcmp(rtag, "RShareCreate") == 0) {
                 got = issue_named_create(o, req, state, "shares",
-                                         "/api/v1/shares");
+                                         "/api/core/v1/shares");
             } else if (strcmp(rtag, "RBucketCreate") == 0) {
                 got = issue_named_create(o, req, state, "buckets",
-                                         "/api/v1/buckets");
+                                         "/api/core/v1/buckets");
             } else {
                 got = issue_api(o, req);
             }

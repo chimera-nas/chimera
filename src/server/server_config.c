@@ -82,7 +82,6 @@ chimera_server_config_init(void)
     config->external_portmap         = 0;
     config->portmap_hostname[0]      = '\0';
     config->soft_fail_bad_req        = 0;
-    config->rest_debug_fsops         = 0;
     config->rest_auth_enabled        = 1;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
@@ -1272,19 +1271,47 @@ chimera_server_config_get_rest_http_port(const struct chimera_server_config *con
     return config->rest_http_port;
 } /* chimera_server_config_get_rest_http_port */
 
-SYMBOL_EXPORT void
-chimera_server_config_set_rest_debug_fsops(
-    struct chimera_server_config *config,
-    int                           enable)
-{
-    config->rest_debug_fsops = enable;
-} /* chimera_server_config_set_rest_debug_fsops */
-
 SYMBOL_EXPORT int
-chimera_server_config_get_rest_debug_fsops(const struct chimera_server_config *config)
+chimera_server_config_add_rest_module(
+    struct chimera_server_config *config,
+    const char                   *name,
+    const char                   *module_path,
+    const char                   *config_json,
+    int                           allow_public_routes)
 {
-    return config->rest_debug_fsops;
-} /* chimera_server_config_get_rest_debug_fsops */
+    struct chimera_server_rest_module_config *module;
+
+    if (!name || !name[0] || config->num_rest_modules == CHIMERA_REST_MAX_MODULES) {
+        return -1;
+    }
+    if (!config_json) {
+        config_json = "{}";
+    }
+    if (!module_path) {
+        module_path = "";
+    }
+    module = &config->rest_modules[config->num_rest_modules];
+    if (strlen(name) >= sizeof(module->name) ||
+        strlen(module_path) >= sizeof(module->module_path) ||
+        strlen(config_json) >= sizeof(module->config_json)) {
+        return -1;
+    }
+    strcpy(module->name, name);
+    strcpy(module->module_path, module_path);
+    strcpy(module->config_json, config_json);
+    module->allow_public_routes = !!allow_public_routes;
+    config->num_rest_modules++;
+    return 0;
+} /* chimera_server_config_add_rest_module */
+
+SYMBOL_EXPORT const struct chimera_server_rest_module_config *
+chimera_server_config_get_rest_modules(
+    const struct chimera_server_config *config,
+    int                                *count)
+{
+    *count = config->num_rest_modules;
+    return config->rest_modules;
+} /* chimera_server_config_get_rest_modules */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_rest_auth_enabled(

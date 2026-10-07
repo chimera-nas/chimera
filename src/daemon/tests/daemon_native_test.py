@@ -37,6 +37,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
             "s3_enabled": False, "state_dir": root.as_posix(),
             "rest_http_port": http_port, "rest_https_port": https_port,
             "metrics_port": metrics_port, "rest_auth_enabled": False,
+            "rest_modules": [{"module": "core", "allow_public_routes": True}],
         },
     }
     config_path = root / "config.json"
@@ -68,7 +69,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
                         time.sleep(0.1)
 
             with open_when_ready(
-                opener, f"http://127.0.0.1:{http_port}/api/v1/exports"
+                opener, f"http://127.0.0.1:{http_port}/api/core/v1/exports"
             ) as response:
                 assert response.status == 200
                 json.load(response)
@@ -85,7 +86,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
                 urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=tls)
             )
             with open_when_ready(
-                https, f"https://127.0.0.1:{https_port}/api/v1/exports"
+                https, f"https://127.0.0.1:{https_port}/api/core/v1/exports"
             ) as response:
                 assert response.status == 200
                 json.load(response)

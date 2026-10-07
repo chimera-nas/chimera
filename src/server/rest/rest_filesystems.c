@@ -13,20 +13,21 @@
 #include "vfs/sdk/vfs_error.h"
 #include "vfs/vfs_procs.h"
 #include "rest_internal.h"
+#include "rest_services.h"
 
 /* ======================== Named filesystems ========================
  *
- * POST   /api/v1/filesystems                  {"module": .., "name": .., "options": ..}
- * DELETE /api/v1/filesystems/<module>/<name>
+ * POST   /api/core/v1/filesystems                  {"module": .., "name": .., "options": ..}
+ * DELETE /api/core/v1/filesystems/<module>/<name>
  *
  * Like the mounts API, the async VFS ops run on this REST thread's own VFS
  * thread and the HTTP reply is dispatched from the completion callback.
  */
 
 struct fs_create_ctx {
-    struct evpl              *evpl;
-    struct evpl_http_request *request;
-    json_t                   *root;
+    struct evpl                 *evpl;
+    struct chimera_rest_request *request;
+    json_t                      *root;
 };
 
 static void
@@ -73,11 +74,11 @@ fs_create_complete(
 
 void
 chimera_rest_handle_filesystems_create(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *body,
-    int                         body_len)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *body,
+    int                          body_len)
 {
     json_t               *root;
     json_error_t          error;
@@ -135,10 +136,10 @@ chimera_rest_handle_filesystems_create(
 } /* chimera_rest_handle_filesystems_create */
 
 struct fs_delete_ctx {
-    struct evpl              *evpl;
-    struct evpl_http_request *request;
-    char                      module[64];
-    char                      name[256];
+    struct evpl                 *evpl;
+    struct chimera_rest_request *request;
+    char                         module[64];
+    char                         name[256];
 };
 
 static void
@@ -151,7 +152,7 @@ fs_delete_complete(
 
     switch (status) {
         case CHIMERA_VFS_OK:
-            evpl_http_server_dispatch_default(ctx->request, 204);
+            chimera_rest_reply(ctx->request, 204, NULL, NULL, 0);
             break;
         case CHIMERA_VFS_ENOENT:
             chimera_rest_send_error(ctx->evpl, ctx->request, 404, "Not Found",
@@ -177,10 +178,10 @@ fs_delete_complete(
 
 void
 chimera_rest_handle_filesystems_delete(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *param)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *param)
 {
     struct fs_delete_ctx *ctx;
     const char           *slash = strchr(param, '/');
@@ -188,7 +189,7 @@ chimera_rest_handle_filesystems_delete(
     /* The path parameter is <module>/<name>. */
     if (!slash || slash == param || !slash[1] || strchr(slash + 1, '/')) {
         chimera_rest_send_error(evpl, request, 400, "Bad Request",
-                                "Expected /api/v1/filesystems/<module>/<name>");
+                                "Expected /api/core/v1/filesystems/<module>/<name>");
         return;
     }
 

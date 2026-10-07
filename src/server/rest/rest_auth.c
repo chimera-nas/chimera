@@ -673,11 +673,11 @@ chimera_rest_auth_check_request(
 
 void
 chimera_rest_handle_auth_login(
-    struct evpl                *evpl,
-    struct evpl_http_request   *request,
-    struct chimera_rest_thread *thread,
-    const char                 *body,
-    int                         body_len)
+    struct evpl                 *evpl,
+    struct chimera_rest_request *request,
+    struct chimera_rest_thread  *thread,
+    const char                  *body,
+    int                          body_len)
 {
     json_t                        *root;
     json_error_t                   error;

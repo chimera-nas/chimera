@@ -1454,6 +1454,10 @@ chimera_server_destroy(struct chimera_server *server)
 
     evpl_threadpool_destroy(server->pool);
 
+    if (server->mgmt) {
+        server->mgmt->destroy(server->mgmt_private);
+    }
+
     /* Destroy protocols before VFS so they can release any open handles */
     for (i = 0; i < server->num_protocols; i++) {
         if (!server->protocol_private[i]) {
@@ -1463,10 +1467,6 @@ chimera_server_destroy(struct chimera_server *server)
     }
 
     chimera_vfs_destroy(server->vfs);
-
-    if (server->mgmt) {
-        server->mgmt->destroy(server->mgmt_private);
-    }
 
     free((void *) server->config);
     free(server);

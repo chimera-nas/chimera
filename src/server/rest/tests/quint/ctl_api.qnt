@@ -23,7 +23,7 @@
  *      cannot be checked one endpoint at a time, which is why the model holds
  *      all the collections at once.
  *
- *   3. The reconstruction agrees.  GET /api/v1/config rebuilds a chimera.json
+ *   3. The reconstruction agrees.  GET /api/core/v1/config rebuilds a chimera.json
  *      from live state, and it is the only place two independent renderings of
  *      the same facts exist.  The model requires them to agree exactly, which
  *      is what catches a field added to one and forgotten in the other.

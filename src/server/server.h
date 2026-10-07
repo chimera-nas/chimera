@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#pragma once
+
 #include "common/export.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -634,6 +636,27 @@ chimera_server_config_set_metrics_port(
     struct chimera_server_config *config,
     int                           port);
 
+/* REST modules are opt-in, including core and docs. A NULL path loads
+ * chimera_rest_<name> from the directory containing libchimera_rest. */
+#define CHIMERA_REST_MAX_MODULES 16
+struct chimera_server_rest_module_config {
+    char name[48];
+    char module_path[4096];
+    char config_json[8192];
+    int  allow_public_routes;
+};
+
+SYMBOL_EXPORT int chimera_server_config_add_rest_module(
+    struct chimera_server_config *config,
+    const char                   *name,
+    const char                   *module_path,
+    const char                   *config_json,
+    int                           allow_public_routes);
+SYMBOL_EXPORT const struct chimera_server_rest_module_config *
+chimera_server_config_get_rest_modules(
+    const struct chimera_server_config *config,
+    int                                *count);
+
 SYMBOL_EXPORT void
 chimera_server_config_set_rest_http_port(
     struct chimera_server_config *config,
@@ -650,15 +673,6 @@ chimera_server_config_set_rest_https_port(
 
 SYMBOL_EXPORT int
 chimera_server_config_get_rest_https_port(
-    const struct chimera_server_config *config);
-
-SYMBOL_EXPORT void
-chimera_server_config_set_rest_debug_fsops(
-    struct chimera_server_config *config,
-    int                           enable);
-
-SYMBOL_EXPORT int
-chimera_server_config_get_rest_debug_fsops(
     const struct chimera_server_config *config);
 
 SYMBOL_EXPORT void

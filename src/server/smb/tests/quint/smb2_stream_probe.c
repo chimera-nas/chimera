@@ -343,6 +343,12 @@ probe_dir_stream(struct smb2_conn *c)
           "  ... and READ it back (0x%08x, %u)", st, rlen);
     st = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, s1.file_id,
                          0, out, sizeof(out), &len);
+    CHECK(st == ST_SUCCESS && len >= 24,
+          "query FileStandardInformation -> 0x%08x, %u bytes", st, len);
+    if (st != ST_SUCCESS || len < 24) {
+        smb2_close(c, s1.file_id);
+        return;
+    }
     CHECK(st == ST_SUCCESS && g64(out, 8) == 7 && out[21] == 0,
           "  ... FileStandardInformation: EOF 7, not a directory (0x%08x, eof "
           "%llu, dir %u)", st, (unsigned long long) g64(out, 8), out[21]);

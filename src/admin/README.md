@@ -87,7 +87,11 @@ The REST API must be enabled in the Chimera server configuration:
 ```json
 {
     "server": {
-        "rest_http_port": 8080
+        "rest_http_port": 8080,
+        "rest_modules": [
+            {"module": "core", "allow_public_routes": true},
+            {"module": "docs", "allow_public_routes": true}
+        ]
     }
 }
 ```
