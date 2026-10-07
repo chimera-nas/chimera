@@ -60,13 +60,17 @@ struct nlm_lock_entry {
      * acquire callback must tear the entry down instead of completing it.
      * Exactly one of the reaper and the callback frees the entry. */
     bool                               reaped;
-    /* UNLOCK carve bookkeeping, valid only while chimera_nfs_nlm4_do_unlock
-     * holds this entry detached: the entry that preceded it on
-     * client->locks (NULL == it was first), so a remainder can take the
-     * parent's place in the list.  The list order is the release order of
-     * nlm_client_release_all_locks, and a lock that shrank is still the lock
-     * the client took when it took it. */
-    struct nlm_lock_entry             *carve_anchor;
+    /* Place on client->locks, which is kept in seq order: the order the
+     * client asked for its locks.  That is the release order of
+     * nlm_client_release_all_locks, which pumps the blocking queue after
+     * each lock and so decides which waiter a FREE_ALL lets through first.
+     * A carve remainder inherits its parent's seq, because a lock that
+     * shrank is still the lock the client took when it took it; the
+     * remainders sharing a seq sit in ascending offset.  Ordering by seq
+     * rather than by a neighbour pointer keeps that true when the neighbour
+     * goes while the parent is detached, as it does when the pump of one
+     * carve grants a lock whose own carve removes it. */
+    uint64_t                           seq;
     struct nlm_lock_entry             *next;
     struct nlm_lock_entry             *prev;
 };
@@ -85,6 +89,8 @@ struct nlm_client {
      * UNLOCK carve) compares this to know whether the client was declared
      * lock-free in between -- re-linking then would resurrect locks. */
     uint64_t               reap_gen;
+    /* The last seq handed to a new lock entry (see nlm_lock_entry.seq). */
+    uint64_t               next_seq;
     UT_hash_handle         hh;              /* keyed by hostname */
 };
 
