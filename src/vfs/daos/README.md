@@ -55,6 +55,6 @@ WRITE reports the submitted length after a successful blocking `dfs_write`
 and always reports unstable status. COMMIT calls container-wide `dfs_sync`
 and propagates failure. Neither result is a crash-durability guarantee.
 
-`ctest -R chimera/vfs/daos` runs codec, registry, configuration, operation
+`ctest -C extended -R chimera/vfs/daos` runs codec, registry, configuration, operation
 and load tests. The first four use DFS and SDK doubles and require no cluster.
 The load test opens the built Chimera VFS library and this module.

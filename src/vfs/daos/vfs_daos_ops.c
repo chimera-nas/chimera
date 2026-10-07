@@ -210,6 +210,22 @@ post_attrs(
 } /* post_attrs */
 
 static int
+cred_in_group(
+    const struct chimera_vfs_cred *cred,
+    uint64_t                       gid)
+{
+    if ((uint64_t) cred->gid == gid) {
+        return 1;
+    }
+    for (uint32_t i = 0; i < cred->ngids && i < CHIMERA_VFS_CRED_MAX_GIDS; i++) {
+        if ((uint64_t) cred->gids[i] == gid) {
+            return 1;
+        }
+    }
+    return 0;
+} /* cred_in_group */
+
+static int
 check_access(
     struct vfs_daos_state         *s,
     dfs_obj_t                     *obj,
@@ -339,7 +355,16 @@ set_attrs(
         }
     }
     if (mask & CHIMERA_VFS_ATTR_MODE) {
-        st.st_mode = (st.st_mode & S_IFMT) | (a->va_mode & 07777);
+        mode_t mode = (st.st_mode & S_IFMT) | (a->va_mode & 07777);
+
+        /* A non-privileged chmod of a non-directory clears set-group-ID
+         * when the caller is not in the file's group. */
+        if (!creating && cred && cred->flavor != CHIMERA_VFS_AUTH_NONE &&
+            cred->uid && !S_ISDIR(st.st_mode) && (mode & S_ISGID) &&
+            !cred_in_group(cred, st.st_gid)) {
+            mode &= ~(mode_t) S_ISGID;
+        }
+        st.st_mode = mode;
         flags     |= DFS_SET_ATTR_MODE;
     }
     if (mask & CHIMERA_VFS_ATTR_UID) {
@@ -517,6 +542,12 @@ read_directory(
     r->readdir.r_dir_attr.va_set_mask = 0;
     if (rc) {
         return rc;
+    }
+    if (r->cred) {
+        rc = check_access(s, dir, r->cred, CHIMERA_ACE_READ_DATA);
+        if (rc) {
+            return rc;
+        }
     }
     if (r->readdir.flags & ~CHIMERA_VFS_READDIR_EMIT_DOT) {
         return EINVAL;

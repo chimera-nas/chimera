@@ -156,6 +156,48 @@ collect(
 } /* collect */
 
 static void
+test_setgid_and_readdir_access(void)
+{
+    struct vfs_daos_state      s;
+    struct chimera_vfs_attrs   root, a = { 0 };
+    struct chimera_vfs_request r     = { 0 };
+    struct chimera_vfs_cred    owner = {
+        .flavor = CHIMERA_VFS_AUTH_UNIX, .uid = 1000, .gid = 1000
+    };
+    struct collected           c = { 0 };
+    dfs_obj_t                 *obj;
+
+    setup_mount(&s, &root);
+    directory_entries = 0;
+    CHECK(lookup(&s, s.root, "1", &obj) == 0);
+    a.va_set_mask = CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID | CHIMERA_VFS_ATTR_MODE;
+    a.va_uid      = 1000;
+    a.va_gid      = 50;
+    a.va_mode     = 0644;
+    CHECK(set_attrs(&s, obj, &a, NULL, false) == 0);
+    a.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    a.va_mode     = 02750;
+    CHECK(set_attrs(&s, obj, &a, &owner, false) == 0);
+    CHECK((setattr_value.st_mode & 07777) == 0750);
+    owner.gid = 50;
+    a.va_mode = 02750;
+    CHECK(set_attrs(&s, obj, &a, &owner, false) == 0);
+    CHECK((setattr_value.st_mode & 07777) == 02750);
+    CHECK(vfs_daos_release(&s, obj) == 0);
+
+    r.cred               = &owner;
+    r.readdir.callback   = collect;
+    r.proto_private_data = &c;
+    CHECK(read_directory(&s, &r, s.root) == EACCES);
+    a.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    a.va_mode     = 0755;
+    CHECK(set_attrs(&s, s.root, &a, NULL, false) == 0);
+    CHECK(read_directory(&s, &r, s.root) == 0);
+    CHECK(c.count == 0 && r.readdir.r_eof);
+    finish_mount(&s);
+} /* test_setgid_and_readdir_access */
+
+static void
 test_readdir_resume(void)
 {
     struct vfs_daos_state      s;
@@ -590,6 +632,7 @@ main(void)
                                     CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR));
     test_names_and_inferred_handles();
     test_setattr_masks();
+    test_setgid_and_readdir_access();
     test_readdir_resume();
     test_create_and_parent();
     test_open_io_and_unsupported();
