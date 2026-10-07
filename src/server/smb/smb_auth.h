@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/export.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -12,16 +13,27 @@ enum smb_auth_mech {
     SMB_AUTH_MECH_UNKNOWN,
     SMB_AUTH_MECH_NTLM,
     SMB_AUTH_MECH_KERBEROS,
+    SMB_AUTH_MECH_NEGOEX,
 };
 
-// Detect the authentication mechanism from a SPNEGO/GSSAPI token
-// Returns the detected mechanism type
-enum smb_auth_mech
+// Detect the authentication mechanism from a SPNEGO/GSSAPI token.  A raw
+// NTLMSSP token is NTLM; a negTokenInit is classified by its first (optimistic)
+// mechType, the mechanism whose token it carries; a negTokenResp by the token
+// it carries; a bare Kerberos InitialContextToken (no SPNEGO) is Kerberos.
+// Anything malformed or unrecognised is UNKNOWN.
+SYMBOL_EXPORT enum smb_auth_mech
 smb_auth_detect_mechanism(
     const uint8_t *token,
     size_t         token_len);
 
+// 1 when token is a SPNEGO negTokenInit whose mechTypes list offers NTLMSSP
+// (anywhere in the list), 0 otherwise.
+SYMBOL_EXPORT int
+smb_auth_spnego_offers_ntlmssp(
+    const uint8_t *token,
+    size_t         token_len);
+
 // Get a string name for a mechanism type (for logging)
-const char *
+SYMBOL_EXPORT const char *
 smb_auth_mech_name(
     enum smb_auth_mech mech);

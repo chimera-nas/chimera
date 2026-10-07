@@ -32,6 +32,7 @@
 #include "vfs/vfs_user_cache.h"
 #include "server/smb/smb_wbclient.h"
 #include "server/smb/smb_kerberos_identity.h"
+#include "server/smb/smb_auth.h"
 
 #define TEST_PASS(name) do { fprintf(stderr, "  PASS: %s\n", name); passed++; } while (0)
 #define TEST_FAIL(name) do { fprintf(stderr, "  FAIL: %s\n", name); failed++; } while (0)
@@ -734,6 +735,181 @@ test_kerberos_identity_policy(void)
     }
 } /* test_kerberos_identity_policy */
 
+/* SPNEGO tokens as the two client families emit them, trimmed to what the
+* detector reads.  Lengths are exact: a wrong byte here fails the test. */
+/* *INDENT-OFF* */
+
+/* negTokenInit, mechTypes [MS KRB5, KRB5, NTLMSSP], mechToken 4 opaque bytes:
+ * what a domain-joined Windows client sends first. */
+static const uint8_t spnego_kerberos_first[] = {
+    0x60, 0x3a,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,       /* SPNEGO OID */
+    0xa0, 0x30,                                           /* negTokenInit */
+    0x30, 0x2e,
+    0xa0, 0x24,                                           /* mechTypes */
+    0x30, 0x22,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x06,                                           /* mechToken */
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
+/* negTokenInit, mechTypes [NTLMSSP], mechToken "NTLMSSP\0" + 4 bytes:
+ * smbclient / a Windows client that chose NTLM. */
+static const uint8_t spnego_ntlmssp_first[] = {
+    0x60, 0x2c,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x22,
+    0x30, 0x20,
+    0xa0, 0x0e,
+    0x30, 0x0c,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x0e,
+    0x04, 0x0c, 'N', 'T', 'L', 'M', 'S', 'S', 'P', 0x00, 0x01, 0x00, 0x00, 0x00,
+};
+
+/* negTokenInit, mechTypes [NEGOEX, NTLMSSP], opaque mechToken. */
+static const uint8_t spnego_negoex_first[] = {
+    0x60, 0x30,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x26,
+    0x30, 0x24,
+    0xa0, 0x1a,
+    0x30, 0x18,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x1e,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
+/* negTokenInit, mechTypes [KRB5] only: a client that cannot do NTLM. */
+static const uint8_t spnego_kerberos_only[] = {
+    0x60, 0x23,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x19,
+    0x30, 0x17,
+    0xa0, 0x0d,
+    0x30, 0x0b,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
+/* Bare krb5 InitialContextToken, no SPNEGO: thisMech KRB5, the AP-REQ
+ * TOK_ID 01 00, then 4 opaque bytes standing in for the AP-REQ. */
+static const uint8_t gss_krb5_bare[] = {
+    0x60, 0x11,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x01, 0x00,
+    0xde, 0xad, 0xbe, 0xef,
+};
+
+/* negTokenResp carrying an NTLMSSP AUTHENTICATE (second NTLM leg). */
+static const uint8_t spnego_resp_ntlmssp[] = {
+    0xa1, 0x14,
+    0x30, 0x12,
+    0xa2, 0x10,
+    0x04, 0x0e, 'N', 'T', 'L', 'M', 'S', 'S', 'P', 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+/* *INDENT-ON* */
+
+static void
+test_spnego_mechanism_detection(void)
+{
+    uint8_t truncated[sizeof(spnego_kerberos_first)];
+    uint8_t bare_other[sizeof(gss_krb5_bare)];
+
+    fprintf(stderr, "\nTesting SPNEGO mechanism detection...\n");
+
+    if (smb_auth_detect_mechanism((const uint8_t *) "NTLMSSP\0\x01\x00\x00\x00", 12) ==
+        SMB_AUTH_MECH_NTLM) {
+        TEST_PASS("raw NTLMSSP token is NTLM");
+    } else {
+        TEST_FAIL("raw NTLMSSP token is NTLM");
+    }
+
+    if (smb_auth_detect_mechanism(spnego_kerberos_first, sizeof(spnego_kerberos_first)) ==
+        SMB_AUTH_MECH_KERBEROS) {
+        TEST_PASS("Kerberos-first negTokenInit is Kerberos even with NTLMSSP in mechTypes");
+    } else {
+        TEST_FAIL("Kerberos-first negTokenInit is Kerberos even with NTLMSSP in mechTypes");
+    }
+
+    if (smb_auth_detect_mechanism(spnego_ntlmssp_first, sizeof(spnego_ntlmssp_first)) ==
+        SMB_AUTH_MECH_NTLM) {
+        TEST_PASS("NTLMSSP-first negTokenInit is NTLM");
+    } else {
+        TEST_FAIL("NTLMSSP-first negTokenInit is NTLM");
+    }
+
+    if (smb_auth_detect_mechanism(spnego_negoex_first, sizeof(spnego_negoex_first)) ==
+        SMB_AUTH_MECH_NEGOEX) {
+        TEST_PASS("NEGOEX-first negTokenInit is NEGOEX");
+    } else {
+        TEST_FAIL("NEGOEX-first negTokenInit is NEGOEX");
+    }
+
+    if (smb_auth_detect_mechanism(spnego_kerberos_only, sizeof(spnego_kerberos_only)) ==
+        SMB_AUTH_MECH_KERBEROS) {
+        TEST_PASS("Kerberos-only negTokenInit is Kerberos");
+    } else {
+        TEST_FAIL("Kerberos-only negTokenInit is Kerberos");
+    }
+
+    if (smb_auth_detect_mechanism(gss_krb5_bare, sizeof(gss_krb5_bare)) ==
+        SMB_AUTH_MECH_KERBEROS) {
+        TEST_PASS("bare krb5 InitialContextToken is Kerberos");
+    } else {
+        TEST_FAIL("bare krb5 InitialContextToken is Kerberos");
+    }
+
+    /* Same framing with a thisMech other than Kerberos (last OID byte
+     * changed): not a mechanism the server accepts unwrapped. */
+    memcpy(bare_other, gss_krb5_bare, sizeof(bare_other));
+    bare_other[12] = 0x03;
+    if (smb_auth_detect_mechanism(bare_other, sizeof(bare_other)) == SMB_AUTH_MECH_UNKNOWN) {
+        TEST_PASS("bare InitialContextToken of another mechanism is UNKNOWN");
+    } else {
+        TEST_FAIL("bare InitialContextToken of another mechanism is UNKNOWN");
+    }
+
+    if (smb_auth_detect_mechanism(spnego_resp_ntlmssp, sizeof(spnego_resp_ntlmssp)) ==
+        SMB_AUTH_MECH_NTLM) {
+        TEST_PASS("negTokenResp with an NTLMSSP token is NTLM");
+    } else {
+        TEST_FAIL("negTokenResp with an NTLMSSP token is NTLM");
+    }
+
+    /* Outer length claims 0x3a bytes but only 20 are present. */
+    memcpy(truncated, spnego_kerberos_first, sizeof(truncated));
+    if (smb_auth_detect_mechanism(truncated, 20) == SMB_AUTH_MECH_UNKNOWN) {
+        TEST_PASS("truncated negTokenInit is UNKNOWN");
+    } else {
+        TEST_FAIL("truncated negTokenInit is UNKNOWN");
+    }
+
+    /* mechTypes length byte pointing past the buffer must not be followed. */
+    memcpy(truncated, spnego_kerberos_first, sizeof(truncated));
+    truncated[15] = 0x7f;
+    if (smb_auth_detect_mechanism(truncated, sizeof(truncated)) == SMB_AUTH_MECH_UNKNOWN) {
+        TEST_PASS("oversized mechTypes length is UNKNOWN");
+    } else {
+        TEST_FAIL("oversized mechTypes length is UNKNOWN");
+    }
+
+    if (smb_auth_spnego_offers_ntlmssp(spnego_kerberos_first, sizeof(spnego_kerberos_first)) == 1 &&
+        smb_auth_spnego_offers_ntlmssp(spnego_negoex_first, sizeof(spnego_negoex_first)) == 1 &&
+        smb_auth_spnego_offers_ntlmssp(spnego_kerberos_only, sizeof(spnego_kerberos_only)) == 0 &&
+        smb_auth_spnego_offers_ntlmssp(gss_krb5_bare, sizeof(gss_krb5_bare)) == 0 &&
+        smb_auth_spnego_offers_ntlmssp(spnego_resp_ntlmssp, sizeof(spnego_resp_ntlmssp)) == 0 &&
+        smb_auth_spnego_offers_ntlmssp(truncated, 20) == 0) {
+        TEST_PASS("NTLMSSP offer detection across mechTypes lists");
+    } else {
+        TEST_FAIL("NTLMSSP offer detection across mechTypes lists");
+    }
+} /* test_spnego_mechanism_detection */
+
 static void
 usage(const char *prog)
 {
@@ -801,6 +977,7 @@ main(
         test_cache_capacity();
         test_wbclient_lm_implied_zeros();
         test_kerberos_identity_policy();
+        test_spnego_mechanism_detection();
     }
 
     if (test_mode == TEST_MODE_ALL || test_mode == TEST_MODE_NTLM_WINBIND) {
