@@ -332,10 +332,7 @@ test_open_io_and_unsupported(void)
     sync_error = 0;
     CHECK(close_open(&s, h.vfs_private) == 0);
     unsigned int             unsupported[] = { CHIMERA_VFS_OP_GETPARENT, CHIMERA_VFS_OP_SEEK,
-                                               CHIMERA_VFS_OP_GET_XATTR,             CHIMERA_VFS_OP_SET_XATTR,
-                                               CHIMERA_VFS_OP_LIST_XATTRS,
-                                               CHIMERA_VFS_OP_REMOVE_XATTR,          CHIMERA_VFS_OP_LINK_AT,
-                                               CHIMERA_VFS_OP_CREATE_UNLINKED,
+                                               CHIMERA_VFS_OP_LINK_AT,               CHIMERA_VFS_OP_CREATE_UNLINKED,
                                                CHIMERA_VFS_OP_GET_LAYOUT,            CHIMERA_VFS_OP_READ_PLUS,
                                                CHIMERA_VFS_OP_WRITE_SAME,            27,
                                                999 };
@@ -358,6 +355,115 @@ test_open_io_and_unsupported(void)
     CHECK(dfs_errno_to_vfs(-1) == CHIMERA_VFS_EIO);
     finish_mount(&s);
 } /* test_open_io_and_unsupported */
+
+static void
+test_xattr(void)
+{
+    struct vfs_daos_state          s;
+    struct chimera_vfs_attrs       root;
+    struct chimera_vfs_request     r    = { 0 };
+    struct chimera_vfs_open_handle h    = { 0 };
+    struct chimera_vfs_cred        cred = { .uid = 1000, .gid = 1000 };
+    dfs_obj_t                     *obj;
+    char                           value[16];
+    char                           list[64];
+    char                           long_name[DFS_MAX_XATTR_NAME + 2];
+
+    setup_mount(&s, &root);
+    CHECK(lookup(&s, s.root, "1", &obj) == 0);
+    CHECK(bind_open(&s, obj, 0, NULL, false, &h.vfs_private) == 0);
+    CHECK(vfs_daos_release(&s, obj) == 0);
+
+    r.mount_private                     = &s;
+    r.opcode                            = CHIMERA_VFS_OP_SET_XATTR;
+    r.set_xattr.handle                  = &h;
+    r.set_xattr.name                    = "user.test";
+    r.set_xattr.namelen                 = 9;
+    r.set_xattr.value                   = "abc";
+    r.set_xattr.value_len               = 3;
+    r.set_xattr.option                  = CHIMERA_VFS_XATTR_CREATE;
+    r.set_xattr.r_pre_attr.va_req_mask  = CHIMERA_VFS_ATTR_MASK_STAT;
+    r.set_xattr.r_post_attr.va_req_mask = CHIMERA_VFS_ATTR_MASK_STAT;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_OK);
+    CHECK(r.set_xattr.r_pre_attr.va_set_mask && r.set_xattr.r_post_attr.va_set_mask);
+
+    r.set_xattr.option = CHIMERA_VFS_XATTR_CREATE;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_EEXIST);
+    r.set_xattr.name    = "user.missing";
+    r.set_xattr.namelen = 12;
+    r.set_xattr.option  = CHIMERA_VFS_XATTR_REPLACE;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_ENODATA);
+
+    memset(&r, 0, sizeof(r));
+    r.mount_private          = &s;
+    r.opcode                 = CHIMERA_VFS_OP_GET_XATTR;
+    r.get_xattr.handle       = &h;
+    r.get_xattr.name         = "user.test";
+    r.get_xattr.namelen      = 9;
+    r.get_xattr.value        = value;
+    r.get_xattr.value_maxlen = 2;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_ERANGE);
+    r.get_xattr.value_maxlen = sizeof(value);
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_OK);
+    CHECK(r.get_xattr.r_value_len == 3 && !memcmp(value, "abc", 3));
+
+    memset(&r, 0, sizeof(r));
+    r.mount_private         = &s;
+    r.opcode                = CHIMERA_VFS_OP_LIST_XATTRS;
+    r.list_xattrs.handle    = &h;
+    r.list_xattrs.buffer    = list;
+    r.list_xattrs.max_bytes = 4;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_ERANGE);
+    r.list_xattrs.max_bytes = sizeof(list);
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_OK);
+    CHECK(r.list_xattrs.r_count == 1 && r.list_xattrs.r_eof &&
+          r.list_xattrs.r_len == 10 && !strcmp(list, "user.test"));
+    r.list_xattrs.cookie = 1;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_OK);
+    CHECK(!r.list_xattrs.r_count && r.list_xattrs.r_eof && !r.list_xattrs.r_len);
+
+    memset(&r, 0, sizeof(r));
+    r.mount_private       = &s;
+    r.cred                = &cred;
+    r.opcode              = CHIMERA_VFS_OP_SET_XATTR;
+    r.set_xattr.handle    = &h;
+    r.set_xattr.name      = "user.other";
+    r.set_xattr.namelen   = 10;
+    r.set_xattr.value     = "no";
+    r.set_xattr.value_len = 2;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_EACCES);
+    r.cred             = NULL;
+    s.config.read_only = true;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_EROFS);
+    s.config.read_only = false;
+    memset(long_name, 'a', sizeof(long_name));
+    r.set_xattr.name    = long_name;
+    r.set_xattr.namelen = DFS_MAX_XATTR_NAME + 1;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_EINVAL);
+
+    memset(&r, 0, sizeof(r));
+    r.mount_private        = &s;
+    r.opcode               = CHIMERA_VFS_OP_REMOVE_XATTR;
+    r.remove_xattr.handle  = &h;
+    r.remove_xattr.name    = "missing";
+    r.remove_xattr.namelen = 7;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_ENODATA);
+    r.remove_xattr.name    = "user.test";
+    r.remove_xattr.namelen = 9;
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_OK);
+
+    memset(&r, 0, sizeof(r));
+    r.mount_private          = &s;
+    r.opcode                 = CHIMERA_VFS_OP_GET_XATTR;
+    r.get_xattr.handle       = &h;
+    r.get_xattr.name         = "user.test";
+    r.get_xattr.namelen      = 9;
+    r.get_xattr.value        = value;
+    r.get_xattr.value_maxlen = sizeof(value);
+    CHECK(vfs_daos_operation(&s, &r) == CHIMERA_VFS_ENODATA);
+    CHECK(close_open(&s, h.vfs_private) == 0);
+    finish_mount(&s);
+} /* test_xattr */
 
 static void
 test_mount_lifecycle(void)
@@ -480,12 +586,14 @@ main(void)
     CHECK(vfs_daos.sdk_version == 3);
     CHECK(vfs_daos.fh_magic == CHIMERA_VFS_FH_MAGIC_DAOS);
     CHECK(vfs_daos.capabilities == (CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
-                                    CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_CREATE_GID_ENGINE));
+                                    CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_CREATE_GID_ENGINE |
+                                    CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR));
     test_names_and_inferred_handles();
     test_setattr_masks();
     test_readdir_resume();
     test_create_and_parent();
     test_open_io_and_unsupported();
+    test_xattr();
     test_mount_lifecycle();
     test_unmount_drain();
     CHECK(allocations == releases);

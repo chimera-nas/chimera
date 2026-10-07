@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/xattr.h>
 #include "vfs_daos.h"
 
 #define SETTABLE       (CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID | \
@@ -1318,6 +1319,190 @@ validate_request(const struct chimera_vfs_request *r)
 } /* validate_request */
 
 static int
+xattr_name(
+    const char *in,
+    uint32_t    len,
+    char       *out)
+{
+    if (!in || !len || memchr(in, 0, len) || len > DFS_MAX_XATTR_NAME) {
+        return EINVAL;
+    }
+    memcpy(out, in, len);
+    out[len] = 0;
+    return 0;
+} /* xattr_name */
+
+static int
+xattr_flags(uint32_t option)
+{
+    if (option == CHIMERA_VFS_XATTR_EITHER) {
+        return 0;
+    }
+    if (option == CHIMERA_VFS_XATTR_CREATE) {
+        return XATTR_CREATE;
+    }
+    if (option == CHIMERA_VFS_XATTR_REPLACE) {
+        return XATTR_REPLACE;
+    }
+    return -1;
+} /* xattr_flags */
+
+/* libdfs reports the full size and can write a short list without an error. */
+static int
+xattr_size(
+    daos_size_t need,
+    daos_size_t room)
+{
+    return need > room ? ERANGE : 0;
+} /* xattr_size */
+
+static int
+xattr_get(
+    struct vfs_daos_state      *s,
+    dfs_obj_t                  *obj,
+    struct chimera_vfs_request *r)
+{
+    char        name[DFS_MAX_XATTR_NAME + 1];
+    daos_size_t need = 0;
+    int         rc   = xattr_name(r->get_xattr.name, r->get_xattr.namelen, name);
+
+    if (!rc) {
+        rc = check_access(s, obj, r->cred, CHIMERA_ACE_READ_DATA);
+    }
+    if (!rc) {
+        rc = dfs_getxattr(s->dfs, obj, name, NULL, &need);
+    }
+    if (!rc) {
+        rc = xattr_size(need, r->get_xattr.value_maxlen);
+    }
+    if (!rc && need) {
+        daos_size_t got = r->get_xattr.value_maxlen;
+        rc = dfs_getxattr(s->dfs, obj, name, (void *) r->get_xattr.value, &got);
+        if (!rc && got != need) {
+            rc = EIO;
+        }
+    }
+    if (!rc) {
+        r->get_xattr.r_value_len = need;
+    }
+    return rc;
+} /* xattr_get */
+
+static int
+xattr_set(
+    struct vfs_daos_state      *s,
+    dfs_obj_t                  *obj,
+    struct chimera_vfs_request *r)
+{
+    char name[DFS_MAX_XATTR_NAME + 1];
+    int  flags = xattr_flags(r->set_xattr.option);
+    int  rc;
+
+    r->set_xattr.r_pre_attr.va_set_mask  = 0;
+    r->set_xattr.r_post_attr.va_set_mask = 0;
+    if (flags < 0 || r->set_xattr.value_len > DFS_MAX_XATTR_LEN) {
+        return EINVAL;
+    }
+    rc = xattr_name(r->set_xattr.name, r->set_xattr.namelen, name);
+    if (!rc && s->config.read_only) {
+        rc = EROFS;
+    }
+    if (!rc) {
+        rc = check_access(s, obj, r->cred, CHIMERA_ACE_WRITE_DATA);
+    }
+    if (!rc) {
+        post_attrs(s, obj, &r->set_xattr.r_pre_attr);
+        rc = dfs_setxattr(s->dfs, obj, name, r->set_xattr.value,
+                          r->set_xattr.value_len, flags);
+        if (rc == ENOENT && flags == XATTR_REPLACE) {
+            rc = ENODATA;
+        }
+    }
+    if (!rc) {
+        post_attrs(s, obj, &r->set_xattr.r_post_attr);
+    }
+    return rc;
+} /* xattr_set */
+
+static int
+xattr_list(
+    struct vfs_daos_state      *s,
+    dfs_obj_t                  *obj,
+    struct chimera_vfs_request *r)
+{
+    daos_size_t need = 0;
+    int         rc   = check_access(s, obj, r->cred, CHIMERA_ACE_READ_DATA);
+
+    r->list_xattrs.r_len    = 0;
+    r->list_xattrs.r_count  = 0;
+    r->list_xattrs.r_eof    = 0;
+    r->list_xattrs.r_cookie = 0;
+    if (rc) {
+        return rc;
+    }
+    if (r->list_xattrs.cookie) {
+        r->list_xattrs.r_eof = 1;
+        return 0;
+    }
+    rc = dfs_listxattr(s->dfs, obj, NULL, &need);
+    if (!rc) {
+        rc = xattr_size(need, r->list_xattrs.max_bytes);
+    }
+    if (!rc && need) {
+        daos_size_t got = r->list_xattrs.max_bytes;
+        rc = dfs_listxattr(s->dfs, obj, r->list_xattrs.buffer, &got);
+        if (!rc && got != need) {
+            rc = EIO;
+        }
+    }
+    if (!rc) {
+        const char *p   = r->list_xattrs.buffer;
+        const char *end = p + need;
+        r->list_xattrs.r_len = need;
+        r->list_xattrs.r_eof = 1;
+        while (p < end) {
+            const char *nul = memchr(p, 0, end - p);
+            if (!nul) {
+                return EIO;
+            }
+            r->list_xattrs.r_count++;
+            p = nul + 1;
+        }
+    }
+    return rc;
+} /* xattr_list */
+
+static int
+xattr_remove(
+    struct vfs_daos_state      *s,
+    dfs_obj_t                  *obj,
+    struct chimera_vfs_request *r)
+{
+    char name[DFS_MAX_XATTR_NAME + 1];
+    int  rc = xattr_name(r->remove_xattr.name, r->remove_xattr.namelen, name);
+
+    r->remove_xattr.r_pre_attr.va_set_mask  = 0;
+    r->remove_xattr.r_post_attr.va_set_mask = 0;
+    if (!rc && s->config.read_only) {
+        rc = EROFS;
+    }
+    if (!rc) {
+        rc = check_access(s, obj, r->cred, CHIMERA_ACE_WRITE_DATA);
+    }
+    if (!rc) {
+        post_attrs(s, obj, &r->remove_xattr.r_pre_attr);
+        rc = dfs_removexattr(s->dfs, obj, name);
+        if (rc == ENOENT) {
+            rc = ENODATA;
+        }
+    }
+    if (!rc) {
+        post_attrs(s, obj, &r->remove_xattr.r_post_attr);
+    }
+    return rc;
+} /* xattr_remove */
+
+static int
 operation(
     struct vfs_daos_state      *s,
     struct chimera_vfs_request *r)
@@ -1379,6 +1564,18 @@ operation(
             break;
         case CHIMERA_VFS_OP_ALLOCATE:
             handle = r->allocate.handle;
+            break;
+        case CHIMERA_VFS_OP_GET_XATTR:
+            handle = r->get_xattr.handle;
+            break;
+        case CHIMERA_VFS_OP_SET_XATTR:
+            handle = r->set_xattr.handle;
+            break;
+        case CHIMERA_VFS_OP_LIST_XATTRS:
+            handle = r->list_xattrs.handle;
+            break;
+        case CHIMERA_VFS_OP_REMOVE_XATTR:
+            handle = r->remove_xattr.handle;
             break;
         case CHIMERA_VFS_OP_OPEN_FH:
         case CHIMERA_VFS_OP_RENAME_AT:
@@ -1637,6 +1834,14 @@ operation(
             }
             return rc;
         }
+        case CHIMERA_VFS_OP_GET_XATTR:
+            return xattr_get(s, obj, r);
+        case CHIMERA_VFS_OP_SET_XATTR:
+            return xattr_set(s, obj, r);
+        case CHIMERA_VFS_OP_LIST_XATTRS:
+            return xattr_list(s, obj, r);
+        case CHIMERA_VFS_OP_REMOVE_XATTR:
+            return xattr_remove(s, obj, r);
         default:
             return ENOTSUP;
     } /* switch */
@@ -1663,9 +1868,6 @@ vfs_daos_operation(
     }
     if (rc == SYMLINK_RESULT) {
         return CHIMERA_VFS_ESYMLINK;
-    }
-    if (rc) {
-        fprintf(stderr, "vfs_daos: op %u status %d\n", r->opcode, rc);
     }
     return dfs_errno_to_vfs(rc);
 } /* vfs_daos_operation */

@@ -24,3 +24,4 @@ extern int          connect_error, sync_error, io_error, setattr_flags, connect_
 extern struct stat  setattr_value;
 extern const char  *missing_name;
 extern daos_size_t  read_length, file_size, submitted_length;
+extern int          access_denied;
