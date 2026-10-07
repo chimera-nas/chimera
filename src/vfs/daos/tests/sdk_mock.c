@@ -76,3 +76,14 @@ chimera_vfs_resolve_set_time(
     *out = in->tv_nsec == CHIMERA_VFS_TIME_NOW ? *now : *in;
     return 1;
 } /* chimera_vfs_resolve_set_time */
+
+int
+chimera_vfs_gate_needed_dac(
+    uint64_t                       capabilities,
+    const struct chimera_vfs_cred *cred)
+{
+    if (!cred || cred->flavor != CHIMERA_VFS_AUTH_UNIX || !cred->uid) {
+        return 0;
+    }
+    return (capabilities & CHIMERA_VFS_CAP_DELEGATES_DAC) != 0;
+} /* chimera_vfs_gate_needed_dac */

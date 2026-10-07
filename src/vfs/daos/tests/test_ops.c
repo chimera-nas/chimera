@@ -198,6 +198,50 @@ test_setgid_and_readdir_access(void)
 } /* test_setgid_and_readdir_access */
 
 static void
+test_open_retention_and_search(void)
+{
+    struct vfs_daos_state      s;
+    struct chimera_vfs_attrs   root, a = { 0 };
+    struct chimera_vfs_request r     = { 0 };
+    struct chimera_vfs_cred    other = {
+        .flavor = CHIMERA_VFS_AUTH_UNIX, .uid = 1000, .gid = 1000
+    };
+    const char                *name = "1";
+
+    setup_mount(&s, &root);
+    r.open_at.name    = name;
+    r.open_at.namelen = 1;
+    r.open_at.flags   = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
+    CHECK(open_at(&s, &r, s.root) == 0);
+    CHECK(!r.open_at.r_vfs_private && !s.objects);
+
+    unsigned int before = lookups;
+    memset(&r, 0, sizeof(r));
+    r.cred            = &other;
+    r.open_at.name    = name;
+    r.open_at.namelen = 1;
+    r.open_at.flags   = CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_READ_ONLY;
+    CHECK(open_at(&s, &r, s.root) == EACCES);
+    CHECK(lookups == before && !s.objects);
+
+    a.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    a.va_mode     = 0111;
+    CHECK(set_attrs(&s, s.root, &a, NULL, false) == 0);
+    memset(&r, 0, sizeof(r));
+    r.cred            = &other;
+    r.open_at.name    = name;
+    r.open_at.namelen = 1;
+    r.open_at.flags   = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
+    CHECK(open_at(&s, &r, s.root) == 0);
+    CHECK(!r.open_at.r_vfs_private && !s.objects);
+    r.open_at.flags = CHIMERA_VFS_OPEN_PATH;
+    CHECK(open_at(&s, &r, s.root) == 0);
+    CHECK(r.open_at.r_vfs_private && s.objects);
+    CHECK(close_open(&s, r.open_at.r_vfs_private) == 0);
+    finish_mount(&s);
+} /* test_open_retention_and_search */
+
+static void
 test_readdir_resume(void)
 {
     struct vfs_daos_state      s;
@@ -633,6 +677,7 @@ main(void)
     test_names_and_inferred_handles();
     test_setattr_masks();
     test_setgid_and_readdir_access();
+    test_open_retention_and_search();
     test_readdir_resume();
     test_create_and_parent();
     test_open_io_and_unsupported();
