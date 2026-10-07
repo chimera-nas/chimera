@@ -19,10 +19,29 @@ chimera_vfs_access_check(
     const struct chimera_vfs_cred  *cred,
     uint32_t                        requested)
 {
-    (void) attr;
-    /* These ownership tests do not substitute for SDK permission tests. */
-    CHECK(!cred);
-    return requested;
+    if (!cred || cred->uid == 0) {
+        return requested;
+    }
+    uint32_t mode  = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) ? attr->va_mode : 0;
+    uint64_t owner = (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ? attr->va_uid : 0;
+    uint64_t group = (attr->va_set_mask & CHIMERA_VFS_ATTR_GID) ? attr->va_gid : 0;
+    uint32_t bits  = mode & 0007;
+    if (cred->uid == owner) {
+        bits = (mode >> 6) & 0007;
+    } else if (cred->gid == group) {
+        bits = (mode >> 3) & 0007;
+    }
+    uint32_t granted = 0;
+    if (bits & 4) {
+        granted |= CHIMERA_ACE_READ_DATA;
+    }
+    if (bits & 2) {
+        granted |= CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_APPEND_DATA;
+    }
+    if (bits & 1) {
+        granted |= CHIMERA_ACE_EXECUTE;
+    }
+    return requested & granted;
 } /* chimera_vfs_access_check */
 
 int
@@ -33,8 +52,7 @@ chimera_vfs_delete_allowed(
 {
     (void) parent;
     (void) child;
-    CHECK(!cred);
-    return 1;
+    return cred == NULL || cred->uid == 0;
 } /* chimera_vfs_delete_allowed */
 
 uint32_t
@@ -42,7 +60,7 @@ chimera_vfs_killpriv_mode(
     const struct chimera_vfs_cred *cred,
     uint32_t                       mode)
 {
-    CHECK(!cred);
+    CHECK(!cred || cred->uid == 0);
     return mode;
 } /* chimera_vfs_killpriv_mode */
 

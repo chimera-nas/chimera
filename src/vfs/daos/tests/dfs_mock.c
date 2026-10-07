@@ -6,21 +6,44 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/xattr.h>
 #include "dfs_mock.h"
 
 /* A local test double, not an assertion about the opaque installed DFS ABI. */
 
 
-unsigned int    allocations, releases, lookups, stats, creates, removes, moves;
-static mode_t   created_mode[100];
-static uint64_t renamed_oid[100];
-int             stat_error, release_error, allocation_error, repair_error;
-unsigned int    connects, disconnects, inits, finis, syncs, writes, reads, setattrs;
-unsigned int    directory_entries;
-int             connect_error, sync_error, io_error, setattr_flags, connect_flags;
-struct stat     setattr_value;
-const char     *missing_name;
-daos_size_t     read_length, file_size, submitted_length;
+unsigned int             allocations, releases, lookups, stats, creates, removes, moves;
+static mode_t            created_mode[100];
+static uint64_t          renamed_oid[100];
+int                      stat_error, release_error, allocation_error, repair_error;
+unsigned int             connects, disconnects, inits, finis, syncs, writes, reads, setattrs;
+unsigned int             directory_entries;
+int                      connect_error, sync_error, io_error, setattr_flags, connect_flags;
+struct stat              setattr_value;
+const char              *missing_name;
+daos_size_t              read_length, file_size, submitted_length;
+int                      access_denied;
+struct mock_xattr {
+    int         used;
+    uint64_t    lo;
+    char        name[DFS_MAX_XATTR_NAME + 1];
+    char        value[64];
+    daos_size_t len;
+};
+static struct mock_xattr xattrs[8];
+
+static struct mock_xattr *
+xattr_find(
+    uint64_t    lo,
+    const char *name)
+{
+    for (int i = 0; i < 8; i++) {
+        if (xattrs[i].used && xattrs[i].lo == lo && !strcmp(xattrs[i].name, name)) {
+            return &xattrs[i];
+        }
+    }
+    return NULL;
+} /* xattr_find */
 
 
 int
@@ -93,6 +116,9 @@ dfs_open(
     (void) chunk;
     (void) value;
     creates++;
+    if (access_denied) {
+        return access_denied;
+    }
     missing_name = NULL;
     int rc = dfs_lookup_rel(dfs, parent, name, flags, obj, NULL, NULL);
     if (!rc) {
@@ -278,10 +304,36 @@ dfs_listxattr(
     char        *list,
     daos_size_t *size)
 {
+    daos_size_t need = 0;
+    char       *out  = list;
+
     (void) dfs;
-    (void) obj;
-    (void) list;
-    *size = 0;
+    if (!obj || !size) {
+        return EINVAL;
+    }
+    for (unsigned int i = 0; i < 8; i++) {
+        if (xattrs[i].used && xattrs[i].lo == obj->oid.lo) {
+            need += strlen(xattrs[i].name) + 1;
+        }
+    }
+    if (!list) {
+        *size = need;
+        return 0;
+    }
+    if (*size < need) {
+        *size = need;
+        return ERANGE;
+    }
+    for (unsigned int i = 0; i < 8; i++) {
+        size_t n;
+        if (!xattrs[i].used || xattrs[i].lo != obj->oid.lo) {
+            continue;
+        }
+        n = strlen(xattrs[i].name) + 1;
+        memcpy(out, xattrs[i].name, n);
+        out += n;
+    }
+    *size = need;
     return 0;
 } /* dfs_listxattr */
 
@@ -293,11 +345,28 @@ dfs_getxattr(
     void        *value,
     daos_size_t *size)
 {
+    struct mock_xattr *slot;
+
     (void) dfs;
-    (void) obj;
-    (void) name;
-    (void) value;
-    *size = 0;
+    if (!obj || !name || !size) {
+        return EINVAL;
+    }
+    slot = xattr_find(obj->oid.lo, name);
+    if (!slot) {
+        return ENODATA;
+    }
+    if (!value || !*size) {
+        *size = slot->len;
+        return 0;
+    }
+    if (*size < slot->len) {
+        *size = slot->len;
+        return ERANGE;
+    }
+    if (slot->len) {
+        memcpy(value, slot->value, slot->len);
+    }
+    *size = slot->len;
     return 0;
 } /* dfs_getxattr */
 
@@ -458,13 +527,45 @@ dfs_setxattr(
     daos_size_t size,
     int         flags)
 {
+    struct mock_xattr *slot;
+    int                free_slot = -1;
+
     (void) dfs;
-    (void) obj;
-    (void) name;
-    (void) value;
-    (void) size;
-    (void) flags;
-    return ENOTSUP;
+    if (!obj || !name || (size && !value) || size > sizeof(xattrs[0].value)) {
+        return EINVAL;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (!xattrs[i].used) {
+            if (free_slot < 0) {
+                free_slot = i;
+            }
+            continue;
+        }
+        if (xattrs[i].lo == obj->oid.lo && !strcmp(xattrs[i].name, name)) {
+            slot = &xattrs[i];
+            if (flags == XATTR_CREATE) {
+                return EEXIST;
+            }
+            goto store;
+        }
+    }
+    if (flags == XATTR_REPLACE) {
+        return ENOENT;
+    }
+    if (free_slot < 0) {
+        return ENOSPC;
+    }
+    slot = &xattrs[free_slot];
+    memset(slot, 0, sizeof(*slot));
+    slot->used = 1;
+    slot->lo   = obj->oid.lo;
+    memcpy(slot->name, name, strlen(name) + 1);
+ store:
+    slot->len = size;
+    if (size) {
+        memcpy(slot->value, value, size);
+    }
+    return 0;
 } /* dfs_setxattr */
 
 int
@@ -473,10 +574,18 @@ dfs_removexattr(
     dfs_obj_t  *obj,
     const char *name)
 {
+    struct mock_xattr *slot;
+
     (void) dfs;
-    (void) obj;
-    (void) name;
-    return ENOTSUP;
+    if (!obj || !name) {
+        return EINVAL;
+    }
+    slot = xattr_find(obj->oid.lo, name);
+    if (!slot) {
+        return ENOENT;
+    }
+    slot->used = 0;
+    return 0;
 } /* dfs_removexattr */
 
 int
