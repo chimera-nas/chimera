@@ -385,6 +385,16 @@ static const uint8_t wire_negotiate_ntlmssp_only[] = {
     0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
 };
 
+/* negTokenResp whose responseToken is a Kerberos (KRB5 OID) GSS token: a
+ * client answering the steering hint with Kerberos again. */
+static const uint8_t wire_kerberos_again[] = {
+    0xa1, 0x13,
+    0x30, 0x11,
+    0xa2, 0x0f,
+    0x04, 0x0d,
+    0x60, 0x0b, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+};
+
 /* The steering reply: negTokenResp { accept-incomplete, supportedMech NTLMSSP }. */
 static const uint8_t wire_ntlmssp_hint[] = {
     0xa1, 0x15,
@@ -435,6 +445,7 @@ wire_exchange(
     int            fd,
     uint8_t        command,
     uint64_t       message_id,
+    uint64_t       session_id,
     const uint8_t *body,
     size_t         body_len,
     uint8_t       *buf,
@@ -461,6 +472,8 @@ wire_exchange(
     wire_put16(msg + 4 + 14, 1);              /* CreditRequest */
     wire_put32(msg + 4 + 24, (uint32_t) message_id);
     wire_put32(msg + 4 + 28, (uint32_t) (message_id >> 32));
+    wire_put32(msg + 4 + 40, (uint32_t) session_id);
+    wire_put32(msg + 4 + 44, (uint32_t) (session_id >> 32));
     memcpy(msg + 4 + 64, body, body_len);
 
     if (write(fd, msg, 4 + len) != (ssize_t) (4 + len)) {
@@ -494,19 +507,77 @@ wire_exchange(
  * then one SESSION_SETUP leg carrying blob.  On success stores the reply
  * status and copies the reply security buffer (truncated to sec_len) and
  * returns 0; -1 on any transport or framing problem. */
+/* Send one SESSION_SETUP leg carrying blob on an open connection with the
+ * given MessageId and SessionId; stores the reply status, the reply's
+ * SessionId and security buffer (truncated to sec_len).  -1 on a transport
+ * or framing problem. */
+static int
+wire_session_setup_leg(
+    int            fd,
+    uint64_t       message_id,
+    uint64_t       session_id,
+    const uint8_t *blob,
+    size_t         blob_len,
+    uint32_t      *status,
+    uint64_t      *reply_session_id,
+    uint8_t       *sec,
+    size_t        *sec_len)
+{
+    uint8_t  body[128 + 128];
+    uint8_t  reply[4096];
+    int      n;
+    uint16_t off, len;
+
+    /* SMB2 SESSION_SETUP: StructureSize 25, Flags 0, SecurityMode
+    * SIGNING_ENABLED, Capabilities 0, Channel 0, SecurityBufferOffset 88,
+    * SecurityBufferLength, PreviousSessionId 0, then the blob. */
+    memset(body, 0, sizeof(body));
+    wire_put16(body, 25);
+    body[3] = 1;
+    wire_put16(body + 12, 88);
+    wire_put16(body + 14, (uint16_t) blob_len);
+    memcpy(body + 24, blob, blob_len);
+    n = wire_exchange(fd, 1, message_id, session_id, body, 24 + blob_len,
+                      reply, sizeof(reply));
+    if (n < 0) {
+        return -1;
+    }
+
+    *status           = wire_get32(reply + 8);
+    *reply_session_id = (uint64_t) wire_get32(reply + 40) |
+        ((uint64_t) wire_get32(reply + 44) << 32);
+    off = wire_get16(reply + 64 + 4);
+    len = wire_get16(reply + 64 + 6);
+    if (wire_get16(reply + 64) != 9 || (size_t) off + len > (size_t) n) {
+        *sec_len = 0;
+        return 0;
+    }
+    if (len > *sec_len) {
+        len = (uint16_t) *sec_len;
+    }
+    memcpy(sec, reply + off, len);
+    *sec_len = len;
+    return 0;
+} /* wire_session_setup_leg */
+
+/* Connect, NEGOTIATE at SMB 2.0.2/2.1 (no negotiate contexts, no preauth
+ * integrity) and send the first SESSION_SETUP leg carrying blob.  Stores the
+ * reply status and security buffer; with fd_out/session_id_out the
+ * connection is kept open for a second leg on the returned SessionId. */
 static int
 wire_first_session_setup_leg(
     const uint8_t *blob,
     size_t         blob_len,
     uint32_t      *status,
     uint8_t       *sec,
-    size_t        *sec_len)
+    size_t        *sec_len,
+    int           *fd_out,
+    uint64_t      *session_id_out)
 {
     struct sockaddr_in sa;
-    uint8_t            body[128 + 128];
+    uint8_t            body[64];
     uint8_t            reply[4096];
     int                fd, n;
-    uint16_t           off, len;
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -531,40 +602,25 @@ wire_first_session_setup_leg(
     memset(body + 12, 0x5a, 16);
     wire_put16(body + 36, 0x0202);
     wire_put16(body + 38, 0x0210);
-    n = wire_exchange(fd, 0, 0, body, 40, reply, sizeof(reply));
+    n = wire_exchange(fd, 0, 0, 0, body, 40, reply, sizeof(reply));
     if (n < 0 || wire_get32(reply + 8) != 0) {
         close(fd);
         return -1;
     }
 
-    /* SMB2 SESSION_SETUP: StructureSize 25, Flags 0, SecurityMode
-    * SIGNING_ENABLED, Capabilities 0, Channel 0, SecurityBufferOffset 88,
-    * SecurityBufferLength, PreviousSessionId 0, then the blob. */
-    memset(body, 0, sizeof(body));
-    wire_put16(body, 25);
-    body[3] = 1;
-    wire_put16(body + 12, 88);
-    wire_put16(body + 14, (uint16_t) blob_len);
-    memcpy(body + 24, blob, blob_len);
-    n = wire_exchange(fd, 1, 1, body, 24 + blob_len, reply, sizeof(reply));
-    close(fd);
-    if (n < 0) {
-        return -1;
-    }
+    {
+        uint64_t sid = 0;
+        int      rc  = wire_session_setup_leg(fd, 1, 0, blob, blob_len, status,
+                                              &sid, sec, sec_len);
 
-    *status = wire_get32(reply + 8);
-    off     = wire_get16(reply + 64 + 4);
-    len     = wire_get16(reply + 64 + 6);
-    if (wire_get16(reply + 64) != 9 || (size_t) off + len > (size_t) n) {
-        *sec_len = 0;
-        return 0;
+        if (rc < 0 || !fd_out) {
+            close(fd);
+        } else {
+            *fd_out         = fd;
+            *session_id_out = sid;
+        }
+        return rc;
     }
-    if (len > *sec_len) {
-        len = (uint16_t) *sec_len;
-    }
-    memcpy(sec, reply + off, len);
-    *sec_len = len;
-    return 0;
 } /* wire_first_session_setup_leg */
 
 /* NEGOTIATE at SMB 2.x and return the server's security buffer. */
@@ -599,7 +655,7 @@ wire_negotiate_security_buffer(
     memset(body + 12, 0x5a, 16);
     wire_put16(body + 36, 0x0202);
     wire_put16(body + 38, 0x0210);
-    n = wire_exchange(fd, 0, 0, body, 40, reply, sizeof(reply));
+    n = wire_exchange(fd, 0, 0, 0, body, 40, reply, sizeof(reply));
     close(fd);
     if (n < 0 || wire_get32(reply + 8) != 0 || wire_get16(reply + 64) != 65) {
         return -1;
@@ -618,6 +674,58 @@ wire_negotiate_security_buffer(
     *sec_len = len;
     return 0;
 } /* wire_negotiate_security_buffer */
+
+/* A client that ignores the hint and sends Kerberos again on the SessionId
+ * the hint came back with must fail that leg with LOGON_FAILURE, and the
+ * server must stay healthy: a fresh NTLM logon still works afterwards. */
+static int
+test_spnego_kerberos_again_after_hint_is_refused(void)
+{
+    uint32_t status = 0;
+    uint64_t session_id = 0, sid2 = 0;
+    uint8_t  sec[64];
+    size_t   sec_len = sizeof(sec);
+    int      fd      = -1;
+    int      rc;
+
+    fprintf(stderr, "\n  Testing Kerberos again after the hint is refused...\n");
+
+    if (wire_first_session_setup_leg(wire_kerberos_first, sizeof(wire_kerberos_first),
+                                     &status, sec, &sec_len, &fd, &session_id) < 0 ||
+        status != WIRE_STATUS_MORE_PROCESSING_REQUIRED || session_id == 0) {
+        fprintf(stderr, "    steered first leg failed (status 0x%08x, session %llu)\n",
+                status, (unsigned long long) session_id);
+        test_fail("steered first leg before the Kerberos retry");
+        if (fd >= 0) {
+            close(fd);
+        }
+        return -1;
+    }
+
+    sec_len = sizeof(sec);
+    rc      = wire_session_setup_leg(fd, 2, session_id, wire_kerberos_again,
+                                     sizeof(wire_kerberos_again), &status, &sid2,
+                                     sec, &sec_len);
+    close(fd);
+    if (rc < 0) {
+        fprintf(stderr, "    second leg: raw SMB2 exchange failed\n");
+        test_fail("Kerberos retry after the hint answered on the wire");
+        return -1;
+    }
+    if (status != WIRE_STATUS_LOGON_FAILURE) {
+        fprintf(stderr, "    status 0x%08x, expected STATUS_LOGON_FAILURE\n", status);
+        test_fail("Kerberos retry after the hint gets STATUS_LOGON_FAILURE");
+        return -1;
+    }
+    test_pass("Kerberos retry after the hint gets STATUS_LOGON_FAILURE");
+
+    if (run_smbclient("-U myuser%mypassword", "ls") != 0) {
+        test_fail("NTLM logon after a refused Kerberos retry");
+        return -1;
+    }
+    test_pass("NTLM logon after a refused Kerberos retry");
+    return 0;
+} /* test_spnego_kerberos_again_after_hint_is_refused */
 
 static int
 test_negotiate_offers_ntlmssp_only(void)
@@ -653,7 +761,7 @@ test_spnego_kerberos_first_is_steered(void)
     fprintf(stderr, "\n  Testing a Kerberos-first SESSION_SETUP is steered to NTLMSSP...\n");
 
     if (wire_first_session_setup_leg(wire_kerberos_first, sizeof(wire_kerberos_first),
-                                     &status, sec, &sec_len) < 0) {
+                                     &status, sec, &sec_len, NULL, NULL) < 0) {
         fprintf(stderr, "    raw SMB2 exchange failed\n");
         test_fail("Kerberos-first leg answered on the wire");
         return -1;
@@ -685,7 +793,7 @@ test_spnego_kerberos_only_is_refused(void)
     fprintf(stderr, "\n  Testing a Kerberos-only SESSION_SETUP is refused...\n");
 
     if (wire_first_session_setup_leg(wire_kerberos_only, sizeof(wire_kerberos_only),
-                                     &status, sec, &sec_len) < 0) {
+                                     &status, sec, &sec_len, NULL, NULL) < 0) {
         fprintf(stderr, "    raw SMB2 exchange failed\n");
         test_fail("Kerberos-only leg answered on the wire");
         return -1;
@@ -724,6 +832,9 @@ run_ntlm_tests(void)
         failures++;
     }
     if (test_spnego_kerberos_only_is_refused() < 0) {
+        failures++;
+    }
+    if (test_spnego_kerberos_again_after_hint_is_refused() < 0) {
         failures++;
     }
     if (test_negotiate_offers_ntlmssp_only() < 0) {
@@ -965,8 +1076,9 @@ test_kerberos_required_still_refused(void)
     return 0;
 } /* test_kerberos_required_still_refused */
 
-/* A client that keeps sending Kerberos must fail that leg, and the server
- * must stay healthy: a plain NTLM logon on a fresh connection still works. */
+/* Server health after a refused Kerberos logon: a plain NTLM logon on a
+ * fresh connection still works.  (The second-Kerberos-leg behaviour itself is
+ * pinned by the raw wire probe in the NTLM mode; smbclient never sends one.) */
 static int
 test_kerberos_hint_then_kerberos_again(void)
 {
