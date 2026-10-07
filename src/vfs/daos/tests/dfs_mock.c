@@ -177,6 +177,8 @@ dfs_ostat(
     stats++;
     memset(st, 0, sizeof(*st));
     st->st_mode = obj->mode;
+    st->st_uid  = obj->uid;
+    st->st_gid  = obj->gid;
     return stat_error;
 } /* dfs_ostat */
 
@@ -268,6 +270,12 @@ dfs_osetattr(
     setattr_value = *st;
     if (flags & DFS_SET_ATTR_MODE) {
         obj->mode = st->st_mode;
+    }
+    if (flags & DFS_SET_ATTR_UID) {
+        obj->uid = st->st_uid;
+    }
+    if (flags & DFS_SET_ATTR_GID) {
+        obj->gid = st->st_gid;
     }
     return 0;
 } /* dfs_osetattr */

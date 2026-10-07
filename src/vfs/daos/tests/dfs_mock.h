@@ -14,6 +14,8 @@
 struct dfs_obj {
     daos_obj_id_t oid;
     mode_t        mode;
+    uid_t         uid;
+    gid_t         gid;
     unsigned int  repairs;
 };
 extern unsigned int allocations, releases, lookups, stats, creates, removes, moves;
