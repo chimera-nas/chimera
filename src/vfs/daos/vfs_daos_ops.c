@@ -307,7 +307,7 @@ set_attrs(
     const struct chimera_vfs_cred  *cred,
     bool                            creating)
 {
-    struct stat     st = { 0 };
+    struct stat     st = { 0 }, before;
     struct timespec now;
     uint64_t        mask  = a ? a->va_set_mask & SETTABLE : 0;
     int             flags = 0;
@@ -323,6 +323,7 @@ set_attrs(
     if (rc) {
         return rc;
     }
+    before = st;
     if (!creating && cred && cred->flavor != CHIMERA_VFS_AUTH_NONE && cred->uid) {
         if ((mask & (CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
                      CHIMERA_VFS_ATTR_GID)) && cred->uid != st.st_uid) {
@@ -376,6 +377,15 @@ set_attrs(
     if (mask & CHIMERA_VFS_ATTR_GID) {
         st.st_gid = a->va_gid;
         flags    |= DFS_SET_ATTR_GID;
+    }
+    /* A non-privileged owner or group change clears both set-ID bits of a
+     * non-directory. */
+    if (!creating && cred && cred->uid && !S_ISDIR(st.st_mode) &&
+        !(mask & CHIMERA_VFS_ATTR_MODE) && (st.st_mode & (S_ISUID | S_ISGID)) &&
+        (((mask & CHIMERA_VFS_ATTR_UID) && a->va_uid != before.st_uid) ||
+         ((mask & CHIMERA_VFS_ATTR_GID) && a->va_gid != before.st_gid))) {
+        st.st_mode &= ~(mode_t) (S_ISUID | S_ISGID);
+        flags      |= DFS_SET_ATTR_MODE;
     }
     if (mask & CHIMERA_VFS_ATTR_SIZE) {
         if (!S_ISREG(st.st_mode)) {
