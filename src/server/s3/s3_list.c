@@ -656,6 +656,27 @@ CHIMERA_S3_REQUEST_CALLBACK(chimera_s3_list_find_complete,
     const char                      *next = NULL;
     uint64_t                         total;
 
+    /* The walk could not list some directory of the bucket -- most often
+     * because this key may not read it.  Refuse the listing rather than
+     * answer with the part the walk did reach. */
+    if (error_code != CHIMERA_VFS_OK) {
+        for (i = 0; i < n; i++) {
+            free(ents[i].key);
+        }
+        free(ents);
+        request->list.entries     = NULL;
+        request->list.n_entries   = 0;
+        request->list.cap_entries = 0;
+
+        request->status = chimera_s3_status_from_vfs(error_code,
+                                                     CHIMERA_S3_STATUS_INTERNAL_ERROR);
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
+
     /* S3 returns keys in lexicographic order; the VFS walk does not. */
     if (n > 0) {
         qsort(ents, n, sizeof(*ents), chimera_s3_list_cmp);

@@ -29,6 +29,10 @@
 #endif /* ifdef _WIN32 */
 #include <sys/statvfs.h>
 #include <sys/xattr.h>
+#ifndef _WIN32
+#include <grp.h>
+#include <sys/wait.h>
+#endif /* ifndef _WIN32 */
 
 static int failures;
 
@@ -42,6 +46,202 @@ static int failures;
                 printf("ok:   " __VA_ARGS__); printf("\n"); \
             } \
         } while (0)
+
+/*
+ * POSIX rights retention: I/O rights bind when the file is OPENED, so a
+ * descriptor already open for writing keeps working across a chmod that
+ * would deny a fresh open.  Path-based truncate(2) is the contrast case
+ * -- it re-checks and must fail.  Nothing in the tree covered this pair,
+ * which is how a FUSE descriptor came to lose its write right to a later
+ * chmod (the grant was re-derived at first I/O from the current mode).
+ * Runs only as an unprivileged user: root bypasses the check entirely,
+ * so as root this would pass no matter what the server did.  Run as root,
+ * main() runs it in a child that drops to FUSE_TEST_UNPRIV_UID, which needs
+ * an allow_other mount.  have_private says main() left a root-owned 0700
+ * directory "private" here for the non-owner case.
+ */
+static void
+unprivileged_checks(int have_private)
+{
+    struct stat    st;
+    DIR           *dirp;
+    struct dirent *de;
+    int            count;
+
+    int            rfd = open("retain", O_CREAT | O_RDWR, 0644);
+
+    CHECK(rfd >= 0, "rights retention: create");
+
+    if (rfd >= 0) {
+        CHECK(chmod("retain", 0444) == 0, "rights retention: chmod 0444");
+
+        CHECK(ftruncate(rfd, 4096) == 0,
+              "ftruncate through a writable fd survives chmod");
+        CHECK(pwrite(rfd, "z", 1, 0) == 1,
+              "write through a writable fd survives chmod");
+
+        CHECK(truncate("retain", 0) < 0 && errno == EACCES,
+              "truncate(path) still denied after chmod");
+
+        close(rfd);
+    }
+    CHECK(unlink("retain") == 0, "rights retention: cleanup");
+
+    /* The same for a directory stream: opendir(3) binds the right to
+     * list it, so readdir keeps working after a chmod that would refuse
+     * a fresh opendir. */
+    CHECK(chimera_test_mkdir("retaindir", 0755) == 0 &&
+          close(open("retaindir/f", O_CREAT | O_WRONLY, 0644)) == 0,
+          "directory rights retention: create");
+    dirp = opendir("retaindir");
+    CHECK(dirp != NULL, "directory rights retention: opendir");
+    if (dirp) {
+        CHECK(chmod("retaindir", 0300) == 0,
+              "directory rights retention: chmod 0300");
+
+        count = 0;
+        errno = 0;
+        while ((de = readdir(dirp)) != NULL) {
+            if (strcmp(de->d_name, "f") == 0) {
+                count++;
+            }
+        }
+        CHECK(errno == 0 && count == 1,
+              "readdir through an open stream survives chmod (errno %d)",
+              errno);
+        closedir(dirp);
+
+        dirp = opendir("retaindir");
+        CHECK(dirp == NULL && errno == EACCES,
+              "opendir still denied after chmod");
+        if (dirp) {
+            closedir(dirp);
+        }
+        CHECK(chmod("retaindir", 0755) == 0,
+              "directory rights retention: restore");
+    }
+    CHECK(unlink("retaindir/f") == 0 && rmdir("retaindir") == 0,
+          "directory rights retention: cleanup");
+
+    /* Read without search: the owner of a 0644 directory (rw-) may list
+     * it but not reach its entries.  READDIRPLUS must not hand the
+     * kernel the entries' attributes and nodeids: on a
+     * no_default_permissions mount with cached entries
+     * (coherence=ttl) it would serve a later stat from them and never
+     * send the lookup that checks search.  A default mount has the
+     * kernel check search itself. */
+    CHECK(chimera_test_mkdir("nosearch", 0755) == 0 &&
+          close(open("nosearch/f", O_CREAT | O_WRONLY, 0644)) == 0,
+          "read without search: create");
+    CHECK(chmod("nosearch", 0644) == 0, "read without search: chmod 0644");
+    dirp = opendir("nosearch");
+    CHECK(dirp != NULL, "read without search: opendir");
+    if (dirp) {
+        int dtype = -1;
+
+        count = 0;
+        while ((de = readdir(dirp)) != NULL) {
+            if (strcmp(de->d_name, "f") == 0) {
+                count++;
+                dtype = de->d_type;
+            }
+        }
+        CHECK(count == 1, "read without search: readdir lists the names");
+        /* getdents(2) gives d_type with read alone; only the attributes
+         * and the handle are search's to withhold. */
+        CHECK(dtype == DT_REG,
+              "read without search: the entry keeps its d_type (%d)", dtype);
+        closedir(dirp);
+    }
+    CHECK(stat("nosearch/f", &st) < 0 && errno == EACCES,
+          "stat of an entry still denied after readdir");
+    CHECK(chmod("nosearch", 0755) == 0 &&
+          unlink("nosearch/f") == 0 && rmdir("nosearch") == 0,
+          "read without search: cleanup");
+
+    /* A directory the caller may not read: opendir is refused, by chimera
+     * itself on a no_default_permissions mount.  On a passthrough backend the
+     * by-handle open beneath it checks nothing, so only the engine's own
+     * check stands in the way. */
+    if (have_private) {
+        errno = 0;
+        dirp  = opendir("private");
+        CHECK(dirp == NULL && errno == EACCES,
+              "opendir of another user's 0700 directory denied");
+        if (dirp) {
+            closedir(dirp);
+        }
+    }
+} /* unprivileged_checks */
+
+#ifndef _WIN32
+/*
+ * Run unprivileged_checks() as `uid` from a root test run, in a scratch
+ * directory that uid owns, beside a root-owned 0700 directory for the
+ * non-owner case.  The mount must allow other users (allow_other).
+ * Returns the child's failure count, or -1 if it could not run.
+ */
+static int
+unprivileged_as(int uid)
+{
+    pid_t pid;
+    int   wstatus;
+
+    if (chimera_test_mkdir("unpriv", 0755) != 0 ||
+        chown("unpriv", uid, uid) != 0 ||
+        chimera_test_mkdir("unpriv/private", 0700) != 0) {
+        return -1;
+    }
+
+    fflush(stdout);
+    pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+
+    if (pid == 0) {
+        failures = 0;
+        if (setgroups(0, NULL) != 0 || setgid(uid) != 0 || setuid(uid) != 0 ||
+            chdir("unpriv") != 0) {
+            printf("FAIL: could not become uid %d (errno %d %s)\n",
+                   uid, errno, strerror(errno));
+            _exit(1);
+        }
+        unprivileged_checks(1);
+        fflush(stdout);
+        _exit(failures > 255 ? 255 : failures);
+    }
+
+    if (waitpid(pid, &wstatus, 0) != pid || !WIFEXITED(wstatus)) {
+        return -1;
+    }
+
+    CHECK(rmdir("unpriv/private") == 0 && rmdir("unpriv") == 0,
+          "unprivileged checks: cleanup");
+
+    return WEXITSTATUS(wstatus);
+} /* unprivileged_as */
+#endif /* ifndef _WIN32 */
+
+
+/* The permission checks: run as the invoking user when unprivileged, else as
+ * FUSE_TEST_UNPRIV_UID, else skipped (root bypasses DAC). */
+static void
+access_checks(void)
+{
+    const char *uid = getenv("FUSE_TEST_UNPRIV_UID");
+
+    if (geteuid() != 0) {
+        unprivileged_checks(0);
+#ifndef _WIN32
+    } else if (uid) {
+        CHECK(unprivileged_as(atoi(uid)) == 0,
+              "unprivileged checks as uid %s", uid);
+#endif /* ifndef _WIN32 */
+    } else {
+        printf("skip: rights retention (running as root, DAC bypassed)\n");
+    }
+} /* access_checks */
 
 int
 main(
@@ -58,6 +258,14 @@ main(
     if (argc < 2 || chdir(argv[1]) != 0) {
         fprintf(stderr, "usage: fuse_posix_test <mountpoint>\n");
         return 1;
+    }
+
+    /* FUSE_TEST_ACCESS_ONLY: just the permission checks, for a backend whose
+     * cell exists to cover how it enforces access. */
+    if (getenv("FUSE_TEST_ACCESS_ONLY")) {
+        access_checks();
+        printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
+        return failures != 0;
     }
 
     /* --- O_CREAT|O_EXCL --- */
@@ -292,38 +500,7 @@ main(
 
     CHECK(count == 2000, "readdir returned all entries (%d)", count);
 
-    /*
-     * POSIX rights retention: I/O rights bind when the file is OPENED, so a
-     * descriptor already open for writing keeps working across a chmod that
-     * would deny a fresh open.  Path-based truncate(2) is the contrast case
-     * -- it re-checks and must fail.  Nothing in the tree covered this pair,
-     * which is how a FUSE descriptor came to lose its write right to a later
-     * chmod (the grant was re-derived at first I/O from the current mode).
-     * Runs only as an unprivileged user: root bypasses the check entirely,
-     * so as root this would pass no matter what the server did.
-     */
-    if (geteuid() != 0) {
-        int rfd = open("retain", O_CREAT | O_RDWR, 0644);
-
-        CHECK(rfd >= 0, "rights retention: create");
-
-        if (rfd >= 0) {
-            CHECK(chmod("retain", 0444) == 0, "rights retention: chmod 0444");
-
-            CHECK(ftruncate(rfd, 4096) == 0,
-                  "ftruncate through a writable fd survives chmod");
-            CHECK(pwrite(rfd, "z", 1, 0) == 1,
-                  "write through a writable fd survives chmod");
-
-            CHECK(truncate("retain", 0) < 0 && errno == EACCES,
-                  "truncate(path) still denied after chmod");
-
-            close(rfd);
-        }
-        CHECK(unlink("retain") == 0, "rights retention: cleanup");
-    } else {
-        printf("skip: rights retention (running as root, DAC bypassed)\n");
-    }
+    access_checks();
 
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
 

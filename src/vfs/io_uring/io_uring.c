@@ -1703,14 +1703,17 @@ chimera_io_uring_readdir(
 
     fd = request->readdir.handle->vfs_private;
 
-    /* No credential impersonation here, deliberately: READDIR acts purely
-     * through an open handle the engine already authorized, and POSIX binds
-     * a directory stream's rights at opendir -- a chmod after that must not
-     * break an open stream.  The per-request "." re-open below (a private
-     * cursor over the same object, no path resolution) and the child statx
-     * would otherwise re-check DAC against the current mode.  Stateless
-     * wire callers still face per-operation DAC where it belongs: at the
-     * cred-keyed open of the handle itself. */
+    /* No credential impersonation here, deliberately: the engine has
+     * already decided whether the caller may list this directory, and
+     * whether it may search it and so see the entries' attributes and
+     * handles (chimera_vfs_readdir, which withholds them otherwise).  POSIX
+     * binds a directory stream's right to list at opendir -- a chmod after
+     * that must not break an open stream.  The per-request "." re-open below
+     * (a private cursor over the same object, no path resolution) and the
+     * child statx would otherwise re-check DAC against the current mode.  A
+     * stateless wire caller holds no stream (the by-handle open authorizes
+     * nothing), so the engine checks it against the current mode and ACL on
+     * every READDIR. */
 
     if (thread->readdir_verifier) {
         struct stat st;

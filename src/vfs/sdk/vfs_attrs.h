@@ -116,6 +116,15 @@ struct chimera_acl;
 #define CHIMERA_VFS_ATTR_OWNER_SID          (1ULL << 29)
 #define CHIMERA_VFS_ATTR_GROUP_SID          (1ULL << 30)
 
+/* Not an attribute: marks a readdir entry whose attributes and handle were
+ * withheld because the caller may read the directory but not search it.  Set
+ * by the VFS core, and by the NFS proxy for an entry its server answered with
+ * rdattr_error NFS4ERR_ACCESS.  Such an entry carries what getdents(2) would:
+ * its name, va_ino when known, and its file type in va_mode's S_IFMT bits
+ * (zero when unknown) with CHIMERA_VFS_ATTR_MODE left unset.  NFSv4 answers
+ * it with rdattr_error. */
+#define CHIMERA_VFS_ATTR_WITHHELD           (1ULL << 31)
+
 #define CHIMERA_VFS_ATTR_MASK_STAT          ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \

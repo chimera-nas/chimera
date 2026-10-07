@@ -128,6 +128,7 @@ struct s3_mbt_req {
     const char    *host;                     /* Host override (virtual-host) */
     const char    *content_type;             /* Content-Type header */
     const char    *meta;                     /* value for the x-amz-meta-m header */
+    const char    *acl;                      /* x-amz-acl canned ACL */
     const char    *content_sha;              /* x-amz-content-sha256 override
                                               * (aws-chunked: STREAMING-...) */
     const char    *access_key;               /* credential override */
@@ -172,8 +173,8 @@ s3_mbt_hmac256(
 /* AWS SigV4 Authorization header for one request as the harness sends it:
  * fixed signed-header set (host, x-amz-content-sha256, x-amz-date), unsigned
  * payload (or the aws-chunked STREAMING- marker).  Any extra headers (Range,
- * x-amz-copy-source, Content-Type, x-amz-meta-*) are deliberately left out
- * of SignedHeaders, which SigV4 permits. */
+ * x-amz-acl, x-amz-copy-source, Content-Type, x-amz-meta-*) are
+ * deliberately left out of SignedHeaders, which SigV4 permits. */
 static inline void
 s3_mbt_sign(
     const struct s3_mbt_req *req,
@@ -279,7 +280,11 @@ s3_mbt_sign_v2(
                     method, req->content_type ? req->content_type : "");
 
     /* CanonicalizedAmzHeaders: the x-amz-* headers s3_mbt_call sends, in
-     * lexicographic name order (copy-source < date < meta-m). */
+     * lexicographic name order (acl < copy-source < date < meta-m). */
+    if (req->acl) {
+        off += snprintf(sts + off, sizeof(sts) - off, "x-amz-acl:%s\n",
+                        req->acl);
+    }
     if (req->copy_source) {
         off += snprintf(sts + off, sizeof(sts) - off,
                         "x-amz-copy-source:%s\n", req->copy_source);
@@ -469,6 +474,9 @@ s3_mbt_call(
     if (req->content_type) {
         evpl_http_request_add_header(request, "Content-Type",
                                      req->content_type);
+    }
+    if (req->acl) {
+        evpl_http_request_add_header(request, "x-amz-acl", req->acl);
     }
     if (req->meta) {
         evpl_http_request_add_header(request, "x-amz-meta-m", req->meta);

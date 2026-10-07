@@ -98,6 +98,36 @@ foreach(backend memfs)
         ENVIRONMENT "${_fuse_env}")
 endforeach()
 
+# The same POSIX assertions with chimera, not the kernel, enforcing
+# permissions (no_default_permissions), and with the unprivileged checks run
+# as uid 4242 even from a root ctest (allow_other admits that uid).  The
+# kernel caches READDIRPLUS entries here (coherence=ttl), so the
+# read-without-search check proves the server withheld them.  The linux cell
+# runs the permission checks alone (FUSE_TEST_ACCESS_ONLY), to cover the
+# passthrough, whose by-handle opens the kernel never checks against the
+# caller.  Its session lives under the build tree, which must support
+# name_to_handle_at (a container tempdir does not), and fuse_test_common.sh
+# skips it where that fails.
+foreach(backend memfs linux)
+    set(_nodp_env "${_fuse_env};FUSE_TEST_UNPRIV_UID=4242")
+    if(backend STREQUAL "linux")
+        set(_nodp_env
+            "${_nodp_env};FUSE_TEST_ACCESS_ONLY=1;TMPDIR=${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+
+    add_test(NAME chimera/fuse/posix_nodp_${backend}
+             COMMAND ${_fuse_wrapper} bash
+                     ${CMAKE_CURRENT_SOURCE_DIR}/fuse_posix_test.sh
+                     $<TARGET_FILE:chimera> ${backend}
+                     $<TARGET_FILE:fuse_posix_test>
+                     "uring_depth=0,allow_other,no_default_permissions,coherence=ttl")
+
+    set_tests_properties(chimera/fuse/posix_nodp_${backend} PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120
+        ENVIRONMENT "${_nodp_env}")
+endforeach()
+
 # Locks and cross-mount coherence run against TWO FUSE mounts of one share.
 # fuse_coherence_test polls (proving the async invalidation pushes);
 # fuse_sync_test never polls (proving the coherence=sync completion gates).

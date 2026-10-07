@@ -94,6 +94,9 @@ struct nfs_nfs4_readdir_cursor {
     uint64_t       count;
     struct entry4 *entries;
     struct entry4 *last;
+    /* An entry's attributes were withheld and the client did not ask for
+     * RDATTR_ERROR, so the READDIR fails with NFS4ERR_ACCESS. */
+    int            denied;
 };
 
 struct nfs_request;

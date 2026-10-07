@@ -406,8 +406,10 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
 
     /* MS-SMB2 3.3.5.18: the open must hold FILE_LIST_DIRECTORY (== READ_DATA)
      * to enumerate the directory; otherwise reject with STATUS_ACCESS_DENIED,
-     * as CHANGE_NOTIFY does.  A non-directory keeps its INVALID_PARAMETER
-     * from the enumeration below: the type error outranks the access one. */
+     * as CHANGE_NOTIFY does.  The VFS readdir gate exempts SMB callers and
+     * leaves this check to the open's granted access.  A non-directory keeps
+     * its INVALID_PARAMETER from the enumeration below: the type error
+     * outranks the access one. */
     if ((request->query_directory.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) &&
         !(request->query_directory.open_file->granted_access & SMB2_FILE_LIST_DIRECTORY)) {
         chimera_smb_open_file_release(request, request->query_directory.open_file);

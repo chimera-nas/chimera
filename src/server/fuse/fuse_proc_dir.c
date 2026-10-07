@@ -90,14 +90,32 @@ chimera_fuse_op_opendir(
      * the kernel check the mode bits first -- but no_default_permissions is a
      * supported option, and there the server is the only thing standing in
      * the way.  Gate it here, the same way the other servers do.
+     *
+     * gate_fh_dac, not gate_fh: on a DELEGATES_DAC passthrough the open below
+     * is O_PATH, which the kernel checks for nothing, so the engine must
+     * judge read itself.  READDIR then trusts this check for the life of the
+     * stream (CHIMERA_VFS_READDIR_READ_BOUND), as opendir(3) binds read.
      */
-    chimera_vfs_gate_fh(&req->u.gate, req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        CHIMERA_ACE_READ_DATA,
-                        chimera_fuse_opendir_gated, req);
+    chimera_vfs_gate_fh_dac(&req->u.gate, req->thread->vfs_thread, &req->cred,
+                            req->fh, req->fh_len,
+                            CHIMERA_ACE_READ_DATA,
+                            chimera_fuse_opendir_gated, req);
 } /* chimera_fuse_op_opendir */
 
 /* --- READDIR / READDIRPLUS --- */
+
+/* An entry's d_type.  A withheld entry (read without search) has no mode,
+* but keeps its file type, as getdents(2) gives d_type with read alone. */
+static inline uint32_t
+chimera_fuse_dirent_type(const struct chimera_vfs_attrs *attrs)
+{
+    if (!(attrs->va_set_mask &
+          (CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_WITHHELD))) {
+        return 0;
+    }
+
+    return (attrs->va_mode >> 12) & 0xf;
+} /* chimera_fuse_dirent_type */
 
 static int
 chimera_fuse_readdir_entry(
@@ -179,8 +197,7 @@ chimera_fuse_readdir_entry(
         plus->dirent.ino     = inum;
         plus->dirent.off     = cookie;
         plus->dirent.namelen = namelen;
-        plus->dirent.type    = (attrs->va_set_mask & CHIMERA_VFS_ATTR_MODE) ?
-            (attrs->va_mode >> 12) & 0xf : 0;
+        plus->dirent.type    = chimera_fuse_dirent_type(attrs);
 
         memcpy(plus->dirent.name, name, namelen);
         memset((uint8_t *) plus + FUSE_NAME_OFFSET_DIRENTPLUS + namelen, 0,
@@ -197,8 +214,7 @@ chimera_fuse_readdir_entry(
         dirent->ino     = inum;
         dirent->off     = cookie;
         dirent->namelen = namelen;
-        dirent->type    = (attrs->va_set_mask & CHIMERA_VFS_ATTR_MODE) ?
-            (attrs->va_mode >> 12) & 0xf : 0;
+        dirent->type    = chimera_fuse_dirent_type(attrs);
 
         memcpy(dirent->name, name, namelen);
         memset((uint8_t *) dirent + FUSE_NAME_OFFSET + namelen, 0,
@@ -310,12 +326,15 @@ chimera_fuse_op_readdir(
         CHIMERA_FUSE_ATTR_MASK :
         (CHIMERA_VFS_ATTR_INUM | CHIMERA_VFS_ATTR_MODE);
 
+    /* Every directory handle here came through chimera_fuse_op_opendir,
+    * which checked read: the stream keeps that right across a chmod. */
     chimera_vfs_readdir(req->thread->vfs_thread, &req->cred,
                         file->handle,
                         attr_mask, 0,
                         in->offset,
                         file->readdir_verifier,
-                        CHIMERA_VFS_READDIR_EMIT_DOT,
+                        CHIMERA_VFS_READDIR_EMIT_DOT |
+                        CHIMERA_VFS_READDIR_READ_BOUND,
                         NULL, 0,
                         chimera_fuse_readdir_entry,
                         chimera_fuse_readdir_complete,

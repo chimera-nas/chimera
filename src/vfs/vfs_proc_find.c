@@ -20,6 +20,31 @@ chimera_vfs_find_open_callback(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data);
 
+/* Record one directory's error on the walk's root; the walk completes with
+ * the first one recorded.  A subdirectory that vanished after its parent
+ * listed it -- removed by another client mid-walk -- is not an error: its
+ * entries went with it, as they would had it gone before the parent's
+ * listing. */
+static inline void
+chimera_vfs_find_record(
+    struct chimera_vfs_request *root,
+    int                         subdir,
+    enum chimera_vfs_error      error_code)
+{
+    if (error_code == CHIMERA_VFS_OK) {
+        return;
+    }
+
+    if (subdir && (error_code == CHIMERA_VFS_ENOENT ||
+                   error_code == CHIMERA_VFS_ESTALE)) {
+        return;
+    }
+
+    if (root->find.status == CHIMERA_VFS_OK) {
+        root->find.status = error_code;
+    }
+} /* chimera_vfs_find_record */
+
 static inline void
 chimera_vfs_find_drain(
     struct chimera_vfs_thread  *thread,
@@ -58,7 +83,7 @@ chimera_vfs_find_drain(
     if (!root->find.results &&
         root->find.is_complete &&
         !root->find.complete_called) {
-        root->find.complete(CHIMERA_VFS_OK, root->find.private_data);
+        root->find.complete(root->find.status, root->find.private_data);
         root->find.complete_called = 1;
         chimera_vfs_request_free(thread, root);
     }
@@ -86,6 +111,14 @@ chimera_vfs_find_dispatch(
     find_request = chimera_vfs_request_alloc(thread, cred, fh, fhlen);
 
     if (CHIMERA_VFS_IS_ERR(find_request)) {
+        /* A subdirectory's walk could not start.  Record that on the root
+         * rather than completing the caller while the rest of the walk runs
+         * on: no child is linked from the parent's result yet, so the drain
+         * passes over it. */
+        if (root) {
+            chimera_vfs_find_record(root, 1, CHIMERA_VFS_PTR_ERR(find_request));
+            return;
+        }
         complete(CHIMERA_VFS_PTR_ERR(find_request), private_data);
         return;
     }
@@ -97,6 +130,7 @@ chimera_vfs_find_dispatch(
     find_request->find.parent          = parent;
     find_request->find.is_complete     = 0;
     find_request->find.complete_called = 0;
+    find_request->find.status          = CHIMERA_VFS_OK;
     find_request->find.results         = NULL;
     find_request->find.filter          = filter;
     find_request->find.callback        = callback;
@@ -130,6 +164,7 @@ chimera_vfs_find_readdir_callback(
     void                           *arg)
 {
     struct chimera_vfs_request     *find_request = arg;
+    struct chimera_vfs_request     *root         = find_request->find.root;
     struct chimera_vfs_thread      *thread       = find_request->thread;
     struct chimera_vfs_find_result *result;
     int                             filter_result;
@@ -137,6 +172,31 @@ chimera_vfs_find_readdir_callback(
     if ((namelen == 1 && name[0] == '.') ||
         (namelen == 2 && name[0] == '.' && name[1] == '.')) {
         return 0;
+    }
+
+    /* The walk has already failed, and will complete with that error:
+     * listing and descending further cannot change the answer. */
+    if (root->find.status != CHIMERA_VFS_OK) {
+        return -1;
+    }
+
+    /* The caller may list this directory but not search it, so the entries
+     * come without the attributes the walk reports and descends by.  Fail
+     * the walk, as for a directory it may not list, rather than report
+     * entries it could not stat or reach. */
+    if (attrs->va_set_mask & CHIMERA_VFS_ATTR_WITHHELD) {
+        root->find.status = CHIMERA_VFS_EACCES;
+        return -1;
+    }
+
+    /* Nor can the walk report or descend an entry that came without its
+     * type or handle for any other reason -- a proxy whose server sent none,
+     * or a handle too large to re-encode -- without passing it off as
+     * something it may not be. */
+    if ((attrs->va_set_mask & (CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE)) !=
+        (CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE)) {
+        root->find.status = CHIMERA_VFS_EIO;
+        return -1;
     }
 
     result = chimera_vfs_find_result_alloc(thread);
@@ -184,6 +244,24 @@ chimera_vfs_find_readdir_callback(
     return 0;
 } /* chimera_vfs_find_readdir_callback */
 
+/* One directory of the walk is done.  An error (the directory could not be
+ * opened, or the caller may not list it) is recorded on the root, and the
+ * walk completes with the first one once every directory has finished:
+ * reporting success would pass off a partial listing as the whole tree. */
+static void
+chimera_vfs_find_finish(
+    struct chimera_vfs_request *find_request,
+    enum chimera_vfs_error      error_code)
+{
+    struct chimera_vfs_request *root = find_request->find.root;
+
+    chimera_vfs_find_record(root, find_request != root, error_code);
+
+    find_request->find.is_complete = 1;
+
+    chimera_vfs_find_drain(find_request->thread, root);
+} /* chimera_vfs_find_finish */
+
 static void
 chimera_vfs_find_readdir_complete(
     enum chimera_vfs_error          error_code,
@@ -199,12 +277,8 @@ chimera_vfs_find_readdir_complete(
 
     chimera_vfs_release(thread, handle);
 
-    find_request->find.is_complete = 1;
-
-    chimera_vfs_find_drain(thread, find_request->find.root);
-
-
-} /* chimera_vfs_find_readdir_complete */ /* chimera_vfs_find_readdir_complete */
+    chimera_vfs_find_finish(find_request, error_code);
+} /* chimera_vfs_find_readdir_complete */
 
 static void
 chimera_vfs_find_open_callback(
@@ -215,10 +289,10 @@ chimera_vfs_find_open_callback(
     struct chimera_vfs_request *find_request = private_data;
     struct chimera_vfs_thread  *thread       = find_request->thread;
 
+    /* Not completed or freed here: a subdirectory's request is still linked
+     * from its parent's result, so the drain must be the one to retire it. */
     if (error_code != CHIMERA_VFS_OK) {
-        find_request->find.complete(error_code,
-                                    find_request->find.private_data);
-        chimera_vfs_request_free(thread, find_request);
+        chimera_vfs_find_finish(find_request, error_code);
         return;
     }
 

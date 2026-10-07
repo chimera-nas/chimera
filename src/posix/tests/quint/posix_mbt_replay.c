@@ -1140,7 +1140,9 @@ check_status(
          * kernel NFS client surfaces the same ESTALE.  Both loopback
          * versions: v4 deterministically, v3 whenever the proxy's cached
          * server handle has been dropped (idle sweep under load) and the
-         * re-open by handle meets the reclaimed object. */
+         * re-open by handle meets the reclaimed object.  (A readdir of a
+         * stream on such a directory is the same case; op_readdir records
+         * it.) */
         if (g_nfs_version && actual == 116 && expected == 2 &&
             tf_field(g_cur_rv, "dfd") >= 0) {
             record_dev("ND9");
@@ -2252,7 +2254,7 @@ op_readdir(
     struct dirent *de;
     json_t        *want;
     char           names[256][256];
-    int            nnames = 0, i;
+    int            nnames = 0, i, rerr;
     size_t         j;
 
     apply_cred(pid);
@@ -2266,15 +2268,18 @@ op_readdir(
         }
         return;
     }
-    if (!check_status(tf_field(res_v, "e"), 0) || tf_field(res_v, "e") != 0) {
-        return;
-    }
     /* One atomic full sweep from a fresh cursor (the model's RReaddir returns
-     * the full current entry set each time). */
+     * the full current entry set each time).  readdir reports an error as
+     * NULL with errno set -- over NFS, a stream whose directory the caller
+     * may no longer read (policies.statelessDirDac) -- so errno is cleared
+     * before each call to tell the error from the end of the directory. */
     chimera_posix_rewinddir(d);
-    while ((de = chimera_posix_readdir(d)) != NULL && nnames < 256) {
+    errno = 0;
+    while (nnames < 256 && (de = chimera_posix_readdir(d)) != NULL) {
         snprintf(names[nnames++], 256, "%s", de->d_name);
+        errno = 0;
     }
+    rerr = errno;
 
     want = json_object_get(res_v, "names");
     if (json_is_object(want)) {
@@ -2282,6 +2287,22 @@ op_readdir(
         if (sset) {
             want = sset;
         }
+    }
+
+    /* ND9 for a directory stream: the model answers an empty listing for a
+     * stream whose directory has been removed (POSIX leaves it unspecified),
+     * and an NFS client, holding only the reclaimed directory's handle, gets
+     * STALE from the server -- as the kernel NFS client does.  Only where
+     * the model lists nothing: a stale handle on a directory the model still
+     * lists stays a mismatch. */
+    if (g_nfs_version && rerr == ESTALE && tf_field(res_v, "e") == 0 &&
+        (!want || json_array_size(want) == 0)) {
+        record_dev("ND9");
+        return;
+    }
+
+    if (!check_status(tf_field(res_v, "e"), rerr) || rerr != 0) {
+        return;
     }
     /* every model name present, and every live name (minus . / ..) modelled */
     for (j = 0; want && j < json_array_size(want); j++) {

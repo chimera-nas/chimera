@@ -31,6 +31,7 @@ chimera_nfs4_readdir_parse_attrs(
     char    *dataend = data + fattr->attr_vals.len;
     uint32_t type;
     uint32_t len;
+    uint32_t rdattr_error;
 
     *fileid           = 0;
     *fh_len           = 0;
@@ -86,6 +87,25 @@ chimera_nfs4_readdir_parse_attrs(
         attr->va_size      = chimera_nfs_ntoh64(*(uint64_t *) data);
         data              += sizeof(uint64_t);
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
+    }
+
+    /* FATTR4_RDATTR_ERROR = 11.  Nonzero when the server could not get this
+     * entry's attributes, and then the only attribute sent: the entry is its
+     * name alone.  NFS4ERR_ACCESS means the caller may list the directory but
+     * not search it, which is what CHIMERA_VFS_ATTR_WITHHELD tells the
+     * consumers (find, a re-exporting server) apart from attributes that are
+     * merely missing. */
+    if (fattr->attrmask[0] & (1 << FATTR4_RDATTR_ERROR)) {
+        if (data + sizeof(uint32_t) > dataend) {
+            return;
+        }
+        rdattr_error = chimera_nfs_ntoh32(*(uint32_t *) data);
+        if (rdattr_error != NFS4_OK) {
+            attr->va_set_mask = (rdattr_error == NFS4ERR_ACCESS) ?
+                CHIMERA_VFS_ATTR_WITHHELD : 0;
+            return;
+        }
+        data += sizeof(uint32_t);
     }
 
     /* FATTR4_FILEHANDLE = 19 - opaque<NFS4_FHSIZE> */

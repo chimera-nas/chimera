@@ -25,6 +25,7 @@ chimera_nfs4_readdir_callback(
     struct entry4                  *entry;
     struct READDIR4args            *args = &req->args_compound->argarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor *cursor;
+    uint32_t                        attrvals_cap = 256;
     int                             rc;
 
     cursor = &req->readdir4_cursor;
@@ -50,7 +51,39 @@ chimera_nfs4_readdir_callback(
         return -1;
     }
 
-    uint32_t attrvals_cap = 256;
+    /* The caller may read the directory but not search it, so the VFS
+     * withheld this entry's attributes.  As nfsd does when its per-entry
+     * lookup is refused (RFC 8881 5.8.1.12), the entry carries only
+     * rdattr_error if the client asked for it, and otherwise the whole
+     * READDIR fails. */
+    if (attrs->va_set_mask & CHIMERA_VFS_ATTR_WITHHELD) {
+        void *val;
+
+        if (args->num_attr_request < 1 ||
+            !(args->attr_request[0] & (1 << FATTR4_RDATTR_ERROR))) {
+            req->encoding->dbuf->used = dbuf_before;
+            cursor->denied            = 1;
+            return -1;
+        }
+
+        rc = xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals, 4,
+                                   req->encoding->dbuf);
+        if (rc) {
+            req->encoding->dbuf->used = dbuf_before;
+            return -1;
+        }
+
+        memset(entry->attrs.attrmask, 0, 3 * sizeof(uint32_t));
+        entry->attrs.num_attrmask = 1;
+        entry->attrs.attrmask[0]  = 1 << FATTR4_RDATTR_ERROR;
+
+        val = entry->attrs.attr_vals.data;
+        chimera_nfs4_attr_append_uint32(&val, NFS4ERR_ACCESS);
+        entry->attrs.attr_vals.len = 4;
+
+        goto account;
+    }
+
     if (attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
         attrvals_cap += chimera_nfs4_acl_wire_size(attrs->va_acl);
     }
@@ -90,6 +123,7 @@ chimera_nfs4_readdir_callback(
                                  * entries -- see the type note in nfs4_proc_getattr. */
                                 0);
 
+ account:
     dbuf_cur = req->encoding->dbuf->used - dbuf_before;
 
     if (cursor->count + dbuf_cur > args->maxcount ||
@@ -126,6 +160,10 @@ chimera_nfs4_readdir_complete(
     nfsstat4                        status = chimera_nfs4_errno_to_nfsstat4(error_code);
     struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
     uint64_t                        cv;
+
+    if (status == NFS4_OK && cursor->denied) {
+        status = NFS4ERR_ACCESS;
+    }
 
     /* RFC 7530 §16.24.4: if not even one entry fit in maxcount and we are
      * not at end-of-directory, the buffer is too small. Returning an empty,
@@ -426,6 +464,7 @@ chimera_nfs4_readdir(
     cursor->count   = 16;
     cursor->entries = NULL;
     cursor->last    = NULL;
+    cursor->denied  = 0;
 
     res->resok4.reply.entries = NULL;
 

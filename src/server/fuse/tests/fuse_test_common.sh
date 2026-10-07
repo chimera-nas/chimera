@@ -78,6 +78,14 @@ fuse_test_start() {
     mkdir -p "$MNT"
 
     if [ "$module" = "linux" ]; then
+        # The passthrough addresses files by name_to_handle_at, which
+        # overlayfs and tmpfs (a container's tempdir) do not support.
+        case "$(stat -f -c %T "$SESSION")" in
+            overlayfs | tmpfs)
+                echo "SKIP: $SESSION cannot back the linux module (no file handles)"
+                exit 77
+                ;;
+        esac
         backend_path="$SESSION/backing"
         mkdir -p "$backend_path"
     fi

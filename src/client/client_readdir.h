@@ -55,14 +55,26 @@ chimera_dispatch_readdir(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
+    struct chimera_vfs_open_handle *handle = request->readdir.handle;
+    uint32_t                        flags  = CHIMERA_VFS_READDIR_EMIT_DOT;
+
+    /* A directory this client opened for reading had read checked and bound
+     * at open (chimera_vfs_handle_stamp_access), and opendir(3) keeps that
+     * right for the stream's life.  The client's handles are its own opens,
+     * so the grant on the handle is the client's to vouch for here. */
+    if (handle->granted_valid && handle->granted_bound &&
+        (handle->granted_access & CHIMERA_ACE_READ_DATA)) {
+        flags |= CHIMERA_VFS_READDIR_READ_BOUND;
+    }
+
     chimera_vfs_readdir(thread->vfs_thread,
                         chimera_client_req_cred(request),
-                        request->readdir.handle,
+                        handle,
                         0,  // attr_mask for entries
                         0,  // dir_attr_mask
                         request->readdir.cookie,
                         0,  // verifier
-                        CHIMERA_VFS_READDIR_EMIT_DOT,
+                        flags,
                         NULL, 0, /* no search-pattern filter */
                         chimera_readdir_entry_callback,
                         chimera_readdir_complete,
