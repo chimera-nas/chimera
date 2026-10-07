@@ -1960,13 +1960,19 @@ chimera_linux_rename_at(
          * "may the replaced directory be emptied" before the POSIX type
          * pairing, answering ENOTEMPTY where rename(2) specifies EISDIR for
          * a non-directory moved onto a directory.  Re-derive the type pair
-         * (as root: DAC was settled above) and correct that corner. */
+         * (as root: DAC was settled above) and correct that corner.
+         * A directory moved onto a non-empty directory is ENOTEMPTY on ext4
+         * and EEXIST on XFS.  rename(2) allows either; report ENOTEMPTY. */
         struct stat ost, nst;
 
         if (fstatat(old_fd, fullname, &ost, AT_SYMLINK_NOFOLLOW) == 0 &&
-            fstatat(new_fd, full_newname, &nst, AT_SYMLINK_NOFOLLOW) == 0 &&
-            !S_ISDIR(ost.st_mode) && S_ISDIR(nst.st_mode)) {
-            renameat_errno = EISDIR;
+            fstatat(new_fd, full_newname, &nst, AT_SYMLINK_NOFOLLOW) == 0) {
+            if (!S_ISDIR(ost.st_mode) && S_ISDIR(nst.st_mode)) {
+                renameat_errno = EISDIR;
+            } else if (S_ISDIR(ost.st_mode) && S_ISDIR(nst.st_mode) &&
+                       renameat_errno == EEXIST) {
+                renameat_errno = ENOTEMPTY;
+            }
         }
     }
 
