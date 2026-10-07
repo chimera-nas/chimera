@@ -93,6 +93,15 @@ target_include_directories(smb_harden_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/harden_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_harden_test)
 
+# DCE/RPC bind handling (smb_dcerpc.h): the bind_ack fields a Windows RPC
+# client validates.  Header-only logic driven with hand-built PDUs.
+add_executable(smb_dcerpc_test smb_dcerpc_test.c)
+target_link_libraries(smb_dcerpc_test chimera_server chimera_smb)
+target_include_directories(smb_dcerpc_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/dcerpc_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_dcerpc_test)
+
 # SMB2 Extended Attribute wire-format helpers (smb_ea.h): FILE_FULL_EA /
 # FILE_GET_EA parse/emit round-trip and bounds, case-insensitive name compare,
 # NTSTATUS mapping, and the shared OS/2 EaSize formula.  Header-only.
