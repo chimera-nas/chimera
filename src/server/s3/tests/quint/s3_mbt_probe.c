@@ -711,6 +711,134 @@ main(
               "remove unbound cred failed");
     }
 
+    /* ---- listing needs read on the bucket (#1762) ------------------------ */
+
+    /* A private bucket is a 0700 directory, and listing it enumerates that
+     * directory, so another tenant's key is refused -- ListObjects and
+     * DeleteBucket alike -- rather than answered with the owner's keys (or,
+     * once enumeration is refused, a silently empty listing).  The owner
+     * still lists it, and the tenant still lists a bucket it may read. */
+    {
+        struct s3_mbt_req mk_priv = { .method = EVPL_HTTP_REQUEST_TYPE_PUT,
+                                      .path   = "/bkpriv",
+                                      .acl    = "private" };
+        struct s3_mbt_req put_obj = { .method   = EVPL_HTTP_REQUEST_TYPE_PUT,
+                                      .path     = "/bkpriv/o",
+                                      .body     = (const uint8_t *) "x",
+                                      .body_len = 1 };
+        struct s3_mbt_req ls_priv = { .method = EVPL_HTTP_REQUEST_TYPE_GET,
+                                      .path   = "/bkpriv",
+                                      .query  = "list-type=2" };
+        struct s3_mbt_req ls_pub = { .method = EVPL_HTTP_REQUEST_TYPE_GET,
+                                     .path   = "/bk0",
+                                     .query  = "list-type=2" };
+        struct s3_mbt_req rm_priv = { .method = EVPL_HTTP_REQUEST_TYPE_DELETE,
+                                      .path   = "/bkpriv" };
+
+        CHECK(chimera_server_add_user(env.server, "tenant", "", "", NULL,
+                                      1000, 1000, 0, NULL, 1) == 0,
+              "add tenant user failed");
+        CHECK(chimera_server_add_s3_cred(env.server, "tenantaccess",
+                                         "tenantsecret", "tenant", NULL, NULL,
+                                         1) == 0,
+              "add tenant cred failed");
+
+        r = s3_mbt_call(&env, &mk_priv);
+        CHECK(r->status == 200, "CreateBucket private: got %d want 200",
+              r->status);
+        r = s3_mbt_call(&env, &put_obj);
+        CHECK(r->status == 200, "PUT /bkpriv/o: got %d want 200", r->status);
+
+        ls_priv.access_key = "tenantaccess";
+        ls_priv.secret_key = "tenantsecret";
+        r                  = s3_mbt_call(&env, &ls_priv);
+        CHECK(r->status == 403 && body_has(r, "<Code>AccessDenied</Code>"),
+              "tenant ListObjects of a private bucket: got %d want 403 "
+              "AccessDenied", r->status);
+
+        rm_priv.access_key = "tenantaccess";
+        rm_priv.secret_key = "tenantsecret";
+        r                  = s3_mbt_call(&env, &rm_priv);
+        CHECK(r->status == 403 && body_has(r, "<Code>AccessDenied</Code>"),
+              "tenant DeleteBucket of a private bucket: got %d want 403 "
+              "AccessDenied", r->status);
+
+        ls_pub.access_key = "tenantaccess";
+        ls_pub.secret_key = "tenantsecret";
+        r                 = s3_mbt_call(&env, &ls_pub);
+        CHECK(r->status == 200 && body_has(r, "<Key>owner-object</Key>"),
+              "tenant ListObjects of a readable bucket: got %d want 200 "
+              "naming owner-object", r->status);
+
+        ls_priv.access_key = NULL;
+        ls_priv.secret_key = NULL;
+        r                  = s3_mbt_call(&env, &ls_priv);
+        CHECK(r->status == 200 && body_has(r, "<Key>o</Key>"),
+              "owner ListObjects of its private bucket: got %d want 200 "
+              "naming o", r->status);
+
+        simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bkpriv/o");
+        r = simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bkpriv");
+        CHECK(r->status == 204, "owner DeleteBucket: got %d want 204",
+              r->status);
+
+        /* The harness key above is uid 0, which the check exempts.  A
+         * non-root owner lists and deletes its own private bucket on its
+         * read and search, and the tenant is still refused it. */
+        CHECK(chimera_server_add_user(env.server, "keeper", "", "", NULL,
+                                      1001, 1001, 0, NULL, 1) == 0,
+              "add keeper user failed");
+        CHECK(chimera_server_add_s3_cred(env.server, "keeperaccess",
+                                         "keepersecret", "keeper", NULL, NULL,
+                                         1) == 0,
+              "add keeper cred failed");
+
+        mk_priv.path       = "/bkown";
+        mk_priv.access_key = "keeperaccess";
+        mk_priv.secret_key = "keepersecret";
+        r                  = s3_mbt_call(&env, &mk_priv);
+        CHECK(r->status == 200, "keeper CreateBucket private: got %d want 200",
+              r->status);
+        put_obj.path       = "/bkown/o";
+        put_obj.access_key = "keeperaccess";
+        put_obj.secret_key = "keepersecret";
+        r                  = s3_mbt_call(&env, &put_obj);
+        CHECK(r->status == 200, "keeper PUT /bkown/o: got %d want 200",
+              r->status);
+
+        ls_priv.path       = "/bkown";
+        ls_priv.access_key = "keeperaccess";
+        ls_priv.secret_key = "keepersecret";
+        r                  = s3_mbt_call(&env, &ls_priv);
+        CHECK(r->status == 200 && body_has(r, "<Key>o</Key>"),
+              "non-root owner ListObjects of its private bucket: got %d "
+              "want 200 naming o", r->status);
+
+        ls_priv.access_key = "tenantaccess";
+        ls_priv.secret_key = "tenantsecret";
+        r                  = s3_mbt_call(&env, &ls_priv);
+        CHECK(r->status == 403 && body_has(r, "<Code>AccessDenied</Code>"),
+              "tenant ListObjects of another non-root owner's private "
+              "bucket: got %d want 403 AccessDenied", r->status);
+
+        rm_priv.path       = "/bkown/o";
+        rm_priv.access_key = "keeperaccess";
+        rm_priv.secret_key = "keepersecret";
+        r                  = s3_mbt_call(&env, &rm_priv);
+        CHECK(r->status == 204, "keeper DELETE /bkown/o: got %d want 204",
+              r->status);
+        rm_priv.path = "/bkown";
+        r            = s3_mbt_call(&env, &rm_priv);
+        CHECK(r->status == 204,
+              "non-root owner DeleteBucket of its private bucket: got %d "
+              "want 204", r->status);
+
+        CHECK(chimera_server_remove_s3_cred(env.server, "keeperaccess") == 0,
+              "remove keeper cred failed");
+        CHECK(chimera_server_remove_s3_cred(env.server, "tenantaccess") == 0,
+              "remove tenant cred failed");
+    }
+
     /* ---- teardown -------------------------------------------------------- */
 
     s3_mbt_env_fs_teardown(&env, "fs0");

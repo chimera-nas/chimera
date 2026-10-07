@@ -365,6 +365,14 @@ chimera_s3_delbucket_find_complete(
 {
     struct s3_delbucket_ctx *ctx = private_data;
 
+    /* A walk that could not list part of the bucket cannot vouch that it is
+     * empty: whatever it could not see may hold objects. */
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_s3_delbucket_finish(ctx, chimera_s3_status_from_vfs(error_code,
+                                                                    CHIMERA_S3_STATUS_INTERNAL_ERROR));
+        return;
+    }
+
     if (ctx->has_file) {
         chimera_s3_delbucket_finish(ctx, CHIMERA_S3_STATUS_BUCKET_NOT_EMPTY);
         return;

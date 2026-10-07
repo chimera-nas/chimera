@@ -58,6 +58,15 @@ The following allowances were retired in this review:
   NFSv4 keeps open-time rights: CLAIM_FH now uses the authorized open path
   and binds its grant, including for non-owner openers after chmod.
 
+Directory streams have no such counterpart over either NFS version: a
+directory open creates no server state, and READDIR rechecks read permission
+on every RPC, as Linux nfsd and NFS-Ganesha do (#1762). The nfs3 and nfs4
+profiles set `statelessDirDac`, so a stream whose read permission was removed
+after opendir answers EACCES, owner included. The replayer now compares
+readdir's errno with the model. A stream on a removed directory answers STALE
+over NFS where the model lists nothing; that is ND9, the same reclaimed
+directory handle as its dirfd case.
+
 The SMB client also preserves a symlink's inherited setgid-directory group
 when stamping ownership after SET_REPARSE_POINT. NFSv3 rolls back a failed
 silly rename and keeps the marked handle alive until the RPC completes;

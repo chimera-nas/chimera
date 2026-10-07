@@ -80,6 +80,31 @@ foreach(backend memfs diskfs cairn)
         LABELS "functional;fault_injection;pnfs;${backend}" TIMEOUT 90)
 endforeach()
 
+# READDIR/READDIRPLUS must check read permission on the directory (#1762).
+# Every backend: the engine gate covers the engine backends, and the
+# passthroughs (linux, io_uring) enumerate through a descriptor opened
+# privileged by handle, so nothing below the engine checks the caller there.
+add_executable(nfs3_readdir_access_probe nfs3_readdir_access_probe.c)
+target_include_directories(nfs3_readdir_access_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs3_readdir_access_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs3_readdir_access_probe)
+foreach(backend memfs diskfs cairn linux io_uring)
+    if((backend STREQUAL "cairn" AND NOT CAIRN_ENABLED) OR
+       (backend STREQUAL "linux" AND NOT CHIMERA_LINUX) OR
+       (backend STREQUAL "io_uring" AND NOT CHIMERA_VFS_IO_URING))
+        continue()
+    endif()
+    add_test(NAME chimera/server/nfs/mbt/readdir_access_probe_${backend}
+        COMMAND $<TARGET_FILE:nfs3_readdir_access_probe> -b ${backend})
+    set_tests_properties(chimera/server/nfs/mbt/readdir_access_probe_${backend} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_readdir_access_probe_${backend}"
+        LABELS "functional;probe;nfs3_mbt;${backend}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 60)
+endforeach()
+
 add_executable(nfs4_deleg_probe nfs4_deleg_probe.c)
 target_include_directories(nfs4_deleg_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)

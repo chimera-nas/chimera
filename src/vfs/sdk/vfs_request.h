@@ -232,6 +232,14 @@ _Static_assert(CHIMERA_VFS_OP_NUM <= 64,
 
 /* Readdir flags */
 #define CHIMERA_VFS_READDIR_EMIT_DOT            (1U << 0) /* Emit "." and ".." entries */
+/* The caller enumerates through a directory stream whose read right it
+ * checked when it opened the stream, as opendir(3) binds it (FUSE OPENDIR, a
+ * POSIX client directory opened for reading): judge only search.  Without
+ * it, read is judged against the directory's current mode on every call.
+ * The binding is the caller's to assert, not read from the open handle,
+ * which the open cache shares among every open of the same identity.  Never
+ * passed to a backend. */
+#define CHIMERA_VFS_READDIR_READ_BOUND          (1U << 1)
 
 #define CHIMERA_VFS_OPEN_ID_SYNTHETIC           0
 #define CHIMERA_VFS_OPEN_ID_PATH                1
@@ -841,6 +849,8 @@ struct chimera_vfs_request {
             int                             path_len;
             int16_t                         is_complete;
             int16_t                         complete_called;
+            /* Root only: the first error any directory of the walk hit. */
+            enum chimera_vfs_error status;
             uint64_t                        attr_mask;
             struct chimera_vfs_request     *root;
             struct chimera_vfs_find_result *parent;
@@ -946,6 +956,9 @@ struct chimera_vfs_request {
              * match_pattern == NULL disables filtering. */
             const char                     *match_pattern;
             int                             match_pattern_len;
+            /* The caller may not search the directory: the filter forwards
+             * each entry as its name and inum, marked ATTR_WITHHELD. */
+            int                             withhold;
             chimera_vfs_readdir_callback_t  inner_callback;
             void                           *inner_arg;
         } readdir;

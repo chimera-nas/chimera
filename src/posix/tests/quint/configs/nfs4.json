@@ -17,6 +17,7 @@
 
   "policies": {
     "strictAtime": "unsupported",
+    "statelessDirDac": true,
     "chownSuppGroup": "supported"
   },
 

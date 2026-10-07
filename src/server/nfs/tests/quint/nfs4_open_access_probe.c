@@ -2,7 +2,7 @@
  *
  * SPDX-License-Identifier: LGPL-2.1-only
  *
- * NFSv4 OPEN authorization ground-truth probe.
+ * NFSv4 OPEN and READDIR authorization ground-truth probe.
  *
  * A kernel NFS client does not re-check what it asked the server to open: for
  * MAY_OPEN on a regular file with NFS_CAP_ATOMIC_OPEN, nfs_permission()
@@ -33,6 +33,14 @@
  * authorizes one and not another is the failure this exists to catch, and a
  * matrix that only denied would be satisfied by a server that denies
  * everything.
+ *
+ * READDIR is probed the same way (rd_matrix): sent directly, with no ACCESS
+ * call before it, as a non-root caller.  A kernel client consults ACCESS
+ * before it lists a directory, so it never sends the READDIR that a server
+ * missing the read check would answer with the listing and every child's
+ * file handle.  A caller that may read a directory but not search it gets
+ * the names, each entry carrying only rdattr_error = NFS4ERR_ACCESS, or
+ * NFS4ERR_ACCESS for the whole READDIR when it did not ask for rdattr_error.
  */
 
 #include <stdio.h>
@@ -153,6 +161,20 @@ struct prep {
     uint64_t        clientid;         /* EXCHANGE_ID */
     uint32_t        eir_seq;
     uint8_t         sessionid[16];    /* CREATE_SESSION */
+    int             readdir_idx;      /* index of the last READDIR in st[] */
+    int             lists_f;          /* READDIR named "f" with its handle */
+    int             names_f;          /* READDIR named "f" at all */
+    int             f_rdattr_only;    /* ...with rdattr_error and nothing else */
+    uint32_t        f_rdattr_error;   /* that rdattr_error */
+    int             f_fileid_only;    /* ...with mounted_on_fileid alone */
+    uint32_t        f_mask0;          /* "f"'s attrmask word 0 */
+    uint32_t        f_nmask;          /* ...its attrmask length */
+    uint32_t        f_len;            /* ...and its attr_vals length */
+    int             n_entries;        /* entries in the READDIR reply */
+    int             n_rdattr_only;    /* ...carrying only rdattr_error ACCESS */
+    uint64_t        last_cookie;      /* the reply's last entry's cookie */
+    int             eof;              /* the reply's eof */
+    uint8_t         cookieverf[NFS4_VERIFIER_SIZE];
 };
 
 static void
@@ -168,8 +190,9 @@ prep_cb(
 
     (void) evpl;
     (void) verf;
-    p->rpc_err  = status;
-    p->open_idx = -1;
+    p->rpc_err     = status;
+    p->open_idx    = -1;
+    p->readdir_idx = -1;
     if (status == 0) {
         p->status = reply->status;
         p->nres   = (int) reply->num_resarray;
@@ -208,6 +231,70 @@ prep_cb(
                 case OP_SETATTR:
                     p->st[i] = r->opsetattr.status;
                     break;
+                case OP_CREATE:
+                    p->st[i] = r->opcreate.status;
+                    break;
+                case OP_READDIR: {
+                    const struct entry4 *e;
+
+                    p->st[i]       = r->opreaddir.status;
+                    p->readdir_idx = (int) i;
+                    if (p->st[i] != NFS4_OK) {
+                        break;
+                    }
+                    p->eof = r->opreaddir.resok4.reply.eof;
+                    memcpy(p->cookieverf, r->opreaddir.resok4.cookieverf,
+                           sizeof(p->cookieverf));
+                    for (e = r->opreaddir.resok4.reply.entries; e;
+                         e = e->nextentry) {
+                        const uint8_t *v = e->attrs.attr_vals.data;
+                        int            only_word0;
+                        int            rdattr_only  = 0;
+                        uint32_t       rdattr_error = 0;
+
+                        p->n_entries++;
+                        p->last_cookie = e->cookie;
+
+                        only_word0 = e->attrs.num_attrmask > 0 &&
+                            (e->attrs.num_attrmask < 2 || e->attrs.attrmask[1] == 0) &&
+                            (e->attrs.num_attrmask < 3 || e->attrs.attrmask[2] == 0);
+                        if (only_word0 &&
+                            e->attrs.attrmask[0] == (1U << FATTR4_RDATTR_ERROR) &&
+                            e->attrs.attr_vals.len == 4) {
+                            rdattr_only  = 1;
+                            rdattr_error = ((uint32_t) v[0] << 24) |
+                                ((uint32_t) v[1] << 16) | ((uint32_t) v[2] << 8) | v[3];
+                            if (rdattr_error == NFS4ERR_ACCESS) {
+                                p->n_rdattr_only++;
+                            }
+                        }
+
+                        if (e->name.len != 1 || ((const char *) e->name.data)[0] != 'f') {
+                            continue;
+                        }
+                        p->names_f = 1;
+                        p->f_nmask = e->attrs.num_attrmask;
+                        p->f_mask0 = e->attrs.num_attrmask ? e->attrs.attrmask[0] : 0;
+                        p->f_len   = e->attrs.attr_vals.len;
+                        if (e->attrs.num_attrmask > 0 &&
+                            (e->attrs.attrmask[0] & (1U << FATTR4_FILEHANDLE))) {
+                            p->lists_f = 1;
+                        }
+                        if (rdattr_only) {
+                            p->f_rdattr_only  = 1;
+                            p->f_rdattr_error = rdattr_error;
+                        }
+                        if (e->attrs.num_attrmask >= 2 &&
+                            e->attrs.attrmask[0] == 0 &&
+                            e->attrs.attrmask[1] ==
+                            (1U << (FATTR4_MOUNTED_ON_FILEID - 32)) &&
+                            (e->attrs.num_attrmask < 3 || e->attrs.attrmask[2] == 0) &&
+                            e->attrs.attr_vals.len == 8) {
+                            p->f_fileid_only = 1;
+                        }
+                    }
+                    break;
+                }
                 case OP_EXCHANGE_ID:
                     p->st[i] = r->opexchange_id.eir_status;
                     if (p->st[i] == NFS4_OK) {
@@ -519,6 +606,129 @@ op_close(const struct stateid4 *sid)
     return a;
 } /* op_close */
 
+/* CREATE(NF4DIR) `name` in the current filehandle, mode 0777 so its creator
+ * can populate it before narrowing it. */
+static struct nfs_argop4
+op_mkdir(const char *name)
+{
+    static uint32_t   bitmap[2];
+    static uint8_t    blob[4];
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    bitmap[0] = 0;
+    bitmap[1] = 1U << (FATTR4_MODE - 32);
+    pack_be32(blob, 0777);
+
+    a.argop                               = OP_CREATE;
+    a.opcreate.objtype.type               = NF4DIR;
+    a.opcreate.objname.data               = (void *) name;
+    a.opcreate.objname.len                = (uint32_t) strlen(name);
+    a.opcreate.createattrs.num_attrmask   = 2;
+    a.opcreate.createattrs.attrmask       = bitmap;
+    a.opcreate.createattrs.attr_vals.data = blob;
+    a.opcreate.createattrs.attr_vals.len  = 4;
+    return a;
+} /* op_mkdir */
+
+/* READDIR from the start, asking for each entry's FILEHANDLE: the attribute
+ * that turns a listing a caller should not have seen into a way to reach the
+ * children (PUTFH + GETATTR/READ).  With `rdattr_error`, also RDATTR_ERROR,
+ * as the Linux client always asks. */
+static struct nfs_argop4
+op_readdir_at(
+    uint32_t       word0,
+    uint32_t       word1,
+    uint64_t       cookie,
+    const uint8_t *cookieverf,
+    uint32_t       maxcount)
+{
+    static uint32_t   bitmap[2];
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    bitmap[0] = word0;
+    bitmap[1] = word1;
+
+    a.argop            = OP_READDIR;
+    a.opreaddir.cookie = cookie;
+    if (cookieverf) {
+        memcpy(a.opreaddir.cookieverf, cookieverf,
+               sizeof(a.opreaddir.cookieverf));
+    }
+    a.opreaddir.dircount         = maxcount;
+    a.opreaddir.maxcount         = maxcount;
+    a.opreaddir.attr_request     = bitmap;
+    a.opreaddir.num_attr_request = word1 ? 2 : 1;
+    return a;
+} /* op_readdir_at */
+
+static struct nfs_argop4
+op_readdir(int rdattr_error)
+{
+    return op_readdir_at((1U << FATTR4_FILEHANDLE) |
+                         (rdattr_error ? (1U << FATTR4_RDATTR_ERROR) : 0),
+                         0, 0, NULL, 65536);
+} /* op_readdir */
+
+/* SETATTR(acl): deny `deny_mask` (LIST_DIRECTORY or EXECUTE) to `deny_uid`,
+ * then allow EVERYONE@ to list, search and read attributes.  The mode would
+ * let every caller list and search the directory, so only the ACL can refuse
+ * `deny_uid`.  Each ACE is {type, flag, access_mask, who}, `who` a
+ * utf8str_mixed padded to 4 bytes; chimera's idmap takes a bare numeric
+ * string as the id itself. */
+static struct nfs_argop4
+op_setattr_acl_deny(
+    uint32_t deny_uid,
+    uint32_t deny_mask)
+{
+    static uint32_t   bitmap[1];
+    static uint8_t    blob[96];
+    struct nfs_argop4 a;
+    char              idtext[16];
+    const char       *who[2];
+    uint32_t          type[2], mask[2];
+    uint32_t          len = 0, wholen, padded;
+    int               i;
+
+    memset(&a, 0, sizeof(a));
+    a.argop   = OP_SETATTR;
+    bitmap[0] = 1U << FATTR4_ACL;
+
+    snprintf(idtext, sizeof(idtext), "%u", deny_uid);
+    who[0]  = idtext;
+    type[0] = ACE4_ACCESS_DENIED_ACE_TYPE;
+    mask[0] = deny_mask;
+    who[1]  = "EVERYONE@";
+    type[1] = ACE4_ACCESS_ALLOWED_ACE_TYPE;
+    mask[1] = ACE4_LIST_DIRECTORY | ACE4_EXECUTE | ACE4_READ_ATTRIBUTES |
+        ACE4_READ_ACL | ACE4_SYNCHRONIZE;
+
+    pack_be32(blob + len, 2);
+    len += 4;
+    for (i = 0; i < 2; i++) {
+        wholen = (uint32_t) strlen(who[i]);
+        padded = (wholen + 3) & ~3U;
+        pack_be32(blob + len, type[i]);
+        len += 4;
+        pack_be32(blob + len, 0);
+        len += 4;
+        pack_be32(blob + len, mask[i]);
+        len += 4;
+        pack_be32(blob + len, wholen);
+        len += 4;
+        memset(blob + len, 0, padded);
+        memcpy(blob + len, who[i], wholen);
+        len += padded;
+    }
+
+    a.opsetattr.obj_attributes.num_attrmask   = 1;
+    a.opsetattr.obj_attributes.attrmask       = bitmap;
+    a.opsetattr.obj_attributes.attr_vals.data = blob;
+    a.opsetattr.obj_attributes.attr_vals.len  = len;
+    return a;
+} /* op_setattr_acl_deny */
+
 /* ---- the matrix ----------------------------------------------------------- */
 
 /* The file is owned OWNER_UID:OWNER_UID, and each mode is probed from both
@@ -597,6 +807,402 @@ access_name(uint32_t access)
             return "?";
     } /* switch */
 } /* access_name */
+
+/* ---- READDIR authorization (#1762) ---------------------------------------- */
+
+/* As root: make directory `name` in `parent` holding the child "f" (unless
+ * `empty`) and `extra` more children "f0".."fN", then set it to `mode`,
+ * owned `owner`:`owner`. */
+static struct mbt_fh
+rd_make_dir_n(
+    struct pc           *pc,
+    const struct mbt_fh *parent,
+    const char          *name,
+    int                  mode,
+    uint32_t             owner,
+    int                  empty,
+    int                  extra)
+{
+    static unsigned int seq;
+    struct nfs_argop4   ops[3];
+    struct mbt_fh       dir;
+    struct stateid4     sid;
+    struct prep         p;
+    char                open_owner[48];
+    char                child[16];
+    int                 k;
+
+    mbt_cred_set_uid(pc->env, 0);
+
+    ops[0] = op_putfh(parent);
+    ops[1] = op_mkdir(name);
+    ops[2] = op_getfh();
+    p      = pc_compound(pc, ops, 3, 1);
+    if (p.status != NFS4_OK || !p.fh.has) {
+        fprintf(stderr, "CREATE dir %s failed: %u\n", name, p.status);
+        exit(2);
+    }
+    dir = p.fh;
+
+    if (empty) {
+        goto setmode;
+    }
+
+    for (k = -1; k < extra; k++) {
+        if (k < 0) {
+            snprintf(child, sizeof(child), "f");
+        } else {
+            snprintf(child, sizeof(child), "f%d", k);
+        }
+        snprintf(open_owner, sizeof(open_owner), "rd-create-%u", seq++);
+        ops[0] = op_putfh(&dir);
+        ops[1] = op_open(pc->clientid, open_owner, child,
+                         OPEN4_SHARE_ACCESS_BOTH, 0644);
+        p = pc_compound(pc, ops, 2, 1);
+        if (p.status != NFS4_OK) {
+            fprintf(stderr, "OPEN-create %s/%s failed: %u\n", name, child,
+                    p.status);
+            exit(2);
+        }
+        sid    = p.open_sid;
+        ops[0] = op_putfh(&dir);
+        ops[1] = op_close(&sid);
+        pc_compound(pc, ops, 2, 1);
+    }
+
+ setmode:
+    ops[0] = op_putfh(&dir);
+    ops[1] = op_setattr_mode_owner(mode, owner);
+    p      = pc_compound(pc, ops, 2, 1);
+    if (p.status != NFS4_OK) {
+        fprintf(stderr, "SETATTR %s mode %04o owner %u failed: %u\n",
+                name, (unsigned) mode, owner, p.status);
+        exit(2);
+    }
+
+    return dir;
+} /* rd_make_dir_n */
+
+static struct mbt_fh
+rd_make_dir(
+    struct pc           *pc,
+    const struct mbt_fh *parent,
+    const char          *name,
+    int                  mode,
+    uint32_t             owner,
+    int                  empty)
+{
+    return rd_make_dir_n(pc, parent, name, mode, owner, empty, 0);
+} /* rd_make_dir */
+
+/* PUTFH(dir) + READDIR as `uid` must answer `want`, and on success list "f"
+ * with its handle. */
+static void
+rd_expect(
+    struct pc           *pc,
+    const char          *label,
+    const struct mbt_fh *dir,
+    uint32_t             uid,
+    uint32_t             want)
+{
+    struct nfs_argop4 ops[2];
+    struct prep       p;
+    char              buf[160];
+    uint32_t          got;
+
+    mbt_cred_set_uid(pc->env, uid);
+    ops[0] = op_putfh(dir);
+    ops[1] = op_readdir(1);
+    p      = pc_compound(pc, ops, 2, 1);
+    mbt_cred_set_uid(pc->env, 0);
+
+    /* READDIR's own status, never a short-circuited op's: see the OPEN
+     * cells. */
+    if (p.readdir_idx < 0) {
+        snprintf(buf, sizeof(buf),
+                 "compound returned %u without reaching READDIR", p.status);
+        expect(label, 0, buf);
+        return;
+    }
+    got = p.st[p.readdir_idx];
+
+    snprintf(buf, sizeof(buf), "READDIR as uid %u: expected %u, got %u",
+             uid, want, got);
+    expect(label, got == want, buf);
+
+    if (want == NFS4_OK && got == NFS4_OK && !p.lists_f) {
+        expect(label, 0, "listing does not name \"f\" with its FILEHANDLE");
+    }
+} /* rd_expect */
+
+/* As `uid`, who may read `dir` but not search it: asked for RDATTR_ERROR,
+ * READDIR lists "f" carrying only rdattr_error = NFS4ERR_ACCESS, as nfsd
+ * answers when its per-entry lookup is refused; not asked, the READDIR fails
+ * with NFS4ERR_ACCESS (RFC 8881 5.8.1.12), unless the directory is empty and
+ * so has no entry to withhold. */
+static void
+rd_expect_withheld(
+    struct pc           *pc,
+    const char          *label,
+    const struct mbt_fh *dir,
+    uint32_t             uid,
+    int                  empty)
+{
+    struct nfs_argop4 ops[2];
+    struct prep       p;
+    char              buf[200];
+    uint32_t          got;
+    int               rdattr_error;
+
+    for (rdattr_error = 1; rdattr_error >= 0; rdattr_error--) {
+        uint32_t want = (rdattr_error || empty) ? NFS4_OK : NFS4ERR_ACCESS;
+
+        mbt_cred_set_uid(pc->env, uid);
+        ops[0] = op_putfh(dir);
+        ops[1] = op_readdir(rdattr_error);
+        p      = pc_compound(pc, ops, 2, 1);
+        mbt_cred_set_uid(pc->env, 0);
+
+        if (p.readdir_idx < 0) {
+            snprintf(buf, sizeof(buf),
+                     "compound returned %u without reaching READDIR", p.status);
+            expect(label, 0, buf);
+            return;
+        }
+        got = p.st[p.readdir_idx];
+
+        snprintf(buf, sizeof(buf),
+                 "READDIR %s RDATTR_ERROR as uid %u: expected %u, got %u",
+                 rdattr_error ? "with" : "without", uid, want, got);
+        expect(label, got == want, buf);
+
+        if (got != NFS4_OK || empty) {
+            continue;
+        }
+        if (!p.names_f) {
+            expect(label, 0, "listing does not name \"f\"");
+        } else if (!p.f_rdattr_only || p.f_rdattr_error != NFS4ERR_ACCESS) {
+            snprintf(buf, sizeof(buf),
+                     "\"f\" should carry only rdattr_error %u (filehandle %d, "
+                     "rdattr_error only %d, value %u)", NFS4ERR_ACCESS,
+                     p.lists_f, p.f_rdattr_only, p.f_rdattr_error);
+            expect(label, 0, buf);
+        }
+    }
+} /* rd_expect_withheld */
+
+/* As `uid`, who may read `dir` but not search it, a READDIR asking only for
+ * the inode number (MOUNTED_ON_FILEID) succeeds and gives "f" it: that is
+ * what getdents(2) gives with read alone, so nothing is withheld.  (nfsd
+ * instead looks each entry up whatever the bitmap, and refuses this
+ * READDIR.) */
+static void
+rd_expect_fileid(
+    struct pc           *pc,
+    const char          *label,
+    const struct mbt_fh *dir,
+    uint32_t             uid)
+{
+    struct nfs_argop4 ops[2];
+    struct prep       p;
+    char              buf[160];
+    uint32_t          got;
+
+    mbt_cred_set_uid(pc->env, uid);
+    ops[0] = op_putfh(dir);
+    ops[1] = op_readdir_at(0, 1U << (FATTR4_MOUNTED_ON_FILEID - 32), 0, NULL,
+                           65536);
+    p = pc_compound(pc, ops, 2, 1);
+    mbt_cred_set_uid(pc->env, 0);
+
+    if (p.readdir_idx < 0) {
+        snprintf(buf, sizeof(buf),
+                 "compound returned %u without reaching READDIR", p.status);
+        expect(label, 0, buf);
+        return;
+    }
+    got = p.st[p.readdir_idx];
+    snprintf(buf, sizeof(buf),
+             "READDIR(MOUNTED_ON_FILEID) as uid %u: expected %u, got %u",
+             uid, NFS4_OK, got);
+    expect(label, got == NFS4_OK, buf);
+    if (got == NFS4_OK && !p.f_fileid_only) {
+        snprintf(buf, sizeof(buf),
+                 "\"f\" should carry mounted_on_fileid alone (named %d, "
+                 "attrmask[0] %#x of %u word(s), %u value byte(s))",
+                 p.names_f, p.f_mask0, p.f_nmask, p.f_len);
+        expect(label, 0, buf);
+    }
+} /* rd_expect_fileid */
+
+/* As `uid`, who may read `dir` (holding `n` entries) but not search it, page
+ * through it with RDATTR_ERROR and a small maxcount: every entry arrives,
+ * once, each with only rdattr_error = NFS4ERR_ACCESS. */
+static void
+rd_expect_withheld_paged(
+    struct pc           *pc,
+    const char          *label,
+    const struct mbt_fh *dir,
+    uint32_t             uid,
+    int                  n)
+{
+    struct nfs_argop4 ops[2];
+    struct prep       p;
+    char              buf[200];
+    uint64_t          cookie = 0;
+    uint8_t           verf[NFS4_VERIFIER_SIZE];
+    int               seen = 0, withheld = 0, calls = 0;
+
+    memset(verf, 0, sizeof(verf));
+    do {
+        mbt_cred_set_uid(pc->env, uid);
+        ops[0] = op_putfh(dir);
+        ops[1] = op_readdir_at((1U << FATTR4_FILEHANDLE) |
+                               (1U << FATTR4_RDATTR_ERROR),
+                               0, cookie, verf, 256);
+        p = pc_compound(pc, ops, 2, 1);
+        mbt_cred_set_uid(pc->env, 0);
+
+        if (p.readdir_idx < 0 || p.st[p.readdir_idx] != NFS4_OK) {
+            snprintf(buf, sizeof(buf), "paged READDIR call %d failed: %u",
+                     calls, p.status);
+            expect(label, 0, buf);
+            return;
+        }
+        if (p.n_entries == 0 && !p.eof) {
+            expect(label, 0, "paged READDIR returned no entries before eof");
+            return;
+        }
+        seen     += p.n_entries;
+        withheld += p.n_rdattr_only;
+        cookie    = p.last_cookie;
+        memcpy(verf, p.cookieverf, sizeof(verf));
+        calls++;
+    } while (!p.eof && calls < 1000);
+
+    snprintf(buf, sizeof(buf),
+             "%d call(s): %d of %d entries seen, %d withheld", calls, seen,
+             n, withheld);
+    expect(label, calls > 1 && seen == n && withheld == n, buf);
+} /* rd_expect_withheld_paged */
+
+static void
+rd_set_acl_deny(
+    struct pc           *pc,
+    const struct mbt_fh *dir,
+    uint32_t             deny_uid,
+    uint32_t             deny_mask)
+{
+    struct nfs_argop4 ops[2];
+    struct prep       p;
+
+    mbt_cred_set_uid(pc->env, 0);
+    ops[0] = op_putfh(dir);
+    ops[1] = op_setattr_acl_deny(deny_uid, deny_mask);
+    p      = pc_compound(pc, ops, 2, 1);
+    if (p.status != NFS4_OK) {
+        fprintf(stderr, "SETATTR acl deny %#x failed: %u\n", deny_mask,
+                p.status);
+        exit(2);
+    }
+} /* rd_set_acl_deny */
+
+static void
+rd_chmod(
+    struct pc           *pc,
+    const struct mbt_fh *dir,
+    int                  mode)
+{
+    struct nfs_argop4 ops[2];
+    struct prep       p;
+
+    mbt_cred_set_uid(pc->env, 0);
+    ops[0] = op_putfh(dir);
+    ops[1] = op_setattr_mode_owner(mode, 0);
+    p      = pc_compound(pc, ops, 2, 1);
+    if (p.status != NFS4_OK) {
+        fprintf(stderr, "chmod %04o failed: %u\n", (unsigned) mode, p.status);
+        exit(2);
+    }
+} /* rd_chmod */
+
+/* The READDIR status, sent directly: no ACCESS call precedes it, which is the
+ * one thing a kernel client always does first, and so the one way the
+ * missing check shows.  Refusals (non-owner on 0700 and on 0711, and an ACL
+ * that denies LIST_DIRECTORY over a mode that grants it) and the allowed side
+ * (owner, non-owner on 0755, a uid the ACL does not deny, root), then read
+ * without search (0644 for owner and non-owner, 0744 for a non-owner, an ACL
+ * that denies EXECUTE over a mode that grants it) against the owner of a 0744
+ * directory and root, then the stateless re-check: NFSv4 READDIR has no open
+ * to bind rights to either. */
+static void
+rd_matrix(
+    struct pc           *pc,
+    const struct mbt_fh *root)
+{
+    struct mbt_fh d700, d711, d755, mine, dacl, d644, mine644, mine744;
+    struct mbt_fh xacl, e644, big644;
+
+    printf("# --- NFSv4 READDIR authorization ---\n");
+
+    d700    = rd_make_dir(pc, root, "rd700", 0700, 0, 0);
+    d711    = rd_make_dir(pc, root, "rd711", 0711, 0, 0);
+    d755    = rd_make_dir(pc, root, "rd755", 0755, 0, 0);
+    mine    = rd_make_dir(pc, root, "rdmine", 0700, OWNER_UID, 0);
+    dacl    = rd_make_dir(pc, root, "rdacl", 0777, 0, 0);
+    d644    = rd_make_dir(pc, root, "rd644", 0644, 0, 0);
+    mine644 = rd_make_dir(pc, root, "rdmine644", 0644, OWNER_UID, 0);
+    mine744 = rd_make_dir(pc, root, "rdmine744", 0744, OWNER_UID, 0);
+    xacl    = rd_make_dir(pc, root, "rdxacl", 0777, 0, 0);
+    e644    = rd_make_dir(pc, root, "rdempty644", 0644, 0, 1);
+    big644  = rd_make_dir_n(pc, root, "rdbig644", 0644, 0, 0, 40);
+
+    rd_set_acl_deny(pc, &dacl, OTHER_UID, ACE4_LIST_DIRECTORY);
+    rd_set_acl_deny(pc, &xacl, OTHER_UID, ACE4_EXECUTE);
+
+    rd_expect(pc, "READDIR 0700/other", &d700, OTHER_UID, NFS4ERR_ACCESS);
+    rd_expect(pc, "READDIR 0711/other", &d711, OTHER_UID, NFS4ERR_ACCESS);
+    rd_expect(pc, "READDIR 0700/other on owner's", &mine, OTHER_UID,
+              NFS4ERR_ACCESS);
+    rd_expect(pc, "READDIR acl-deny/denied uid", &dacl, OTHER_UID,
+              NFS4ERR_ACCESS);
+
+    rd_expect(pc, "READDIR 0755/other", &d755, OTHER_UID, NFS4_OK);
+    rd_expect(pc, "READDIR 0700/owner", &mine, OWNER_UID, NFS4_OK);
+    rd_expect(pc, "READDIR acl-deny/other uid", &dacl, OWNER_UID, NFS4_OK);
+    rd_expect(pc, "READDIR 0700/root", &d700, 0, NFS4_OK);
+
+    rd_expect_withheld(pc, "READDIR 0644/other", &d644, OTHER_UID, 0);
+    rd_expect_withheld(pc, "READDIR 0744/other on owner's", &mine744,
+                       OTHER_UID, 0);
+    rd_expect_withheld(pc, "READDIR 0644/owner (rw-, no search)", &mine644,
+                       OWNER_UID, 0);
+    rd_expect_withheld(pc, "READDIR acl-deny-execute/denied uid", &xacl,
+                       OTHER_UID, 0);
+    rd_expect_withheld(pc, "READDIR empty 0644/other", &e644, OTHER_UID, 1);
+    rd_expect_withheld_paged(pc, "READDIR 0644/other, paged", &big644,
+                             OTHER_UID, 41);
+    rd_expect_fileid(pc, "READDIR(MOUNTED_ON_FILEID) 0644/other", &d644,
+                     OTHER_UID);
+
+    rd_expect(pc, "READDIR 0744/owner", &mine744, OWNER_UID, NFS4_OK);
+    rd_expect(pc, "READDIR acl-deny-execute/other uid", &xacl, OWNER_UID,
+              NFS4_OK);
+    rd_expect(pc, "READDIR 0644/root", &d644, 0, NFS4_OK);
+
+    rd_chmod(pc, &d755, 0700);
+    rd_expect(pc, "READDIR after chmod 0755->0700", &d755, OTHER_UID,
+              NFS4ERR_ACCESS);
+    rd_chmod(pc, &d755, 0755);
+    rd_expect(pc, "READDIR after chmod 0700->0755", &d755, OTHER_UID,
+              NFS4_OK);
+    rd_chmod(pc, &d755, 0744);
+    rd_expect_withheld(pc, "READDIR after chmod 0755->0744", &d755,
+                       OTHER_UID, 0);
+    rd_chmod(pc, &d755, 0755);
+    rd_expect(pc, "READDIR after chmod 0744->0755", &d755, OTHER_UID,
+              NFS4_OK);
+} /* rd_matrix */
 
 int
 main(void)
@@ -794,14 +1400,16 @@ main(void)
         mbt_cred_set_uid(env, 0);
     }
 
+    rd_matrix(&pc, &root);
+
     mbt_env_stop(env);
     free(env);
 
     if (failures) {
-        fprintf(stderr, "%d NFSv4 OPEN authorization check(s) FAILED\n",
+        fprintf(stderr, "%d NFSv4 authorization check(s) FAILED\n",
                 failures);
         return 1;
     }
-    printf("all NFSv4 OPEN authorization checks passed\n");
+    printf("all NFSv4 OPEN and READDIR authorization checks passed\n");
     return 0;
 } /* main */

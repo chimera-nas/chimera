@@ -38,7 +38,10 @@
  * Band 4 drives the readdir attr parser, which reports "no handle" by leaving
  * *fh_len at 0 instead of by return code, so it is checked separately.  Band 5
  * drives the same parser but checks the other half of its contract: skipping a
- * handle it cannot use must not stop it parsing the rest of that entry.
+ * handle it cannot use must not stop it parsing the rest of that entry.  Band
+ * 6 drives its rdattr_error handling: an entry whose attributes the server
+ * could not get carries nothing but the error, and a zero rdattr_error ahead
+ * of the handle must not shift the attributes that follow it.
  *
  * Each case reports rather than asserts, so one run shows every band rather
  * than stopping at the first failure.  Band 3 against an unchecked helper is
@@ -395,6 +398,81 @@ check_readdir_continues(
     fflush(stdout);
 } /* check_readdir_continues */
 
+/*
+ * Band 6: RDATTR_ERROR.  The client asks for it so a server answers an entry
+ * it cannot stat -- every entry of a directory the caller may list but not
+ * search -- with rdattr_error alone instead of failing the READDIR.  Such an
+ * entry is its name only: no handle, no fileid, no attributes.  NFS4ERR_ACCESS
+ * marks it CHIMERA_VFS_ATTR_WITHHELD, so a consumer can tell it from one whose
+ * attributes are missing for another reason; any other error leaves no mark.
+ * A server that could get the attributes may still send rdattr_error = 0
+ * first (nfsd does), and the handle and fileid after it must parse as usual.
+ */
+static void
+check_readdir_rdattr_error(uint32_t rdattr_error)
+{
+    struct fattr4            fattr;
+    struct chimera_vfs_attrs attr;
+    struct fh_probe          probe;
+    uint32_t                 attrmask[1];
+    uint64_t                 fileid;
+    uint32_t                 off = 0;
+    uint64_t                 expect_mask;
+    int                      fh_len;
+    const char              *verdict = "ok";
+
+    memset(&probe, 0, sizeof(probe));
+    memset(probe.canary, CANARY_BYTE, sizeof(probe.canary));
+    memset(&attr, 0, sizeof(attr));
+
+    /* [rdattr_error : 4], and when it is 0, [len : 4][handle : 16][fileid : 8] */
+    *(uint32_t *) attr_blob = chimera_nfs_hton32(rdattr_error);
+    off                     = sizeof(uint32_t);
+    attrmask[0]             = 1U << FATTR4_RDATTR_ERROR;
+    if (rdattr_error == NFS4_OK) {
+        *(uint32_t *) (attr_blob + off) = chimera_nfs_hton32(16);
+        off                            += sizeof(uint32_t);
+        memcpy(attr_blob + off, remote_fh_data, 16);
+        off                            += 16;
+        *(uint64_t *) (attr_blob + off) = chimera_nfs_hton64(BAND5_FILEID);
+        off                            += sizeof(uint64_t);
+        attrmask[0]                    |= (1U << FATTR4_FILEHANDLE) |
+            (1U << FATTR4_FILEID);
+    }
+
+    fattr.num_attrmask   = 1;
+    fattr.attrmask       = attrmask;
+    fattr.attr_vals.data = attr_blob;
+    fattr.attr_vals.len  = off;
+
+    fh_len = -1;
+    fileid = ~0ULL;
+
+    chimera_nfs4_readdir_parse_attrs(&fattr, &attr, &fileid, probe.fh, &fh_len);
+
+    if (rdattr_error != NFS4_OK) {
+        expect_mask = (rdattr_error == NFS4ERR_ACCESS) ?
+            CHIMERA_VFS_ATTR_WITHHELD : 0;
+        if (fh_len != 0 || fileid != 0 || attr.va_set_mask != expect_mask) {
+            verdict = "FAIL: an entry carrying only rdattr_error parsed wrongly";
+            failures++;
+        }
+    } else if (fh_len != 16 || fileid != BAND5_FILEID ||
+               !(attr.va_set_mask & CHIMERA_VFS_ATTR_INUM)) {
+        verdict = "FAIL: a zero rdattr_error shifted the handle or fileid";
+        failures++;
+    }
+
+    if (!canary_intact(probe.canary, sizeof(probe.canary))) {
+        verdict = "FAIL: overran the caller's fh_data buffer";
+        failures++;
+    }
+
+    printf("%-8s v4 rdattr_error=%-5u fh_len=%-3d %s\n",
+           "band6", rdattr_error, fh_len, verdict);
+    fflush(stdout);
+} /* check_readdir_rdattr_error */
+
 int
 main(void)
 {
@@ -460,6 +538,11 @@ main(void)
     check_readdir_continues(NFS4_FHSIZE, 0);
     check_readdir_continues(NFS4_FHSIZE + 1, 0);
     check_readdir_continues(1024, 0);
+
+    /* Band 6: an entry the server could not stat, and nfsd's success shape. */
+    check_readdir_rdattr_error(NFS4ERR_ACCESS);
+    check_readdir_rdattr_error(NFS4ERR_IO);
+    check_readdir_rdattr_error(NFS4_OK);
 
     if (failures) {
         printf("\nnfs_fh_bounds_test: %d failure(s)\n", failures);

@@ -235,9 +235,14 @@ chimera_vfs_nfs4_readdir(
                sizeof(argarray[2].opreaddir.cookieverf));
     }
 
-    /* Request attributes: TYPE, SIZE, FILEHANDLE, FILEID, MODE, NUMLINKS */
+    /* Request attributes: TYPE, SIZE, FILEHANDLE, FILEID, MODE, NUMLINKS,
+     * and RDATTR_ERROR, as the Linux client does: without it a server fails
+     * the whole READDIR when it cannot get one entry's attributes, which it
+     * cannot for any entry of a directory the caller may list but not
+     * search (RFC 8881 5.8.1.12). */
     ctx->attr_request[0] = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) |
-        (1 << FATTR4_FILEHANDLE) | (1 << FATTR4_FILEID);
+        (1 << FATTR4_RDATTR_ERROR) | (1 << FATTR4_FILEHANDLE) |
+        (1 << FATTR4_FILEID);
     ctx->attr_request[1] = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32));
 
     argarray[2].opreaddir.attr_request     = ctx->attr_request;

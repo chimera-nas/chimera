@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #undef NDEBUG
 #include <assert.h>
 
@@ -204,6 +205,190 @@ remove_cb(
     ctx->status = error_code;
     ctx->done   = 1;
 } /* remove_cb */
+
+/* Set by readdir_entry_cb when the listing names "kid", with the entry's
+ * va_set_mask and va_mode. */
+static int      readdir_saw_kid;
+static uint64_t readdir_kid_mask;
+static uint32_t readdir_kid_mode;
+
+static int
+readdir_entry_cb(
+    uint64_t                        inum,
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs,
+    void                           *arg)
+{
+    if (namelen == 3 && memcmp(name, "kid", 3) == 0) {
+        readdir_saw_kid  = 1;
+        readdir_kid_mask = attrs->va_set_mask;
+        readdir_kid_mode = attrs->va_mode;
+    }
+    return 0;
+} /* readdir_entry_cb */
+
+static void
+readdir_complete_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        cookie,
+    uint64_t                        verifier,
+    uint32_t                        eof,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    ctx->done   = 1;
+} /* readdir_complete_cb */
+
+/* List directory handle `dir` as `cred`, asking for `attr_mask` per entry,
+ * with readdir `flags`.  Returns the status; a successful listing must name
+ * "kid". */
+static enum chimera_vfs_error
+readdir_flags_as(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir,
+    uint64_t                        attr_mask,
+    uint32_t                        flags)
+{
+    readdir_saw_kid  = 0;
+    readdir_kid_mask = 0;
+    readdir_kid_mode = 0;
+    chimera_vfs_readdir(ctx->vfs_thread, cred, dir, attr_mask, 0, 0, 0, flags,
+                        NULL, 0, readdir_entry_cb, readdir_complete_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status != CHIMERA_VFS_OK || readdir_saw_kid);
+    return ctx->status;
+} /* readdir_flags_as */
+
+static enum chimera_vfs_error
+readdir_mask_as(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir,
+    uint64_t                        attr_mask)
+{
+    return readdir_flags_as(ctx, cred, dir, attr_mask, 0);
+} /* readdir_mask_as */
+
+static enum chimera_vfs_error
+readdir_as(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir)
+{
+    return readdir_mask_as(ctx, cred, dir, 0);
+} /* readdir_as */
+
+/* As readdir_as, through a stream whose read the caller bound at open (FUSE
+ * after OPENDIR, the POSIX client on a directory opened for reading). */
+static enum chimera_vfs_error
+readdir_bound_as(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir)
+{
+    return readdir_flags_as(ctx, cred, dir, 0,
+                            CHIMERA_VFS_READDIR_READ_BOUND);
+} /* readdir_bound_as */
+
+/* As readdir_flags_as with the attributes and handle READDIRPLUS asks for;
+ * returns 1 if "kid" came with them, 0 if withheld.  Fails on anything else:
+ * a withheld entry carries the mark, its inode number and its file type (a
+ * regular file), and nothing more. */
+static int
+readdir_plus_flags(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir,
+    uint32_t                        flags)
+{
+    assert(readdir_flags_as(ctx, cred, dir,
+                            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH,
+                            flags) == CHIMERA_VFS_OK);
+    if (readdir_kid_mask & CHIMERA_VFS_ATTR_WITHHELD) {
+        assert((readdir_kid_mask & ~(CHIMERA_VFS_ATTR_WITHHELD |
+                                     CHIMERA_VFS_ATTR_INUM)) == 0);
+        assert(readdir_kid_mode == S_IFREG);
+        return 0;
+    }
+    assert(readdir_kid_mask & CHIMERA_VFS_ATTR_FH);
+    assert(readdir_kid_mask & CHIMERA_VFS_ATTR_MODE);
+    return 1;
+} /* readdir_plus_flags */
+
+static int
+readdir_plus_full(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir)
+{
+    return readdir_plus_flags(ctx, cred, dir, 0);
+} /* readdir_plus_full */
+
+static int
+readdir_plus_bound(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *dir)
+{
+    return readdir_plus_flags(ctx, cred, dir, CHIMERA_VFS_READDIR_READ_BOUND);
+} /* readdir_plus_bound */
+
+static int find_entries;
+
+static int
+find_filter_cb(
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *attr,
+    void                           *private_data)
+{
+    return 0;
+} /* find_filter_cb */
+
+static int
+find_entry_cb(
+    const char                     *path,
+    int                             pathlen,
+    const struct chimera_vfs_attrs *attr,
+    void                           *private_data)
+{
+    find_entries++;
+    return 0;
+} /* find_entry_cb */
+
+static void
+find_complete_cb(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = error_code;
+    ctx->done   = 1;
+} /* find_complete_cb */
+
+/* Walk the tree under `fh` as `cred`, as S3 listing does; return the status. */
+static enum chimera_vfs_error
+find_as(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fh_len)
+{
+    find_entries = 0;
+    chimera_vfs_find(ctx->vfs_thread, cred, fh, fh_len,
+                     CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FH,
+                     find_filter_cb, find_entry_cb, find_complete_cb, ctx);
+    wait_done(ctx);
+    return ctx->status;
+} /* find_as */
 
 /* mkdir `name` under directory handle `dir` as `cred`; return the status. */
 static enum chimera_vfs_error
@@ -628,6 +813,193 @@ main(
         chimera_vfs_release(ctx.vfs_thread, root_handle);
         assert(failures == 0);
         TEST_PASS("open_at: mode gates data-access intent at open time");
+    }
+
+    /*
+     * READDIR needs read (LIST_DIRECTORY) on the directory.  An enumeration
+     * that does not say its read was bound at open -- every NFS READDIR,
+     * since NFS has no directory open -- is judged against the directory's
+     * current mode on every call, whatever grant other opens left on the
+     * shared handle.  A stream opened for reading (FUSE OPENDIR, an O_RDONLY
+     * POSIX opendir) says so with CHIMERA_VFS_READDIR_READ_BOUND, and POSIX
+     * keeps a directory stream's rights from opendir(), so a later chmod does
+     * not break it.  SMB (AUTH_ATTR) is exempt here: it checks the open's
+     * granted access itself.  Search (EXECUTE) decides whether the entries'
+     * attributes and handles come with the names, and is judged on every
+     * call, bound stream or not.
+     */
+    {
+        struct chimera_vfs_open_handle *root_handle, *dir_handle, *stream;
+        struct chimera_vfs_open_handle *sub_handle;
+        struct chimera_vfs_cred         smb_other;
+        struct chimera_vfs_cred         root_cred;
+        struct chimera_vfs_attrs        dattr;
+        uint8_t                         dir_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                        dir_fh_len;
+        uint8_t                         sub_fh[CHIMERA_VFS_FH_SIZE];
+        uint32_t                        sub_fh_len;
+
+        chimera_vfs_cred_init_attr(&smb_other, 2000, 2000, 0, NULL);
+        chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
+
+        chimera_vfs_open_fh(ctx.vfs_thread, &owner, root_fh, root_fh_len,
+                            CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        root_handle = ctx.handle;
+
+        memset(&dattr, 0, sizeof(dattr));
+        dattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+        dattr.va_mode     = 0755;
+        chimera_vfs_mkdir_at(ctx.vfs_thread, &owner, root_handle, "rd", 2,
+                             &dattr, CHIMERA_VFS_ATTR_FH, 0, 0, mkdir_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        memcpy(dir_fh, ctx.fh, ctx.fh_len);
+        dir_fh_len = ctx.fh_len;
+
+        /* A handle opened as an NFS READDIR opens it, and listed unbound. */
+        chimera_vfs_open_fh(ctx.vfs_thread, &other, dir_fh, dir_fh_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                            CHIMERA_VFS_OPEN_DIRECTORY, openfh_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        dir_handle = ctx.handle;
+
+        assert(create_as(&ctx, &owner, dir_handle, "kid") == CHIMERA_VFS_OK);
+
+        assert(readdir_as(&ctx, &other, dir_handle) == CHIMERA_VFS_OK);
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0700) == CHIMERA_VFS_OK);
+        assert(readdir_as(&ctx, &other, dir_handle) == CHIMERA_VFS_EACCES);
+        assert(readdir_as(&ctx, &owner, dir_handle) == CHIMERA_VFS_OK);
+        assert(readdir_as(&ctx, &root_cred, dir_handle) == CHIMERA_VFS_OK);
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0711) == CHIMERA_VFS_OK);
+        assert(readdir_as(&ctx, &other, dir_handle) == CHIMERA_VFS_EACCES);
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0755) == CHIMERA_VFS_OK);
+        assert(readdir_as(&ctx, &other, dir_handle) == CHIMERA_VFS_OK);
+        TEST_PASS("readdir: unbound READDIR judged against the current mode");
+
+        /* opendir(): an O_RDONLY open checks read, and the stream it opens
+         * keeps it -- a chmod afterwards leaves the stream listable, while a
+         * fresh open is refused.  The open stamps its grant on the handle the
+         * open cache shares with every open of this identity, here the very
+         * handle the NFS-style READDIRs above use; that stamp must not exempt
+         * them. */
+        memset(&sattr, 0, sizeof(sattr));
+        chimera_vfs_open_at(ctx.vfs_thread, &other, root_handle, "rd", 2,
+                            CHIMERA_VFS_OPEN_READ_ONLY |
+                            CHIMERA_VFS_OPEN_DIRECTORY, &sattr,
+                            CHIMERA_VFS_ATTR_FH, 0, 0, openat_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        stream = ctx.handle;
+        assert(stream->granted_bound &&
+               (stream->granted_access & CHIMERA_ACE_READ_DATA));
+
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0700) == CHIMERA_VFS_OK);
+        assert(readdir_bound_as(&ctx, &other, stream) == CHIMERA_VFS_OK);
+        assert(readdir_as(&ctx, &other, stream) == CHIMERA_VFS_EACCES);
+        assert(readdir_as(&ctx, &other, dir_handle) == CHIMERA_VFS_EACCES);
+        TEST_PASS("readdir: a grant stamped on the shared handle exempts no unbound READDIR");
+        chimera_vfs_release(ctx.vfs_thread, stream);
+
+        memset(&sattr, 0, sizeof(sattr));
+        chimera_vfs_open_at(ctx.vfs_thread, &other, root_handle, "rd", 2,
+                            CHIMERA_VFS_OPEN_READ_ONLY |
+                            CHIMERA_VFS_OPEN_DIRECTORY, &sattr,
+                            CHIMERA_VFS_ATTR_FH, 0, 0, openat_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_EACCES);
+        TEST_PASS("readdir: read bound at opendir survives a later chmod");
+
+        /* FUSE binds read to its own stream after checking it at OPENDIR,
+         * and opens the handle as NFS does, stamping nothing: the bound
+         * stream lists, the same handle unbound does not. */
+        assert(readdir_bound_as(&ctx, &other, dir_handle) == CHIMERA_VFS_OK);
+        assert(readdir_as(&ctx, &other, dir_handle) == CHIMERA_VFS_EACCES);
+        TEST_PASS("readdir: READ_BOUND is the caller's stream, not the handle's");
+
+        /* Still 0700: SMB's handle-level check, not this gate, decides. */
+        assert(readdir_as(&ctx, &smb_other, dir_handle) == CHIMERA_VFS_OK);
+        TEST_PASS("readdir: AUTH_ATTR (SMB) caller not gated by the mode");
+
+        /* Read without search (0744 for `other`, and 0644 for the owner,
+         * whose rw- has no search either): the names, but each entry's
+         * attributes and handle are withheld, as LOOKUP of it is refused.
+         * A caller asking only for names and inode numbers is unaffected. */
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0744) == CHIMERA_VFS_OK);
+        assert(readdir_plus_full(&ctx, &other, dir_handle) == 0);
+        assert(readdir_mask_as(&ctx, &other, dir_handle,
+                               CHIMERA_VFS_ATTR_INUM) == CHIMERA_VFS_OK);
+        assert(!(readdir_kid_mask & CHIMERA_VFS_ATTR_WITHHELD));
+        assert(readdir_plus_full(&ctx, &owner, dir_handle) == 1);
+        assert(readdir_plus_full(&ctx, &root_cred, dir_handle) == 1);
+        assert(readdir_plus_full(&ctx, &smb_other, dir_handle) == 1);
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0644) == CHIMERA_VFS_OK);
+        assert(readdir_plus_full(&ctx, &owner, dir_handle) == 0);
+        TEST_PASS("readdir: read without search withholds entry attributes");
+
+        /* Search is never bound: a stream opened while the caller could
+         * search loses the entries' attributes once it cannot, and gets
+         * them back when it can again; its read stays bound. */
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0755) == CHIMERA_VFS_OK);
+        memset(&sattr, 0, sizeof(sattr));
+        chimera_vfs_open_at(ctx.vfs_thread, &other, root_handle, "rd", 2,
+                            CHIMERA_VFS_OPEN_READ_ONLY |
+                            CHIMERA_VFS_OPEN_DIRECTORY, &sattr,
+                            CHIMERA_VFS_ATTR_FH, 0, 0, openat_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        stream = ctx.handle;
+        assert(readdir_plus_bound(&ctx, &other, stream) == 1);
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0744) == CHIMERA_VFS_OK);
+        assert(readdir_plus_bound(&ctx, &other, stream) == 0);
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0700) == CHIMERA_VFS_OK);
+        assert(readdir_bound_as(&ctx, &other, stream) == CHIMERA_VFS_OK);
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0755) == CHIMERA_VFS_OK);
+        assert(readdir_plus_bound(&ctx, &other, stream) == 1);
+        chimera_vfs_release(ctx.vfs_thread, stream);
+        TEST_PASS("readdir: search judged on every call, even on a bound stream");
+
+        /* find (S3 listing) fails the walk rather than report entries it
+         * could not stat or descend into. */
+        assert(find_as(&ctx, &other, dir_fh, dir_fh_len) == CHIMERA_VFS_OK);
+        assert(find_entries >= 1);
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0744) == CHIMERA_VFS_OK);
+        assert(find_as(&ctx, &other, dir_fh, dir_fh_len) == CHIMERA_VFS_EACCES);
+        assert(find_as(&ctx, &owner, dir_fh, dir_fh_len) == CHIMERA_VFS_OK);
+        TEST_PASS("find: read without search fails the walk with EACCES");
+
+        /* The same below the top: a subdirectory the caller may not list,
+         * or may list but not search, fails the whole walk, after the
+         * walk reached and listed the directories above it. */
+        assert(chmod_as(&ctx, &owner, dir_fh, dir_fh_len, 0755) == CHIMERA_VFS_OK);
+        assert(mkdir_as(&ctx, &owner, dir_handle, "sub") == CHIMERA_VFS_OK);
+        memcpy(sub_fh, ctx.fh, ctx.fh_len);
+        sub_fh_len = ctx.fh_len;
+        chimera_vfs_open_fh(ctx.vfs_thread, &owner, sub_fh, sub_fh_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                            CHIMERA_VFS_OPEN_DIRECTORY, openfh_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+        sub_handle = ctx.handle;
+        assert(create_as(&ctx, &owner, sub_handle, "f") == CHIMERA_VFS_OK);
+        chimera_vfs_release(ctx.vfs_thread, sub_handle);
+        assert(find_as(&ctx, &other, dir_fh, dir_fh_len) == CHIMERA_VFS_OK);
+        assert(find_entries >= 3);
+        assert(chmod_as(&ctx, &owner, sub_fh, sub_fh_len, 0700) == CHIMERA_VFS_OK);
+        assert(find_as(&ctx, &other, dir_fh, dir_fh_len) == CHIMERA_VFS_EACCES);
+        assert(find_as(&ctx, &owner, dir_fh, dir_fh_len) == CHIMERA_VFS_OK);
+        assert(chmod_as(&ctx, &owner, sub_fh, sub_fh_len, 0744) == CHIMERA_VFS_OK);
+        assert(find_as(&ctx, &other, dir_fh, dir_fh_len) == CHIMERA_VFS_EACCES);
+        assert(find_as(&ctx, &owner, dir_fh, dir_fh_len) == CHIMERA_VFS_OK);
+        assert(find_as(&ctx, &root_cred, dir_fh, dir_fh_len) == CHIMERA_VFS_OK);
+        assert(chmod_as(&ctx, &owner, sub_fh, sub_fh_len, 0755) == CHIMERA_VFS_OK);
+        assert(find_as(&ctx, &other, dir_fh, dir_fh_len) == CHIMERA_VFS_OK);
+        TEST_PASS("find: a subdirectory without read or search fails the walk");
+
+        chimera_vfs_release(ctx.vfs_thread, dir_handle);
+        chimera_vfs_release(ctx.vfs_thread, root_handle);
     }
 
     /* Unmount and remove the filesystem to exercise the full lifecycle. */
