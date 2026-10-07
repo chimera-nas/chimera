@@ -47,6 +47,20 @@ static const uint8_t spnego_negotiate_token[] = {
     0x37, 0x02, 0x02, 0x0a,
 };
 
+/* The same negTokenInit with mechTypes { NTLMSSP } alone: advertised when no
+ * Kerberos is configured, so a client with a ticket for this name does not
+ * open with an AP-REQ the server would only steer away. */
+static const uint8_t spnego_negotiate_token_ntlm[] = {
+    0x60, 0x1c, /* APPLICATION [0], len 28 */
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,     /* OID: SPNEGO */
+    0xa0, 0x12, /* [0] NegTokenInit, len 18 */
+    0x30, 0x10, /* SEQUENCE, len 16 */
+    0xa0, 0x0e, /* [0] mechTypes, len 14 */
+    0x30, 0x0c, /* SEQUENCE OF, len 12 */
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82,     /* OID: NTLMSSP */
+    0x37, 0x02, 0x02, 0x0a,
+};
+
 void
 chimera_smb_negotiate(struct chimera_smb_request *request)
 {
@@ -475,9 +489,15 @@ chimera_smb_negotiate_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request)
 {
-    struct chimera_smb_conn *conn                   = request->compound->conn;
+    struct chimera_smb_conn *conn     = request->compound->conn;
+    int                      kerberos =
+        request->compound->thread->shared->config.auth.kerberos_enabled;
+    const uint8_t           *security_buffer =
+        kerberos ? spnego_negotiate_token : spnego_negotiate_token_ntlm;
     uint16_t                 security_buffer_offset = sizeof(struct smb2_header) + 64;
-    uint16_t                 security_buffer_length = sizeof(spnego_negotiate_token);
+    uint16_t                 security_buffer_length =
+        kerberos ? (uint16_t) sizeof(spnego_negotiate_token) :
+        (uint16_t) sizeof(spnego_negotiate_token_ntlm);
     uint8_t                  ctx_buf[1024];
     uint32_t                 ctx_len;
     uint16_t                 ctx_count;
@@ -516,17 +536,24 @@ chimera_smb_negotiate_reply(
     /* NegotiateContextOffset / Reserved2 — absolute from start of SMB2 header */
     evpl_iovec_cursor_append_uint32(reply_cursor, ctx_offset);
 
-    /* SPNEGO security buffer */
-    evpl_iovec_cursor_append_blob(reply_cursor, (void *) spnego_negotiate_token,
-                                  security_buffer_length);
+    /* SPNEGO security buffer, then the negotiate contexts at exactly the
+     * NegotiateContextOffset announced above.  evpl_iovec_cursor_append_blob
+     * rounds the cursor up to a 4-byte boundary before every write, which
+     * happened to be a no-op for the 52-byte three-mechanism token but moves
+     * the contexts past their announced offset for any other buffer length,
+     * so the unaligned appends are used and the 8-byte alignment is the
+     * explicit pad computed above. */
+    evpl_iovec_cursor_append_blob_unaligned(reply_cursor, (void *) security_buffer,
+                                            security_buffer_length);
 
     if (pad_before_ctx > 0) {
         static const uint8_t pad_zero[8] = { 0 };
-        evpl_iovec_cursor_append_blob(reply_cursor, (void *) pad_zero, pad_before_ctx);
+        evpl_iovec_cursor_append_blob_unaligned(reply_cursor, (void *) pad_zero,
+                                                pad_before_ctx);
     }
 
     if (ctx_len > 0) {
-        evpl_iovec_cursor_append_blob(reply_cursor, ctx_buf, ctx_len);
+        evpl_iovec_cursor_append_blob_unaligned(reply_cursor, ctx_buf, ctx_len);
     }
 
 } /* chimera_smb_negotiate_reply */

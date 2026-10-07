@@ -373,6 +373,18 @@ static const uint8_t wire_kerberos_only[] = {
     0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
 };
 
+/* The NEGOTIATE security buffer a server without Kerberos must offer:
+ * negTokenInit with mechTypes { NTLMSSP } alone. */
+static const uint8_t wire_negotiate_ntlmssp_only[] = {
+    0x60, 0x1c,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x12,
+    0x30, 0x10,
+    0xa0, 0x0e,
+    0x30, 0x0c,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+};
+
 /* The steering reply: negTokenResp { accept-incomplete, supportedMech NTLMSSP }. */
 static const uint8_t wire_ntlmssp_hint[] = {
     0xa1, 0x15,
@@ -555,6 +567,82 @@ wire_first_session_setup_leg(
     return 0;
 } /* wire_first_session_setup_leg */
 
+/* NEGOTIATE at SMB 2.x and return the server's security buffer. */
+static int
+wire_negotiate_security_buffer(
+    uint8_t *sec,
+    size_t  *sec_len)
+{
+    struct sockaddr_in sa;
+    uint8_t            body[64];
+    uint8_t            reply[4096];
+    int                fd, n;
+    uint16_t           off, len;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family      = AF_INET;
+    sa.sin_port        = htons(445);
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, (struct sockaddr *) &sa, sizeof(sa)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    memset(body, 0, sizeof(body));
+    wire_put16(body, 36);
+    wire_put16(body + 2, 2);
+    wire_put16(body + 4, 1);
+    memset(body + 12, 0x5a, 16);
+    wire_put16(body + 36, 0x0202);
+    wire_put16(body + 38, 0x0210);
+    n = wire_exchange(fd, 0, 0, body, 40, reply, sizeof(reply));
+    close(fd);
+    if (n < 0 || wire_get32(reply + 8) != 0 || wire_get16(reply + 64) != 65) {
+        return -1;
+    }
+
+    /* NEGOTIATE response: SecurityBufferOffset at 56, Length at 58. */
+    off = wire_get16(reply + 64 + 56);
+    len = wire_get16(reply + 64 + 58);
+    if ((size_t) off + len > (size_t) n) {
+        return -1;
+    }
+    if (len > *sec_len) {
+        len = (uint16_t) *sec_len;
+    }
+    memcpy(sec, reply + off, len);
+    *sec_len = len;
+    return 0;
+} /* wire_negotiate_security_buffer */
+
+static int
+test_negotiate_offers_ntlmssp_only(void)
+{
+    uint8_t sec[128];
+    size_t  sec_len = sizeof(sec);
+
+    fprintf(stderr, "\n  Testing NEGOTIATE offers NTLMSSP alone without Kerberos...\n");
+
+    if (wire_negotiate_security_buffer(sec, &sec_len) < 0) {
+        fprintf(stderr, "    raw SMB2 NEGOTIATE failed\n");
+        test_fail("NEGOTIATE security buffer read");
+        return -1;
+    }
+    if (sec_len != sizeof(wire_negotiate_ntlmssp_only) ||
+        memcmp(sec, wire_negotiate_ntlmssp_only, sec_len) != 0) {
+        fprintf(stderr, "    security buffer is %zu bytes, expected the %zu-byte NTLMSSP-only token\n",
+                sec_len, sizeof(wire_negotiate_ntlmssp_only));
+        test_fail("NEGOTIATE offers NTLMSSP alone");
+        return -1;
+    }
+    test_pass("NEGOTIATE offers NTLMSSP alone");
+    return 0;
+} /* test_negotiate_offers_ntlmssp_only */
+
 static int
 test_spnego_kerberos_first_is_steered(void)
 {
@@ -636,6 +724,9 @@ run_ntlm_tests(void)
         failures++;
     }
     if (test_spnego_kerberos_only_is_refused() < 0) {
+        failures++;
+    }
+    if (test_negotiate_offers_ntlmssp_only() < 0) {
         failures++;
     }
 
