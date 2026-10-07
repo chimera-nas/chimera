@@ -183,6 +183,12 @@ test_setgid_and_readdir_access(void)
     a.va_mode = 02750;
     CHECK(set_attrs(&s, obj, &a, &owner, false) == 0);
     CHECK((setattr_value.st_mode & 07777) == 02750);
+    a.va_set_mask = CHIMERA_VFS_ATTR_GID;
+    a.va_gid      = 1000;
+    owner.ngids   = 1;
+    owner.gids[0] = 1000;
+    CHECK(set_attrs(&s, obj, &a, &owner, false) == 0);
+    CHECK((setattr_value.st_mode & 07777) == 0750);
     CHECK(vfs_daos_release(&s, obj) == 0);
 
     r.cred               = &owner;
