@@ -1969,8 +1969,8 @@ chimera_vfs_claim_cancel(
 /* REPLACE-geometry carve                                               */
 /* -------------------------------------------------------------------- */
 
-SYMBOL_EXPORT void
-chimera_vfs_claim_range_replace(
+static void
+chimera_vfs_claim_range_replace_common(
     struct chimera_vfs_state         *state,
     struct chimera_vfs_file_state    *file,
     const struct chimera_claim_owner *owner,
@@ -1984,7 +1984,8 @@ chimera_vfs_claim_range_replace(
     void (                           *released_cb )(
         struct chimera_vfs_claim *claim,
         void                     *arg),
-    void                             *released_arg)
+    void                             *released_arg,
+    bool                              pump)
 {
     struct chimera_vfs_claim *cur, *next;
     struct chimera_vfs_claim *released[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
@@ -2090,10 +2091,66 @@ chimera_vfs_claim_range_replace(
         }
     }
 
+    if (pump) {
+        chimera_vfs_claim_pump(state, file);
+    }
+} /* chimera_vfs_claim_range_replace_common */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_range_replace(
+    struct chimera_vfs_state         *state,
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
+    uint64_t                          offset,
+    uint64_t                          length,
+    uint8_t                           new_mask,
+    struct chimera_vfs_claim        **spare,
+    int                               n_spare_max,
+    int                              *spare_used,
+    void (                           *released_cb )(
+        struct chimera_vfs_claim *claim,
+        void                     *arg),
+    void                             *released_arg)
+{
+    chimera_vfs_claim_range_replace_common(state, file, owner, except, offset,
+                                           length, new_mask, spare,
+                                           n_spare_max, spare_used,
+                                           released_cb, released_arg, true);
+} /* chimera_vfs_claim_range_replace */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_range_replace_nopump(
+    struct chimera_vfs_state         *state,
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
+    uint64_t                          offset,
+    uint64_t                          length,
+    uint8_t                           new_mask,
+    struct chimera_vfs_claim        **spare,
+    int                               n_spare_max,
+    int                              *spare_used,
+    void (                           *released_cb )(
+        struct chimera_vfs_claim *claim,
+        void                     *arg),
+    void                             *released_arg)
+{
+    chimera_vfs_claim_range_replace_common(state, file, owner, except, offset,
+                                           length, new_mask, spare,
+                                           n_spare_max, spare_used,
+                                           released_cb, released_arg, false);
+} /* chimera_vfs_claim_range_replace_nopump */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_pump(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
     chimera_vfs_claim_pump_pending(state, file);
     chimera_vfs_claim_pump_io(state, file);
     chimera_vfs_claim_backend_reeval(state, file);
-} /* chimera_vfs_claim_range_replace */
+} /* chimera_vfs_claim_pump */
 
 /* -------------------------------------------------------------------- */
 /* Cache grants                                                         */
