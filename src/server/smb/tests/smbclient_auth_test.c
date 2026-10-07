@@ -42,6 +42,10 @@
 #include "common/platform.h"
 #else  /* ifdef _WIN32 */
 #include <unistd.h>
+#include <stdint.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #endif /* ifdef _WIN32 */
 
 #define TEST_DIR     "smbclient_test"
@@ -330,6 +334,283 @@ test_ntlm_file_operations(void)
     return 0;
 } /* test_ntlm_file_operations */
 
+/* ---------------------------------------------------------------------------
+* Raw-wire SPNEGO probe.  Samba's smbclient falls back to NTLM by itself when
+* a Kerberos leg fails, so it cannot tell the server steering it to NTLMSSP
+* (RFC 4178 negTokenResp accept-incomplete) from the server refusing it.  A
+* domain-joined Windows client can: it takes LOGON_FAILURE as final.  This
+* minimal SMB2 client sends the first SESSION_SETUP leg with a hand-built
+* negTokenInit and reads the status and security buffer the server answers.
+* ------------------------------------------------------------------------- */
+
+/* negTokenInit, mechTypes [MS KRB5, KRB5, NTLMSSP], opaque mechToken: the
+ * first leg of a domain-joined Windows client. */
+/* *INDENT-OFF* */
+static const uint8_t wire_kerberos_first[] = {
+    0x60, 0x3a,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x30,
+    0x30, 0x2e,
+    0xa0, 0x24,
+    0x30, 0x22,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
+/* negTokenInit, mechTypes [KRB5] only: a client that cannot do NTLM. */
+static const uint8_t wire_kerberos_only[] = {
+    0x60, 0x23,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x19,
+    0x30, 0x17,
+    0xa0, 0x0d,
+    0x30, 0x0b,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
+/* The steering reply: negTokenResp { accept-incomplete, supportedMech NTLMSSP }. */
+static const uint8_t wire_ntlmssp_hint[] = {
+    0xa1, 0x15,
+    0x30, 0x13,
+    0xa0, 0x03, 0x0a, 0x01, 0x01,
+    0xa1, 0x0c,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+};
+/* *INDENT-ON* */
+
+#define WIRE_STATUS_MORE_PROCESSING_REQUIRED 0xC0000016u
+#define WIRE_STATUS_LOGON_FAILURE            0xC000006Du
+
+static void
+wire_put16(
+    uint8_t *p,
+    uint16_t v)
+{
+    p[0] = (uint8_t) v;
+    p[1] = (uint8_t) (v >> 8);
+} /* wire_put16 */
+
+static void
+wire_put32(
+    uint8_t *p,
+    uint32_t v)
+{
+    wire_put16(p, (uint16_t) v);
+    wire_put16(p + 2, (uint16_t) (v >> 16));
+} /* wire_put32 */
+
+static uint16_t
+wire_get16(const uint8_t *p)
+{
+    return (uint16_t) (p[0] | (p[1] << 8));
+} /* wire_get16 */
+
+static uint32_t
+wire_get32(const uint8_t *p)
+{
+    return (uint32_t) wire_get16(p) | ((uint32_t) wire_get16(p + 2) << 16);
+} /* wire_get32 */
+
+/* Send one SMB2 message (NBSS framed) and read the reply into buf.  Returns
+ * the reply length from the SMB2 header on, or -1. */
+static int
+wire_exchange(
+    int            fd,
+    uint8_t        command,
+    uint64_t       message_id,
+    const uint8_t *body,
+    size_t         body_len,
+    uint8_t       *buf,
+    size_t         buf_len)
+{
+    uint8_t  msg[4 + 64 + 512];
+    size_t   len = 64 + body_len;
+    uint8_t  nb[4];
+    size_t   got;
+    ssize_t  n;
+    uint32_t rlen;
+
+    if (body_len > 512) {
+        return -1;
+    }
+    memset(msg, 0, sizeof(msg));
+    msg[0] = 0;
+    msg[1] = (uint8_t) (len >> 16);
+    msg[2] = (uint8_t) (len >> 8);
+    msg[3] = (uint8_t) len;
+    memcpy(msg + 4, "\xfeSMB", 4);
+    wire_put16(msg + 4 + 4, 64);              /* StructureSize */
+    wire_put16(msg + 4 + 12, command);        /* Command */
+    wire_put16(msg + 4 + 14, 1);              /* CreditRequest */
+    wire_put32(msg + 4 + 24, (uint32_t) message_id);
+    wire_put32(msg + 4 + 28, (uint32_t) (message_id >> 32));
+    memcpy(msg + 4 + 64, body, body_len);
+
+    if (write(fd, msg, 4 + len) != (ssize_t) (4 + len)) {
+        return -1;
+    }
+
+    got = 0;
+    while (got < 4) {
+        n = read(fd, nb + got, 4 - got);
+        if (n <= 0) {
+            return -1;
+        }
+        got += (size_t) n;
+    }
+    rlen = ((uint32_t) nb[1] << 16) | ((uint32_t) nb[2] << 8) | nb[3];
+    if (rlen < 64 || rlen > buf_len) {
+        return -1;
+    }
+    got = 0;
+    while (got < rlen) {
+        n = read(fd, buf + got, rlen - got);
+        if (n <= 0) {
+            return -1;
+        }
+        got += (size_t) n;
+    }
+    return (int) rlen;
+} /* wire_exchange */
+
+/* NEGOTIATE at SMB 2.0.2/2.1 (no negotiate contexts, no preauth integrity),
+ * then one SESSION_SETUP leg carrying blob.  On success stores the reply
+ * status and copies the reply security buffer (truncated to sec_len) and
+ * returns 0; -1 on any transport or framing problem. */
+static int
+wire_first_session_setup_leg(
+    const uint8_t *blob,
+    size_t         blob_len,
+    uint32_t      *status,
+    uint8_t       *sec,
+    size_t        *sec_len)
+{
+    struct sockaddr_in sa;
+    uint8_t            body[128 + 128];
+    uint8_t            reply[4096];
+    int                fd, n;
+    uint16_t           off, len;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family      = AF_INET;
+    sa.sin_port        = htons(445);
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, (struct sockaddr *) &sa, sizeof(sa)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    /* SMB2 NEGOTIATE: StructureSize 36, DialectCount 2, SecurityMode
+     * SIGNING_ENABLED, Capabilities 0, ClientGuid, ClientStartTime 0,
+     * Dialects 0x0202 0x0210. */
+    memset(body, 0, sizeof(body));
+    wire_put16(body, 36);
+    wire_put16(body + 2, 2);
+    wire_put16(body + 4, 1);
+    memset(body + 12, 0x5a, 16);
+    wire_put16(body + 36, 0x0202);
+    wire_put16(body + 38, 0x0210);
+    n = wire_exchange(fd, 0, 0, body, 40, reply, sizeof(reply));
+    if (n < 0 || wire_get32(reply + 8) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    /* SMB2 SESSION_SETUP: StructureSize 25, Flags 0, SecurityMode
+    * SIGNING_ENABLED, Capabilities 0, Channel 0, SecurityBufferOffset 88,
+    * SecurityBufferLength, PreviousSessionId 0, then the blob. */
+    memset(body, 0, sizeof(body));
+    wire_put16(body, 25);
+    body[3] = 1;
+    wire_put16(body + 12, 88);
+    wire_put16(body + 14, (uint16_t) blob_len);
+    memcpy(body + 24, blob, blob_len);
+    n = wire_exchange(fd, 1, 1, body, 24 + blob_len, reply, sizeof(reply));
+    close(fd);
+    if (n < 0) {
+        return -1;
+    }
+
+    *status = wire_get32(reply + 8);
+    off     = wire_get16(reply + 64 + 4);
+    len     = wire_get16(reply + 64 + 6);
+    if (wire_get16(reply + 64) != 9 || (size_t) off + len > (size_t) n) {
+        *sec_len = 0;
+        return 0;
+    }
+    if (len > *sec_len) {
+        len = (uint16_t) *sec_len;
+    }
+    memcpy(sec, reply + off, len);
+    *sec_len = len;
+    return 0;
+} /* wire_first_session_setup_leg */
+
+static int
+test_spnego_kerberos_first_is_steered(void)
+{
+    uint32_t status = 0;
+    uint8_t  sec[64];
+    size_t   sec_len = sizeof(sec);
+
+    fprintf(stderr, "\n  Testing a Kerberos-first SESSION_SETUP is steered to NTLMSSP...\n");
+
+    if (wire_first_session_setup_leg(wire_kerberos_first, sizeof(wire_kerberos_first),
+                                     &status, sec, &sec_len) < 0) {
+        fprintf(stderr, "    raw SMB2 exchange failed\n");
+        test_fail("Kerberos-first leg answered on the wire");
+        return -1;
+    }
+    if (status != WIRE_STATUS_MORE_PROCESSING_REQUIRED) {
+        fprintf(stderr, "    status 0x%08x, expected STATUS_MORE_PROCESSING_REQUIRED\n", status);
+        test_fail("Kerberos-first leg gets STATUS_MORE_PROCESSING_REQUIRED");
+        return -1;
+    }
+    test_pass("Kerberos-first leg gets STATUS_MORE_PROCESSING_REQUIRED");
+
+    if (sec_len != sizeof(wire_ntlmssp_hint) ||
+        memcmp(sec, wire_ntlmssp_hint, sec_len) != 0) {
+        fprintf(stderr, "    security buffer (%zu bytes) is not the NTLMSSP steering hint\n", sec_len);
+        test_fail("Kerberos-first leg carries the NTLMSSP steering hint");
+        return -1;
+    }
+    test_pass("Kerberos-first leg carries the NTLMSSP steering hint");
+    return 0;
+} /* test_spnego_kerberos_first_is_steered */
+
+static int
+test_spnego_kerberos_only_is_refused(void)
+{
+    uint32_t status = 0;
+    uint8_t  sec[64];
+    size_t   sec_len = sizeof(sec);
+
+    fprintf(stderr, "\n  Testing a Kerberos-only SESSION_SETUP is refused...\n");
+
+    if (wire_first_session_setup_leg(wire_kerberos_only, sizeof(wire_kerberos_only),
+                                     &status, sec, &sec_len) < 0) {
+        fprintf(stderr, "    raw SMB2 exchange failed\n");
+        test_fail("Kerberos-only leg answered on the wire");
+        return -1;
+    }
+    if (status != WIRE_STATUS_LOGON_FAILURE) {
+        fprintf(stderr, "    status 0x%08x, expected STATUS_LOGON_FAILURE\n", status);
+        test_fail("Kerberos-only leg gets STATUS_LOGON_FAILURE");
+        return -1;
+    }
+    test_pass("Kerberos-only leg gets STATUS_LOGON_FAILURE");
+    return 0;
+} /* test_spnego_kerberos_only_is_refused */
+
 static int
 run_ntlm_tests(void)
 {
@@ -349,6 +630,12 @@ run_ntlm_tests(void)
         failures++;
     }
     if (test_ntlm_file_operations() < 0) {
+        failures++;
+    }
+    if (test_spnego_kerberos_first_is_steered() < 0) {
+        failures++;
+    }
+    if (test_spnego_kerberos_only_is_refused() < 0) {
         failures++;
     }
 
@@ -540,6 +827,99 @@ test_kerberos_logon_refused(void)
     test_pass("Kerberos logon refused with NT_STATUS_LOGON_FAILURE");
     return 0;
 } /* test_kerberos_logon_refused */
+
+/* The server has no Kerberos configured but the client holds a ticket for
+ * it, so smbclient goes Kerberos first (--use-kerberos=desired), and the
+ * local user's password must then log on over NTLM.  smbclient falls back to
+ * NTLM by itself when the Kerberos leg fails, so this passes whether the
+ * server steers or refuses: it guards the end-to-end logon, not the steering,
+ * which the raw wire probe in the NTLM mode pins. */
+static int
+test_kerberos_first_falls_back_to_ntlm(void)
+{
+    char output[4096];
+    int  rc;
+
+    fprintf(stderr, "\n  Testing Kerberos-first logon falls back to NTLM...\n");
+
+    rc = run_smbclient_with_output("--use-kerberos=desired -U myuser%mypassword",
+                                   "ls", output, sizeof(output));
+    if (rc != 0) {
+        fprintf(stderr, "    smbclient failed:\n%s\n", output);
+        test_fail("Kerberos-first client logs on over NTLM");
+        return -1;
+    }
+    test_pass("Kerberos-first client logs on over NTLM");
+    return 0;
+} /* test_kerberos_first_falls_back_to_ntlm */
+
+/* A client that insists on Kerberos must still be refused: the steering
+ * hint is not an open door. */
+static int
+test_kerberos_required_still_refused(void)
+{
+    char output[4096];
+    int  rc;
+
+    fprintf(stderr, "\n  Testing Kerberos-required logon is refused...\n");
+
+    rc = run_smbclient_with_output("--use-kerberos=required -U myuser%mypassword",
+                                   "ls", output, sizeof(output));
+    if (rc == 0) {
+        fprintf(stderr, "    smbclient succeeded with Kerberos against a server without it\n");
+        test_fail("Kerberos-required logon refused");
+        return -1;
+    }
+    test_pass("Kerberos-required logon refused");
+    return 0;
+} /* test_kerberos_required_still_refused */
+
+/* A client that keeps sending Kerberos must fail that leg, and the server
+ * must stay healthy: a plain NTLM logon on a fresh connection still works. */
+static int
+test_kerberos_hint_then_kerberos_again(void)
+{
+    char output[4096];
+    int  rc;
+
+    fprintf(stderr, "\n  Testing the server survives a client that ignores the hint...\n");
+
+    (void) run_smbclient_with_output("--use-kerberos=required -U myuser%mypassword",
+                                     "ls", output, sizeof(output));
+    rc = run_smbclient_with_output("--use-kerberos=off -U myuser%mypassword",
+                                   "ls", output, sizeof(output));
+    if (rc != 0) {
+        fprintf(stderr, "    plain NTLM logon failed after a refused Kerberos one:\n%s\n", output);
+        test_fail("NTLM logon after refused Kerberos leg");
+        return -1;
+    }
+    test_pass("NTLM logon after refused Kerberos leg");
+    return 0;
+} /* test_kerberos_hint_then_kerberos_again */
+
+static int
+run_kerberos_fallback_tests(void)
+{
+    int failures = 0;
+
+    fprintf(stderr, "\n========================================\n");
+    fprintf(stderr, "Kerberos-first NTLM Fallback Tests\n");
+    fprintf(stderr, "========================================\n");
+
+    if (verify_kerberos_environment() < 0) {
+        return 0; /* Skip, not fail */
+    }
+    if (test_kerberos_first_falls_back_to_ntlm() < 0) {
+        failures++;
+    }
+    if (test_kerberos_required_still_refused() < 0) {
+        failures++;
+    }
+    if (test_kerberos_hint_then_kerberos_again() < 0) {
+        failures++;
+    }
+    return failures;
+} /* run_kerberos_fallback_tests */
 
 static int
 run_kerberos_refusal_tests(
@@ -736,6 +1116,16 @@ mode_uses_kerberos(const char *mode)
            strcmp(mode, "all") == 0;
 } /* mode_uses_kerberos */
 
+/* Modes whose CLIENT holds a Kerberos ticket and talks to the realm host
+ * name: every server-side Kerberos mode plus the fallback mode, whose
+ * server deliberately has no Kerberos at all. */
+static int
+mode_client_has_ticket(const char *mode)
+{
+    return mode_uses_kerberos(mode) ||
+           strcmp(mode, "kerberos-ntlm-fallback") == 0;
+} /* mode_client_has_ticket */
+
 /* Modes whose one assertion is that the Kerberos logon is REFUSED. */
 static int
 mode_expects_refusal(const char *mode)
@@ -760,6 +1150,8 @@ print_usage(const char *prog)
             "  --mode=kerberos-winbind-down  Kerberos with winbind_enabled and no winbindd; logon must be refused\n");
     fprintf(stderr,
             "  --mode=kerberos-no-fallback   Kerberos with winbind off and no fallback knob; logon must be refused\n");
+    fprintf(stderr,
+            "  --mode=kerberos-ntlm-fallback Client holds a ticket, server has no Kerberos; logon must fall back to NTLM\n");
     fprintf(stderr, "  --mode=winbind   Test winbind NTLM (requires AD)\n");
     fprintf(stderr, "  --mode=all       Run all available tests\n");
     fprintf(stderr, "  -b <backend>     VFS backend (memfs, linux, diskfs)\n");
@@ -809,7 +1201,7 @@ main(
     /* The refusal modes assert a security property: run with no KDC they would
      * pass vacuously, so they skip outright unless the Kerberos wrapper set the
      * environment up, and they need winbind to be genuinely absent. */
-    if (mode_expects_refusal(mode)) {
+    if (mode_expects_refusal(mode) || strcmp(mode, "kerberos-ntlm-fallback") == 0) {
         if (!getenv("KRB5_KTNAME")) {
             fprintf(stderr, "\nSKIP: KRB5_KTNAME not set; run via scripts/kerberos_test_wrapper.sh\n");
             return 77;
@@ -875,6 +1267,19 @@ main(
         chimera_server_config_set_smb_kerberos_realm(config, realm);
         env.kerberos_enabled = 1;
 
+        fprintf(stderr, "Kerberos enabled: realm=%s, keytab=%s\n", realm, keytab);
+    }
+
+    /* Client side of the realm: the host name smbclient may do Kerberos
+     * against and an smb.conf naming the realm.  Needed by every mode whose
+     * client holds a ticket, including the fallback mode whose server has
+     * no Kerberos configured at all. */
+    if (keytab && mode_client_has_ticket(mode)) {
+        const char *realm = getenv("KRB_REALM");
+        if (!realm) {
+            realm = "TEST.LOCAL";
+        }
+
         /* smbclient refuses Kerberos auth to 'localhost' (hardcoded check),
          * so use a real hostname from the test environment */
         const char *smb_host = getenv("KRB_SMB_HOST");
@@ -900,8 +1305,6 @@ main(
                 fprintf(stderr, "Created smbclient config: %s\n", env.smb_conf_path);
             }
         }
-
-        fprintf(stderr, "Kerberos enabled: realm=%s, keytab=%s\n", realm, keytab);
     }
 
     if (strcmp(mode, "kerberos-winbind-down") == 0) {
@@ -977,6 +1380,10 @@ main(
         failures += run_kerberos_refusal_tests(&env, mode);
     }
 
+    if (strcmp(mode, "kerberos-ntlm-fallback") == 0) {
+        failures += run_kerberos_fallback_tests();
+    }
+
     if (strcmp(mode, "winbind") == 0 || strcmp(mode, "all") == 0) {
         failures += run_winbind_tests(&env);
     }
@@ -987,7 +1394,8 @@ main(
      * assertion in run_kerberos_refusal_tests() was itself skipped (e.g.
      * verify_kerberos_environment() still failed), tests_passed stays 0 with
      * no failures, and that is a vacuous pass, not a PASS. */
-    if (mode_expects_refusal(mode) && tests_passed == 0 && failures == 0) {
+    if ((mode_expects_refusal(mode) || strcmp(mode, "kerberos-ntlm-fallback") == 0) &&
+        tests_passed == 0 && failures == 0) {
         fprintf(stderr, "\nSKIP: refusal mode ran no assertion\n");
         test_cleanup(&env, 1);
         return 77;
