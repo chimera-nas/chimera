@@ -51,6 +51,16 @@ if(CHIMERA_NETNS_TESTING)
     set_tests_properties(chimera/server/smb/smbclient_kerberos_no_fallback PROPERTIES
         SKIP_RETURN_CODE 77)
 
+    # Kerberos-first client against a server with no Kerberos: the local user
+    # must still log on over NTLM, and a client that insists on Kerberos must
+    # be refused.  smbclient falls back to NTLM on its own, so the steering
+    # itself is pinned by the raw wire probe in smbclient_ntlm.
+    add_test(NAME chimera/server/smb/smbclient_kerberos_ntlm_fallback
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/kerberos_test_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=kerberos-ntlm-fallback)
+    set_tests_properties(chimera/server/smb/smbclient_kerberos_ntlm_fallback PROPERTIES
+        SKIP_RETURN_CODE 77)
+
     find_program(SAMBA_TOOL samba-tool)
     if(SAMBA_TOOL)
         add_test(NAME chimera/server/smb/smbclient_winbind
