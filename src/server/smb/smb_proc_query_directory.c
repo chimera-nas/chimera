@@ -404,6 +404,17 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 3.3.5.18: the open must hold FILE_LIST_DIRECTORY (== READ_DATA)
+     * to enumerate the directory; otherwise reject with STATUS_ACCESS_DENIED,
+     * as CHANGE_NOTIFY does.  A non-directory keeps its INVALID_PARAMETER
+     * from the enumeration below: the type error outranks the access one. */
+    if ((request->query_directory.open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) &&
+        !(request->query_directory.open_file->granted_access & SMB2_FILE_LIST_DIRECTORY)) {
+        chimera_smb_open_file_release(request, request->query_directory.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     if (request->query_directory.flags & SMB2_RESTART_SCANS) {
         request->query_directory.open_file->position = 0;
     }

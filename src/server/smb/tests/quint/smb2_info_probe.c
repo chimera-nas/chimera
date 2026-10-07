@@ -1782,15 +1782,83 @@ probe_query_directory(struct smb2_conn *c)
         smb2_close(c, dir.file_id);
     }
 
-    /* QUERY_DIRECTORY against a FILE handle is not a directory enumeration. */
-    st = smb2_create(c, "qdir_notadir.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
-                     MBT_FILE_SHARE_RWD, NULL, &f);
-    if (st == ST_SUCCESS) {
-        st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0, f.file_id,
-                  "*", 8192, buf, sizeof(buf), &len);
-        CHECK(st != ST_SUCCESS,
-              "QUERY_DIRECTORY on a file handle is refused (0x%08x)", st);
-        smb2_close(c, f.file_id);
+    /* MS-SMB2 3.3.5.18: the open must hold FILE_LIST_DIRECTORY, or the
+     * enumeration is refused with STATUS_ACCESS_DENIED (#1391) -- the check
+     * CHANGE_NOTIFY already makes.  The allowed side too: FILE_LIST_DIRECTORY
+     * alone, and GENERIC_READ, which maps to it. */
+    {
+        static const struct {
+            const char *name;
+            uint32_t    access;
+            uint32_t    expect;
+        }
+        /* *INDENT-OFF* */
+        opens[] = {
+            { "FILE_READ_ATTRIBUTES", MBT_FILE_READ_ATTRIBUTES, ST_ACCESS_DENIED },
+            { "FILE_LIST_DIRECTORY",  MBT_FILE_LIST_DIRECTORY,  ST_SUCCESS       },
+            { "GENERIC_READ",         MBT_GENERIC_READ,         ST_SUCCESS       },
+        };
+        /* *INDENT-ON* */
+        unsigned int i;
+
+        for (i = 0; i < sizeof(opens) / sizeof(opens[0]); i++) {
+            st = smb2_create_opts(c, "qdir", MBT_FILE_OPEN, opens[i].access,
+                                  MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE,
+                                  NULL, &dir);
+            CHECK(st == ST_SUCCESS, "open qdir with %s -> 0x%08x",
+                  opens[i].name, st);
+            if (st != ST_SUCCESS) {
+                continue;
+            }
+
+            count = 0;
+            st    = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0, dir.file_id, "*",
+                         8192, buf, sizeof(buf), &len);
+            CHECK(st == opens[i].expect,
+                  "QUERY_DIRECTORY on a %s open -> 0x%08x (want 0x%08x)",
+                  opens[i].name, st, opens[i].expect);
+            if (st == ST_SUCCESS) {
+                dir_collect(&dir_classes[0], buf, len, names, 64, &count);
+                CHECK(names_have(names, count, "alpha.txt"),
+                      "  ... the %s open lists the directory", opens[i].name);
+            }
+            smb2_close(c, dir.file_id);
+        }
+    }
+
+    /* QUERY_DIRECTORY against a FILE handle is not a directory enumeration:
+     * STATUS_INVALID_PARAMETER (MS-SMB2 3.3.5.18), whatever the open's
+     * access -- the type error outranks the FILE_LIST_DIRECTORY check, so an
+     * open without it gets INVALID_PARAMETER too, not ACCESS_DENIED. */
+    {
+        static const struct {
+            const char *name;
+            uint32_t    access;
+        }
+        /* *INDENT-OFF* */
+        file_opens[] = {
+            { "FILE_ALL_ACCESS",      MBT_FILE_ALL_ACCESS      },
+            { "FILE_READ_ATTRIBUTES", MBT_FILE_READ_ATTRIBUTES },
+        };
+        /* *INDENT-ON* */
+        unsigned int i;
+
+        for (i = 0; i < sizeof(file_opens) / sizeof(file_opens[0]); i++) {
+            st = smb2_create(c, "qdir_notadir.bin", MBT_FILE_OPEN_IF,
+                             file_opens[i].access, MBT_FILE_SHARE_RWD, NULL,
+                             &f);
+            CHECK(st == ST_SUCCESS, "open qdir_notadir.bin with %s -> 0x%08x",
+                  file_opens[i].name, st);
+            if (st != ST_SUCCESS) {
+                continue;
+            }
+            st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0, f.file_id,
+                      "*", 8192, buf, sizeof(buf), &len);
+            CHECK(st == ST_INVALID_PARAMETER,
+                  "QUERY_DIRECTORY on a %s file handle -> 0x%08x "
+                  "(want INVALID_PARAMETER)", file_opens[i].name, st);
+            smb2_close(c, f.file_id);
+        }
     }
 } /* probe_query_directory */
 
