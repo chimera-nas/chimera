@@ -107,6 +107,146 @@ chimera_nfs4_lock_finish(
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_lock_finish */
 
+/*
+ * POSIX replace (RFC 7530 section 9.3, and the fcntl semantics that
+ * OPEN4_RESULT_LOCKTYPE_POSIX promises in section 16.16.5): a LOCK by a
+ * lock-owner over bytes it already holds replaces that owner's coverage of
+ * them.  A WRITE re-locked as READ is an atomic downgrade, a READ re-locked
+ * as WRITE an atomic upgrade, and the parts of an old lock outside the new
+ * range keep standing in their old mode.
+ *
+ * The claim core admits the new range next to the owner's old ones -- a
+ * lock-owner never conflicts with itself -- so without this the old mode
+ * lingers under the new one, and a downgraded range keeps denying every
+ * other owner's READ.  Carve the new range out of the owner's other claims
+ * with chimera_vfs_claim_range_replace, the new claim excepted.  The core
+ * does it in one step under file->lock, so no waiter can slip into the bytes
+ * between the old coverage going and its remainders standing.
+ *
+ * A (lock-owner, file) pair has one lock stateid in every minor version
+ * (chimera_nfs4_lock), so the owner's claims on this file are the entries on
+ * lock_state->range_leases.  Runs before the same-mode merge, which then
+ * coalesces any remainder that abuts the new range.  If the remainder leases
+ * cannot be allocated the carve is skipped: the old coverage stays, holding
+ * more than was asked for but never less.
+ */
+static void
+chimera_nfs4_lock_replace_coverage(
+    struct chimera_vfs_state *vfs_state,
+    struct nfs_lock_state    *lock_state,
+    struct nfs4_range_lease  *rl)
+{
+    struct chimera_vfs_file_state *fs      = rl->file_state;
+    uint64_t                       n_start = rl->claim.offset;
+    uint64_t                       n_end   =
+        (rl->claim.offset + rl->claim.length < rl->claim.offset)
+        ? UINT64_MAX : rl->claim.offset + rl->claim.length;
+    struct nfs4_range_lease      **pp     = &lock_state->range_leases;
+    struct nfs4_range_lease       *hits   = NULL;
+    int                            n_hits = 0;
+    struct nfs4_range_lease       *e;
+    struct nfs4_range_lease      **rem;
+    struct chimera_vfs_claim     **spare;
+    int                            n_spare;
+    int                            spare_used = 0;
+    int                            i;
+
+    /* Detach every interval of this owner that overlaps the new range.  One
+     * that only abuts it stays for the same-mode merge. */
+    while (*pp) {
+        uint64_t e_start, e_end;
+
+        e       = *pp;
+        e_start = e->claim.offset;
+        e_end   = (e->claim.offset + e->claim.length < e->claim.offset)
+            ? UINT64_MAX : e->claim.offset + e->claim.length;
+
+        if (e_end <= n_start || n_end <= e_start) {
+            pp = &e->next;
+            continue;
+        }
+        *pp     = e->next;
+        e->next = hits;
+        hits    = e;
+        n_hits++;
+    }
+
+    if (!hits) {
+        return;
+    }
+
+    /* A straddled interval leaves at most a head and a tail.  Each spare is a
+     * whole range lease with its own file_state reference, so a consumed one
+     * only needs linking. */
+    n_spare = 2 * n_hits;
+    rem     = calloc((size_t) n_spare, sizeof(*rem));
+    spare   = calloc((size_t) n_spare, sizeof(*spare));
+
+    for (i = 0; rem && spare && i < n_spare; i++) {
+        rem[i] = calloc(1, sizeof(*rem[i]));
+        if (rem[i]) {
+            rem[i]->file_state = chimera_vfs_state_get(vfs_state, fs->fh,
+                                                       fs->fh_len, fs->fh_hash,
+                                                       true);
+        }
+        if (!rem[i] || !rem[i]->file_state) {
+            free(rem[i]);
+            break;
+        }
+        spare[i] = &rem[i]->claim;
+    }
+
+    if (!rem || !spare || i < n_spare) {
+        while (rem && i-- > 0) {
+            chimera_vfs_state_put(vfs_state, rem[i]->file_state);
+            free(rem[i]);
+        }
+        free(rem);
+        free(spare);
+        while (hits) {
+            e                        = hits;
+            hits                     = e->next;
+            e->next                  = lock_state->range_leases;
+            lock_state->range_leases = e;
+        }
+        return;
+    }
+
+    chimera_vfs_claim_range_replace(vfs_state, fs, &rl->claim.owner,
+                                    /* except   */ &rl->claim,
+                                    rl->claim.offset, rl->claim.length,
+                                    /* new_mask */ 0,
+                                    spare, n_spare, &spare_used,
+                                    /* released_cb */ NULL, NULL);
+
+    if (spare_used > n_spare) {
+        spare_used = n_spare;
+    }
+
+    /* A consumed spare is now a linked claim carrying its parent's owner,
+     * mode and courtesy callbacks, with the remainder's geometry. */
+    for (i = 0; i < n_spare; i++) {
+        if (i < spare_used) {
+            rem[i]->next             = lock_state->range_leases;
+            lock_state->range_leases = rem[i];
+        } else {
+            chimera_vfs_state_put(vfs_state, rem[i]->file_state);
+            free(rem[i]);
+        }
+    }
+    free(rem);
+    free(spare);
+
+    /* The core has unlinked every carved claim; free the leases that held
+     * them.  The release inside is a no-op for an unlinked claim, except for
+     * a backend token beyond the carve's bounded release batch. */
+    while (hits) {
+        e    = hits;
+        hits = e->next;
+        nfs4_range_lease_free(vfs_state, e);
+    }
+} /* chimera_nfs4_lock_replace_coverage */
+
 static void
 chimera_nfs4_lock_complete(
     enum chimera_vfs_claim_result            result,
@@ -127,10 +267,13 @@ chimera_nfs4_lock_complete(
     req->nfs_inflight_range = NULL;
 
     if (result == CHIMERA_CLAIM_GRANTED) {
-        /* POSIX consolidation (RFC 7530 §16.10.4): coalesce this newly-granted
-         * range with any same-mode interval of the same lock-owner that it
-         * overlaps or abuts, so a single merged interval is what LOCKT reports
-         * and LOCKU operates on.  All entries on this lock_state share one
+        chimera_nfs4_lock_replace_coverage(vfs_state, lock_state, rl);
+
+        /* POSIX consolidation (RFC 7530 section 16.10.4): coalesce this
+         * newly-granted range with any same-mode interval of the same
+         * lock-owner that it abuts (whatever it overlapped was carved out
+         * just above), so a single merged interval is what LOCKT reports and
+         * LOCKU operates on.  All entries on this lock_state share one
          * lock-owner, so only the lock mode must match. */
         uint64_t                  n_start = rl->claim.offset;
         /* The claim core stores to-EOF as UINT64_MAX; computing the
