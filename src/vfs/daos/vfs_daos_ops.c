@@ -16,6 +16,8 @@
 #define BAD_COOKIE     200
 #define SYMLINK_RESULT 120
 
+extern struct chimera_vfs_module vfs_daos;
+
 static bool
 oid_equal(
     daos_obj_id_t a,
@@ -1045,6 +1047,13 @@ open_at(
         return rc;
     }
     post_attrs(s, parent, &r->open_at.r_dir_pre_attr);
+    if (r->cred &&
+        chimera_vfs_gate_needed_dac(vfs_daos.capabilities, r->cred)) {
+        rc = check_access(s, parent, r->cred, CHIMERA_ACE_EXECUTE);
+        if (rc) {
+            return rc;
+        }
+    }
     rc = lookup(s, parent, name, &obj);
     if (!rc) {
         rc = open_type(s, obj, flags);
@@ -1064,21 +1073,35 @@ open_at(
     r->open_at.r_attr.va_req_mask |= CHIMERA_VFS_ATTR_FH;
     rc                             = get_attrs(s, obj, &r->open_at.r_attr);
     if (!rc) {
-        rc = bind_open(s, obj, flags, r->cred, created, &r->open_at.r_vfs_private);
+        if (chimera_vfs_open_handle_retained(flags, vfs_daos.capabilities)) {
+            rc = bind_open(s, obj, flags, r->cred, created,
+                           &r->open_at.r_vfs_private);
+        }
     }
     if (!rc && (flags & CHIMERA_VFS_OPEN_TRUNCATE) && !created) {
-        struct chimera_vfs_attrs a = { 0 };
+        struct chimera_vfs_attrs a      = { 0 };
+        dfs_obj_t               *target = obj;
+
         if (r->open_at.set_attr) {
             a = *r->open_at.set_attr;
         }
         a.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         a.va_size      = 0;
-        struct vfs_daos_object  *opened = find_object(s, r->open_at.r_vfs_private);
-        rc = set_attrs(s, opened->obj, &a, r->cred, false);
+        if (r->open_at.r_vfs_private) {
+            struct vfs_daos_object *opened = find_object(s, r->open_at.r_vfs_private);
+
+            target = opened ? opened->obj : NULL;
+            if (!target) {
+                rc = EBADF;
+            }
+        }
+        if (!rc) {
+            rc = set_attrs(s, target, &a, r->cred, false);
+        }
         if (!rc) {
             /* Preserve a successful mutation even if optional stat fails. */
             struct chimera_vfs_attrs after = r->open_at.r_attr;
-            if (!get_attrs(s, opened->obj, &after)) {
+            if (!get_attrs(s, target, &after)) {
                 r->open_at.r_attr = after;
             } else {
                 r->open_at.r_attr.va_set_mask = CHIMERA_VFS_ATTR_FH;
