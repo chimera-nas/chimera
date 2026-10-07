@@ -131,11 +131,13 @@ anonymous access.
 **`smbd` must not be running.** Chimera binds port 445 itself. If samba's file
 server is installed as a side effect of another package, disable and mask it.
 
-> **Note:** chimera's SPNEGO NEGOTIATE response advertises Kerberos
-> unconditionally, including when `kerberos_enabled` is `false`. A client that
-> prefers Kerberos will select it and its logon will then be rejected. Where
-> only NTLM is configured, point clients at NTLM explicitly (for `smbclient`,
-> `--use-kerberos=off`).
+> **Note:** without `kerberos_enabled`, chimera's SPNEGO NEGOTIATE response
+> offers NTLMSSP alone. A client that still opens with Kerberos (or NEGOEX)
+> while also offering NTLMSSP, as a domain-joined Windows client does whenever
+> its KDC issues a ticket for the server name, is steered to NTLMSSP per
+> RFC 4178 and logs on with its NTLM credential; no client-side setting is
+> needed. A client offering only Kerberos is refused with
+> `NT_STATUS_LOGON_FAILURE`.
 
 > **Note:** the uid and gid resolved for a session are applied to files it
 > creates. The supplementary group list winbind returns is retrieved but is not
