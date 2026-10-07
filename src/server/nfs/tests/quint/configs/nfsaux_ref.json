@@ -18,7 +18,6 @@
     "nsmMonFromLocks": true,
     "nsmAddrsDistinct": false,
     "nsmInitialState": 1,
-    "nlmUpgradeIsNoop": true,
     "nlmShareEnforced": false,
     "nlmInGrace": false,
     "nlmGrantCallbackObservable": false,

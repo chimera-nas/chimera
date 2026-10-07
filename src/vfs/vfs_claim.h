@@ -506,6 +506,38 @@ chimera_vfs_claim_range_replace(
         void                     *arg),
     void                             *released_arg);
 
+/* The same carve without waking waiters afterwards.  The pump at the end of
+ * chimera_vfs_claim_range_replace completes waiters inline, and a completed
+ * waiter may carve the same owner again before the caller has recorded the
+ * remainders this carve handed it; a caller that keeps its own record of
+ * the owner's claims (NLM's per-client lock list) records them first and
+ * then pumps with chimera_vfs_claim_pump. */
+SYMBOL_EXPORT void
+chimera_vfs_claim_range_replace_nopump(
+    struct chimera_vfs_state         *state,
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
+    uint64_t                          offset,
+    uint64_t                          length,
+    uint8_t                           new_mask,
+    struct chimera_vfs_claim        **spare,
+    int                               n_spare,
+    int                              *spare_used,
+    void (                           *released_cb )(
+        struct chimera_vfs_claim *claim,
+        void                     *arg),
+    void                             *released_arg);
+
+/* Wake what a preceding _nopump mutation left waiting: grant queued
+ * acquires the file now admits, resume parked I/O, and re-evaluate the
+ * backend cover.  Takes no lock the caller could hold; waiter callbacks run
+ * inline on this thread. */
+SYMBOL_EXPORT void
+chimera_vfs_claim_pump(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file);
+
 /* -------------------------------------------------------------------- */
 /* Cache grants                                                         */
 /* -------------------------------------------------------------------- */
