@@ -419,14 +419,13 @@ probe_nlm(struct mbt_env *env)
     check_eq("LOCK shared [64,80) as A (shared/shared)", r->nlm_stat,
              NLM4_GRANTED);
 
-    /* A already holds [64,80) shared, so this names a range it holds: the
-     * request is answered as an idempotent retry WITHOUT re-evaluating the
-     * mode, so the upgrade silently does not happen.  (The third-party case
-     * below, where the requester holds nothing, does conflict.) */
+    /* A already holds [64,80) shared, but asking for it exclusive is an
+     * upgrade, not a retry: it is decided like any other request, and B's
+     * shared lock on the range refuses it.  A's shared lock stays. */
     r = mbt_nlm_lock(env, 2, PROBE_CALLER_A, &file_fh[0], oh_a, sizeof(oh_a),
                      1, 1, 0, 0, 0, 64, 16, ck, sizeof(ck));
-    check_eq("LOCK excl [64,80) as A over its own shared", r->nlm_stat,
-             NLM4_GRANTED);
+    check_eq("LOCK excl [64,80) as A over its own shared (B shares it)",
+             r->nlm_stat, NLM4_DENIED);
 
     /* TEST reports the conflicting holder's range and mode. */
     r = mbt_nlm_test(env, 0, PROBE_CALLER_B, &file_fh[0], oh_b, sizeof(oh_b),
@@ -781,6 +780,316 @@ probe_nlm(struct mbt_env *env)
 
 /* ---------------------------------------------------------------------- */
 
+/*
+ * A LOCK over bytes its own owner already holds replaces the owner's
+ * coverage of them: POSIX fcntl semantics, which Linux lockd assumes for
+ * every re-lock.  An exclusive re-locked as shared is a downgrade other
+ * owners can share, a shared re-locked as exclusive an upgrade decided like
+ * any other request, and the parts of an old lock outside the new range keep
+ * their mode.  Every case runs on f1 at RL_BASE and above, clear of the
+ * ranges probe_nlm used, and FREE_ALL clears its callers before the next.
+ */
+#define RL_BASE 1048576ULL
+
+static void
+relock_reset(struct mbt_env *env)
+{
+    mbt_nlm_free_all(env, "quint-r1", 1);
+    mbt_nlm_free_all(env, "quint-r2", 1);
+    mbt_nlm_free_all(env, "quint-r3", 1);
+} /* relock_reset */
+
+static void
+probe_nlm_relock(struct mbt_env *env)
+{
+    const struct mbt_fh   *f = &file_fh[1];
+    struct mbt_aux_result *r;
+    uint64_t               b;
+
+    printf("nlm re-lock:\n");
+    relock_reset(env);
+
+    /* The reported case: r1 downgrades its whole exclusive lock, so r2 can
+     * share the range and r3's exclusive test names a shared holder. */
+    b = RL_BASE;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("whole: r1 LOCK excl [0,16)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("whole: r1 LOCK shared [0,16) (downgrade)", r->nlm_stat,
+             NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("whole: r2 LOCK shared [0,16) shares it", r->nlm_stat,
+             NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r3", f, oh_a, sizeof(oh_a), 3, 1, b, 16,
+                     ck, sizeof(ck));
+    check_eq("whole: r3 TEST excl [0,16)", r->nlm_stat, NLM4_DENIED);
+    check_eq("whole: holder is shared", r->holder_exclusive, 0);
+    relock_reset(env);
+
+    /* Downgrading the middle of an exclusive lock keeps both edges
+     * exclusive. */
+    b = RL_BASE + 0x1000;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b, 30, ck, sizeof(ck));
+    check_eq("middle: r1 LOCK excl [0,30)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b + 10, 10, ck, sizeof(ck));
+    check_eq("middle: r1 LOCK shared [10,20)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0,
+                     b + 10, 10, ck, sizeof(ck));
+    check_eq("middle: r2 TEST shared [10,20)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0,
+                     b, 10, ck, sizeof(ck));
+    check_eq("middle: r2 TEST shared [0,10)", r->nlm_stat, NLM4_DENIED);
+    check_eq("middle: head holder exclusive", r->holder_exclusive, 1);
+    check_u64("middle: head holder offset", r->holder_offset, b);
+    check_u64("middle: head holder length", r->holder_length, 10);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0,
+                     b + 20, 10, ck, sizeof(ck));
+    check_eq("middle: r2 TEST shared [20,30)", r->nlm_stat, NLM4_DENIED);
+    check_u64("middle: tail holder offset", r->holder_offset, b + 20);
+    check_u64("middle: tail holder length", r->holder_length, 10);
+    relock_reset(env);
+
+    /* An upgrade and then a downgrade: neither leaves the old mode behind. */
+    b = RL_BASE + 0x2000;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("updown: r1 LOCK shared [0,16)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("updown: r1 LOCK excl [0,16) (upgrade)", r->nlm_stat,
+             NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0, b, 16,
+                     ck, sizeof(ck));
+    check_eq("updown: r2 TEST shared after the upgrade", r->nlm_stat,
+             NLM4_DENIED);
+    check_eq("updown: holder is exclusive", r->holder_exclusive, 1);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("updown: r1 LOCK shared [0,16) (downgrade)", r->nlm_stat,
+             NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0, b, 16,
+                     ck, sizeof(ck));
+    check_eq("updown: r2 TEST shared after the downgrade", r->nlm_stat,
+             NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 1, b, 16,
+                     ck, sizeof(ck));
+    check_eq("updown: r2 TEST excl after the downgrade", r->nlm_stat,
+             NLM4_DENIED);
+    check_eq("updown: holder is shared again", r->holder_exclusive, 0);
+    relock_reset(env);
+
+    /* A refused upgrade changes nothing: r1's shared lock still stands once
+     * r2 lets go. */
+    b = RL_BASE + 0x3000;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("refused: r1 LOCK shared [0,16)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("refused: r2 LOCK shared [0,16)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("refused: r1 LOCK excl [0,16) over r2's shared", r->nlm_stat,
+             NLM4_DENIED);
+    r = mbt_nlm_unlock(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, b, 16,
+                       ck, sizeof(ck));
+    check_eq("refused: r2 UNLOCK [0,16)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r3", f, oh_a, sizeof(oh_a), 3, 1, b, 16,
+                     ck, sizeof(ck));
+    check_eq("refused: r3 TEST excl [0,16)", r->nlm_stat, NLM4_DENIED);
+    check_eq("refused: r1's lock is still shared", r->holder_exclusive, 0);
+    check_u64("refused: holder offset", r->holder_offset, b);
+    check_u64("refused: holder length", r->holder_length, 16);
+    relock_reset(env);
+
+    /* A blocked upgrade, once granted, takes over the shared lock it was
+     * upgrading and keeps the part outside the upgraded range shared. */
+    b = RL_BASE + 0x4000;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b, 32, ck, sizeof(ck));
+    check_eq("blocked: r1 LOCK shared [0,32)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0, 0, 0, 0,
+                     b, 16, ck, sizeof(ck));
+    check_eq("blocked: r2 LOCK shared [0,16)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1,
+                     1 /* block */, 0, 0, b, 16, ck, sizeof(ck));
+    check_eq("blocked: r1 blocking LOCK excl [0,16)", r->nlm_stat,
+             NLM4_BLOCKED);
+    mbt_nlm_unlock(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, b, 16, ck,
+                   sizeof(ck));
+    mbt_aux_drain_us(env, 200000);
+    r = mbt_nlm_test(env, 0, "quint-r3", f, oh_a, sizeof(oh_a), 3, 0, b, 16,
+                     ck, sizeof(ck));
+    check_eq("blocked: r3 TEST shared [0,16) after the grant", r->nlm_stat,
+             NLM4_DENIED);
+    check_eq("blocked: the upgrade was granted", r->holder_exclusive, 1);
+    r = mbt_nlm_test(env, 0, "quint-r3", f, oh_a, sizeof(oh_a), 3, 1,
+                     b + 16, 16, ck, sizeof(ck));
+    check_eq("blocked: r3 TEST excl [16,32)", r->nlm_stat, NLM4_DENIED);
+    check_eq("blocked: tail holder is shared", r->holder_exclusive, 0);
+    check_u64("blocked: tail holder offset", r->holder_offset, b + 16);
+    check_u64("blocked: tail holder length", r->holder_length, 16);
+    relock_reset(env);
+
+    /* An exclusive re-lock spanning a shared and an exclusive lock trims the
+     * shared one to what lies outside it and cuts the exclusive one's head
+     * off; NLM keeps the three locks apart rather than merging them. */
+    b = RL_BASE + 0x5000;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b, 10, ck, sizeof(ck));
+    check_eq("span: r1 LOCK shared [0,10)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b + 20, 10, ck, sizeof(ck));
+    check_eq("span: r1 LOCK excl [20,30)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b + 5, 20, ck, sizeof(ck));
+    check_eq("span: r1 LOCK excl [5,25)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0, b, 5,
+                     ck, sizeof(ck));
+    check_eq("span: r2 TEST shared [0,5)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 1, b, 5,
+                     ck, sizeof(ck));
+    check_eq("span: r2 TEST excl [0,5)", r->nlm_stat, NLM4_DENIED);
+    check_eq("span: head holder is shared", r->holder_exclusive, 0);
+    check_u64("span: head holder offset", r->holder_offset, b);
+    check_u64("span: head holder length", r->holder_length, 5);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0,
+                     b + 26, 1, ck, sizeof(ck));
+    check_eq("span: r2 TEST shared [26,27)", r->nlm_stat, NLM4_DENIED);
+    check_u64("span: tail holder offset", r->holder_offset, b + 25);
+    check_u64("span: tail holder length", r->holder_length, 5);
+    relock_reset(env);
+
+    /* FREE_ALL after a partial downgrade releases the remainders too. */
+    b = RL_BASE + 0x6000;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b, 30, ck, sizeof(ck));
+    check_eq("free_all: r1 LOCK excl [0,30)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b + 10, 10, ck, sizeof(ck));
+    check_eq("free_all: r1 LOCK shared [10,20)", r->nlm_stat, NLM4_GRANTED);
+    mbt_nlm_free_all(env, "quint-r1", 1);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 1, b, 30,
+                     ck, sizeof(ck));
+    check_eq("free_all: r2 TEST excl [0,30) after FREE_ALL", r->nlm_stat,
+             NLM4_GRANTED);
+    relock_reset(env);
+
+    /* FREE_ALL releases a client's locks in the order it took them, and
+     * pumps the blocking queue after each, so that order decides which of
+     * two queued waiters wins.  A remainder of a carve must therefore keep
+     * its parent's place even when the carve only touched one of the
+     * parent's sibling remainders: r1 ends up with [5,10) and [20,30) of one
+     * original lock, and releasing [5,10) first (as the original's place
+     * says) means r2's older [5,30) wait is granted before r3's [20,30). */
+    b = RL_BASE + 0x7000;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b, 30, ck, sizeof(ck));
+    check_eq("order: r1 LOCK excl [0,30)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b + 10, 10, ck, sizeof(ck));
+    check_eq("order: r1 LOCK shared [10,20)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_unlock(env, 0, "quint-r1", f, oh_a, sizeof(oh_a), 1, b + 10,
+                       10, ck, sizeof(ck));
+    check_eq("order: r1 UNLOCK [10,20)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_unlock(env, 0, "quint-r1", f, oh_a, sizeof(oh_a), 1, b, 5,
+                       ck, sizeof(ck));
+    check_eq("order: r1 UNLOCK [0,5)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r2", f, oh_b, sizeof(oh_b), 2, 1,
+                     1 /* block */, 0, 0, b + 5, 25, ck, sizeof(ck));
+    check_eq("order: r2 blocking LOCK excl [5,30)", r->nlm_stat,
+             NLM4_BLOCKED);
+    r = mbt_nlm_lock(env, 2, "quint-r3", f, oh_a, sizeof(oh_a), 3, 1,
+                     1 /* block */, 0, 0, b + 20, 10, ck, sizeof(ck));
+    check_eq("order: r3 blocking LOCK excl [20,30)", r->nlm_stat,
+             NLM4_BLOCKED);
+    mbt_nlm_free_all(env, "quint-r1", 1);
+    mbt_aux_drain_us(env, 200000);
+    r = mbt_nlm_test(env, 0, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, b + 5,
+                     5, ck, sizeof(ck));
+    check_eq("order: r1 TEST excl [5,10) after FREE_ALL (r2 won)",
+             r->nlm_stat, NLM4_DENIED);
+    check_eq("order: winner is exclusive", r->holder_exclusive, 1);
+    check_u64("order: winner offset", r->holder_offset, b + 5);
+    check_u64("order: winner length", r->holder_length, 25);
+    relock_reset(env);
+
+    /* Carves nest: the pump at the end of r1's UNLOCK carve grants r2's
+     * blocked downgrade, whose own carve pumps and grants r1's blocked
+     * re-lock, all before r1's UNLOCK remainder [0,20) is back on r1's lock
+     * list.  That re-lock still has to take [10,20) over from the remainder:
+     * r1 ends up with exclusive [0,10) and shared [10,35), r2 with shared
+     * [20,40) and exclusive [40,50). */
+    b = RL_BASE + 0x8000;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b, 30, ck, sizeof(ck));
+    check_eq("nested: r1 LOCK excl [0,30)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r2", f, oh_b, sizeof(oh_b), 2, 1, 0, 0, 0,
+                     b + 30, 20, ck, sizeof(ck));
+    check_eq("nested: r2 LOCK excl [30,50)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0,
+                     1 /* block */, 0, 0, b + 20, 20, ck, sizeof(ck));
+    check_eq("nested: r2 blocking LOCK shared [20,40)", r->nlm_stat,
+             NLM4_BLOCKED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0,
+                     1 /* block */, 0, 0, b + 10, 25, ck, sizeof(ck));
+    check_eq("nested: r1 blocking LOCK shared [10,35)", r->nlm_stat,
+             NLM4_BLOCKED);
+    r = mbt_nlm_unlock(env, 0, "quint-r1", f, oh_a, sizeof(oh_a), 1, b + 20,
+                       10, ck, sizeof(ck));
+    check_eq("nested: r1 UNLOCK [20,30)", r->nlm_stat, NLM4_GRANTED);
+    mbt_aux_drain_us(env, 200000);
+    r = mbt_nlm_test(env, 0, "quint-r3", f, oh_a, sizeof(oh_a), 3, 0,
+                     b + 10, 10, ck, sizeof(ck));
+    check_eq("nested: r3 TEST shared [10,20) (r1 downgraded it)",
+             r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r3", f, oh_a, sizeof(oh_a), 3, 1, b, 10,
+                     ck, sizeof(ck));
+    check_eq("nested: r3 TEST excl [0,10)", r->nlm_stat, NLM4_DENIED);
+    check_eq("nested: head holder is exclusive", r->holder_exclusive, 1);
+    check_u64("nested: head holder offset", r->holder_offset, b);
+    check_u64("nested: head holder length", r->holder_length, 10);
+    r = mbt_nlm_test(env, 0, "quint-r3", f, oh_a, sizeof(oh_a), 3, 1,
+                     b + 35, 5, ck, sizeof(ck));
+    check_eq("nested: r3 TEST excl [35,40)", r->nlm_stat, NLM4_DENIED);
+    check_eq("nested: r2's downgrade holder is shared", r->holder_exclusive,
+             0);
+    check_u64("nested: r2's downgrade offset", r->holder_offset, b + 20);
+    check_u64("nested: r2's downgrade length", r->holder_length, 20);
+    r = mbt_nlm_test(env, 0, "quint-r3", f, oh_a, sizeof(oh_a), 3, 0,
+                     b + 40, 10, ck, sizeof(ck));
+    check_eq("nested: r3 TEST shared [40,50)", r->nlm_stat, NLM4_DENIED);
+    check_eq("nested: r2's tail is exclusive", r->holder_exclusive, 1);
+    check_u64("nested: r2's tail offset", r->holder_offset, b + 40);
+    check_u64("nested: r2's tail length", r->holder_length, 10);
+    relock_reset(env);
+
+    /* Downgrading inside a to-EOF lock leaves a to-EOF tail (wire 0). */
+    b = RL_BASE + 0x100000;
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     b, 0, ck, sizeof(ck));
+    check_eq("eof: r1 LOCK excl [0,EOF)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-r1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     b + 10, 10, ck, sizeof(ck));
+    check_eq("eof: r1 LOCK shared [10,20)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0,
+                     b + 10, 10, ck, sizeof(ck));
+    check_eq("eof: r2 TEST shared [10,20)", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_test(env, 0, "quint-r2", f, oh_b, sizeof(oh_b), 2, 0,
+                     b + 1000, 1, ck, sizeof(ck));
+    check_eq("eof: r2 TEST shared [1000,1001)", r->nlm_stat, NLM4_DENIED);
+    check_u64("eof: tail holder offset", r->holder_offset, b + 20);
+    check_u64("eof: tail holder length is wire 0", r->holder_length, 0);
+    relock_reset(env);
+} /* probe_nlm_relock */
+
+/* ---------------------------------------------------------------------- */
+
 static void
 probe_nsm(struct mbt_env *env)
 {
@@ -911,6 +1220,7 @@ main(
     probe_setup_files(&env);
     probe_mount(&env);
     probe_nlm(&env);
+    probe_nlm_relock(&env);
     probe_nsm(&env);
 
     chimera_server_remove_export(env.server, PROBE_EXPORT2);
