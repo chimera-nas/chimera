@@ -285,6 +285,10 @@ jobs:
             -w /build \
             ${{ env.DEV_IMAGE }} \
             bash -euxc '
+              # Preserve diagnostics even when configure, build or CTest fails.
+              # The EXIT trap leaves the original failure status intact.
+              mkdir -p /workspace/quick-test-diagnostics
+              trap "bash /workspace/scripts/ci_collect_test_logs.sh /build /workspace/quick-test-diagnostics" EXIT
               # Ubuntu ships these versioned; the unversioned names are not
               # always on PATH, and coverage-report.sh honours the overrides.
               export LLVM_PROFDATA="$(command -v llvm-profdata || ls /usr/lib/llvm-*/bin/llvm-profdata | tail -n1)"
@@ -295,6 +299,7 @@ jobs:
               mkdir -p /build/coverage/profraw
               LLVM_PROFILE_FILE=/build/coverage/profraw/%m-%p.profraw \
                 ctest --output-on-failure --no-tests=error \
+                      --output-junit /workspace/quick-test-diagnostics/results.xml \
                       --test-output-size-failed 65536 --timeout 600 -j "$(nproc)"
               # Which of the changed files are worth an lcov export; empty
               # (or absent, on a non-PR run) means the export is skipped.
@@ -318,6 +323,15 @@ jobs:
                         /workspace "$GH_REPO" "$PR_HEAD_SHA" \
                         >> /workspace/coverage-report.md
               fi'
+
+      - name: Upload quick-tier test diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: quick-test-diagnostics
+          path: quick-test-diagnostics/
+          if-no-files-found: warn
+          retention-days: 30
 
       # Best-effort: a report that cannot be posted is still in the run summary,
       # and a comment API hiccup should not fail an otherwise-green job.
