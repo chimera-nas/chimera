@@ -115,6 +115,9 @@ run_bind(
     struct evpl_iovec out_iov = { .data = out, .length = 65535 };
     int               rc;
 
+    /* A failed dce_rpc() leaves the reply untouched; start from zeros so the
+     * callers' field checks read defined bytes either way. */
+    memset(out, 0, 65535);
     rc       = dce_rpc(&SRVSVC_IF, &in_iov, 1, &out_iov, never_called, NULL);
     *out_len = out_iov.length;
     return rc;
@@ -131,7 +134,11 @@ test_bind_ack_names_a_group(void)
     p_result_t      *res;
 
     fprintf(stderr, "\nbind with assoc_group_id 0...\n");
-    CHECK(run_bind(0, out, &out_len) == 0, "dce_rpc accepts the bind");
+    if (run_bind(0, out, &out_len) != 0) {
+        CHECK(0, "dce_rpc accepts the bind");
+        return;
+    }
+    CHECK(1, "dce_rpc accepts the bind");
 
     hdr  = (dce_common_t *) out;
     ack  = (dce_bind_ack_t *) (out + sizeof(*hdr));
@@ -158,7 +165,11 @@ test_bind_ack_echoes_client_group(void)
     dce_bind_ack_t *ack;
 
     fprintf(stderr, "\nbind with assoc_group_id 0x1234...\n");
-    CHECK(run_bind(0x1234, out, &out_len) == 0, "dce_rpc accepts the bind");
+    if (run_bind(0x1234, out, &out_len) != 0) {
+        CHECK(0, "dce_rpc accepts the bind");
+        return;
+    }
+    CHECK(1, "dce_rpc accepts the bind");
     ack = (dce_bind_ack_t *) (out + sizeof(dce_common_t));
     CHECK(ack->assoc_group_id == 0x1234, "client-supplied association group echoed");
 } /* test_bind_ack_echoes_client_group */
