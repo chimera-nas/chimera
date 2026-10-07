@@ -911,6 +911,43 @@ test_spnego_mechanism_detection(void)
 } /* test_spnego_mechanism_detection */
 
 static void
+test_spnego_ntlmssp_hint(void)
+{
+    /* RFC 4178 negTokenResp: accept-incomplete, supportedMech NTLMSSP, no
+     * responseToken.  This is what makes a Kerberos-first client restart
+     * with its NTLMSSP NEGOTIATE on the next SESSION_SETUP. */
+    /* *INDENT-OFF* */
+    static const uint8_t expected[] = {
+        0xa1, 0x15,
+        0x30, 0x13,
+        0xa0, 0x03, 0x0a, 0x01, 0x01,
+        0xa1, 0x0c,
+        0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    };
+    /* *INDENT-ON* */
+    size_t   len = 0;
+    uint8_t *hint;
+
+    fprintf(stderr, "\nTesting the SPNEGO NTLMSSP steering hint...\n");
+
+    hint = smb_auth_spnego_ntlmssp_hint(&len);
+    if (hint && len == sizeof(expected) && memcmp(hint, expected, len) == 0) {
+        TEST_PASS("hint is the 23-byte accept-incomplete/NTLMSSP negTokenResp");
+    } else {
+        TEST_FAIL("hint is the 23-byte accept-incomplete/NTLMSSP negTokenResp");
+    }
+    free(hint);
+
+    /* The hint itself must not be mistaken for a client token with a
+     * mechanism in it. */
+    if (smb_auth_detect_mechanism(expected, sizeof(expected)) == SMB_AUTH_MECH_UNKNOWN) {
+        TEST_PASS("hint bytes carry no client mechanism");
+    } else {
+        TEST_FAIL("hint bytes carry no client mechanism");
+    }
+} /* test_spnego_ntlmssp_hint */
+
+static void
 usage(const char *prog)
 {
     fprintf(stderr, "Usage: %s [options]\n", prog);
@@ -978,6 +1015,7 @@ main(
         test_wbclient_lm_implied_zeros();
         test_kerberos_identity_policy();
         test_spnego_mechanism_detection();
+        test_spnego_ntlmssp_hint();
     }
 
     if (test_mode == TEST_MODE_ALL || test_mode == TEST_MODE_NTLM_WINBIND) {

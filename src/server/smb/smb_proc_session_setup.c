@@ -344,6 +344,18 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
      * completion below returns the right status. */
     int bad_token = 0;
 
+    /* RFC 4178 3.2 / MS-SPNG: a negTokenInit's optimistic mechanism the
+     * server does not accept is answered with negTokenResp { accept-incomplete,
+     * supportedMech } naming one the client also offered, under
+     * STATUS_MORE_PROCESSING_REQUIRED; the client then restarts with that
+     * mechanism's first token.  Chimera only ever steers to NTLMSSP, and only
+     * when the client's mechTypes list offers it: a Kerberos-only client gets
+     * the LOGON_FAILURE it would get from any server without its realm.
+     * Without this a domain-joined Windows client, which goes Kerberos first
+     * whenever its KDC issues a ticket for the server name, never reaches NTLM
+     * at all and only ever sees its credential prompt. */
+    int steer_to_ntlm = 0;
+
     // Route to appropriate handler
     switch (mech) {
         case SMB_AUTH_MECH_NTLM:
@@ -351,11 +363,22 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             break;
 
         case SMB_AUTH_MECH_KERBEROS:
-            if (!shared->config.auth.kerberos_enabled) {
+            if (shared->config.auth.kerberos_enabled) {
+                rc = process_kerberos_auth(request, shared, conn, input, input_len);
+            } else if (smb_auth_spnego_offers_ntlmssp(input, input_len)) {
+                steer_to_ntlm = 1;
+            } else {
                 chimera_smb_error("Kerberos authentication not enabled");
                 rc = -1;
+            }
+            break;
+
+        case SMB_AUTH_MECH_NEGOEX:
+            if (smb_auth_spnego_offers_ntlmssp(input, input_len)) {
+                steer_to_ntlm = 1;
             } else {
-                rc = process_kerberos_auth(request, shared, conn, input, input_len);
+                chimera_smb_error("NEGOEX authentication not supported");
+                rc = -1;
             }
             break;
 
@@ -365,6 +388,20 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             bad_token = 1;
             break;
     } /* switch */
+
+    if (steer_to_ntlm) {
+        size_t hint_len = 0;
+
+        conn->ntlm_output = smb_auth_spnego_ntlmssp_hint(&hint_len);
+        if (conn->ntlm_output) {
+            conn->ntlm_output_len = hint_len;
+            chimera_smb_debug("Session setup: steering %s-first client to NTLMSSP",
+                              smb_auth_mech_name(mech));
+            rc = 1;
+        } else {
+            rc = -1;
+        }
+    }
 
     /* A structurally malformed authentication token (e.g. an NTLMv2_RESPONSE
      * whose client-challenge AvPairs cannot be parsed) is reported as

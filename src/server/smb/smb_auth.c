@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <stdlib.h>
 #include <string.h>
 #include "smb_auth.h"
 
@@ -275,6 +276,35 @@ smb_auth_detect_mechanism(
 
     return SMB_AUTH_MECH_UNKNOWN;
 } // smb_auth_detect_mechanism
+
+uint8_t *
+smb_auth_spnego_ntlmssp_hint(size_t *out_len)
+{
+    /* negTokenResp [1] {
+     *   SEQUENCE {
+     *     [0] negState ENUMERATED accept-incomplete (1)
+     *     [1] supportedMech OID NTLMSSP
+     *   }
+     * }
+     * No responseToken: the client restarts the chosen mechanism itself. */
+    /* *INDENT-OFF* */
+    static const uint8_t hint[] = {
+        0xa1, 0x15,
+        0x30, 0x13,
+        0xa0, 0x03, 0x0a, 0x01, 0x01,
+        0xa1, 0x0c,
+        0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    };
+    /* *INDENT-ON* */
+    uint8_t *buf = malloc(sizeof(hint));
+
+    if (!buf) {
+        return NULL;
+    }
+    memcpy(buf, hint, sizeof(hint));
+    *out_len = sizeof(hint);
+    return buf;
+} // smb_auth_spnego_ntlmssp_hint
 
 const char *
 smb_auth_mech_name(enum smb_auth_mech mech)
