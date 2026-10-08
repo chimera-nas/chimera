@@ -1044,6 +1044,7 @@ main(
             const char *smb_nic_info_name  = json_string_value(json_object_get(smb_nic_info_json, "address"));
             int         smb_nic_info_speed = json_integer_value(json_object_get(smb_nic_info_json, "speed"));
             int         smb_nic_info_rdma  = json_boolean_value(json_object_get(smb_nic_info_json, "rdma"));
+            int         smb_nic_info_rss   = json_boolean_value(json_object_get(smb_nic_info_json, "rss"));
 
             if (!smb_nic_info_name || !smb_nic_info_speed) {
                 chimera_server_error(
@@ -1055,6 +1056,7 @@ main(
                     sizeof(smb_nic_info[i].address) - 1);
             smb_nic_info[i].speed = smb_nic_info_speed;
             smb_nic_info[i].rdma  = smb_nic_info_rdma;
+            smb_nic_info[i].rss   = smb_nic_info_rss;
         }
 
         chimera_server_config_set_smb_nic_info(server_config, json_array_size(smb_multichannel), smb_nic_info);

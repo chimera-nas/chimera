@@ -438,7 +438,7 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
     } /* switch */
 } /* chimera_smb_ioctl */
 
-void
+SYMBOL_EXPORT void
 chimera_smb_ioctl_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request)
@@ -545,12 +545,22 @@ chimera_smb_ioctl_reply(
             for (int i = 0; i < shared->config.num_nic_info; i++) {
                 nic_info = &shared->config.nic_info[i];
 
-                /* MS-SMB2 2.2.32 RSS_CAPABLE (0x1) must mirror the real NIC
-                 * capability; chimera has no RSS backing and no config knob, so
-                 * report 0 (no RSS) rather than asserting it unconditionally
-                 * (issue #1289).  RDMA_CAPABLE (0x2) is reported only when the
-                 * interface is actually configured for RDMA. */
+                /* MS-SMB2 2.2.32.5 Capability: RSS_CAPABLE (0x1) and
+                 * RDMA_CAPABLE (0x2) are independent and each follows its own
+                 * per-interface knob (smb_multichannel[].rss / .rdma).  The
+                 * spec leaves the client's choice of interfaces
+                 * implementation-specific (3.2.5.14.11); Windows clients
+                 * prefer RDMA-capable pairs, then RSS-capable ones, and open
+                 * several channels to an address only when it reports one of
+                 * these bits.  An interface carrying both therefore lets a
+                 * TCP-only Windows client fall back to RSS while an RDMA
+                 * client uses SMB Direct.  Neither bit is asserted
+                 * unconditionally (issue #1289). */
                 caps = 0;
+
+                if (nic_info->rss) {
+                    caps |= 0x1; /* RSS */
+                }
 
                 if (nic_info->rdma) {
                     caps |= 0x2; /* RDMA */
