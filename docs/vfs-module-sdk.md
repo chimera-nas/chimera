@@ -159,8 +159,9 @@ See `examples/vfs_module/vfs_example.c` for the skeleton.  In short:
    `thread_init`, `thread_destroy`, `dispatch`).  If `dispatch` blocks,
    say which ops do in `.blocking_ops`, a mask of `CHIMERA_VFS_OP_BIT(op)`:
    the ops listed go to a sync delegation thread and the rest are
-   dispatched inline.  `CHIMERA_VFS_BLOCKING_ALL` delegates every op;
-   `CHIMERA_VFS_BLOCKING_READ_WRITE` only reads and writes.
+   dispatched inline.  Build the mask up by OR-ing in the ops that block,
+   or down from `CHIMERA_VFS_BLOCKING_ALL` (every op) by clearing the ones
+   that do not.
 3. `dispatch` receives a `struct chimera_vfs_request`; switch on
    `request->opcode`, use the per-op payload union, set
    `request->status`, and call `request->complete(request)` exactly once

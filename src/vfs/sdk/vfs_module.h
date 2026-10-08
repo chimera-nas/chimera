@@ -86,14 +86,17 @@ chimera_vfs_open_handle_retained(
  * meaning. */
 
 /* Building blocks for chimera_vfs_module.blocking_ops: one bit per
- * CHIMERA_VFS_OP_* opcode. */
+ * CHIMERA_VFS_OP_* opcode.  A module builds its mask either up from
+ * nothing, OR-ing in the ops that block:
+ *
+ *     CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_READ) |
+ *     CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_WRITE)
+ *
+ * or down from CHIMERA_VFS_BLOCKING_ALL, removing the ops that do not:
+ *
+ *     CHIMERA_VFS_BLOCKING_ALL & ~CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_GETATTR)
+ */
 #define CHIMERA_VFS_OP_BIT(op) (1ULL << (op))
-
-/* Exactly OP_READ and OP_WRITE -- not read_plus, write_same, the range ops
- * or commit, which a module lists separately if they block too. */
-#define CHIMERA_VFS_BLOCKING_READ_WRITE \
-        (CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_READ) | \
-         CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_WRITE))
 
 /* Every op, including any opcode added after the module was written. */
 #define CHIMERA_VFS_BLOCKING_ALL            (~0ULL)

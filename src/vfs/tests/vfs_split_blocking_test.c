@@ -43,6 +43,11 @@
 #define NUM_SYNC_THREADS 4
 #define IO_LEN           4096
 
+/* Built up by OR-ing ops in; a backend with asynchronous I/O but blocking
+ * metadata takes the complement from CHIMERA_VFS_BLOCKING_ALL instead. */
+#define READ_WRITE_OPS   (CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_READ) | \
+                          CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_WRITE))
+
 extern struct chimera_vfs_module vfs_memfs;
 
 /* ---- the splitblk shim ------------------------------------------------- */
@@ -385,22 +390,26 @@ main(
 {
     const struct expect read_write  = { 1, 1, 0, 0 };
     const struct expect commit_only = { 0, 0, 0, 1 };
+    const struct expect metadata    = { 0, 0, 1, 1 };
     const struct expect all         = { 1, 1, 1, 1 };
     const struct expect none        = { 0, 0, 0, 0 };
 
     chimera_log_init();
 
     run_phase("read/write blocking delegates only read and write",
-              CHIMERA_VFS_BLOCKING_READ_WRITE, NUM_SYNC_THREADS, &read_write);
+              READ_WRITE_OPS, NUM_SYNC_THREADS, &read_write);
     run_phase("commit blocking delegates only commit",
               CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_COMMIT), NUM_SYNC_THREADS,
               &commit_only);
+    run_phase("all but read/write delegates everything else",
+              CHIMERA_VFS_BLOCKING_ALL & ~READ_WRITE_OPS, NUM_SYNC_THREADS,
+              &metadata);
     run_phase("BLOCKING_ALL delegates every op",
               CHIMERA_VFS_BLOCKING_ALL, NUM_SYNC_THREADS, &all);
     run_phase("no blocking ops dispatches inline",
               0, NUM_SYNC_THREADS, &none);
     run_phase("blocking ops run inline without a sync pool",
-              CHIMERA_VFS_BLOCKING_READ_WRITE, 0, &none);
+              READ_WRITE_OPS, 0, &none);
 
     fprintf(stderr, "All split blocking tests passed!\n");
     return 0;
