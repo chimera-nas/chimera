@@ -8,7 +8,7 @@
  * A shim module, "splitblk", is memfs in every respect -- same capabilities,
  * same fh_magic -- except that its dispatch records the thread each opcode
  * ran on before handing the request to memfs.  Each phase sets the shim's
- * blocking_ops (or CAP_BLOCKING) before the VFS is initialized, then runs
+ * blocking_ops before the VFS is initialized, then runs
  * write, read, getattr and commit against one file and checks where each
  * was dispatched.  The attr cache is disabled so getattr reaches the shim.
  */
@@ -278,7 +278,6 @@ struct expect {
 static void
 run_phase(
     const char          *label,
-    uint64_t             capabilities,
     uint64_t             blocking_ops,
     int                  num_sync_threads,
     const struct expect *expect)
@@ -296,7 +295,7 @@ run_phase(
 
     chimera_vfs_cred_init_unix(&ctx.cred, 0, 0, 0, NULL);
 
-    vfs_splitblk.capabilities   = capabilities;
+    vfs_splitblk.capabilities   = vfs_memfs.capabilities;
     vfs_splitblk.blocking_ops   = blocking_ops;
     vfs_splitblk.init           = vfs_memfs.init;
     vfs_splitblk.destroy        = vfs_memfs.destroy;
@@ -318,13 +317,6 @@ run_phase(
     ctx.vfs = chimera_vfs_init(num_sync_threads, 0, module_cfgs, 2, "memkv", 60,
                                0, 0, 0, metrics);
     assert(ctx.vfs != NULL);
-
-    /* Registration expands CAP_BLOCKING to every op. */
-    if (capabilities & CHIMERA_VFS_CAP_BLOCKING) {
-        assert(vfs_splitblk.blocking_ops == CHIMERA_VFS_BLOCKING_ALL);
-    } else {
-        assert(vfs_splitblk.blocking_ops == blocking_ops);
-    }
 
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, ctx.vfs);
     assert(ctx.vfs_thread != NULL);
@@ -391,7 +383,6 @@ main(
     int    argc,
     char **argv)
 {
-    const uint64_t      caps        = vfs_memfs.capabilities;
     const struct expect read_write  = { 1, 1, 0, 0 };
     const struct expect commit_only = { 0, 0, 0, 1 };
     const struct expect all         = { 1, 1, 1, 1 };
@@ -400,17 +391,16 @@ main(
     chimera_log_init();
 
     run_phase("read/write blocking delegates only read and write",
-              caps, CHIMERA_VFS_BLOCKING_READ_WRITE, NUM_SYNC_THREADS,
-              &read_write);
+              CHIMERA_VFS_BLOCKING_READ_WRITE, NUM_SYNC_THREADS, &read_write);
     run_phase("commit blocking delegates only commit",
-              caps, CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_COMMIT), NUM_SYNC_THREADS,
+              CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_COMMIT), NUM_SYNC_THREADS,
               &commit_only);
-    run_phase("CAP_BLOCKING delegates every op",
-              caps | CHIMERA_VFS_CAP_BLOCKING, 0, NUM_SYNC_THREADS, &all);
+    run_phase("BLOCKING_ALL delegates every op",
+              CHIMERA_VFS_BLOCKING_ALL, NUM_SYNC_THREADS, &all);
     run_phase("no blocking ops dispatches inline",
-              caps, 0, NUM_SYNC_THREADS, &none);
+              0, NUM_SYNC_THREADS, &none);
     run_phase("blocking ops run inline without a sync pool",
-              caps, CHIMERA_VFS_BLOCKING_READ_WRITE, 0, &none);
+              CHIMERA_VFS_BLOCKING_READ_WRITE, 0, &none);
 
     fprintf(stderr, "All split blocking tests passed!\n");
     return 0;

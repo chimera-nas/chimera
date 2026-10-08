@@ -81,14 +81,9 @@ chimera_vfs_open_handle_retained(
 /* (1U << 1) was CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED.  A data open is now always
  * a real open: see the note on CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED. */
 
-/* If set, every op's dispatch is synchronous/blocking and chimera will
- * delegate all of the module's VFS requests to a separate threadpool.
- * Shorthand for blocking_ops = CHIMERA_VFS_BLOCKING_ALL; registration
- * expands it, so the core only ever consults blocking_ops.  A module whose
- * dispatch blocks for some ops but not others sets blocking_ops directly
- * instead.  See blocking_ops in struct chimera_vfs_module.
- */
-#define CHIMERA_VFS_CAP_BLOCKING (1U << 2)
+/* (1U << 2) was CHIMERA_VFS_CAP_BLOCKING.  Which ops block is now
+ * chimera_vfs_module.blocking_ops; CHIMERA_VFS_BLOCKING_ALL is the old
+ * meaning. */
 
 /* Building blocks for chimera_vfs_module.blocking_ops: one bit per
  * CHIMERA_VFS_OP_* opcode. */
@@ -429,8 +424,9 @@ struct chimera_vfs_module {
      * Bitwise OR of CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_*): the ops whose
      * dispatch blocks and so must run on a sync delegation thread.  Ops not
      * listed are dispatched from the main threadpool (or the async
-     * delegation pool) and must return quickly.  CHIMERA_VFS_CAP_BLOCKING
-     * sets every bit.  See dispatch below.
+     * delegation pool) and must return quickly.  A module whose dispatch
+     * blocks for everything sets CHIMERA_VFS_BLOCKING_ALL.  See dispatch
+     * below.
      *
      * Listing only some ops gives up per-file serialization: when every op
      * is delegated, all requests on one file run on the same delegation
@@ -439,14 +435,14 @@ struct chimera_vfs_module {
      * must tolerate that.  An opcode added to the SDK later is not
      * blocking unless the module lists it.
      */
-    uint64_t    blocking_ops;
+    uint64_t blocking_ops;
 
     /* Optional
      * Called once at initialization to setup global state
      * Return a pointer to global state structure
      * Receives module-specific configuration JSON data as an argument.
      */
-    void      * (*init)(
+    void   * (*init)(
         const char                *cfgdata,
         struct prometheus_metrics *metrics);
 
@@ -454,7 +450,7 @@ struct chimera_vfs_module {
      * Called once at destruction to clean up global state
      * returned from the init function
      */
-    void        (*destroy)(
+    void     (*destroy)(
         void *);
 
     /* Optional
@@ -462,7 +458,7 @@ struct chimera_vfs_module {
      * Receives global state pointer as an argument
      * Return a pointer to per-thread state structure
      */
-    void      * (*thread_init)(
+    void   * (*thread_init)(
         struct evpl *evpl,
         void        *private_data);
 
@@ -470,7 +466,7 @@ struct chimera_vfs_module {
      * Called once per thread at destruction to clean up per-thread state
      * Receives per-thread state pointer as an argument
      */
-    void        (*thread_destroy)(
+    void     (*thread_destroy)(
         void *);
 
     /* Required
@@ -481,8 +477,7 @@ struct chimera_vfs_module {
      * request processing is completed.
      *
      * If dispatch logic is blocking for an op, list that op in
-     * blocking_ops above (or set CHIMERA_VFS_CAP_BLOCKING if it is
-     * blocking for all of them).
+     * blocking_ops above.
      *
      * For an op not in blocking_ops, the request will be dispatched from
      * chimera's main threadpool, ie the same threadpool that is

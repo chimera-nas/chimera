@@ -1240,7 +1240,7 @@ chimera_server_thread_shutdown(
 
     /* Protocol thread_destroy can issue fresh VFS operations (e.g. the SMB
      * durable/persistent handle drain releases parked opens, NFS releases
-     * state).  For a CAP_BLOCKING backend like cairn those are posted to a
+     * state).  For a blocking backend like cairn those are posted to a
      * shared delegation thread and completed asynchronously back to *this*
      * vfs_thread's doorbell.  Drain again so every such late request lands
      * before we free the vfs_thread below -- otherwise the delegation thread

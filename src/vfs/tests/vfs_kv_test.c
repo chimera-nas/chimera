@@ -480,7 +480,7 @@ run_suite(
     ctx.evpl = evpl_create(NULL);
     assert(ctx.evpl != NULL);
 
-    /* 4 sync delegation threads so a CAP_BLOCKING backend (sqlite) is exercised
+    /* 4 sync delegation threads so a blocking backend (sqlite) is exercised
      * through the delegation pool and completion bounce-back. */
     ctx.vfs = chimera_vfs_init(
         4,              /* num_sync_delegation_threads */

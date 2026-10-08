@@ -136,9 +136,10 @@ allocations (`chimera_vfs_request_alloc_memory`) and changes the request
 layout; modules built against earlier SDK versions must be rebuilt.
 Version 4 adds `chimera_vfs_module.blocking_ops`, the per-opcode mask of
 ops whose dispatch blocks, and the `CHIMERA_VFS_OP_BIT()` /
-`CHIMERA_VFS_BLOCKING_*` helpers; `CHIMERA_VFS_CAP_BLOCKING` keeps its
-meaning as shorthand for every op.  The module struct layout changes, so
-modules built against earlier SDK versions must be rebuilt.
+`CHIMERA_VFS_BLOCKING_*` helpers, and removes `CHIMERA_VFS_CAP_BLOCKING`:
+a module that set it sets `.blocking_ops = CHIMERA_VFS_BLOCKING_ALL`
+instead.  The module struct layout changes, so modules built against
+earlier SDK versions must be rebuilt.
 
 The `struct chimera_vfs_request` layout is exposed in full and is
 therefore ABI-stable only within an SDK version.  A public-head /
@@ -156,10 +157,10 @@ See `examples/vfs_module/vfs_example.c` for the skeleton.  In short:
    visibility, `.sdk_version = CHIMERA_VFS_SDK_VERSION`, the magic,
    capability flags, and the five callbacks (`init`, `destroy`,
    `thread_init`, `thread_destroy`, `dispatch`).  If `dispatch` blocks,
-   say which ops do: `CHIMERA_VFS_CAP_BLOCKING` sends every op to a sync
-   delegation thread, while `.blocking_ops` (a mask of
-   `CHIMERA_VFS_OP_BIT(op)`, e.g. `CHIMERA_VFS_BLOCKING_READ_WRITE`)
-   delegates only the ops listed and dispatches the rest inline.
+   say which ops do in `.blocking_ops`, a mask of `CHIMERA_VFS_OP_BIT(op)`:
+   the ops listed go to a sync delegation thread and the rest are
+   dispatched inline.  `CHIMERA_VFS_BLOCKING_ALL` delegates every op;
+   `CHIMERA_VFS_BLOCKING_READ_WRITE` only reads and writes.
 3. `dispatch` receives a `struct chimera_vfs_request`; switch on
    `request->opcode`, use the per-op payload union, set
    `request->status`, and call `request->complete(request)` exactly once
