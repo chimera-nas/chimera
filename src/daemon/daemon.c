@@ -1037,26 +1037,80 @@ main(
     }
 
     json_t *smb_multichannel = json_object_get(server_params, "smb_multichannel");
+    if (smb_multichannel && !json_is_array(smb_multichannel)) {
+        chimera_server_error(
+            "SMB Multichannel: smb_multichannel must be an array of interface objects");
+        startup_validation_fail();
+    }
     if (json_is_array(smb_multichannel)) {
-        json_t *smb_nic_info_json;
+        json_t      *smb_nic_info_json;
+        const size_t smb_nic_info_max = sizeof(smb_nic_info) / sizeof(smb_nic_info[0]);
+
+        if (json_array_size(smb_multichannel) > smb_nic_info_max) {
+            chimera_server_error("SMB Multichannel: at most %d interfaces are supported",
+                                 (int) smb_nic_info_max);
+            startup_validation_fail();
+        }
+
         json_array_foreach(smb_multichannel, i, smb_nic_info_json)
         {
-            const char *smb_nic_info_name  = json_string_value(json_object_get(smb_nic_info_json, "address"));
-            int         smb_nic_info_speed = json_integer_value(json_object_get(smb_nic_info_json, "speed"));
-            int         smb_nic_info_rdma  = json_boolean_value(json_object_get(smb_nic_info_json, "rdma"));
-            int         smb_nic_info_rss   = json_boolean_value(json_object_get(smb_nic_info_json, "rss"));
+            const char *smb_nic_info_name;
+            json_t     *smb_nic_info_speed_json;
+            json_t     *smb_nic_info_rdma_json;
+            json_t     *smb_nic_info_rss_json;
+            json_int_t  smb_nic_info_speed;
 
-            if (!smb_nic_info_name || !smb_nic_info_speed) {
-                chimera_server_error(
-                    "SMB Multichannel: Invalid address or speed on SMB multichannel interface");
-                return 1;
+            if (!json_is_object(smb_nic_info_json)) {
+                chimera_server_error("SMB Multichannel: interface %d is not an object", (int) i);
+                startup_validation_fail();
             }
 
+            smb_nic_info_name       = json_string_value(json_object_get(smb_nic_info_json, "address"));
+            smb_nic_info_speed_json = json_object_get(smb_nic_info_json, "speed");
+            smb_nic_info_rdma_json  = json_object_get(smb_nic_info_json, "rdma");
+            smb_nic_info_rss_json   = json_object_get(smb_nic_info_json, "rss");
+
+            if (!smb_nic_info_name) {
+                chimera_server_error("SMB Multichannel: address on interface %d must be a string", (int) i);
+                startup_validation_fail();
+            }
+
+            /* speed is the link speed in Gbps; the SMB server scales it by
+             * 10^9 for the 64-bit LinkSpeed field.  1000000 is a sanity cap,
+             * far inside that field, that refuses a value typed in bps
+             * rather than advertising it. */
+            smb_nic_info_speed = json_is_integer(smb_nic_info_speed_json) ?
+                json_integer_value(smb_nic_info_speed_json) : 0;
+
+            if (smb_nic_info_speed < 1 || smb_nic_info_speed > 1000000) {
+                chimera_server_error(
+                    "SMB Multichannel: speed on interface %d must be an integer in Gbps, 1..1000000",
+                    (int) i);
+                startup_validation_fail();
+            }
+
+            /* The configuration reference used to give speed in Mbps
+             * (10000 for 10 GbE).  Such a value passes the cap above and
+             * advertises 1000 times the link rate, so flag it without
+             * refusing the configuration. */
+            if (smb_nic_info_speed > 1600) {
+                chimera_server_info(
+                    "SMB Multichannel: interface %d speed %lld Gbps is above any current link rate; speed is in Gbps, not Mbps",
+                    (int) i, (long long) smb_nic_info_speed);
+            }
+
+            if ((smb_nic_info_rdma_json && !json_is_boolean(smb_nic_info_rdma_json)) ||
+                (smb_nic_info_rss_json && !json_is_boolean(smb_nic_info_rss_json))) {
+                chimera_server_error("SMB Multichannel: rss and rdma on interface %d must be booleans", (int) i);
+                startup_validation_fail();
+            }
+
+            memset(&smb_nic_info[i], 0, sizeof(smb_nic_info[i]));
             strncpy(smb_nic_info[i].address, smb_nic_info_name,
                     sizeof(smb_nic_info[i].address) - 1);
             smb_nic_info[i].speed = smb_nic_info_speed;
-            smb_nic_info[i].rdma  = smb_nic_info_rdma;
-            smb_nic_info[i].rss   = smb_nic_info_rss;
+            smb_nic_info[i].rdma  = json_is_true(smb_nic_info_rdma_json);
+            smb_nic_info[i].rss   = json_is_true(smb_nic_info_rss_json);
         }
 
         chimera_server_config_set_smb_nic_info(server_config, json_array_size(smb_multichannel), smb_nic_info);
