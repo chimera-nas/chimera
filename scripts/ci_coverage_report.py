@@ -110,6 +110,23 @@ def relative(path, roots):
     return None
 
 
+def source_components(root):
+    """Every component in the checkout that has hand-written C in it.
+
+    Walked from the tree rather than taken from the export so that a component
+    the build skipped -- an optional backend behind a find_library() the CI
+    image does not satisfy -- is a known absence rather than a silent one.
+    """
+    comps = set()
+    for top in ("src", "examples"):
+        for dirpath, dirnames, filenames in os.walk(os.path.join(root, top)):
+            if any(f.endswith(".c") for f in filenames):
+                rel = os.path.relpath(dirpath, root)
+                if not (is_test_source(rel + "/") or is_model_unreachable(rel)):
+                    comps.add(component(rel + "/x.c"))
+    return comps
+
+
 def cell(covered, count):
     """One metric as a bar, a percentage and the raw pair.
 
@@ -179,6 +196,15 @@ def main():
     out.append("| **Total** | "
                + " | ".join(cell(grand[m][1], grand[m][0]) for m in METRICS)
                + " |")
+
+    # Components that ship but were not in this build.  Each is a configure-
+    # time option the CI image does not satisfy, and the table cannot show a
+    # row for code that was never instrumented -- so name them, or the total
+    # quietly measures less than it claims to.
+    unbuilt = sorted(source_components(root) - comps.keys())
+    if unbuilt:
+        out += ["", "Not built in this configuration, so not measured: "
+                + ", ".join(f"`{c}`" for c in unbuilt) + "."]
 
     out += ["", "```sh", REPRO, "```"]
     print("\n".join(out))

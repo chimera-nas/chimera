@@ -152,8 +152,20 @@ def main():
 
     hits = lcov_hits(lcov_path, root)
 
-    rows, uncovered, tot_cov, tot_exec = [], [], 0, 0
+    rows, uncovered, unbuilt, tot_cov, tot_exec = [], [], [], 0, 0
     for rel in sorted(changed):
+        # A .c file with no record at all in the export was not compiled into
+        # any instrumented binary: an optional component whose prerequisites
+        # the CI image lacks (a backend behind a find_library, say).  That is
+        # a different fact from "its changed lines were not executable", and
+        # reporting it as the latter reads as if a few hundred new lines of
+        # code were comments.  Headers are left out of this: one with no
+        # functions in it is absent from the export too, and that is the
+        # common case.
+        if rel not in hits and rel.endswith(".c"):
+            rows.append((rel, None, "unbuilt"))
+            unbuilt.append(rel)
+            continue
         file_hits = hits.get(rel, {})
         executable = sorted(changed[rel] & file_hits.keys())
         if not executable:
@@ -169,16 +181,32 @@ def main():
         if missed:
             uncovered.append((rel, runs(missed)))
 
+    # Said whether or not anything else was measured: a reviewer reading 100%
+    # on the two files that did build should know the other nine did not.
+    unbuilt_note = (
+        "Not compiled in this build, so nothing in them could have been "
+        "executed: " + ", ".join(f"`{rel}`" for rel in unbuilt) + ". "
+        "These sources belong to a component the CI image cannot build (an "
+        "optional backend whose library is not installed, say); their "
+        "coverage is unknown, not zero.")
+
     if not tot_exec:
-        print("\n".join(out + ["This pull request changes no executable lines "
-                               "(comments, declarations or build files only)."]))
+        if unbuilt:
+            print("\n".join(out + [unbuilt_note, "", "Nothing else this pull "
+                                   "request changed has executable lines."]))
+        else:
+            print("\n".join(out + [
+                "This pull request changes no executable lines (comments, "
+                "declarations or build files only)."]))
         return
 
     out += [f"**{bar(tot_cov, tot_exec)} {100.0 * tot_cov / tot_exec:.0f}% "
             f"({tot_cov:,}/{tot_exec:,} changed lines executed)**", "",
             "| File | Changed lines executed |", "|---|---|"]
     for rel, covered, total in rows:
-        if total is None:
+        if total == "unbuilt":
+            out.append(f"| `{rel}` | not compiled in this build |")
+        elif total is None:
             out.append(f"| `{rel}` | no executable lines changed |")
         else:
             out.append(f"| `{rel}` | {bar(covered, total)} "
@@ -200,6 +228,9 @@ def main():
                 if total_runs > shown else "")
         out += ["", "Changed lines the quick-tier tests never executed: "
                 + "; ".join(items) + more + "."]
+
+    if unbuilt:
+        out += ["", unbuilt_note]
 
     out += ["", "<sub>Executed by the quick-tier tests "
             "(`ctest`) — code reached solely by the other suites "
