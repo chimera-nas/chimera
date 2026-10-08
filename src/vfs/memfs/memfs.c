@@ -119,14 +119,29 @@ struct memfs_fork {
     unsigned int         max_blocks;
 };
 
-struct memfs_dirent {
-    uint64_t             inum;
-    uint32_t             gen;
-    uint32_t             name_len;
+struct memfs_dirent;
+
+/* An entry's node in its directory's folded-name index (dir.folded), keyed by
+ * chimera_vfs_casefold_hash of the name.  The index holds one node per folded
+ * name: the entry it is embedded in heads a chain (fold_next) of every entry
+ * whose name folds alike -- more than one only where a case-sensitive (NFS)
+ * client created names differing in case. */
+struct memfs_dirent_fold {
     uint64_t             hash;
     struct rb_node       node;
-    struct memfs_dirent *next;
-    char                 name[256];
+    struct memfs_dirent *dirent;
+};
+
+struct memfs_dirent {
+    uint64_t                 inum;
+    uint32_t                 gen;
+    uint32_t                 name_len;
+    uint64_t                 hash;
+    struct rb_node           node;
+    struct memfs_dirent     *next;
+    struct memfs_dirent_fold fold;
+    struct memfs_dirent     *fold_next;
+    char                     name[256];
 };
 
 struct memfs_symlink_target {
@@ -248,6 +263,7 @@ struct memfs_inode {
     union {
         struct {
             struct rb_tree dirents;
+            struct rb_tree folded;    /* folded-name index (memfs_dirent_fold) */
             uint64_t       parent_inum;
             uint32_t       parent_gen;
         } dir;
@@ -331,33 +347,37 @@ memfs_claim_recall_sweep(
     struct evpl_timer *timer);
 
 struct memfs_fs {
-    struct memfs_shared     *shared;
-    char                    *name;
-    struct memfs_inode_list *inode_list;
-    int                      num_inode_list;
+    struct memfs_shared         *shared;
+    char                        *name;
+    /* Chosen at mkfs.  Only a case-folding filesystem keeps the folded-name
+     * index (dir.folded). */
+    int                          casefold;
+    enum chimera_vfs_case_policy case_policy;
+    struct memfs_inode_list     *inode_list;
+    int                          num_inode_list;
     /* Mounts currently referencing this filesystem; RMFS fails with EBUSY
      * while non-zero.  Guarded by shared->lock. */
-    int                      mount_count;
+    int                          mount_count;
     /* Open handles (backend opens, including the VFS layer's cached ones)
      * holding an inode reference in this filesystem.  RMFS frees inode
      * memory outright, so it must also refuse while this is non-zero: the
      * VFS open cache outlives umount and closes its handles later, which
      * would otherwise touch freed inodes.  Atomic: taken/dropped under
      * whichever inode lock the op holds, never a single shared lock. */
-    uint8_t                  root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                 root_fhlen;
-    uint64_t                 fsid;
+    uint8_t                      root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                     root_fhlen;
+    uint64_t                     fsid;
     /* Optional capacity (mkfs option "size", bytes; default from module
      * config "size").  0 = unlimited (memfs reports a synthetic,
      * never-shrinking size).  When non-zero, memfs accounts live data blocks
      * against this limit and returns ENOSPC when full; fs_space_used is
      * maintained atomically at the block alloc/free choke points (so every
      * path that allocates or frees data is covered). */
-    uint64_t                 fs_size;
-    uint64_t                 fs_space_used;
-    struct memfs_fs         *prev;
-    struct memfs_fs         *next;
-    chimera_rcu_head         rcu;
+    uint64_t                     fs_size;
+    uint64_t                     fs_space_used;
+    struct memfs_fs             *prev;
+    struct memfs_fs             *next;
+    chimera_rcu_head             rcu;
 };
 
 struct memfs_shared {
@@ -483,33 +503,105 @@ memfs_stream_find_by_name(
     return NULL;
 } /* memfs_stream_find_by_name */
 
-/* Case-insensitive directory scan, used as a fallback when an exact (case-
- * sensitive hash) lookup misses for an SMB/Windows (AUTH_ATTR) caller.  Windows
- * opens are case-insensitive even on a volume that reports
- * FILE_CASE_SENSITIVE_SEARCH (smb2.streams.names3 opens the file via its
- * upper/lower-cased path).  O(n) in the directory size, so it is reached only
- * on a miss; NFS/POSIX (AUTH_UNIX) callers keep strict case-sensitive semantics
- * and never run it.  Caller holds the directory inode lock. */
+/* Add dirent to dir's name index, and on a case-folding filesystem its
+ * folded-name index.  Caller holds the directory inode lock. */
+static inline void
+memfs_dirent_link(
+    struct memfs_fs     *fs,
+    struct memfs_inode  *dir,
+    struct memfs_dirent *dirent)
+{
+    struct memfs_dirent_fold *head;
+
+    rb_tree_insert(&dir->dir.dirents, hash, dirent);
+
+    if (!fs->casefold) {
+        return;
+    }
+
+    dirent->fold.hash   = chimera_vfs_casefold_hash(dirent->name, dirent->name_len);
+    dirent->fold.dirent = dirent;
+    dirent->fold_next   = NULL;
+
+    rb_tree_query_exact(&dir->dir.folded, dirent->fold.hash, hash, head);
+
+    if (head) {
+        dirent->fold_next       = head->dirent->fold_next;
+        head->dirent->fold_next = dirent;
+    } else {
+        rb_tree_insert(&dir->dir.folded, hash, &dirent->fold);
+    }
+} /* memfs_dirent_link */
+
+/* Remove dirent from dir's indexes.  Caller holds the directory inode lock. */
+static inline void
+memfs_dirent_unlink(
+    struct memfs_fs     *fs,
+    struct memfs_inode  *dir,
+    struct memfs_dirent *dirent)
+{
+    struct memfs_dirent_fold *head;
+    struct memfs_dirent      *prev;
+
+    rb_tree_remove(&dir->dir.dirents, &dirent->node);
+
+    if (!fs->casefold) {
+        return;
+    }
+
+    rb_tree_query_exact(&dir->dir.folded, dirent->fold.hash, hash, head);
+
+    if (!head) {
+        return;
+    }
+
+    if (head->dirent == dirent) {
+        rb_tree_remove(&dir->dir.folded, &dirent->fold.node);
+        if (dirent->fold_next) {
+            /* The next entry that folds alike takes over the chain. */
+            dirent->fold_next->fold.dirent = dirent->fold_next;
+            rb_tree_insert(&dir->dir.folded, hash, &dirent->fold_next->fold);
+        }
+        return;
+    }
+
+    for (prev = head->dirent; prev && prev->fold_next != dirent; prev = prev->fold_next) {
+    }
+    if (prev) {
+        prev->fold_next = dirent->fold_next;
+    }
+} /* memfs_dirent_unlink */
+
+/* The entry of dir named name: exactly, or for a case-insensitive (SMB)
+ * caller, the entry whose name matches regardless of case.  Caller holds the
+ * directory inode lock. */
 static inline struct memfs_dirent *
-memfs_dirent_find_ci(
+memfs_dirent_lookup(
     struct memfs_inode *dir,
     const char         *name,
-    uint32_t            name_len)
+    uint32_t            name_len,
+    uint64_t            hash,
+    int                 ci)
 {
-    struct memfs_dirent *dirent;
+    struct memfs_dirent      *dirent;
+    struct memfs_dirent_fold *fold;
 
-    rb_tree_first(&dir->dir.dirents, dirent);
+    rb_tree_query_exact(&dir->dir.dirents, hash, hash, dirent);
 
-    while (dirent) {
-        if (dirent->name_len == name_len &&
-            strncasecmp(dirent->name, name, name_len) == 0) {
+    if (dirent || !ci) {
+        return dirent;
+    }
+
+    rb_tree_query_exact(&dir->dir.folded, chimera_vfs_casefold_hash(name, name_len), hash, fold);
+
+    for (dirent = fold ? fold->dirent : NULL; dirent; dirent = dirent->fold_next) {
+        if (chimera_vfs_name_equal_ci(dirent->name, dirent->name_len, name, name_len)) {
             return dirent;
         }
-        dirent = rb_tree_next(&dir->dir.dirents, dirent);
     }
 
     return NULL;
-} /* memfs_dirent_find_ci */
+} /* memfs_dirent_lookup */
 
 static inline struct memfs_named_stream *
 memfs_stream_find_by_id(
@@ -1366,6 +1458,7 @@ memfs_fs_create(
     inode->btime = now;
 
     rb_tree_init(&inode->dir.dirents);
+    rb_tree_init(&inode->dir.folded);
 
     /* Root directory's parent is itself */
     inode->dir.parent_inum = inode->inum;
@@ -2445,7 +2538,8 @@ memfs_lookup_path(
 
         hash = chimera_vfs_hash(name, namelen);
 
-        rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
+        /* A mount resolves its configured path exactly. */
+        dirent = memfs_dirent_lookup(inode, name, namelen, hash, 0);
 
         if (!dirent) {
             evpl_mutex_unlock(&inode->lock);
@@ -2605,6 +2699,7 @@ memfs_mount(
     /* The VFS keeps this on the mount and hands it back on every request
      * routed through it, which is how each op finds its filesystem. */
     request->mount.r_mount_private = fs;
+    request->mount.r_case_policy   = fs->case_policy;
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -2681,6 +2776,8 @@ memfs_mkfs(
 
     fs = memfs_fs_create(shared, request->mkfs.name, request->mkfs.namelen,
                          fsid, fs_size);
+    fs->case_policy = request->mkfs.case_policy;
+    fs->casefold    = fs->case_policy != CHIMERA_VFS_CASE_SENSITIVE;
 
     DL_APPEND(shared->fs_list, fs);
 
@@ -2902,12 +2999,10 @@ memfs_lookup_at(
         return;
     }
 
-    rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
+    dirent = memfs_dirent_lookup(inode, name, namelen, hash, request->name_ci);
 
-    /* Windows opens are case-insensitive: fall back to a case-insensitive scan
-     * for an SMB (AUTH_ATTR) caller when the exact match misses (names3). */
-    if (!dirent && request->cred->flavor == CHIMERA_VFS_AUTH_ATTR) {
-        dirent = memfs_dirent_find_ci(inode, name, namelen);
+    if (dirent) {
+        chimera_vfs_request_matched(request, 0, name, namelen, dirent->name, dirent->name_len);
     }
 
     if (!dirent) {
@@ -2971,6 +3066,7 @@ memfs_mkdir_at(
     inode->btime = now;
 
     rb_tree_init(&inode->dir.dirents);
+    rb_tree_init(&inode->dir.folded);
 
     memfs_apply_attrs(inode, request->mkdir_at.set_attr);
 
@@ -3045,11 +3141,9 @@ memfs_mkdir_at(
 
     memfs_map_pre_attr(fs, r_dir_pre_attr, parent_inode, request->fh);
 
-    rb_tree_query_exact(
-        &parent_inode->dir.dirents,
-        hash,
-        hash,
-        existing_dirent);
+    existing_dirent = memfs_dirent_lookup(parent_inode, request->mkdir_at.name,
+                                          request->mkdir_at.name_len, hash,
+                                          request->name_ci);
 
     if (existing_dirent) {
 
@@ -3068,7 +3162,7 @@ memfs_mkdir_at(
         return;
     }
 
-    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
+    memfs_dirent_link(fs, parent_inode, dirent);
 
     parent_inode->nlink++;
 
@@ -3199,11 +3293,9 @@ memfs_mknod_at(
 
     memfs_map_pre_attr(fs, r_dir_pre_attr, parent_inode, request->fh);
 
-    rb_tree_query_exact(
-        &parent_inode->dir.dirents,
-        hash,
-        hash,
-        existing_dirent);
+    existing_dirent = memfs_dirent_lookup(parent_inode, request->mknod_at.name,
+                                          request->mknod_at.name_len, hash,
+                                          request->name_ci);
 
     if (existing_dirent) {
 
@@ -3222,7 +3314,7 @@ memfs_mknod_at(
         return;
     }
 
-    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
+    memfs_dirent_link(fs, parent_inode, dirent);
 
     parent_inode->mtime = now;
     parent_inode->ctime = now;
@@ -3283,7 +3375,13 @@ memfs_remove_at(
         return;
     }
 
-    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
+    dirent = memfs_dirent_lookup(parent_inode, request->remove_at.name,
+                                 request->remove_at.namelen, hash, request->name_ci);
+
+    if (dirent) {
+        chimera_vfs_request_matched(request, 0, request->remove_at.name, request->remove_at.namelen,
+                                    dirent->name, dirent->name_len);
+    }
 
     if (!dirent) {
         evpl_mutex_unlock(&parent_inode->lock);
@@ -3354,7 +3452,7 @@ memfs_remove_at(
     parent_inode->ctime = now;
     parent_inode->change++;
 
-    rb_tree_remove(&parent_inode->dir.dirents, &dirent->node);
+    memfs_dirent_unlink(fs, parent_inode, dirent);
 
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
@@ -3710,15 +3808,16 @@ memfs_open_at(
 
     memfs_map_pre_attr(fs, &request->open_at.r_dir_pre_attr, parent_inode, request->fh);
 
-    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
+    /* An existing file is opened (or collides on FILE_CREATE) whatever the
+     * case an SMB caller names it in (names3); a genuine miss still creates
+     * the requested-case name. */
+    dirent = memfs_dirent_lookup(parent_inode, request->open_at.name,
+                                 request->open_at.namelen, hash,
+                                 request->name_ci);
 
-    /* Windows opens are case-insensitive: an SMB (AUTH_ATTR) caller that misses
-     * the exact match falls back to a case-insensitive scan, so an existing
-     * file is opened (or collides on FILE_CREATE) regardless of the requested
-     * case (names3).  A genuine miss still creates the requested-case name. */
-    if (!dirent && request->cred->flavor == CHIMERA_VFS_AUTH_ATTR) {
-        dirent = memfs_dirent_find_ci(parent_inode, request->open_at.name,
-                                      request->open_at.namelen);
+    if (dirent) {
+        chimera_vfs_request_matched(request, 0, request->open_at.name, request->open_at.namelen,
+                                    dirent->name, dirent->name_len);
     }
 
     if (!dirent) {
@@ -3798,7 +3897,7 @@ memfs_open_at(
                                     request->open_at.name,
                                     request->open_at.namelen);
 
-        rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
+        memfs_dirent_link(fs, parent_inode, dirent);
 
         parent_inode->mtime = now;
         parent_inode->ctime = now;
@@ -5979,7 +6078,9 @@ memfs_symlink_at(
         memfs_map_attrs(fs, &request->symlink_at.r_attr, inode, request->fh);
     }
 
-    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
+    existing_dirent = memfs_dirent_lookup(parent_inode, request->symlink_at.name,
+                                          request->symlink_at.namelen, hash,
+                                          request->name_ci);
 
     if (existing_dirent) {
         evpl_mutex_unlock(&parent_inode->lock);
@@ -5992,7 +6093,7 @@ memfs_symlink_at(
 
     memfs_map_pre_attr(fs, &request->symlink_at.r_dir_pre_attr, parent_inode, request->fh);
 
-    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
+    memfs_dirent_link(fs, parent_inode, dirent);
 
     parent_inode->mtime = now;
     parent_inode->ctime = now;
@@ -6168,7 +6269,13 @@ memfs_rename_at(
     memfs_map_pre_attr(fs, &request->rename_at.r_fromdir_pre_attr, old_parent_inode, request->fh);
     memfs_map_pre_attr(fs, &request->rename_at.r_todir_pre_attr, new_parent_inode, request->rename_at.new_fh);
 
-    rb_tree_query_exact(&old_parent_inode->dir.dirents, hash, hash, old_dirent);
+    old_dirent = memfs_dirent_lookup(old_parent_inode, request->rename_at.name,
+                                     request->rename_at.namelen, hash, request->name_ci);
+
+    if (old_dirent) {
+        chimera_vfs_request_matched(request, 0, request->rename_at.name, request->rename_at.namelen,
+                                    old_dirent->name, old_dirent->name_len);
+    }
 
     if (!old_dirent) {
         evpl_mutex_unlock(&old_parent_inode->lock);
@@ -6241,8 +6348,21 @@ memfs_rename_at(
         return;
     }
 
-    /* Check if destination already exists */
-    rb_tree_query_exact(&new_parent_inode->dir.dirents, new_hash, hash, existing_dirent);
+    /* Check if destination already exists.  For an SMB caller that includes
+     * a name differing only in case; when that is the source itself, this is
+     * a rename to a new case, not onto another entry. */
+    existing_dirent = memfs_dirent_lookup(new_parent_inode, request->rename_at.new_name,
+                                          request->rename_at.new_namelen, new_hash,
+                                          request->name_ci);
+
+    if (existing_dirent == old_dirent && new_hash != old_dirent->hash) {
+        existing_dirent = NULL;
+    }
+
+    if (existing_dirent) {
+        chimera_vfs_request_matched(request, 1, request->rename_at.new_name, request->rename_at.new_namelen,
+                                    existing_dirent->name, existing_dirent->name_len);
+    }
 
     if (existing_dirent) {
         /* Check if source and destination refer to the same inode (hardlinks).
@@ -6333,7 +6453,7 @@ memfs_rename_at(
              * returns ENOENT, exactly as unlink does (memfs_remove_at).  Without
              * this the clobbered inode leaked and its file handle kept resolving
              * after the rename that replaced it. */
-            rb_tree_remove(&new_parent_inode->dir.dirents, &existing_dirent->node);
+            memfs_dirent_unlink(fs, new_parent_inode, existing_dirent);
             if (S_ISDIR(existing_inode->mode)) {
                 new_parent_inode->nlink--;
                 existing_inode->nlink = 0;
@@ -6378,9 +6498,9 @@ memfs_rename_at(
                                     request->rename_at.new_name,
                                     request->rename_at.new_namelen);
 
-    rb_tree_insert(&new_parent_inode->dir.dirents, hash, new_dirent);
+    memfs_dirent_link(fs, new_parent_inode, new_dirent);
 
-    rb_tree_remove(&old_parent_inode->dir.dirents, &old_dirent->node);
+    memfs_dirent_unlink(fs, old_parent_inode, old_dirent);
 
     if (S_ISDIR(child_inode->mode) && cmp != 0) {
         /* Cross-directory move of a directory: the source parent loses its
@@ -6507,7 +6627,14 @@ memfs_link_at(
         return;
     }
 
-    rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
+    existing_dirent = memfs_dirent_lookup(parent_inode, request->link_at.name,
+                                          request->link_at.namelen, hash,
+                                          request->name_ci);
+
+    if (existing_dirent) {
+        chimera_vfs_request_matched(request, 1, request->link_at.name, request->link_at.namelen,
+                                    existing_dirent->name, existing_dirent->name_len);
+    }
 
     if (existing_dirent) {
         /* The name is taken. Without an explicit replace request this is an
@@ -6559,7 +6686,7 @@ memfs_link_at(
         /* Detach the existing entry and release its inode link, freeing the
          * inode if it now has neither links nor open handles (mirrors
          * memfs_remove_at). */
-        rb_tree_remove(&parent_inode->dir.dirents, &existing_dirent->node);
+        memfs_dirent_unlink(fs, parent_inode, existing_dirent);
 
         if (existing_inode) {
             existing_inode->nlink--;
@@ -6582,7 +6709,7 @@ memfs_link_at(
                                 request->link_at.name,
                                 request->link_at.namelen);
 
-    rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
+    memfs_dirent_link(fs, parent_inode, dirent);
 
     /* Re-entering the namespace re-takes the reference that stands for it.
      * Without this an inode that was unlinked while open (its namespace
@@ -7835,7 +7962,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
         CHIMERA_VFS_CAP_ACL_NATIVE | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
         CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
-        CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL |
+        CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL | CHIMERA_VFS_CAP_CASEFOLD |
         CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
         CHIMERA_VFS_CAP_CLAIM_AGGREGATE | CHIMERA_VFS_CAP_CLAIM_RANGE |
         CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME |

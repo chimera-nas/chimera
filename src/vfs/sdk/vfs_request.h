@@ -20,6 +20,7 @@
  */
 
 #include <stdint.h>
+#include <string.h>
 #include <sys/types.h>
 #include "vfs_mode.h"
 #include <time.h>
@@ -73,6 +74,31 @@ struct chimera_vfs_mount_option {
 struct chimera_vfs_mount_options {
     int                             num_options;
     struct chimera_vfs_mount_option options[CHIMERA_VFS_MOUNT_OPT_MAX];
+};
+
+/* How a filesystem compares names: a property of the filesystem, chosen when
+ * it is made (the "case=" mkfs option) and kept with it, since whether two
+ * names that differ only in case may coexist is a fact about its contents
+ * that every writer must respect.  Every policy preserves case: a name is
+ * stored as it was created.  An SMB caller is one with CHIMERA_VFS_AUTH_ATTR
+ * credentials; NFS, S3, FUSE and the POSIX client are the others.
+ *
+ *   sensitive    every caller matches names exactly.  The module keeps no
+ *                folded-name index.  SMB clients are told the volume is
+ *                case-sensitive.
+ *   mixed        SMB callers match case-insensitively, as Windows does,
+ *                preferring an exact match; everyone else exactly.  Names
+ *                that differ only in case may coexist (SMB clients see one
+ *                of them).  The default where the module supports it.
+ *   insensitive  every caller matches case-insensitively, and no name may
+ *                differ only in case from another; NFS clients are told so.
+ *
+ * Anything but sensitive needs CHIMERA_VFS_CAP_CASEFOLD.  A filesystem the
+ * module knows nothing about (a passthrough's, a proxy's) is sensitive. */
+enum chimera_vfs_case_policy {
+    CHIMERA_VFS_CASE_SENSITIVE = 0,
+    CHIMERA_VFS_CASE_MIXED,
+    CHIMERA_VFS_CASE_INSENSITIVE,
 };
 
 #define CHIMERA_VFS_OP_MOUNT                    1
@@ -507,6 +533,14 @@ struct chimera_vfs_stream_entry {
 struct chimera_vfs_notify_gate;
 struct chimera_vfs_request_memory;
 
+/* A directory entry a name operation resolved under a spelling other than
+ * the one the caller passed (a case-insensitive caller; see
+ * chimera_vfs_request_matched()). */
+struct chimera_vfs_matched_name {
+    uint16_t len;
+    char     name[CHIMERA_VFS_NAME_MAX];
+};
+
 struct chimera_vfs_request {
     struct chimera_vfs_thread         *thread;
     const struct chimera_vfs_cred     *cred;
@@ -537,6 +571,18 @@ struct chimera_vfs_request {
 
     /* Points to one page of memory that the plugin may use as desired */
     void                              *plugin_data;
+
+    /* Set by a backend whose name operation matched an existing entry stored
+     * under a different spelling than the name it was given, so the core can
+     * keep its name cache keyed by the stored name.  [0] is the operation's
+     * name (a rename's source), [1] the existing entry a rename or link
+     * replaced.  len is 0 when the stored name is the one asked for. */
+    struct chimera_vfs_matched_name    r_matched[2];
+
+    /* Whether this request matches names case-insensitively (preferring an
+     * exact match), resolved by the core from the filesystem's case policy
+     * and the caller before the request reaches the module. */
+    uint8_t                            name_ci;
 
     /* Core-owned temporary allocations, released after the final callback. */
     struct chimera_vfs_request_memory *memory;
@@ -857,6 +903,9 @@ struct chimera_vfs_request {
             struct chimera_vfs_mount_options options;
             char                             options_buffer[CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX];
             const char                      *raw_options;
+            /* The mounted filesystem's case policy, which a module with
+             * CHIMERA_VFS_CAP_CASEFOLD reports; it starts sensitive. */
+            enum chimera_vfs_case_policy r_case_policy;
             void                            *r_mount_private;
             struct chimera_vfs_attrs         r_attr;
         } mount;
@@ -887,6 +936,10 @@ struct chimera_vfs_request {
             struct chimera_vfs_mount_options options;
             char                             options_buffer[CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX];
             const char                      *raw_options;
+            /* From the "case=" option, or the module's default (mixed with
+             * CHIMERA_VFS_CAP_CASEFOLD, else sensitive); the module keeps it
+             * with the filesystem. */
+            enum chimera_vfs_case_policy case_policy;
         } mkfs;
 
         struct {
@@ -1501,6 +1554,26 @@ struct chimera_vfs_request {
         } get_layout;
     };
 };
+
+/* Record, for a name operation, the stored name of the entry that matched
+ * the name the caller asked for; a no-op when the two are identical. */
+static inline void
+chimera_vfs_request_matched(
+    struct chimera_vfs_request *request,
+    int                         slot,
+    const char                 *asked,
+    int                         asked_len,
+    const char                 *stored,
+    int                         stored_len)
+{
+    if ((stored_len == asked_len && memcmp(stored, asked, asked_len) == 0) ||
+        stored_len > CHIMERA_VFS_NAME_MAX) {
+        return;
+    }
+
+    request->r_matched[slot].len = stored_len;
+    memcpy(request->r_matched[slot].name, stored, stored_len);
+} /* chimera_vfs_request_matched */
 
 /* Allocate temporary storage that survives deferred/backend completion and
 * delegation to the owning thread. The core frees it when the request is

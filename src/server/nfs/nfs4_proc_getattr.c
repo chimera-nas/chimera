@@ -111,6 +111,9 @@ chimera_nfs4_getattr_finish(
                                                               req->fh, req->fhlen),
                                 chimera_nfs4_xattr_supported(req->thread->vfs_thread,
                                                              req->fh, req->fhlen),
+                                chimera_vfs_case_policy(req->thread->shared->vfs,
+                                                        req->fh, req->fhlen) ==
+                                CHIMERA_VFS_CASE_INSENSITIVE,
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
                                 req->thread->shared->nfs_lease_time_s,

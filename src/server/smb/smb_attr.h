@@ -138,9 +138,13 @@ chimera_smb_named_streams_enabled(
  * FILE_PERSISTENT_ACLS -- so it must describe what the backend actually does,
  * not what the server implements in general.
  *
- * Unconditional: names are case-sensitive and case-preserving Unicode, and
- * reparse points (symlinks and device nodes under the NFS reparse tag) ride
- * on symlink_at / mknod_at, which every FS module implements.
+ * Unconditional: names are case-preserving Unicode, and reparse points
+ * (symlinks and device nodes under the NFS reparse tag) ride on symlink_at /
+ * mknod_at, which every FS module implements.
+ *
+ * FILE_CASE_SENSITIVE_SEARCH says an SMB client's names are matched exactly:
+ * true only of a case-sensitive filesystem (see enum
+ * chimera_vfs_case_policy).  Windows' own file systems never report it.
  *
  * FILE_NAMED_STREAMS follows chimera_smb_named_streams_enabled, the gate
  * FileStreamInformation applies, so the client is never told about streams
@@ -160,12 +164,16 @@ chimera_smb_named_streams_enabled(
 static inline uint32_t
 chimera_smb_fs_attributes(
     uint64_t capabilities,
-    int      named_streams)
+    int      named_streams,
+    int      case_sensitive)
 {
-    uint32_t attrs = SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH |
-        SMB2_FS_ATTR_CASE_PRESERVED_NAMES |
+    uint32_t attrs = SMB2_FS_ATTR_CASE_PRESERVED_NAMES |
         SMB2_FS_ATTR_UNICODE_ON_DISK |
         SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS;
+
+    if (case_sensitive) {
+        attrs |= SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH;
+    }
 
     if (capabilities & CHIMERA_VFS_CAP_SPARSE) {
         attrs |= SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES;

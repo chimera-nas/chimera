@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <string.h>
-#include <ctype.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_mount_table.h"
@@ -29,10 +28,15 @@ static void
 chimera_vfs_readdir_complete(
     struct chimera_vfs_request *request);
 
+/* Names and patterns are matched as code points (decoded from UTF-8, folded
+ * for a case-insensitive caller), 0-terminated, at most this many: a
+ * component is at most 255 UTF-16 code units. */
+#define CHIMERA_VFS_MATCH_MAX 256
+
 /* The remaining expression matches end-of-name iff every metacharacter left can
  * match zero characters (MS-FSA null_match). */
 static int
-chimera_vfs_match_null(const char *p)
+chimera_vfs_match_null(const uint32_t *p)
 {
     for (; *p; p++) {
         if (*p != '?' && *p != '"' && *p != '>') {
@@ -42,15 +46,15 @@ chimera_vfs_match_null(const char *p)
     return 1;
 } /* chimera_vfs_match_null */
 
-/* Recursive matcher over NUL-terminated strings; ldot points at the last '.'
- * in the name (or NULL).  Returns 0 on match, -1 otherwise. */
+/* Recursive matcher over 0-terminated code point strings; ldot points at the
+ * last '.' in the name (or NULL).  Returns 0 on match, -1 otherwise. */
 static int
 chimera_vfs_match_core(
-    const char *p,
-    const char *n,
-    const char *ldot)
+    const uint32_t *p,
+    const uint32_t *n,
+    const uint32_t *ldot)
 {
-    char c;
+    uint32_t c;
 
     while ((c = *p++)) {
         switch (c) {
@@ -107,7 +111,7 @@ chimera_vfs_match_core(
                 n++;
                 break;
             default:
-                if (toupper((unsigned char) c) != toupper((unsigned char) *n)) {
+                if (c != *n) {
                     return -1;
                 }
                 n++;
@@ -124,10 +128,12 @@ chimera_vfs_dirent_match(
     const char *name,
     int         namelen,
     const char *pattern,
-    int         patternlen)
+    int         patternlen,
+    int         ci)
 {
-    char        nbuf[256], pbuf[256];
-    const char *ldot;
+    uint32_t        nbuf[CHIMERA_VFS_MATCH_MAX], pbuf[CHIMERA_VFS_MATCH_MAX];
+    const uint32_t *ldot = NULL;
+    int             nlen, plen;
 
     if (!pattern || patternlen == 0) {
         return 1;
@@ -136,18 +142,16 @@ chimera_vfs_dirent_match(
         return 1;
     }
 
-    if (namelen >= (int) sizeof(nbuf)) {
-        namelen = sizeof(nbuf) - 1;
-    }
-    if (patternlen >= (int) sizeof(pbuf)) {
-        patternlen = sizeof(pbuf) - 1;
-    }
-    memcpy(nbuf, name, namelen);
-    nbuf[namelen] = '\0';
-    memcpy(pbuf, pattern, patternlen);
-    pbuf[patternlen] = '\0';
+    nlen       = chimera_vfs_casefold_decode(name, namelen, nbuf, CHIMERA_VFS_MATCH_MAX - 1, ci);
+    plen       = chimera_vfs_casefold_decode(pattern, patternlen, pbuf, CHIMERA_VFS_MATCH_MAX - 1, ci);
+    nbuf[nlen] = 0;
+    pbuf[plen] = 0;
 
-    ldot = strrchr(nbuf, '.');
+    for (int i = 0; i < nlen; i++) {
+        if (nbuf[i] == '.') {
+            ldot = &nbuf[i];
+        }
+    }
 
     return chimera_vfs_match_core(pbuf, nbuf, ldot) == 0;
 } /* chimera_vfs_dirent_match */
@@ -174,7 +178,8 @@ chimera_vfs_readdir_filter_callback(
     if (request->readdir.match_pattern &&
         !chimera_vfs_dirent_match(name, namelen,
                                   request->readdir.match_pattern,
-                                  request->readdir.match_pattern_len)) {
+                                  request->readdir.match_pattern_len,
+                                  request->name_ci)) {
         return 0;
     }
 

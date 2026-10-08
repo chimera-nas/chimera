@@ -116,13 +116,17 @@ chimera_vfs_open_at_hdl_callback(
          * tombstone ages out (path-only lookup_at repopulates a correct stable
          * fh on the next miss). */
         if (!chimera_vfs_module_is_path_only(request->module)) {
+            /* Keyed by the stored name, as lookup_at caches it. */
+            const struct chimera_vfs_matched_name *m = &request->r_matched[0];
+
             chimera_vfs_name_cache_insert(thread, cache,
                                           request->open_at.handle->fh_hash,
                                           request->open_at.handle->fh,
                                           request->open_at.handle->fh_len,
+                                          m->len ? chimera_vfs_hash(m->name, m->len) :
                                           request->open_at.name_hash,
-                                          request->open_at.name,
-                                          request->open_at.namelen,
+                                          m->len ? m->name : request->open_at.name,
+                                          m->len ? m->len : request->open_at.namelen,
                                           request->open_at.r_attr.va_fh,
                                           request->open_at.r_attr.va_fh_len);
         } else if (request->open_at.r_created) {

@@ -87,6 +87,7 @@ struct chimera_vfs_find_result {
 
 struct chimera_vfs_mount_attrs {
     uint64_t flags;
+    enum chimera_vfs_case_policy case_policy;
 };
 
 struct chimera_vfs_mount {
@@ -307,6 +308,16 @@ SYMBOL_EXPORT void
 chimera_vfs_set_umount_timeout(
     struct chimera_vfs *vfs,
     int                 timeout_ms);
+
+/* The case policy of the filesystem a file handle belongs to (sensitive for
+ * one that is not mounted), for a protocol server describing the volume to
+ * its clients: whether SMB clients are told it is case-sensitive, NFS clients
+ * that it is case-insensitive.  See enum chimera_vfs_case_policy. */
+SYMBOL_EXPORT enum chimera_vfs_case_policy
+chimera_vfs_case_policy(
+    struct chimera_vfs *vfs,
+    const void         *fh,
+    int                 fh_len);
 
 /* Get the handle of the namespace root: the root of the mount at "/", which
  * is the built-in rootfs unless a mount has been placed there.  It changes

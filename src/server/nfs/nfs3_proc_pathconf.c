@@ -38,7 +38,11 @@ chimera_nfs3_pathconf_complete(
     if (res.status == NFS3_OK) {
         chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
 
-        res.resok.case_insensitive = 0;
+        /* Only an insensitive filesystem matches an NFS client's names
+         * case-insensitively; every policy preserves case. */
+        res.resok.case_insensitive = chimera_vfs_case_policy(shared->vfs, req->handle->fh,
+                                                             req->handle->fh_len) ==
+            CHIMERA_VFS_CASE_INSENSITIVE;
         res.resok.case_preserving  = 1;
         res.resok.no_trunc         = 1;
         res.resok.linkmax          = UINT32_MAX;

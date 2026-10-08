@@ -399,3 +399,21 @@ chimera_vfs_name_cache_remove(
     chimera_rcu_mutate_end(&shard->rcu);
 
 } /* chimera_vfs_name_cache_remove */
+
+/* Drop the entry for the stored name a backend reported it matched in place
+ * of the name it was asked for (a case-insensitive caller); see
+ * chimera_vfs_request_matched(). */
+static inline void
+chimera_vfs_name_cache_remove_matched(
+    struct chimera_vfs_name_cache         *cache,
+    uint64_t                               fh_hash,
+    const void                            *fh,
+    int                                    fh_len,
+    const struct chimera_vfs_matched_name *matched)
+{
+    if (matched->len) {
+        chimera_vfs_name_cache_remove(cache, fh_hash, fh, fh_len,
+                                      chimera_vfs_hash(matched->name, matched->len),
+                                      matched->name, matched->len);
+    }
+} /* chimera_vfs_name_cache_remove_matched */

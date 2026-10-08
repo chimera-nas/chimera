@@ -232,7 +232,7 @@ in the config permanently.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `module` | string | required | Module that holds the filesystem (`memfs`, `diskfs` or `cairn`). |
-| `options` | string | - | Module-specific creation options. |
+| `options` | string | - | Comma-separated creation options. The VFS core takes `case=` (see [Name case](#name-case)); the rest are module-specific. |
 
 ```json
 "filesystems": { "fs0": { "module": "memfs" } },
@@ -242,6 +242,37 @@ in the config permanently.
 A filesystem name is scoped to its module. A `memfs` filesystem and a `diskfs`
 filesystem with the same name are distinct, but a JSON object cannot repeat a
 key, so give them different names here.
+
+#### Name case
+
+Every filesystem preserves case — a name is stored as it was created — but
+protocols disagree on how names compare: Windows (SMB) clients expect
+`readme.txt` and `README.TXT` to be one file, NFS and POSIX clients expect
+two. Whether two names that differ only in case may coexist is a fact about a
+filesystem's contents that every protocol must respect, so it is chosen when
+the filesystem is made, with the `case=` option, and kept with it; it cannot
+be changed afterwards, and applies to every mount of the filesystem.
+
+| `case=` | SMB clients | NFS, S3, FUSE clients | Names that differ only in case | Advertised |
+|---|---|---|---|---|
+| `sensitive` | match exactly | match exactly | allowed | SMB and NFS: case-sensitive |
+| `mixed` | match case-insensitively | match exactly | allowed (SMB clients see one of them) | SMB: case-insensitive. NFS: case-sensitive |
+| `insensitive` | match case-insensitively | match case-insensitively | impossible | SMB and NFS: case-insensitive |
+
+Case-insensitive matching follows Windows: each character through Unicode's
+simple uppercase mapping, preferring an exact match, including in SMB
+directory searches (`dir *.TXT`).
+
+`mixed` is the default for `memfs`, `diskfs` and `cairn`. A `sensitive`
+filesystem keeps no case-folded name index, so creates and removes cost no
+more than exact matching needs. Every other module (`linux`, `io_uring`, the
+`nfs` and `smb` proxies) serves someone else's filesystem, and matches names
+exactly. A `diskfs` or `cairn` filesystem made before the option existed is
+`sensitive`.
+
+```json
+"filesystems": { "shared": { "module": "diskfs", "options": "case=insensitive" } }
+```
 
 ### `mounts`
 
@@ -272,7 +303,7 @@ exports, shares or buckets over a missing root.
 | `module` | string | required | VFS module name (`memfs`, `linux`, `diskfs`, `cairn`, `io_uring`, `nfs`, ...). |
 | `path` | string | required | Backend-specific root. For passthrough modules (`linux`, `io_uring`) this is a host path; for `nfs` it's the upstream export; for `memfs`, `diskfs` and `cairn` it's the name of a filesystem declared under [`filesystems`](#filesystems), optionally followed by a path inside it (`fs0/projects`). The path must already exist unless `create` is set. |
 | `create` | bool or object | `false` | Create `path`, and any missing parents, before mounting. `true` uses mode `0755`; `{ "mode": "0750" }` sets the mode as an octal string. The directories are owned by the server identity. A path that cannot be created stops startup. |
-| `options` | string | - | Module-specific mount options (e.g. `"vers=4.1,rdma,port=20049"` for the `nfs` module). |
+| `options` | string | - | Comma-separated mount options. The VFS core takes `ro` (read-only); the rest are module-specific (e.g. `"vers=4.1,rdma,port=20049"` for the `nfs` module). |
 
 ### `exports` (NFS)
 

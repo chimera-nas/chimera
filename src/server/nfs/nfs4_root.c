@@ -588,6 +588,7 @@ nfs4_root_readdir_lookup_callback(
                                     0,
                                     0, /* pNFS not advertised on the pseudo-fs root */
                                     0, /* pseudo-fs root has no xattr-capable backend */
+                                    0, /* pseudo-fs names match exactly */
                                     0,
                                     req->thread->shared->nfs_lease_time_s,
                                     state->exports[state->pos].id,

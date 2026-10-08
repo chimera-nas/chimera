@@ -90,6 +90,10 @@ add_test(chimera/vfs/claim_test vfs_claim_test)
 set_tests_properties(chimera/vfs/claim_test PROPERTIES TIMEOUT 30)
 set(CHIMERA_TEST_TIER "${_claim_saved_tier}")
 
+add_executable(vfs_casefold_test vfs_casefold_test.c)
+target_link_libraries(vfs_casefold_test chimera_vfs)
+add_test(chimera/vfs/casefold_test vfs_casefold_test)
+
 add_executable(vfs_acl_test vfs_acl_test.c)
 target_link_libraries(vfs_acl_test chimera_vfs)
 add_test(chimera/vfs/acl_test vfs_acl_test)
@@ -169,6 +173,21 @@ if(CHIMERA_VFS_IO_URING)
 endif()
 if(CAIRN_ENABLED)
     add_test(NAME chimera/vfs/zerorange_cairn COMMAND vfs_zerorange_test cairn)
+endif()
+
+# Case-insensitive name resolution for SMB callers, and the name cache shared
+# with exact-match (NFS) callers, parameterized by backend.
+add_executable(vfs_case_test vfs_case_test.c)
+target_link_libraries(vfs_case_test chimera_vfs evpl)
+add_test(NAME chimera/vfs/case_memfs COMMAND vfs_case_test memfs)
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/vfs/case_diskfs_aio COMMAND vfs_case_test diskfs_aio)
+endif()
+if(CHIMERA_VFS_IO_URING)
+    add_test(NAME chimera/vfs/case_diskfs_io_uring COMMAND vfs_case_test diskfs_io_uring)
+endif()
+if(CAIRN_ENABLED)
+    add_test(NAME chimera/vfs/case_cairn COMMAND vfs_case_test cairn)
 endif()
 
 # xattr DAC regression, parameterized by passthrough backend: the linux and

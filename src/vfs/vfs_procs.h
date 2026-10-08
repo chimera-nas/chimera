@@ -435,13 +435,16 @@ chimera_vfs_readdir(
     void                           *private_data);
 
 /* SMB-style directory wildcard match (MS-FSA 2.1.4.4), exposed for callers that
- * filter outside chimera_vfs_readdir.  A NULL/empty pattern matches everything. */
+ * filter outside chimera_vfs_readdir.  A NULL/empty pattern matches everything.
+ * With ci set, characters compare case-insensitively, through the case table
+ * lookups use (vfs_casefold.h). */
 SYMBOL_EXPORT int
 chimera_vfs_dirent_match(
     const char *name,
     int         namelen,
     const char *pattern,
-    int         patternlen);
+    int         patternlen,
+    int         ci);
 
 typedef void (*chimera_vfs_open_fh_callback_t)(
     enum chimera_vfs_error          error_code,

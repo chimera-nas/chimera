@@ -7,6 +7,55 @@
 #include "vfs_internal.h"
 #include "common/macros.h"
 
+/* The new filesystem's case policy, from its "case=" option or the module's
+ * default: mixed where the module keeps a folded-name index, else
+ * sensitive.  Returns -1 for an unknown policy or one the module cannot
+ * keep. */
+static int
+chimera_vfs_mkfs_case_policy(
+    const struct chimera_vfs_module        *module,
+    const struct chimera_vfs_mount_options *options,
+    enum chimera_vfs_case_policy           *r_policy)
+{
+    int casefold = !!(module->capabilities & CHIMERA_VFS_CAP_CASEFOLD);
+
+    *r_policy = casefold ? CHIMERA_VFS_CASE_MIXED : CHIMERA_VFS_CASE_SENSITIVE;
+
+    for (int i = 0; i < options->num_options; i++) {
+        const char                  *key   = options->options[i].key;
+        const char                  *value = options->options[i].value;
+        enum chimera_vfs_case_policy policy;
+
+        if (!key || strcmp(key, "case") != 0) {
+            continue;
+        }
+
+        if (value && strcmp(value, "sensitive") == 0) {
+            policy = CHIMERA_VFS_CASE_SENSITIVE;
+        } else if (value && strcmp(value, "mixed") == 0) {
+            policy = CHIMERA_VFS_CASE_MIXED;
+        } else if (value && strcmp(value, "insensitive") == 0) {
+            policy = CHIMERA_VFS_CASE_INSENSITIVE;
+        } else {
+            chimera_vfs_error("chimera_vfs_mkfs: unknown case policy '%s' "
+                              "(sensitive, mixed or insensitive)",
+                              value ? value : "");
+            return -1;
+        }
+
+        if (policy != CHIMERA_VFS_CASE_SENSITIVE && !casefold) {
+            chimera_vfs_error("chimera_vfs_mkfs: module %s matches names "
+                              "exactly; case=%s needs case-insensitive lookup",
+                              module->name, value);
+            return -1;
+        }
+
+        *r_policy = policy;
+    }
+
+    return 0;
+} /* chimera_vfs_mkfs_case_policy */
+
 static void
 chimera_vfs_mkfs_complete(struct chimera_vfs_request *request)
 {
@@ -85,6 +134,13 @@ chimera_vfs_mkfs(
     if (rc) {
         chimera_vfs_error("chimera_vfs_mkfs: invalid options: %s",
                           options ? options : "(null)");
+        chimera_vfs_request_free(thread, request);
+        callback(thread, CHIMERA_VFS_EINVAL, private_data);
+        return;
+    }
+
+    if (chimera_vfs_mkfs_case_policy(module, &request->mkfs.options,
+                                     &request->mkfs.case_policy)) {
         chimera_vfs_request_free(thread, request);
         callback(thread, CHIMERA_VFS_EINVAL, private_data);
         return;

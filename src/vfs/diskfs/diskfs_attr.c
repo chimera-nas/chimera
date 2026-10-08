@@ -1613,9 +1613,23 @@ diskfs_mount(
         return;
     }
 
+    /* A case-folding filesystem whose index was built with another case
+     * table cannot be served: its fold keys would not find their entries. */
+    if (fs->case_policy != CHIMERA_VFS_CASE_SENSITIVE &&
+        fs->name_fold != CHIMERA_VFS_CASEFOLD_VERSION) {
+        evpl_mutex_unlock(&shared->lock);
+        chimera_diskfs_error("filesystem %s: folded-name index built with case table %u, "
+                             "not %u", fs->name, fs->name_fold, CHIMERA_VFS_CASEFOLD_VERSION);
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     fs->mount_count++;
 
     evpl_mutex_unlock(&shared->lock);
+
+    request->mount.r_case_policy = fs->case_policy;
 
     p->fs         = fs;
     p->thread     = thread;
@@ -1804,9 +1818,11 @@ diskfs_mkfs_committed_cb(
 
     memset(e, 0, sizeof(*e));
     memcpy(e->name, fs->name, strlen(fs->name));
-    e->fsid      = fs->fsid;
-    e->root_inum = fs->root_inum;
-    e->root_gen  = fs->root_gen;
+    e->fsid        = fs->fsid;
+    e->root_inum   = fs->root_inum;
+    e->root_gen    = fs->root_gen;
+    e->case_policy = fs->case_policy;
+    e->name_fold   = fs->name_fold = CHIMERA_VFS_CASEFOLD_VERSION;
 
     sw = diskfs_sb_write_prepare(thread, diskfs_mkfs_sb_written, request);
 
@@ -1936,10 +1952,11 @@ diskfs_mkfs(
     /* Placeholder (root_fhlen == 0) reserves the name and a table slot
      * against a concurrent mkfs; published for real (root FH, fs_table,
      * fs_map) once the root inode commit is durable. */
-    fs         = calloc(1, sizeof(*fs));
-    fs->shared = shared;
-    fs->name   = strndup(request->mkfs.name, request->mkfs.namelen);
-    fs->fsid   = fsid;
+    fs              = calloc(1, sizeof(*fs));
+    fs->shared      = shared;
+    fs->name        = strndup(request->mkfs.name, request->mkfs.namelen);
+    fs->case_policy = request->mkfs.case_policy;
+    fs->fsid        = fsid;
     DL_APPEND(shared->fs_list, fs);
 
     evpl_mutex_unlock(&shared->lock);
