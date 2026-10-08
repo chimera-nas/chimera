@@ -581,9 +581,10 @@ main(
      * of bailing ("no interface info returned").  Everything in the test netns
      * lives on loopback (127.0.0.0/8 is all local), so the smbtorture client
      * opens every additional channel back to 127.0.0.1 regardless of which
-     * addresses are advertised; two RSS-capable NICs mirror the WPTS setup and
-     * let num_channels exercise binding.  The capability bit itself is already
-     * advertised globally by the server. */
+     * addresses are advertised; two plain TCP NICs (Capability 0: neither rss
+     * nor rdma) are enough to let num_channels exercise binding.
+     * SMB2_GLOBAL_CAP_MULTI_CHANNEL itself is negotiated globally by the
+     * server. */
     {
         struct chimera_server_config_smb_nic nics[2] = {
             { .address = "127.0.0.1", .speed = 10, .rdma = 0 },
