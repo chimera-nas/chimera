@@ -84,6 +84,7 @@ struct nlm_grant_job {
     int                      attempts;
     int                      acked;
     int                      inflight;      /* a GRANTED call is outstanding */
+    int                      finishing;     /* wait for disconnect callbacks before freeing */
 
     struct nlm_grant_job    *next;          /* link on granter active list */
     struct nlm_grant_job    *prev;
@@ -114,9 +115,31 @@ static void nlm_grant_job_finish(
 * ------------------------------------------------------------------ */
 
 static void
+nlm_grant_job_release(struct nlm_grant_job *job)
+{
+#ifndef __clang_analyzer__
+    struct nlm_grant_ctx *ctx = nlm_grant_tls_ctx;
+#endif /* ifndef __clang_analyzer__ */
+
+    if (!job->finishing || job->pm_conn || job->nlm_conn) {
+        return;
+    }
+
+#ifndef __clang_analyzer__
+    DL_DELETE(ctx->active, job);
+#endif /* ifndef __clang_analyzer__ */
+    free(job);
+} /* nlm_grant_job_release */
+
+static void
 nlm_grant_job_finish(struct nlm_grant_job *job)
 {
     struct nlm_grant_ctx *ctx = nlm_grant_tls_ctx;
+
+    if (job->finishing) {
+        return;
+    }
+    job->finishing = 1;
 
     if (job->timer_armed) {
         evpl_remove_timer(ctx->evpl, &job->retry_timer);
@@ -124,7 +147,6 @@ nlm_grant_job_finish(struct nlm_grant_job *job)
     }
     if (job->nlm_conn) {
         evpl_rpc2_client_disconnect(ctx->rpc2_thread, job->nlm_conn);
-        job->nlm_conn = NULL;
     }
     if (job->nlm_ep) {
         evpl_endpoint_close(job->nlm_ep);
@@ -132,22 +154,42 @@ nlm_grant_job_finish(struct nlm_grant_job *job)
     }
     if (job->pm_conn) {
         evpl_rpc2_client_disconnect(ctx->rpc2_thread, job->pm_conn);
-        job->pm_conn = NULL;
     }
     if (job->pm_ep) {
         evpl_endpoint_close(job->pm_ep);
         job->pm_ep = NULL;
     }
 
-    /* job is always on ctx->active (DL_APPEND'd in job_start before any finish),
-     * so the list is non-empty here; the guard silences a utlist DL_DELETE
-     * null-deref false positive under scan-build (same idiom as
-     * nlm_state_destroy). */
-#ifndef __clang_analyzer__
-    DL_DELETE(ctx->active, job);
-#endif /* ifndef __clang_analyzer__ */
-    free(job);
+    /* Disconnect is deferred. RPC2 first completes pending calls with
+     * CONN_LOST, then notifies us and frees the connection. Keep the job alive
+     * for those reply callbacks, including while the granter is shutting down. */
+    nlm_grant_job_release(job);
 } /* nlm_grant_job_finish */
+
+static void
+nlm_grant_rpc_notify(
+    struct evpl_rpc2_thread *thread,
+    struct evpl_rpc2_conn   *conn,
+    struct evpl_rpc2_notify *notify,
+    void                    *private_data)
+{
+    struct nlm_grant_job *job = evpl_rpc2_conn_get_private_data(conn);
+
+    (void) thread;
+    (void) private_data;
+
+    if (notify->notify_type != EVPL_RPC2_NOTIFY_DISCONNECTED || !job) {
+        return;
+    }
+    if (job->pm_conn == conn) {
+        job->pm_conn = NULL;
+    }
+    if (job->nlm_conn == conn) {
+        job->nlm_conn = NULL;
+        job->inflight = 0;
+    }
+    nlm_grant_job_release(job);
+} /* nlm_grant_rpc_notify */
 
 /* ------------------------------------------------------------------ *
 *  GRANTED call + ack                                                 *
@@ -169,6 +211,10 @@ nlm_grant_reply_cb(
 
     job->inflight = 0;
 
+    if (job->finishing) {
+        return;
+    }
+
     /* Any application-level reply (whatever stat) means the client received the
      * GRANTED and its F_SETLKW completed -- stop retransmitting.  A transport
      * error leaves the job armed for the next retry tick. */
@@ -181,16 +227,26 @@ nlm_grant_reply_cb(
     }
 } /* nlm_grant_reply_cb */
 
-/* Build the nlm4_testargs from the job snapshot and fire one GRANTED call on
- * the (already connected) NLM conn. */
+/* Reconnect after a lost transport, then fire one GRANTED call. */
 static void
 nlm_grant_job_send(struct nlm_grant_job *job)
 {
     struct nlm_grant_ctx *ctx = nlm_grant_tls_ctx;
     struct nlm4_testargs  args;
 
-    if (!job->nlm_conn || job->inflight) {
+    if (job->finishing || job->inflight) {
         return;
+    }
+
+    job->attempts++;
+    if (!job->nlm_conn) {
+        job->nlm_conn = evpl_rpc2_client_connect(ctx->rpc2_thread,
+                                                 chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()),
+                                                 job->nlm_ep, NULL, 0, NULL);
+        if (!job->nlm_conn) {
+            return;
+        }
+        evpl_rpc2_conn_set_private_data(job->nlm_conn, job);
     }
 
     memset(&args, 0, sizeof(args));
@@ -208,7 +264,6 @@ nlm_grant_job_send(struct nlm_grant_job *job)
     args.alock.l_len           = job->req.length;
 
     job->inflight = 1;
-    job->attempts++;
 
     chimera_nfs_debug("NLM GRANTED: -> host '%s' (%s:%u) attempt %d",
                       job->req.caller_name, job->req.client_addr,
@@ -267,10 +322,13 @@ nlm_grant_getport_cb(
     (void) evpl;
     (void) verf;
 
+    if (job->finishing) {
+        return;
+    }
+
     /* The portmap query is done with either way; release its conn/endpoint. */
     if (job->pm_conn) {
         evpl_rpc2_client_disconnect(ctx->rpc2_thread, job->pm_conn);
-        job->pm_conn = NULL;
     }
     if (job->pm_ep) {
         evpl_endpoint_close(job->pm_ep);
@@ -288,16 +346,6 @@ nlm_grant_getport_cb(
     job->nlm_port = port;
     job->nlm_ep   = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(),
                                                        job->req.client_addr, port);
-    job->nlm_conn = evpl_rpc2_client_connect(ctx->rpc2_thread,
-                                             chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()),
-                                             job->nlm_ep, NULL, 0, NULL);
-    if (!job->nlm_conn) {
-        chimera_nfs_info("NLM GRANTED: cannot connect to NLM at %s:%u",
-                         job->req.client_addr, port);
-        nlm_grant_job_finish(job);
-        return;
-    }
-
     /* Arm the retransmit timer and fire the first GRANTED. */
     evpl_add_timer(ctx->evpl, &job->retry_timer, nlm_grant_retry_timer_cb,
                    NLM_GRANT_RETRY_INTERVAL_US);
@@ -340,6 +388,7 @@ nlm_grant_job_start(
         nlm_grant_job_finish(job);
         return;
     }
+    evpl_rpc2_conn_set_private_data(job->pm_conn, job);
 
     mapping.prog = NLM_PROGRAM;
     mapping.vers = NLM_VERSION;
@@ -403,7 +452,7 @@ nlm_granter_thread_init(
     NLM_V4_init(&ctx->nlm);
     programs[0]      = &ctx->pm.rpc2;
     programs[1]      = &ctx->nlm.rpc2;
-    ctx->rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 2, NULL, NULL);
+    ctx->rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 2, nlm_grant_rpc_notify, NULL);
 
     nlm_grant_tls_ctx = ctx;
 
