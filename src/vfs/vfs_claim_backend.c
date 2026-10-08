@@ -839,12 +839,12 @@ chimera_vfs_claim_backend_project_range(
  * one and not the other.
  *
  * The construct check is the synchrony gate.  A backend confirm reaches a
- * CHIMERA_VFS_CAP_BLOCKING module through a delegation thread, so its
- * callback lands on another thread later; callers that can wait (POSIX
- * fcntl on its condvar, NLM and NFSv4 on their ticket queues) are fine with
- * that, but the SMB byte-range path resolves a whole multi-element request
- * synchronously and rolls earlier elements back on a later failure, which a
- * deferred answer would break.  SMB locks therefore stay node-local against
+ * module that lists CLAIM_ACQUIRE in blocking_ops through a delegation
+ * thread, so its callback lands on another thread later; callers that can
+ * wait (POSIX fcntl on its condvar, NLM and NFSv4 on their ticket queues)
+ * are fine with that, but the SMB byte-range path resolves a whole
+ * multi-element request synchronously and rolls earlier elements back on a
+ * later failure, which a deferred answer would break.  SMB locks therefore stay node-local against
  * a blocking arbiter -- exactly what they did before ranges projected at
  * all -- rather than being made to wait for an answer they cannot wait
  * for.  An inline arbiter (memfs) serves everyone. */
@@ -877,7 +877,7 @@ chimera_vfs_claim_backend_range_projects(
     }
 
     if (claim && claim->construct == CHIMERA_CONSTRUCT_LOCK_SMB && module &&
-        (module->capabilities & CHIMERA_VFS_CAP_BLOCKING)) {
+        (module->blocking_ops & CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_CLAIM_ACQUIRE))) {
         return false;
     }
 

@@ -1224,7 +1224,7 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
      * completed and rung back, so no in-flight delegated close remains.  But the
      * close thread's event loop is still running after that handshake -- its
      * periodic timer sweep and idle-lease reaper can issue *new* closes, which
-     * for a CHIMERA_VFS_CAP_BLOCKING backend (cairn, diskfs) route through a
+     * for a backend whose close blocks (cairn, linux) route through a
      * delegation thread and ring its doorbell.  If the delegation threads (and
      * their doorbells) were torn down first, such a late close would ring a
      * closed doorbell fd -> EBADF fatal abort (a use-after-close of the
@@ -1615,6 +1615,12 @@ chimera_vfs_register(
     chimera_vfs_abort_if(module->sdk_version != CHIMERA_VFS_SDK_VERSION,
                          "module %s was built against VFS SDK version %u; this chimera provides version %u",
                          module->name, module->sdk_version, CHIMERA_VFS_SDK_VERSION);
+
+    /* CAP_BLOCKING is shorthand for "every op blocks"; expand it here so
+     * dispatch consults blocking_ops alone. */
+    if (module->capabilities & CHIMERA_VFS_CAP_BLOCKING) {
+        module->blocking_ops = CHIMERA_VFS_BLOCKING_ALL;
+    }
 
     vfs->modules[module->fh_magic] = module;
 

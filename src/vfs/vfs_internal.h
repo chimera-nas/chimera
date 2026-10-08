@@ -760,7 +760,7 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
         return;
     }
 
-    if ((module->capabilities & CHIMERA_VFS_CAP_BLOCKING) &&
+    if ((module->blocking_ops & CHIMERA_VFS_OP_BIT(request->opcode)) &&
         vfs->num_sync_delegation_threads > 0) {
         thread_id         = request->fh_hash % vfs->num_sync_delegation_threads;
         delegation_thread = &vfs->sync_delegation_threads[thread_id];

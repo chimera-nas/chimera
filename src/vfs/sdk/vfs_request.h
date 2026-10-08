@@ -123,6 +123,10 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_RENAME_STREAM            46
 #define CHIMERA_VFS_OP_NUM                      47
 
+/* chimera_vfs_module.blocking_ops holds one bit per opcode. */
+_Static_assert(CHIMERA_VFS_OP_NUM <= 64,
+               "CHIMERA_VFS_OP_* no longer fits chimera_vfs_module.blocking_ops");
+
 #define CHIMERA_VFS_OPEN_CREATE                 (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH                   (1U << 1)
 #define CHIMERA_VFS_OPEN_INFERRED               (1U << 2)
