@@ -203,6 +203,10 @@ struct chimera_smb_nic_info {
     struct sockaddr_storage addr;
     uint64_t                speed;
     uint8_t                 rdma;
+    /* Advertise RSS_CAPABLE in FSCTL_QUERY_NETWORK_INTERFACE_INFO.  A
+     * client-side gate only: it lets a TCP client open several connections
+     * to this address and never touches the transport. */
+    uint8_t                 rss;
 };
 
 struct chimera_smb_rdma_element {

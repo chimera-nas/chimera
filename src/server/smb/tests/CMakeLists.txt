@@ -103,6 +103,15 @@ target_include_directories(smb_harden_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/harden_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_harden_test)
 
+# FSCTL_QUERY_NETWORK_INTERFACE_INFO (smb_proc_ioctl.c): the per-interface
+# Capability word must follow the rss / rdma configuration bit for bit.
+add_executable(smb_nic_info_test smb_nic_info_test.c)
+target_link_libraries(smb_nic_info_test chimera_server chimera_smb)
+target_include_directories(smb_nic_info_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/nic_info_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_nic_info_test)
+
 # DCE/RPC bind handling (smb_dcerpc.h): the bind_ack fields a Windows RPC
 # client validates.  Header-only logic driven with hand-built PDUs.
 add_executable(smb_dcerpc_test smb_dcerpc_test.c)

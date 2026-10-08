@@ -198,13 +198,14 @@ chimera_smb_server_init(
         }
         shared->config.nic_info[i].speed = smb_nic_info->speed * 1000000000UL;
         shared->config.nic_info[i].rdma  = smb_nic_info->rdma;
+        shared->config.nic_info[i].rss   = smb_nic_info->rss;
 
         if (shared->config.nic_info[i].rdma) {
             rdma = 1;
         }
 
-        chimera_smb_info("SMB Multichannel: %s, speed: %llu, rdma: %d", smb_nic_info->address, smb_nic_info->speed,
-                         smb_nic_info->rdma);
+        chimera_smb_info("SMB Multichannel: %s, speed: %llu, rdma: %d, rss: %d", smb_nic_info->address,
+                         smb_nic_info->speed, smb_nic_info->rdma, smb_nic_info->rss);
     }
 
     snprintf(shared->config.identity, sizeof(shared->config.identity), "chimera");

@@ -117,7 +117,7 @@ int chimera_smb_parse_ioctl(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);
 
-void chimera_smb_ioctl_reply(
+SYMBOL_EXPORT void chimera_smb_ioctl_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request);
 
