@@ -12,8 +12,8 @@
  * The database runs in WAL journal mode so multiple reader threads and a writer
  * can operate concurrently.  Each VFS thread owns its own sqlite3 connection
  * (sqlite connections are not safe to share across threads); the module is
- * declared CAP_BLOCKING so the synchronous sqlite calls run on delegation
- * threads rather than the event-loop core threads.
+ * declared blocking for every op so the synchronous sqlite calls run on
+ * delegation threads rather than the event-loop core threads.
  */
 
 #include <stdint.h>
@@ -206,7 +206,7 @@ sqlite_get_key(
         /* The column blob pointer is only valid until the next step/reset.  Copy
          * it into the request-owned scratch so it survives the reset below and
          * remains valid for the caller's callback, which (because this op is
-         * CAP_BLOCKING) runs later on the originating thread after the
+         * blocking) runs later on the originating thread after the
          * completion is bounced back from the delegation thread. */
         if (value_len > CHIMERA_VFS_PLUGIN_DATA_SIZE) {
             chimera_sqlite_error("get_key value too large: %d > %d",
@@ -385,7 +385,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_sqlite = {
     .sdk_version    = CHIMERA_VFS_SDK_VERSION,
     .name           = "sqlite",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_SQLITE,
-    .capabilities   = CHIMERA_VFS_CAP_KV | CHIMERA_VFS_CAP_BLOCKING,
+    .capabilities   = CHIMERA_VFS_CAP_KV,
+    .blocking_ops   = CHIMERA_VFS_BLOCKING_ALL,
     .init           = sqlite_init,
     .destroy        = sqlite_destroy,
     .thread_init    = sqlite_thread_init,

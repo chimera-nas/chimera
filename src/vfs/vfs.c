@@ -1616,12 +1616,6 @@ chimera_vfs_register(
                          "module %s was built against VFS SDK version %u; this chimera provides version %u",
                          module->name, module->sdk_version, CHIMERA_VFS_SDK_VERSION);
 
-    /* CAP_BLOCKING is shorthand for "every op blocks"; expand it here so
-     * dispatch consults blocking_ops alone. */
-    if (module->capabilities & CHIMERA_VFS_CAP_BLOCKING) {
-        module->blocking_ops = CHIMERA_VFS_BLOCKING_ALL;
-    }
-
     vfs->modules[module->fh_magic] = module;
 
     vfs->module_private[module->fh_magic] = module->init(cfgdata, vfs->metrics.metrics);

@@ -16,7 +16,7 @@
  * req->lock_4_0_open_owner and chimera_nfs4_lock_finish().
  *
  * This test forces that exact interleaving deterministically -- no threads or
- * VFS backend needed.  (A CHIMERA_VFS_CAP_BLOCKING backend only widens the
+ * VFS backend needed.  (A blocking backend only widens the
  * async window in production; here we simply call the sweeper's teardown while
  * still holding the borrowed reference.)  It holds the caller reference that
  * find_or_create now returns -- the same reference an in-flight request keeps

@@ -2992,13 +2992,14 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_linux = {
     .sdk_version  = CHIMERA_VFS_SDK_VERSION,
     .name         = "linux",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_LINUX,
-    .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED |
+    .capabilities = CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED |
         CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_FS_PATH_OP |
         CHIMERA_VFS_CAP_CLAIM_RANGE | CHIMERA_VFS_CAP_RPL |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE |
         CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR |
         CHIMERA_VFS_CAP_SPARSE
     ,
+    .blocking_ops   = CHIMERA_VFS_BLOCKING_ALL,
     .init           = chimera_linux_init,
     .destroy        = chimera_linux_destroy,
     .thread_init    = chimera_linux_thread_init,
