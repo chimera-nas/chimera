@@ -228,7 +228,9 @@ generate_config() {
     # MultipleChannel cases can discover the alternative server address.
     local multichannel_line=""
     if [ "${CHIMERA_SMB_MULTICHANNEL:-0}" = "1" ]; then
-        multichannel_line="\"smb_multichannel\": [{\"address\": \"${SUT_IP}\", \"speed\": 10, \"rdma\": false}, {\"address\": \"${SUT_IP2}\", \"speed\": 10, \"rdma\": false}, {\"address\": \"${SUT_IPV6}\", \"speed\": 10, \"rdma\": false}],"
+        # The first NIC is RSS-capable so the interface query returns a
+        # non-zero Capability sample (RSS_CAPABLE, 0x1); the others keep 0.
+        multichannel_line="\"smb_multichannel\": [{\"address\": \"${SUT_IP}\", \"speed\": 10, \"rss\": true, \"rdma\": false}, {\"address\": \"${SUT_IP2}\", \"speed\": 10, \"rdma\": false}, {\"address\": \"${SUT_IPV6}\", \"speed\": 10, \"rdma\": false}],"
         # The MultipleChannel_Negative_SMB2002 case establishes its main channel
         # with the original SMB 2.0.2 dialect (then verifies the bind is refused),
         # so the multichannel harness lowers the dialect floor to 2.0.2.
