@@ -169,9 +169,18 @@ An **array** of NIC descriptors advertised to SMB clients for multichannel.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `address` | string | required | Interface address/IP. |
-| `speed` | int | required | Link speed in Mbps (e.g. `10000` for 10 GbE). |
-| `rdma` | bool | `false` | Advertise this NIC as RDMA-capable. |
+| `address` | string | required | Interface address/IP (IPv4 or IPv6). |
+| `speed` | int | required | Link speed in **Gbps**, 1 to 1000000 (e.g. `100` for 100 GbE, `10` for 10 GbE); reported to clients as bits per second. Values above 1600 are logged at startup as a likely Mbps figure. |
+| `rss` | bool | `false` | Advertise this NIC as RSS-capable (`RSS_CAPABLE` in `FSCTL_QUERY_NETWORK_INTERFACE_INFO`). A Windows client without RDMA opens several TCP connections only to an RSS- or RDMA-capable address, so set this to use multichannel over a single NIC. Chimera already spreads those connections across its core threads; the flag only changes what is advertised. |
+| `rdma` | bool | `false` | Advertise this NIC as RDMA-capable and listen for SMB Direct. Independent of `rss`; set both so an RDMA client uses SMB Direct while a TCP-only client falls back to RSS. |
+
+At most 16 interfaces may be listed. Example:
+
+```json
+"smb_multichannel": [
+    { "address": "192.0.2.10", "speed": 100, "rss": true, "rdma": false }
+]
+```
 
 #### `server.pnfs`
 
