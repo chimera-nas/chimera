@@ -107,6 +107,13 @@ target_link_libraries(vfs_attr_gate_test chimera_vfs chimera_vfs_memfs_objs evpl
 set_target_properties(vfs_attr_gate_test PROPERTIES ENABLE_EXPORTS ON)
 add_test(chimera/vfs/attr_gate_test vfs_attr_gate_test)
 
+# Same shim arrangement as attr_gate_test: "splitblk" wraps an embedded memfs
+# and is found in the executable's own exports.
+add_executable(vfs_split_blocking_test vfs_split_blocking_test.c)
+target_link_libraries(vfs_split_blocking_test chimera_vfs chimera_vfs_memfs_objs evpl)
+set_target_properties(vfs_split_blocking_test PROPERTIES ENABLE_EXPORTS ON)
+add_test(chimera/vfs/split_blocking_test vfs_split_blocking_test)
+
 add_executable(vfs_clone_range_test vfs_clone_range_test.c)
 target_link_libraries(vfs_clone_range_test chimera_vfs evpl)
 add_test(chimera/vfs/clone_range_test vfs_clone_range_test)
