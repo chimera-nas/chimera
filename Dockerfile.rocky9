@@ -45,6 +45,7 @@ FROM ${CCACHE_REGISTRY}:${CCACHE_VERSION} AS ccache
 FROM ${DOCKER_MIRROR}rockylinux/rockylinux:9
 ARG ENABLE_XLIO=1
 ARG ENABLE_FIO=0
+ARG ENABLE_DAOS=0
 
 # The mirrored ccache, ahead of anything the distro might provide on PATH.
 COPY --from=ccache /ccache /usr/local/bin/ccache
@@ -77,6 +78,21 @@ RUN dnf -y update && \
     libwbclient-devel samba-client krb5-server krb5-workstation samba samba-winbind samba-winbind-clients \
     python3-boto3 which && \
     dnf clean all
+
+# EL9 publishes x86_64 client packages only.  The arm64 image leaves this off.
+RUN if [ "$ENABLE_DAOS" = "1" ] ; then \
+    printf '%s\n' \
+        '[daos-2.6]' \
+        'name=DAOS 2.6 EL9' \
+        'baseurl=https://packages.daos.io/v2.6/EL9/packages/x86_64/' \
+        'enabled=1' \
+        'gpgcheck=1' \
+        'gpgkey=https://packages.daos.io/v2.6/DAOS_2025_1_GPG_KEY' \
+        > /etc/yum.repos.d/daos-2.6.repo && \
+    dnf -y install daos-devel daos-client && \
+    dnf clean all ; \
+    fi
+
 # --disable-native below: see .devcontainer/Dockerfile for why fio must not be
 # tuned to the runner that happens to build this image.
 
