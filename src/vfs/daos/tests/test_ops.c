@@ -675,11 +675,12 @@ test_unmount_drain(void)
 int
 main(void)
 {
-    CHECK(vfs_daos.sdk_version == 3);
+    CHECK(vfs_daos.sdk_version == CHIMERA_VFS_SDK_VERSION);
     CHECK(vfs_daos.fh_magic == CHIMERA_VFS_FH_MAGIC_DAOS);
     CHECK(vfs_daos.capabilities == (CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
-                                    CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_CREATE_GID_ENGINE |
+                                    CHIMERA_VFS_CAP_CREATE_GID_ENGINE |
                                     CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR));
+    CHECK(vfs_daos.blocking_ops == CHIMERA_VFS_BLOCKING_ALL);
     test_names_and_inferred_handles();
     test_setattr_masks();
     test_setgid_and_readdir_access();

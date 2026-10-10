@@ -227,8 +227,9 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_daos = {
     .name         = "daos",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_DAOS,
     .capabilities = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
-        CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_CREATE_GID_ENGINE |
+        CHIMERA_VFS_CAP_CREATE_GID_ENGINE |
         CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR,
+    .blocking_ops   = CHIMERA_VFS_BLOCKING_ALL,
     .init           = vfs_daos_init,
     .destroy        = vfs_daos_destroy,
     .thread_init    = vfs_daos_thread_init,
