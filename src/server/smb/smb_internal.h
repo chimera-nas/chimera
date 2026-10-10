@@ -729,6 +729,17 @@ struct chimera_smb_request {
              * exactly as gen_parked does for a break park. */
             uint8_t                            trunc_deferred;
             uint8_t                            gen_truncating;
+            /* An overwriting CREATE (SUPERSEDE/OVERWRITE/OVERWRITE_IF) of an
+             * existing file whose DOS attributes forbid the overwrite
+             * (READONLY, or a HIDDEN/SYSTEM the request would clear) owes an
+             * ACCESS_DENIED -- but that verdict must not be RETURNED before the
+             * share-mode claim is adjudicated (MS-FSA 2.1.5.1.2: a conflicting
+             * concurrent open is SHARING_VIOLATION, which takes precedence).  So
+             * chimera_smb_create_overwrite_check_callback records it here and
+             * proceeds to the open; chimera_smb_create_issue_truncate (reached
+             * only once the claim is GRANTED) returns the ACCESS_DENIED, exactly
+             * where the content replacement it gates would have happened. */
+            uint8_t                            overwrite_deny;
             struct chimera_vfs_attrs           trunc_attr;
             /* Set by chimera_smb_create_gen_open_file_normal when the share
              * conflict it could not resolve is against a durable holder that will
