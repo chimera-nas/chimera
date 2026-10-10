@@ -672,6 +672,26 @@ Each entry of `devices`:
 | `signature` | object | - | SIMPLE-volume signature: `{ "offset": int, "bytes": "<hex>" }` (block layout). |
 | `scsi` | object | - | SCSI designator: `{ "designator_type": "naa"\|"eui64"\|"t10", "code_set": "binary"\|"ascii", "id": "<hex>", "pr_key": int }` (SCSI layout). |
 
+### `daos` (DAOS POSIX container, Linux)
+
+Built only when the DAOS client headers and libraries are installed. It is
+not loaded by default, so register it under `server.vfs` before using it in
+`mounts`. The mount `path` must be empty. The module connects to an existing
+pool and POSIX container and does not create them.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `pool` | string | required | Pool label. |
+| `container` | string | required | Container label. |
+| `mount_uuid` | string | required | Container UUID, lowercase canonical form. A null UUID is rejected. |
+| `system` | string/null | null | DAOS system name. `null` or omitted selects the default. |
+| `read_only` | bool | `false` | Open the container read-only. |
+| `registry_max_entries` | int | `65536` | Process-local object table limit. Must be greater than 0. |
+| `open_max_handles` | int | `65536` | Open handle limit. Must be greater than 0. |
+| `oclass` | int | `0` | Object class id passed to `dfs_open` for a new object. A nonzero value must name a known class and be at most 65535. |
+| `chunk_size` | int | `1048576` | Chunk size in bytes for a new regular file. Must be greater than 0. |
+| `readdir_batch_entries` | int | `64` | Directory scan batch size, from 1 to 4096. |
+
 The `nfs` module takes no `config` object; it is configured through mount
 `options` instead.
 
