@@ -1537,6 +1537,10 @@ mbt_env_open_opts(
  * and because the dir is left in place on teardown (only unmounted) its inode
  * is never reused mid-run, so cached FHs likewise cannot collide across
  * traces.  The whole session_dir is reaped at process exit. */
+static inline void mbt_daos_normalize_root(
+    struct mbt_env *env,
+    const char     *path);
+
 static inline void
 mbt_env_fs_setup_as(
     struct mbt_env *env,
@@ -1646,6 +1650,9 @@ mbt_env_fs_setup_as(
             fprintf(stderr, "pnfs proxy: failed to export %s\n", path);
             exit(1);
         }
+    }
+    if (strcmp(env->module, "daos") == 0) {
+        mbt_daos_normalize_root(env, path);
     }
 } /* mbt_env_fs_setup_as */
 
@@ -2379,6 +2386,56 @@ mbt_setattr(
     mbt_call_wait(env);
     return &env->res;
 } /* mbt_setattr */
+
+/* A DAOS trace reuses one container. Clearing its children does not put the
+ * export root back to the model's fsInit(0777, 0, 0). Do that here, after the
+ * export exists and before replay, so the next trace does not inherit the
+ * previous trace's mode or owner. */
+static inline void
+mbt_daos_normalize_root(
+    struct mbt_env *env,
+    const char     *path)
+{
+    uint32_t            saved_uid = env->cred.authsys.uid;
+    uint32_t            saved_gid = env->cred.authsys.gid;
+    struct mbt_fh       fh;
+    struct mbt_result  *res;
+    struct SETATTR3args args;
+
+    mbt_cred_set_uid(env, 0);
+    res = mbt_mnt(env, path);
+    if (res->rpc_err != 0 || res->status != MNT3_OK || !res->obj_fh.has) {
+        fprintf(stderr, "DAOS root mount %s failed: rpc_err=%d status=%u\n",
+                path, res->rpc_err, res->status);
+        exit(1);
+    }
+    fh = res->obj_fh;
+
+    mbt_call_begin(env);
+    args.object.data.data = (void *) fh.data;
+    args.object.data.len  = fh.len;
+    mbt_sattr3_default(&args.new_attributes);
+    args.new_attributes.mode.set_it = 1;
+    args.new_attributes.mode.mode   = 0777;
+    args.new_attributes.uid.set_it  = 1;
+    args.new_attributes.uid.uid     = 0;
+    args.new_attributes.gid.set_it  = 1;
+    args.new_attributes.gid.gid     = 0;
+    args.guard.check                = 0;
+    env->nfs_v3.send_call_NFSPROC3_SETATTR(&env->nfs_v3.rpc2, env->evpl,
+                                           env->nfs_conn, &env->cred, &args,
+                                           0, 0, NULL, 0, 0,
+                                           mbt_setattr_cb, env);
+    mbt_call_wait(env);
+    if (env->res.rpc_err != 0 || env->res.status != NFS3_OK) {
+        fprintf(stderr,
+                "DAOS root normalize %s failed: rpc_err=%d status=%u\n",
+                path, env->res.rpc_err, env->res.status);
+        exit(1);
+    }
+    env->cred.authsys.uid = saved_uid;
+    env->cred.authsys.gid = saved_gid;
+} /* mbt_daos_normalize_root */
 
 /* ---- ACCESS -------------------------------------------------------------- */
 
