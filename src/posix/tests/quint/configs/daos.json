@@ -1,7 +1,7 @@
 {
   "extends": "posix_base.json",
   "features": {
-    "copyRange": "unsupported",
+    "copyRange": "supported",
     "cloneRange": "unsupported",
     "seekHole": "unsupported"
   },
