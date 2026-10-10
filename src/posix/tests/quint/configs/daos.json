@@ -1,0 +1,10 @@
+{
+  "extends": "./posix_base.json",
+  "description": "DAOS POSIX module: no range copy, no reflink, no sparse seek. The schema has no flag for hard links, layouts, streams or offloads.",
+  "traceStem": "posixDaos",
+  "features": {
+    "copyRange": "unsupported",
+    "cloneRange": "unsupported",
+    "seekHole": "unsupported"
+  }
+}
