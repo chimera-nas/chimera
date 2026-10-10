@@ -96,7 +96,7 @@ endmacro()
 # Generate tests for each backend
 generate_backend_tests(memfs "")
 generate_backend_tests(diskfs_io_uring IO_URING_ENABLED)
-if(HAVE_LIBAIO)
+if(HAVE_LIBAIO_USABLE)
     generate_backend_tests(diskfs_aio "")
 endif()
 generate_backend_tests(cairn CAIRN_ENABLED)
