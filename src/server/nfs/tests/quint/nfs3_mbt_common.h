@@ -992,6 +992,55 @@ mbt_env_seconds(
     *out = (int) n;
     return 1;
 } /* mbt_env_seconds */
+/* The module connects to an existing container. It does not create one, and
+ * its mount path must be empty. reset drops the previous trace's namespace
+ * on the next mount. */
+static inline int
+daos_module_config(
+    char  *buf,
+    size_t len)
+{
+    const char *pool      = getenv("CHIMERA_DAOS_POOL");
+    const char *container = getenv("CHIMERA_DAOS_CONTAINER");
+    const char *uuid      = getenv("CHIMERA_DAOS_UUID");
+    const char *system    = getenv("CHIMERA_DAOS_SYSTEM");
+    const char *fields[4];
+    int         n;
+
+    if (!pool || !pool[0] || !container || !container[0] ||
+        !uuid || strlen(uuid) != 36) {
+        fprintf(stderr,
+                "SKIP: DAOS replay needs CHIMERA_DAOS_POOL, "
+                "CHIMERA_DAOS_CONTAINER, and CHIMERA_DAOS_UUID\n");
+        exit(77);
+    }
+    fields[0] = pool;
+    fields[1] = container;
+    fields[2] = uuid;
+    fields[3] = system ? system : "";
+    for (int i = 0; i < 4; i++) {
+        if (strpbrk(fields[i], "\\\"\n")) {
+            fprintf(stderr, "DAOS setting contains an unsafe character\n");
+            return 1;
+        }
+    }
+    if (system && system[0]) {
+        n = snprintf(buf, len,
+                     "{\"pool\":\"%s\",\"container\":\"%s\","
+                     "\"mount_uuid\":\"%s\",\"system\":\"%s\",\"reset\":true}",
+                     pool, container, uuid, system);
+    } else {
+        n = snprintf(buf, len,
+                     "{\"pool\":\"%s\",\"container\":\"%s\","
+                     "\"mount_uuid\":\"%s\",\"reset\":true}",
+                     pool, container, uuid);
+    }
+    if (n < 0 || (size_t) n >= len) {
+        fprintf(stderr, "DAOS config does not fit\n");
+        return 1;
+    }
+    return 0;
+} /* daos_module_config */
 
 static inline void
 mbt_env_open_opts(
@@ -1242,6 +1291,15 @@ mbt_env_open_opts(
         }
         snprintf(cfg, sizeof(cfg), "{\"initialize\":true,\"path\":\"%s\"}", dir);
         chimera_server_config_add_module(config, "cairn", NULL, cfg);
+    } else if (strcmp(env->module, "daos") == 0) {
+        char cfg[512];
+
+        if (daos_module_config(cfg, sizeof(cfg)) != 0) {
+            exit(1);
+        }
+        chimera_server_config_add_module(config, "daos", NULL, cfg);
+        chimera_server_config_set_sync_delegation(config, 1);
+        chimera_server_config_set_sync_delegation_threads(config, 4);
     } else if (opts && opts->memfs_config) {
         chimera_server_config_add_module(config, "memfs", NULL,
                                          opts->memfs_config);
@@ -1538,6 +1596,14 @@ mbt_env_fs_setup_as(
                     env->module, dir, mrc);
             _exit(1);
         }
+    } else if (strcmp(env->module, "daos") == 0) {
+        int mrc = chimera_server_mount(env->server, path + 1, env->module,
+                                       "", NULL);
+
+        if (mrc != 0) {
+            fprintf(stderr, "mount daos at %s failed: status=%d\n", path, mrc);
+            exit(1);
+        }
     } else {
         if (chimera_server_mkfs(env->server, env->module, fsname, NULL) != 0) {
             fprintf(stderr, "failed to create %s filesystem %s\n", env->module,
@@ -1697,7 +1763,8 @@ mbt_env_fs_teardown_as(
      * mid-run, see mbt_env_fs_setup) and is reaped with the session_dir.
      * Unlike a leaked named fs, an unmounted host dir is inert -- the VFS does
      * not walk it -- so there is no quadratic cost. */
-    if (mbt_module_is_passthrough(env->module)) {
+    if (mbt_module_is_passthrough(env->module) ||
+        strcmp(env->module, "daos") == 0) {
         return;
     }
 

@@ -1274,6 +1274,53 @@ rename_at(
 } /* rename_at */
 
 static int
+empty_children(
+    struct vfs_daos_state *s,
+    dfs_obj_t             *dir)
+{
+    daos_anchor_t anchor;
+    int           rc = 0;
+
+    memset(&anchor, 0, sizeof(anchor));
+    for (;;) {
+        struct dirent entry;
+        dfs_obj_t    *child = NULL;
+        mode_t        mode  = 0;
+        uint32_t      nr    = 1;
+
+        if (daos_anchor_is_eof(&anchor)) {
+            break;
+        }
+        memset(&entry, 0, sizeof(entry));
+        rc = dfs_readdir(s->dfs, dir, &anchor, &nr, &entry);
+        if (rc || nr == 0) {
+            break;
+        }
+        if (!strcmp(entry.d_name, ".") || !strcmp(entry.d_name, "..")) {
+            continue;
+        }
+        rc = dfs_lookup_rel(s->dfs, dir, entry.d_name, O_RDONLY | O_NOFOLLOW,
+                            &child, &mode, NULL);
+        if (rc) {
+            return rc;
+        }
+        if (S_ISDIR(mode)) {
+            rc = empty_children(s, child);
+        }
+        dfs_release(child);
+        if (rc) {
+            return rc;
+        }
+        rc = dfs_remove(s->dfs, dir, entry.d_name, false, NULL);
+        if (rc) {
+            return rc;
+        }
+        memset(&anchor, 0, sizeof(anchor));
+    }
+    return rc;
+} /* empty_children */
+
+static int
 mount_fs(
     struct vfs_daos_state      *s,
     struct chimera_vfs_request *r)
@@ -1301,6 +1348,9 @@ mount_fs(
     }
     if (!rc) {
         rc = vfs_daos_lookup_root(s, &s->root);
+    }
+    if (!rc && s->config.reset) {
+        rc = empty_children(s, s->root);
     }
     if (!rc) {
         struct stat st;

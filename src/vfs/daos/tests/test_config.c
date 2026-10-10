@@ -44,14 +44,19 @@ main(void)
         ",\"identity_max_entries\":0",     ",\"registry_max_entries\":1.5",
         ",\"open_max_handles\":\"4\"",     ",\"identity_max_entries\":null",
         ",\"fh_profile\":\"nfs3_signed\"", ",\"fh_profile\":\"vfs64\"",
-        ",\"fh_profile\":null",            ",\"unknown\":4"
+        ",\"fh_profile\":null",            ",\"unknown\":4",
+        ",\"reset\":1",                    ",\"reset\":\"yes\""
     };
 
     CHECK(parse("", &c) == 0);
+    CHECK(!c.reset);
     CHECK(c.registry_max_entries == 65536 && c.open_max_handles == 65536);
     vfs_daos_config_free(&c);
     CHECK(parse(",\"registry_max_entries\":1,\"open_max_handles\":2", &c) == 0);
     CHECK(c.registry_max_entries == 1 && c.open_max_handles == 2);
+    vfs_daos_config_free(&c);
+    CHECK(parse(",\"reset\":true", &c) == 0);
+    CHECK(c.reset);
     vfs_daos_config_free(&c);
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         CHECK(parse(bad[i], &c) == EINVAL);

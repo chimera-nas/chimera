@@ -1134,6 +1134,14 @@ handle(json_t *req)
                             new_dir, rc);
                     return res_int(-1, chimera_posix_errno_from_status(rc));
                 }
+            } else if (strcmp(g_module, "daos") == 0) {
+                rc = chimera_server_mount(g_server, "share", g_module, "", NULL);
+                if (rc != 0) {
+                    fprintf(stderr,
+                            "posix_driver: newfs daos share mount failed: %d\n",
+                            rc);
+                    return res_int(-1, chimera_posix_errno_from_status(rc));
+                }
             } else {
                 tries = 0;
                 while ((rc = chimera_server_rmfs(g_server, g_module,
@@ -1245,6 +1253,19 @@ handle(json_t *req)
             }
             return res_int(0, 0);
         }
+        if (strcmp(g_module, "daos") == 0) {
+            if (chimera_posix_mount(POSIX_DRIVER_MOUNT, g_module, "") != 0) {
+                fprintf(stderr, "posix_driver: newfs daos mount failed: %s\n",
+                        strerror(errno));
+                return res_int(-1, errno);
+            }
+            if (normalize_root() != 0) {
+                fprintf(stderr, "posix_driver: newfs normalize failed: %s\n",
+                        strerror(errno));
+                return res_int(-1, errno);
+            }
+            return res_int(0, 0);
+        }
         /* Remove the old filesystem rather than leaking it.  The replayer has
          * dropped every handle and the unmount drained them, so rmfs succeeds
          * once the async sweep releases the last reference (bounded-retry that
@@ -1306,6 +1327,57 @@ posix_env_setup_unwind(
     chimera_posix_shutdown();
     prometheus_metrics_destroy(metrics);
 } /* posix_env_setup_unwind */
+
+/* The module connects to an existing container. It does not create one, and
+ * its mount path must be empty. reset drops the previous trace's namespace
+ * on the next mount. */
+static int
+daos_module_config(
+    char  *buf,
+    size_t len)
+{
+    const char *pool      = getenv("CHIMERA_DAOS_POOL");
+    const char *container = getenv("CHIMERA_DAOS_CONTAINER");
+    const char *uuid      = getenv("CHIMERA_DAOS_UUID");
+    const char *system    = getenv("CHIMERA_DAOS_SYSTEM");
+    const char *fields[4];
+    int         n;
+
+    if (!pool || !pool[0] || !container || !container[0] ||
+        !uuid || strlen(uuid) != 36) {
+        fprintf(stderr,
+                "SKIP: DAOS replay needs CHIMERA_DAOS_POOL, "
+                "CHIMERA_DAOS_CONTAINER, and CHIMERA_DAOS_UUID\n");
+        exit(77);
+    }
+    fields[0] = pool;
+    fields[1] = container;
+    fields[2] = uuid;
+    fields[3] = system ? system : "";
+    for (int i = 0; i < 4; i++) {
+        if (strpbrk(fields[i], "\\\"\n")) {
+            fprintf(stderr,
+                    "posix_driver: DAOS setting contains an unsafe character\n");
+            return 1;
+        }
+    }
+    if (system && system[0]) {
+        n = snprintf(buf, len,
+                     "{\"pool\":\"%s\",\"container\":\"%s\","
+                     "\"mount_uuid\":\"%s\",\"system\":\"%s\",\"reset\":true}",
+                     pool, container, uuid, system);
+    } else {
+        n = snprintf(buf, len,
+                     "{\"pool\":\"%s\",\"container\":\"%s\","
+                     "\"mount_uuid\":\"%s\",\"reset\":true}",
+                     pool, container, uuid);
+    }
+    if (n < 0 || (size_t) n >= len) {
+        fprintf(stderr, "posix_driver: DAOS config does not fit\n");
+        return 1;
+    }
+    return 0;
+} /* daos_module_config */
 
 /* Bring up the chimera POSIX client (plus an in-process loopback NFS server
  * for the nfs3_/nfs4_ backends), create and mount fs0, and normalize the root
@@ -1415,6 +1487,10 @@ posix_env_setup(
         }
         snprintf(module_cfg, sizeof(module_cfg),
                  "{\"initialize\":true,\"path\":\"%s\"}", storage);
+    } else if (strcmp(module, "daos") == 0) {
+        if (daos_module_config(module_cfg, sizeof(module_cfg)) != 0) {
+            return 1;
+        }
     } else if (posix_module_is_passthrough(module)) {
         /* Passthrough backing store.  The host filesystem must support
          * name_to_handle_at (the linux/io_uring modules derive their file
@@ -1513,6 +1589,10 @@ posix_env_setup(
             chimera_server_config_add_module(server_config, module, NULL,
                                              module_cfg);
         }
+        if (strcmp(module, "daos") == 0) {
+            chimera_server_config_set_sync_delegation(server_config, 1);
+            chimera_server_config_set_sync_delegation_threads(server_config, 4);
+        }
 
         server = chimera_server_init(server_config, metrics);
         if (!server) {
@@ -1545,6 +1625,14 @@ posix_env_setup(
             if (mrc != 0) {
                 fprintf(stderr, "posix_driver: share mount %s failed: %d\n",
                         dir, mrc);
+                return 1;
+            }
+        } else if (strcmp(module, "daos") == 0) {
+            int mrc = chimera_server_mount(server, "share", module, "", NULL);
+
+            if (mrc != 0) {
+                fprintf(stderr, "posix_driver: daos share mount failed: %d\n",
+                        mrc);
                 return 1;
             }
         } else {
@@ -1658,6 +1746,12 @@ posix_env_setup(
                 }
                 fprintf(stderr, "posix_driver: %s mount failed: %s\n",
                         backend, strerror(errno));
+                return 1;
+            }
+        } else if (strcmp(module, "daos") == 0) {
+            if (chimera_posix_mount(POSIX_DRIVER_MOUNT, module, "") != 0) {
+                fprintf(stderr, "posix_driver: daos mount failed: %s\n",
+                        strerror(errno));
                 return 1;
             }
         } else {

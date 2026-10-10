@@ -85,6 +85,11 @@ vfs_daos_config_parse(
                 goto out;
             }
             c->read_only = json_is_true(value);
+        } else if (!strcmp(key, "reset")) {
+            if (!json_is_boolean(value)) {
+                goto out;
+            }
+            c->reset = json_is_true(value);
         } else {
             if (!json_is_integer(value) || n < 0) {
                 goto out;

@@ -47,6 +47,7 @@ struct vfs_daos_config {
     char            *system;
     uint8_t          uuid[16];
     bool             read_only;
+    bool             reset;
     size_t           registry_max_entries;
     size_t           open_max_handles;
     daos_oclass_id_t oclass;

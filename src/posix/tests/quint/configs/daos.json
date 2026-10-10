@@ -1,10 +1,25 @@
 {
-  "extends": "./posix_base.json",
-  "description": "DAOS POSIX module: no range copy, no reflink, no sparse seek. The schema has no flag for hard links, layouts, streams or offloads.",
-  "traceStem": "posixDaos",
+  "extends": "posix_base.json",
   "features": {
     "copyRange": "unsupported",
     "cloneRange": "unsupported",
     "seekHole": "unsupported"
-  }
+  },
+  "traceStem": "posixDaos",
+  "batches": [
+    { "flavor": "step",            "steps": 128, "traces": 10, "seed": "0x1" },
+    { "flavor": "step",            "steps": 128, "traces": 6,  "seed": "0x2" },
+    { "flavor": "step",            "steps": 256, "traces": 3,  "seed": "0x100" },
+    { "flavor": "step",            "steps": 512, "traces": 2,  "seed": "0x5" },
+    { "flavor": "stepNamespace",   "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepNamespace",   "steps": 256, "traces": 2,  "seed": "0x9" },
+    { "flavor": "stepDescriptors", "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepMetadata",    "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepDirs",        "steps": 128, "traces": 3,  "seed": "0x1" },
+    { "flavor": "stepData",        "steps": 128, "traces": 4,  "seed": "0x1" },
+    { "flavor": "stepLocks",       "steps": 128, "traces": 6,  "seed": "0x1" },
+    { "flavor": "stepPerms",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepLinks",       "steps": 128, "traces": 5,  "seed": "0x1" },
+    { "flavor": "stepFds",         "steps": 128, "traces": 5,  "seed": "0x1" }
+  ]
 }

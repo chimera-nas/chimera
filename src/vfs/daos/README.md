@@ -25,19 +25,21 @@ Module configuration:
   "open_max_handles": 65536,
   "oclass": 0,
   "chunk_size": 1048576,
-  "readdir_batch_entries": 64
+  "readdir_batch_entries": 64,
+  "reset": false
 }
 ```
 
-`mount_uuid` must be the container UUID. The module mount path must be empty;
-the Chimera namespace mount path is independent. Initialization calls
-`dfs_init`. MOUNT connects without creating a pool or container. A second
-live mount returns EBUSY. Configure a positive sync delegation thread count
-before offering the share. One gateway process must be the only namespace
-and metadata writer for the container.
+`reset` removes the container root's children on each mount. Leave it unset
+for a production mount. `mount_uuid` must be the container UUID. The module
+mount path must be empty; the Chimera namespace mount path is independent.
+Initialization calls `dfs_init`. MOUNT connects without creating a pool or
+container. A second live mount returns EBUSY. Configure a positive sync
+delegation thread count before offering the share. One gateway process must
+be the only namespace and metadata writer for the container.
 
-Capabilities are FS, FS_RELATIVE_OP, BLOCKING, CREATE_GID_ENGINE,
-DELEGATES_DAC and XATTR. File handles are 33 bytes. Published objects
+Capabilities are FS, FS_RELATIVE_OP, CREATE_GID_ENGINE, DELEGATES_DAC and
+XATTR. Every opcode is blocking. File handles are 33 bytes. Published objects
 remain in the process-local table; a full table returns EMFILE. Removed
 or cold child handles return ESTALE without a namespace scan. No restart
 recovery of child handles is provided. Directory scans retain every
