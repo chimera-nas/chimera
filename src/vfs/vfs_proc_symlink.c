@@ -159,7 +159,12 @@ chimera_vfs_symlink(
     request->symlink.callback     = callback;
     request->symlink.private_data = private_data;
 
-    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
+    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len) &&
+        !memchr(request->symlink.path, '/', request->symlink.pathlen)) {
+        /* Fast path only for a single-component name: a multi-component name must
+         * have its parent resolved (and any mid-path symlink followed) in the
+         * core, so it falls through to the parent-resolving fallback below --
+         * symmetric with mkdir (vfs_proc_mkdir.c). */
         request->symlink.name_offset = 0;
 
         memcpy(request->symlink.parent_fh, fh, fhlen);

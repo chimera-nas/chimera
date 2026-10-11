@@ -317,6 +317,63 @@ probe_working_surface(void)
     probe_eq("size reflects the truncate", probe_field(res, "size"), 2);
     json_decref(res);
 
+    /* Symlink and mknod at DEPTH (Phase 1b guard+fallback): a multi-component
+     * create path must have its parent resolved in the core, not resolved
+     * lexically by the backend.  The single-component /sym and /w/fifo rows
+     * (probe_pin_symlink / probe_pin_parent_handle_ops) never hit the guarded
+     * multi-component arm; these do.  Cleaned up before the rmdir of /w/sub.
+     *
+     * The symlink-at-depth sub-block is skipped under --leases: deleting a
+     * symlink (reparse) leaf at depth while a directory lease is held is a
+     * pre-existing project/main bug (it returns an unmapped protocol status),
+     * not something this change introduced -- tracked by task
+     * smb-reparse-leaf-delete-under-directory-lease.  The guard+fallback
+     * coverage it provides still runs in the 21 non-lease configs.  mknod at
+     * depth (a non-reparse delete) runs in every config. */
+    if (!g_smb_leases) {
+        res = probe_req("symlink");
+        probe_set_str(res, "path", "/w/sub/s");
+        probe_set_str(res, "target", "f");
+        probe_ok("symlink at depth", probe_call(res));
+        res = op_stat("/w/sub/s", 0);            /* lstat: the link itself */
+        {
+            const char *lt = json_string_value(json_object_get(res, "ftype"));
+
+            if (probe_ret(res) < 0 || !lt || strcmp(lt, "lnk") != 0) {
+                probe_fail("symlink at depth lstat", "expected an lnk at depth");
+            }
+        }
+        json_decref(res);
+        res = probe_req("readlink");
+        probe_set_str(res, "path", "/w/sub/s");
+        res = probe_call(res);
+        {
+            const char *lt = json_string_value(json_object_get(res, "target"));
+
+            if (probe_ret(res) < 0 || !lt || strcmp(lt, "f") != 0) {
+                probe_fail("readlink at depth", "did not return the target 'f'");
+            }
+        }
+        json_decref(res);
+        probe_ok("unlink symlink at depth", op_path("unlink", "/w/sub/s"));
+    }
+
+    res = probe_req("mknod");
+    probe_set_str(res, "path", "/w/sub/p");
+    probe_set_int(res, "mode", 0644);
+    probe_set_str(res, "ftype", "fifo");
+    probe_ok("mknod at depth", probe_call(res));
+    res = op_stat("/w/sub/p", 1);                /* it exists as a fifo */
+    {
+        const char *pt = json_string_value(json_object_get(res, "ftype"));
+
+        if (probe_ret(res) < 0 || !pt || strcmp(pt, "fifo") != 0) {
+            probe_fail("mknod at depth stat", "expected a fifo at depth");
+        }
+    }
+    json_decref(res);
+    probe_ok("unlink mknod at depth", op_path("unlink", "/w/sub/p"));
+
     /* Rename and remove, both at depth. */
     probe_ok("rename", op_two_path("rename", "/w/sub/f", "/w/sub/g"));
     probe_ok("stat the renamed file", op_stat("/w/sub/g", 1));
