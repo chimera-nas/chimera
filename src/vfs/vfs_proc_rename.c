@@ -260,8 +260,13 @@ chimera_vfs_rename(
     request->rename.callback     = callback;
     request->rename.private_data = private_data;
 
-    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
-        /* Fast path: pass full paths directly, kernel resolves */
+    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len) &&
+        !memchr(request->rename.path, '/', request->rename.pathlen) &&
+        !memchr(request->rename.new_path, '/', request->rename.new_pathlen)) {
+        /* Fast path only when BOTH names are single-component: a multi-component
+         * side (either parent) must be resolved (and any mid-path symlink
+         * followed) in the core, so it falls through to the parent-resolving
+         * fallback below -- symmetric with mkdir (vfs_proc_mkdir.c). */
         request->rename.name_offset     = 0;
         request->rename.new_name_offset = 0;
 
@@ -335,7 +340,13 @@ chimera_vfs_rename(
 
             if (new_rebase >= 0 && new_rebase < request->rename.new_pathlen &&
                 old_root_fh_len == new_root_fh_len &&
-                memcmp(old_root_fh, new_root_fh, old_root_fh_len) == 0) {
+                memcmp(old_root_fh, new_root_fh, old_root_fh_len) == 0 &&
+                !memchr(request->rename.path + old_rebase, '/',
+                        request->rename.pathlen - old_rebase) &&
+                !memchr(request->rename.new_path + new_rebase, '/',
+                        request->rename.new_pathlen - new_rebase)) {
+                /* Both in-mount remainders single-component; a multi-component
+                 * side falls through to the parent-resolving fallback. */
 
                 request->rename.name_offset     = old_rebase;
                 request->rename.new_name_offset = new_rebase;

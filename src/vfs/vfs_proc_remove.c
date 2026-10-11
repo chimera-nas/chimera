@@ -235,31 +235,41 @@ chimera_vfs_remove(
     request->remove.private_data = private_data;
 
     if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
-        request->remove.name_offset = 0;
+        /* Fast path only for a single-component name: a multi-component name must
+         * have its parent resolved (and any mid-path symlink followed) in the
+         * core, so it falls through to the parent-resolving fallback below --
+         * symmetric with mkdir (vfs_proc_mkdir.c). */
+        if (!memchr(request->remove.path, '/', request->remove.pathlen)) {
+            request->remove.name_offset = 0;
 
-        memcpy(request->remove.parent_fh, fh, fhlen);
-        request->remove.parent_fh_len = fhlen;
+            memcpy(request->remove.parent_fh, fh, fhlen);
+            request->remove.parent_fh_len = fhlen;
 
-        chimera_vfs_open_fh(
-            thread,
-            cred,
-            request->remove.parent_fh,
-            request->remove.parent_fh_len,
-            CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
-            chimera_vfs_remove_parent_open_complete,
-            request);
-        return;
+            chimera_vfs_open_fh(
+                thread,
+                cred,
+                request->remove.parent_fh,
+                request->remove.parent_fh_len,
+                CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
+                chimera_vfs_remove_parent_open_complete,
+                request);
+            return;
+        }
     }
 
     /* Deep path crossing into a path-only mount: rebase onto the mount root and
-     * dispatch remove_at with the whole in-mount sub-path as the name. */
+     * dispatch remove_at with the in-mount sub-path as the name -- again only
+     * when that sub-path is a single component; a multi-component remainder falls
+     * through to the parent-resolving fallback. */
     {
         int rebase = chimera_vfs_pathonly_rebase(thread, request->fh, request->fh_len, request->remove.path,
                                                  request->remove.pathlen,
                                                  request->remove.parent_fh,
                                                  &request->remove.parent_fh_len);
 
-        if (rebase >= 0 && rebase < request->remove.pathlen) {
+        if (rebase >= 0 && rebase < request->remove.pathlen &&
+            !memchr(request->remove.path + rebase, '/',
+                    request->remove.pathlen - rebase)) {
             request->remove.name_offset = rebase;
 
             chimera_vfs_open_fh(
