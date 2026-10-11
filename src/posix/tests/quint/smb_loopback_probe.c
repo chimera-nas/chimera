@@ -329,6 +329,47 @@ probe_working_surface(void)
     probe_err("rmdir of a missing name", op_path("rmdir", "/w/sub"));
     probe_err("stat of a missing name", op_stat("/w/missing", 1));
 
+    /* Cross-directory rename (Phase 1b): source parent != destination parent.
+     * This is the one shape the same-parent row above cannot test -- a dest join
+     * keyed on the SOURCE fh would create /a/g and leave /b/g absent.  A fresh
+     * /a,/b sibling tree so it does not depend on /w/sub (rmdir'd above). */
+    probe_ok("mkdir /a", op_mkdir("/a", 0755));
+    probe_ok("mkdir /b", op_mkdir("/b", 0755));
+
+    res = op_open("/a/f", O_CREAT | O_RDWR, 0644);
+    probe_ok("open /a/f O_CREAT", json_incref(res));
+    fd = probe_ret(res);
+    json_decref(res);
+    if (fd >= 0) {
+        json_t *w = probe_req("write");
+
+        probe_set_int(w, "fd", (int) fd);
+        probe_set_str(w, "data", "aGVsbG8=");     /* "hello", 5 bytes */
+        res = probe_call(w);
+        probe_eq("cross-dir write returns the byte count", probe_ret(res), 5);
+        json_decref(res);
+        probe_ok("close /a/f", op_fd("close", (int) fd));
+    }
+
+    probe_ok("rename /a/f -> /b/g", op_two_path("rename", "/a/f", "/b/g"));
+
+    /* The object moved to /b/g and carries the payload (same object, new name). */
+    res = op_stat("/b/g", 1);
+    probe_ok("stat /b/g", json_incref(res));
+    probe_eq("/b/g size reflects the write", probe_field(res, "size"), 5);
+    json_decref(res);
+
+    /* The old name is gone. */
+    probe_err("stat /a/f (old name gone)", op_stat("/a/f", 1));
+
+    /* DECISIVE: /a/g must NOT exist.  A source-keyed dest join would have joined
+     * the dest leaf "g" onto the SOURCE parent "a" and created /a/g. */
+    probe_err("stat /a/g (dest not keyed on source fh)", op_stat("/a/g", 1));
+
+    probe_ok("unlink /b/g", op_path("unlink", "/b/g"));
+    probe_ok("rmdir /b", op_path("rmdir", "/b"));
+    probe_ok("rmdir /a", op_path("rmdir", "/a"));
+
     probe_ok("statvfs", op_path("statvfs", "/"));
 } /* probe_working_surface */
 
