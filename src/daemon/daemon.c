@@ -134,8 +134,17 @@ generate_self_signed_cert(
     /* Set public key */
     X509_set_pubkey(x509, pkey);
 
-    /* Set subject name */
-    name = X509_get_subject_name(x509);
+    /*
+     * Build the subject name separately: OpenSSL 4 returns the certificate's
+     * own subject as const.  X509_set_subject_name() and
+     * X509_set_issuer_name() each store a copy.
+     */
+    name = X509_NAME_new();
+    if (!name) {
+        chimera_server_error("Failed to create X509_NAME");
+        goto cleanup;
+    }
+
     X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC,
                                (unsigned char *) "US", -1, -1, 0);
     X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC,
@@ -144,7 +153,11 @@ generate_self_signed_cert(
                                (unsigned char *) "localhost", -1, -1, 0);
 
     /* Self-signed: issuer = subject */
-    X509_set_issuer_name(x509, name);
+    if (!X509_set_subject_name(x509, name) ||
+        !X509_set_issuer_name(x509, name)) {
+        chimera_server_error("Failed to set certificate subject/issuer");
+        goto cleanup;
+    }
 
     /* Sign the certificate */
     if (!X509_sign(x509, pkey, EVP_sha256())) {
@@ -207,6 +220,9 @@ generate_self_signed_cert(
  cleanup:
     if (fp) {
         fclose(fp);
+    }
+    if (name) {
+        X509_NAME_free(name);
     }
     if (x509) {
         X509_free(x509);
