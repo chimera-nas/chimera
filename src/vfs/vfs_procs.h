@@ -948,6 +948,20 @@ chimera_vfs_put_key(
     chimera_vfs_put_key_callback_t callback,
     void                          *private_data);
 
+/* Atomic set-if-absent: completes with CHIMERA_VFS_EEXIST when the key already
+ * exists, and OK only when this call created it.  A backend retry may report
+ * EEXIST for this caller's own write, so a caller that needs the stored value
+ * reads it back. */
+void
+chimera_vfs_put_key_if_absent(
+    struct chimera_vfs_thread     *thread,
+    const void                    *key,
+    uint32_t                       key_len,
+    const void                    *value,
+    uint32_t                       value_len,
+    chimera_vfs_put_key_callback_t callback,
+    void                          *private_data);
+
 /* fh-routed put: store a key/value associated with the backend serving `fh`
  * (used to persist handle-state for backends without native KV; see
  * chimera_vfs_kv_route_fh). */

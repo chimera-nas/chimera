@@ -140,6 +140,15 @@ ops whose dispatch blocks, and the `CHIMERA_VFS_OP_BIT()` /
 a module that set it sets `.blocking_ops = CHIMERA_VFS_BLOCKING_ALL`
 instead.  The module struct layout changes, so modules built against
 earlier SDK versions must be rebuilt.
+Version 5 adds `put_key.flags` to the request and the
+`CHIMERA_VFS_PUT_KEY_IF_ABSENT` flag: a KV module must store the value
+only if the key is absent, atomically, and otherwise complete with
+`CHIMERA_VFS_EEXIST` leaving the stored value untouched.  Callers treat
+`CHIMERA_VFS_OK` as an exclusive win (the NFS server mints its fleet-wide
+file-handle signing key this way), so a module that ignored the flag would
+let racing callers each overwrite the key and each report success.
+Registration refuses a module built against any other SDK version, so
+all modules must be rebuilt; KV modules must also implement the flag.
 
 The `struct chimera_vfs_request` layout is exposed in full and is
 therefore ABI-stable only within an SDK version.  A public-head /

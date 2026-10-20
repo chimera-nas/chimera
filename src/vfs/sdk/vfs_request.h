@@ -439,6 +439,11 @@ typedef void (*chimera_vfs_put_key_callback_t)(
     enum chimera_vfs_error error_code,
     void                  *private_data);
 
+/* put_key flag: store only if the key is absent; otherwise complete with
+ * CHIMERA_VFS_EEXIST and leave the stored value untouched.  Every KV backend
+ * must honour it atomically: callers treat OK as an exclusive win. */
+#define CHIMERA_VFS_PUT_KEY_IF_ABSENT 0x00000001U
+
 typedef void (*chimera_vfs_get_key_callback_t)(
     enum chimera_vfs_error error_code,
     const void            *value,
@@ -1201,6 +1206,7 @@ struct chimera_vfs_request {
             uint32_t    key_len;
             const void *value;
             uint32_t    value_len;
+            uint32_t    flags;
         } put_key;
 
         struct {
