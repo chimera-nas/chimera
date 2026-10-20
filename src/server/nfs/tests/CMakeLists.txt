@@ -229,6 +229,26 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py")
         ENVIRONMENT "PYTHONUNBUFFERED=1")
 endif()
 
+# End-to-end NFSv4.1 presented-stateid validation: a superseded stateid seqid
+# must be NFS4ERR_OLD_STATEID (not silently honored -- a stale pipelined CLOSE
+# must not destroy live state), and a wrong-epoch stateid must be
+# NFS4ERR_BAD_STATEID, never the 4.0-only NFS4ERR_STALE_STATEID that pins a
+# 4.1+ client in reboot-style lease recovery.  Runs against a real daemon over
+# a minorversion=1 session; needs pynfs's nfs4.1 client and a network
+# namespace to own port 2049.  The wrapper exits 77 (skip) if pynfs is missing
+# at run time.
+if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
+    add_test(NAME chimera/server/nfs/nfs4_41_stateid_checks
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_41_stateid_checks_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs
+                ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_41_stateid_checks.py)
+    set_tests_properties(chimera/server/nfs/nfs4_41_stateid_checks PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180
+        ENVIRONMENT "PYTHONUNBUFFERED=1")
+endif()
+
 # Tag every test registered above with the 'nfs' label so these NFS server unit
 # tests can be run independently via `ctest -L nfs`.
 get_property(_nfs_tests DIRECTORY PROPERTY TESTS)
