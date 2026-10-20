@@ -47,6 +47,7 @@ chimera_nfs4_open_downgrade(
     status = nfs_state_table_acquire(table, &args->open_stateid,
                                      NFS4_SLOT_TYPE_OPEN,
                                      &state_void, &state_type);
+    status = nfs4_stateid_acquire_status(status, req->minorversion);
     if (status != NFS4_OK) {
         res->status = status;
         chimera_nfs4_compound_complete(req, res->status);

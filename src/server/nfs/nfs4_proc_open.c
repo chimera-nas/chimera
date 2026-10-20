@@ -1251,6 +1251,7 @@ chimera_nfs4_open_check_delegate_cur(struct nfs_request *req)
                                      NFS4_SLOT_TYPE_DELEG,
                                      &state_void,
                                      &state_type);
+    status = nfs4_stateid_acquire_status(status, req->minorversion);
 
     if (status != NFS4_OK) {
         return status;

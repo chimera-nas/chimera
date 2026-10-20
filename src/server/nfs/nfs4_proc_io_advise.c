@@ -45,6 +45,7 @@ chimera_nfs4_io_advise(
     if (!nfs4_stateid_is_special(&args->iaa_stateid)) {
         status = nfs_state_table_acquire(table, &args->iaa_stateid, 0,
                                          &state_void, &state_type);
+        status = nfs4_stateid_acquire_status(status, req->minorversion);
         if (status != NFS4_OK) {
             res->ior_status = status;
             chimera_nfs4_compound_complete(req, res->ior_status);

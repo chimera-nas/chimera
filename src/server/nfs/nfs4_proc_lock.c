@@ -476,6 +476,7 @@ chimera_nfs4_lock(
                                          &args->locker.open_owner.open_stateid,
                                          NFS4_SLOT_TYPE_OPEN,
                                          &state_void, &state_type);
+        status = nfs4_stateid_acquire_status(status, req->minorversion);
         if (status != NFS4_OK) {
             res->status = status;
             chimera_nfs4_lock_finish(req, res->status);
@@ -749,6 +750,7 @@ chimera_nfs4_lock(
                                          &args->locker.lock_owner.lock_stateid,
                                          NFS4_SLOT_TYPE_LOCK,
                                          &state_void, &state_type);
+        status = nfs4_stateid_acquire_status(status, req->minorversion);
         if (status != NFS4_OK) {
             res->status = status;
             chimera_nfs4_lock_finish(req, res->status);

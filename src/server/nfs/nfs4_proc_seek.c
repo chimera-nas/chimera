@@ -206,6 +206,7 @@ chimera_nfs4_seek(
 
     status = nfs_state_table_acquire(table, &args->sa_stateid, 0,
                                      &state_void, &state_type);
+    status = nfs4_stateid_acquire_status(status, req->minorversion);
     if (status != NFS4_OK) {
         res->sa_status = status;
         chimera_nfs4_compound_complete(req, res->sa_status);
