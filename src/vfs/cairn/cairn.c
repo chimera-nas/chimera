@@ -5736,6 +5736,12 @@ cairn_rename_at(
                 new_parent_inode->nlink--;
             } else {
                 existing_inode->nlink--;
+                /* Removing one of several hard links changes the surviving inode's
+                 * link count, which is a status change: bump its ctime. */
+                if (existing_inode->nlink > 0) {
+                    existing_inode->ctime = now;
+                    existing_inode->change++;
+                }
             }
 
             if (existing_inode->nlink == 0) {

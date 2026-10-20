@@ -2832,6 +2832,7 @@ diskfs_rename_at_perform_removed_cb(
     struct diskfs_request_private *p              = request->plugin_data;
     struct diskfs_inode           *np             = p->inode_stash[1];
     struct diskfs_inode           *existing_inode = p->inode_stash[3];
+    struct timespec                now;
 
     diskfs_bt_op_free(p->thread, bop);
 
@@ -2843,6 +2844,14 @@ diskfs_rename_at_perform_removed_cb(
             np->nlink--;
         } else {
             existing_inode->nlink--;
+            /* Removing one of several hard links changes the surviving inode's
+             * link count, which is a status change: bump its ctime. */
+            if (existing_inode->nlink > 0) {
+                clock_gettime(CLOCK_REALTIME, &now);
+                existing_inode->ctime_sec  = now.tv_sec;
+                existing_inode->ctime_nsec = now.tv_nsec;
+                existing_inode->change++;
+            }
         }
         if (existing_inode->nlink == 0) {
             diskfs_inode_orphaned(p->thread, p->txn, existing_inode,
