@@ -95,12 +95,15 @@ nfs4_stateid_decode(
 } /* nfs4_stateid_decode */
 
 /*
- * RFC 7530 §9.1.4.2 seqid validation for a (non-special) NFSv4.0 stateid: the
- * presented seqid is compared against the state's current seqid.  A smaller
- * seqid is a stale reference to a superseded stateid (NFS4ERR_OLD_STATEID); a
- * larger one was never issued (NFS4ERR_BAD_STATEID).  A zero seqid means "use
- * the most current" and always matches.  4.1+ does not carry this seqid
- * coupling, so callers gate this on minorversion 0.
+ * Seqid validation for a (non-special) presented stateid: the presented seqid
+ * is compared against the state's current seqid.  A smaller seqid is a stale
+ * reference to a superseded stateid (NFS4ERR_OLD_STATEID); a larger one was
+ * never issued (NFS4ERR_BAD_STATEID).  A zero seqid means "use the most
+ * current" and always matches.  The same rules hold on every minor version
+ * (RFC 7530 §9.1.4.2, RFC 8881 §8.2.2) -- on 4.1+ this check is what makes
+ * pipelining safe: a LOCK, LOCKU or OPEN_DOWNGRADE built against a stateid a
+ * concurrent OPEN has since superseded must be refused with OLD_STATEID, not
+ * acted on.
  */
 static inline nfsstat4
 nfs4_stateid_check_seqid(
