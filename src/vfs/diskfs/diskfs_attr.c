@@ -2177,6 +2177,12 @@ diskfs_put_key(
 
     rb_tree_query_exact(&shard->entries, hash, hash, existing);
 
+    if (existing && (request->put_key.flags & CHIMERA_VFS_PUT_KEY_IF_ABSENT)) {
+        evpl_mutex_unlock(&shard->lock);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EEXIST);
+        return;
+    }
+
     if (existing) {
         slab_allocator_free(thread->allocator, existing->value, existing->value_len);
         existing->value_len = request->put_key.value_len;

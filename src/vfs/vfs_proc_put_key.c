@@ -18,13 +18,14 @@ chimera_vfs_put_key_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_put_key_complete */
 
-SYMBOL_EXPORT void
-chimera_vfs_put_key(
+static void
+chimera_vfs_put_key_flags(
     struct chimera_vfs_thread     *thread,
     const void                    *key,
     uint32_t                       key_len,
     const void                    *value,
     uint32_t                       value_len,
+    uint32_t                       flags,
     chimera_vfs_put_key_callback_t callback,
     void                          *private_data)
 {
@@ -43,11 +44,41 @@ chimera_vfs_put_key(
     request->put_key.key_len    = key_len;
     request->put_key.value      = value;
     request->put_key.value_len  = value_len;
+    request->put_key.flags      = flags;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 
     chimera_vfs_dispatch(request);
+} /* chimera_vfs_put_key_flags */
+
+SYMBOL_EXPORT void
+chimera_vfs_put_key(
+    struct chimera_vfs_thread     *thread,
+    const void                    *key,
+    uint32_t                       key_len,
+    const void                    *value,
+    uint32_t                       value_len,
+    chimera_vfs_put_key_callback_t callback,
+    void                          *private_data)
+{
+    chimera_vfs_put_key_flags(thread, key, key_len, value, value_len, 0,
+                              callback, private_data);
 } /* chimera_vfs_put_key */
+
+SYMBOL_EXPORT void
+chimera_vfs_put_key_if_absent(
+    struct chimera_vfs_thread     *thread,
+    const void                    *key,
+    uint32_t                       key_len,
+    const void                    *value,
+    uint32_t                       value_len,
+    chimera_vfs_put_key_callback_t callback,
+    void                          *private_data)
+{
+    chimera_vfs_put_key_flags(thread, key, key_len, value, value_len,
+                              CHIMERA_VFS_PUT_KEY_IF_ABSENT,
+                              callback, private_data);
+} /* chimera_vfs_put_key_if_absent */
 
 /* Store a key/value associated with the backend that serves `fh`.  If that
  * backend has native KV the record is stored co-located with the file;
@@ -108,6 +139,7 @@ chimera_vfs_put_key_at(
     request->put_key.key_len    = key_off + key_len;
     request->put_key.value      = scratch + key_off + key_len;
     request->put_key.value_len  = value_len;
+    request->put_key.flags      = 0;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 

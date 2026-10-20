@@ -6014,7 +6014,6 @@ cairn_put_key(
     uint8_t                kv_key[1 + CAIRN_KV_KEY_MAX];
     size_t                 kv_key_len;
 
-    (void) shared;
     (void) private_data;
 
     if (request->put_key.key_len > CAIRN_KV_KEY_MAX) {
@@ -6029,6 +6028,28 @@ cairn_put_key(
     memcpy(kv_key + 1, request->put_key.key, request->put_key.key_len);
 
     txn = cairn_get_meta_txn(thread);
+
+    if (request->put_key.flags & CHIMERA_VFS_PUT_KEY_IF_ABSENT) {
+        size_t existing_len;
+        char  *existing;
+
+        /* get_for_update joins the key to the commit conflict set, so a racing
+         * insert forces a replay that then sees the key. */
+        existing = rocksdb_transaction_get_for_update(txn, shared->read_options,
+                                                      (const char *) kv_key, kv_key_len,
+                                                      &existing_len, 1, &err);
+        chimera_cairn_abort_if(err, "Error reading KV for put-if-absent: %s\n", err);
+        if (existing) {
+            rocksdb_free(existing);
+            /* The key may be an uncommitted insert earlier in this batch:
+             * report EEXIST only once it commits (EIO if it fails; replayed on
+             * conflict). */
+            request->status = CHIMERA_VFS_EEXIST;
+            cairn_queue_request(thread, request);
+            return;
+        }
+    }
+
     rocksdb_transaction_put(txn,
                             (const char *) kv_key, kv_key_len,
                             (const char *) request->put_key.value,

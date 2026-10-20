@@ -460,6 +460,44 @@ test_nonexistent_key(struct test_ctx *ctx)
     TEST_PASS("operations on nonexistent key");
 } /* test_nonexistent_key */
 
+/* OK must mean this call created the key: callers (FH keyring mint) treat it
+ * as an exclusive win. */
+static void
+test_put_if_absent(struct test_ctx *ctx)
+{
+    const char *key = "if_absent_key";
+
+    chimera_vfs_put_key_if_absent(ctx->vfs_thread, key, strlen(key), "first", 5,
+                                  put_key_callback, ctx);
+    wait_for_completion(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    chimera_vfs_put_key_if_absent(ctx->vfs_thread, key, strlen(key), "second", 6,
+                                  put_key_callback, ctx);
+    wait_for_completion(ctx);
+    assert(ctx->status == CHIMERA_VFS_EEXIST);
+
+    chimera_vfs_get_key(ctx->vfs_thread, key, strlen(key), get_key_callback, ctx);
+    wait_for_completion(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(ctx->value_len == 5);
+    assert(memcmp(ctx->value, "first", 5) == 0);
+
+    chimera_vfs_delete_key(ctx->vfs_thread, key, strlen(key), delete_key_callback, ctx);
+    wait_for_completion(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    chimera_vfs_put_key_if_absent(ctx->vfs_thread, key, strlen(key), "third", 5,
+                                  put_key_callback, ctx);
+    wait_for_completion(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    chimera_vfs_delete_key(ctx->vfs_thread, key, strlen(key), delete_key_callback, ctx);
+    wait_for_completion(ctx);
+
+    TEST_PASS("put-if-absent does not overwrite an existing key");
+} /* test_put_if_absent */
+
 /* Run the full KV test suite against a single KV-only backend. */
 static void
 run_suite(
@@ -525,6 +563,7 @@ run_suite(
     test_search_keys(&ctx);
     test_binary_keys_values(&ctx);
     test_nonexistent_key(&ctx);
+    test_put_if_absent(&ctx);
 
     if (has_fs) {
         ctx.done = 0;
