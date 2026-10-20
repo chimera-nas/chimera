@@ -257,6 +257,13 @@ chimera_nfs4_read(
     }
     state_handle = nfs_state_io_handle(state_void, state_type, OPEN4_SHARE_ACCESS_READ);
 
+    /* RFC 7530 §9.1.4.2: a superseded or never-issued open/lock stateid seqid
+     * is refused.  Gated on 4.0: RFC 8881 §8.2.2 lets a 4.1+ client send a
+     * zero seqid to mean "the most current", which is the common choice for
+     * READ/WRITE, and does not require it to track every server-side OPEN
+     * upgrade's seqid for I/O it issues through a cached stateid.  The
+     * stateid-modifying ops (LOCK/LOCKU/OPEN_DOWNGRADE) do enforce it
+     * on every minor version. */
     if (req->minorversion == 0) {
         status = nfs4_stateid_check_seqid(current_seqid, args->stateid.seqid);
         if (status != NFS4_OK) {

@@ -501,6 +501,24 @@ chimera_nfs4_lock(
             return;
         }
 
+        /* RFC 8881 §8.2.2: a superseded (old) or never-issued open-stateid
+         * seqid must be refused on 4.1+ as well -- under OPEN/CLOSE pipelining
+         * the open stateid this LOCK cites may have been re-published by a
+         * concurrent OPEN.  The 4.0 path runs the same check below, after its
+         * owner-seqid replay classification. */
+        if (req->minorversion != 0) {
+            status = nfs4_stateid_check_seqid(
+                open_state->seqid,
+                args->locker.open_owner.open_stateid.seqid);
+            if (status != NFS4_OK) {
+                nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                        thread->vfs_thread);
+                res->status = status;
+                chimera_nfs4_lock_finish(req, res->status);
+                return;
+            }
+        }
+
         /* RFC 7530 §9.1.4: the new lock-owner's clientid must be the client
          * that holds the open being locked.  A mismatched (e.g. stale)
          * clientid is a bad stateid. */
@@ -774,6 +792,23 @@ chimera_nfs4_lock(
         handle              = lock_state->handle;
         req->nfs_state_ref  = lock_state;
         req->nfs_state_type = NFS4_SLOT_TYPE_LOCK;
+
+        /* RFC 8881 §8.2.2: a superseded (old) or never-issued lock-stateid
+         * seqid must be refused on 4.1+ as well.  The 4.0 path runs the same
+         * check below, after its owner-seqid replay classification. */
+        if (req->minorversion != 0) {
+            status = nfs4_stateid_check_seqid(
+                lock_state->seqid,
+                args->locker.lock_owner.lock_stateid.seqid);
+            if (status != NFS4_OK) {
+                nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
+                                        thread->vfs_thread);
+                req->nfs_state_ref = NULL;
+                res->status        = status;
+                chimera_nfs4_compound_complete(req, res->status);
+                return;
+            }
+        }
 
         /* RFC 7530 §9.1.7 entry-time seqid classification on the lock_owner. */
         if (req->minorversion == 0) {
