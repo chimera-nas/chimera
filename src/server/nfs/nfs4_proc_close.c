@@ -38,6 +38,7 @@ chimera_nfs4_close(
                                      NFS4_SLOT_TYPE_OPEN,
                                      &state_void,
                                      &state_type);
+    status = nfs4_stateid_acquire_status(status, req->minorversion);
 
     if (status != NFS4_OK) {
         struct nfs4_replay_cache replay;

@@ -228,6 +228,7 @@ chimera_nfs4_write(
 
     status = nfs_state_table_acquire(table, &args->stateid, 0,
                                      &state_void, &state_type);
+    status = nfs4_stateid_acquire_status(status, req->minorversion);
     if (status != NFS4_OK) {
         res->status = status;
         evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);

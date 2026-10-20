@@ -151,6 +151,7 @@ chimera_nfs4_clone(
 
     status = nfs_state_table_acquire(table, &args->cl_src_stateid, 0,
                                      &refs->src_state, &refs->src_type);
+    status = nfs4_stateid_acquire_status(status, req->minorversion);
     if (status != NFS4_OK) {
         free(refs);
         res->cl_status = status;
@@ -160,6 +161,7 @@ chimera_nfs4_clone(
 
     status = nfs_state_table_acquire(table, &args->cl_dst_stateid, 0,
                                      &refs->dst_state, &refs->dst_type);
+    status = nfs4_stateid_acquire_status(status, req->minorversion);
     if (status != NFS4_OK) {
         nfs_state_table_release(table, refs->src_state, refs->src_type,
                                 thread->vfs_thread);

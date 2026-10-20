@@ -51,18 +51,18 @@ chimera_nfs4_free_stateid(
      * (the state itself is not handed back); FREE_STATEID is exactly how the
      * client disposes of it. */
     if (status == NFS4ERR_DELEG_REVOKED) {
-        res->fsr_status = nfs_state_table_free_revoked_deleg(
-            table, &args->fsa_stateid, thread->vfs_thread);
+        res->fsr_status = nfs4_stateid_acquire_status(
+            nfs_state_table_free_revoked_deleg(
+                table, &args->fsa_stateid, thread->vfs_thread),
+            req->minorversion);
         chimera_nfs4_compound_complete(req, res->fsr_status);
         return;
     }
 
-    /* NFS4ERR_STALE_STATEID is a 4.0-only code; FREE_STATEID is 4.1+-only, so
-     * a wrong-epoch / older-generation stateid is reported as
-     * NFS4ERR_BAD_STATEID per the RFC 8881 §15.2 FREE_STATEID error set. */
-    if (status == NFS4ERR_STALE_STATEID) {
-        status = NFS4ERR_BAD_STATEID;
-    }
+    /* FREE_STATEID is 4.1+-only, so a wrong-epoch / older-generation stateid
+     * is reported as NFS4ERR_BAD_STATEID per the RFC 8881 §15.2 FREE_STATEID
+     * error set. */
+    status = nfs4_stateid_acquire_status(status, req->minorversion);
 
     if (status != NFS4_OK) {
         res->fsr_status = status;

@@ -35,6 +35,7 @@ chimera_nfs4_delegreturn(
                                      NFS4_SLOT_TYPE_DELEG,
                                      &state_void,
                                      &state_type);
+    status = nfs4_stateid_acquire_status(status, req->minorversion);
 
     if (status != NFS4_OK) {
         res->status = status;

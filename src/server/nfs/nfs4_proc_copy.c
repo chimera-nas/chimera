@@ -584,6 +584,7 @@ chimera_nfs4_copy(
     if (!refs->src_special) {
         status = nfs_state_table_acquire(table, &args->ca_src_stateid, 0,
                                          &refs->src_state, &refs->src_type);
+        status = nfs4_stateid_acquire_status(status, req->minorversion);
         if (status != NFS4_OK) {
             chimera_nfs4_copy_fail(refs, status);
             return;
@@ -605,6 +606,7 @@ chimera_nfs4_copy(
     if (!refs->dst_special) {
         status = nfs_state_table_acquire(table, &args->ca_dst_stateid, 0,
                                          &refs->dst_state, &refs->dst_type);
+        status = nfs4_stateid_acquire_status(status, req->minorversion);
         if (status != NFS4_OK) {
             chimera_nfs4_copy_fail(refs, status);
             return;
