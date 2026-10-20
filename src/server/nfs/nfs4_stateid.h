@@ -119,6 +119,26 @@ nfs4_stateid_check_seqid(
     return NFS4_OK;
 } /* nfs4_stateid_check_seqid */
 
+/*
+ * NFS4ERR_STALE_STATEID is an NFSv4.0-only error: it means "this stateid was
+ * minted by a previous server instance", and a 4.1+ client treats it as a
+ * server-reboot indicator and enters lease recovery.  RFC 8881 §15.2 lists it
+ * in no 4.1 operation's error set; a wrong-epoch or older-generation stateid
+ * is NFS4ERR_BAD_STATEID there, which the client resolves by recovering just
+ * the one open instead of a mount-wide reboot reclaim.  Every handler that
+ * reports a state-table verdict to the client filters it through this.
+ */
+static inline nfsstat4
+nfs4_stateid_acquire_status(
+    nfsstat4 status,
+    uint32_t minorversion)
+{
+    if (status == NFS4ERR_STALE_STATEID && minorversion != 0) {
+        return NFS4ERR_BAD_STATEID;
+    }
+    return status;
+} /* nfs4_stateid_acquire_status */
+
 static inline int
 nfs4_stateid_is_special(const struct stateid4 *sid)
 {

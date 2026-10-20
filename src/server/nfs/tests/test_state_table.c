@@ -326,6 +326,26 @@ test_share_mode_conflict(void)
     printf("ok: share_mode_conflict\n");
 } /* test_share_mode_conflict */
 
+static void
+test_acquire_status_translation(void)
+{
+    /* NFS4ERR_STALE_STATEID is 4.0-only; on 4.1+ the table's verdict is
+     * reported as NFS4ERR_BAD_STATEID.  Every other status, and every 4.0
+     * status, passes through untouched. */
+    CHECK(nfs4_stateid_acquire_status(NFS4ERR_STALE_STATEID, 0) ==
+          NFS4ERR_STALE_STATEID);
+    CHECK(nfs4_stateid_acquire_status(NFS4ERR_STALE_STATEID, 1) ==
+          NFS4ERR_BAD_STATEID);
+    CHECK(nfs4_stateid_acquire_status(NFS4ERR_STALE_STATEID, 2) ==
+          NFS4ERR_BAD_STATEID);
+    CHECK(nfs4_stateid_acquire_status(NFS4_OK, 1) == NFS4_OK);
+    CHECK(nfs4_stateid_acquire_status(NFS4ERR_BAD_STATEID, 1) ==
+          NFS4ERR_BAD_STATEID);
+    CHECK(nfs4_stateid_acquire_status(NFS4ERR_EXPIRED, 1) ==
+          NFS4ERR_EXPIRED);
+    printf("ok: acquire_status_translation\n");
+} /* test_acquire_status_translation */
+
 int
 main(
     int   argc,
@@ -338,6 +358,7 @@ main(
     test_owner_state_lifecycle();
     test_replay_helpers();
     test_share_mode_conflict();
+    test_acquire_status_translation();
     printf("PASS: all state table tests\n");
     return 0;
 } /* main */
