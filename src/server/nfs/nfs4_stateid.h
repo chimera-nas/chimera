@@ -110,17 +110,35 @@ nfs4_stateid_check_seqid(
     uint32_t cur_seqid,
     uint32_t sid_seqid)
 {
+    /* Serial comparison: the seqid wraps (see nfs4_stateid_seqid_next), so
+     * a presented seqid just behind a server that has wrapped to 1 is still
+     * "older", not "never issued". */
+    int32_t distance = (int32_t) (sid_seqid - cur_seqid);
+
     if (sid_seqid == 0) {
         return NFS4_OK;
     }
-    if (sid_seqid < cur_seqid) {
+    if (distance < 0) {
         return NFS4ERR_OLD_STATEID;
     }
-    if (sid_seqid > cur_seqid) {
+    if (distance > 0) {
         return NFS4ERR_BAD_STATEID;
     }
     return NFS4_OK;
 } /* nfs4_stateid_check_seqid */
+
+/*
+ * The seqid a state carries after one more modification.  RFC 8881 8.2.2:
+ * the seqid advances past 0xFFFFFFFF to 1, never to 0, which is the
+ * current-seqid wildcard a client may present in its place.
+ */
+static inline uint32_t
+nfs4_stateid_seqid_next(uint32_t seqid)
+{
+    seqid += 1;
+
+    return seqid ? seqid : 1;
+} /* nfs4_stateid_seqid_next */
 
 /*
  * NFS4ERR_STALE_STATEID is an NFSv4.0-only error: it means "this stateid was

@@ -1284,7 +1284,7 @@ nfs_open_state_coalesce(
     state->share_access |= share_access;
     state->share_deny   |= share_deny;
     state->share_combos |= nfs_open_combo_bit(share_access, share_deny);
-    state->seqid        += 1;
+    state->seqid         = nfs4_stateid_seqid_next(state->seqid);
 
     nfs4_stateid_encode(out_stateid, state->seqid,
                         NFS4_STATEID_TYPE_OPEN,
@@ -1429,7 +1429,7 @@ nfs_layout_state_bump(
 {
     /* RFC 8881 §12.5.3: the server owns the layout stateid seqid and advances
      * it on each successful LAYOUTGET / LAYOUTRETURN. */
-    st->seqid++;
+    st->seqid = nfs4_stateid_seqid_next(st->seqid);
     nfs4_stateid_encode(out_stateid, st->seqid, NFS4_STATEID_TYPE_LAYOUT,
                         st->shard, st->slot_idx, st->generation,
                         client_short_id);

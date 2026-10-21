@@ -346,6 +346,27 @@ test_acquire_status_translation(void)
     printf("ok: acquire_status_translation\n");
 } /* test_acquire_status_translation */
 
+static void
+test_stateid_seqid_wrap(void)
+{
+    /* RFC 8881 8.2.2: the seqid advances past 0xFFFFFFFF to 1 (0 is the
+     * current-seqid wildcard), and the comparison is serial so a client
+     * still holding the pre-wrap seqid is OLD, not BAD. */
+    CHECK(nfs4_stateid_seqid_next(1) == 2);
+    CHECK(nfs4_stateid_seqid_next(0xFFFFFFFFu) == 1);
+    CHECK(nfs4_stateid_check_seqid(5, 0) == NFS4_OK);
+    CHECK(nfs4_stateid_check_seqid(5, 5) == NFS4_OK);
+    CHECK(nfs4_stateid_check_seqid(5, 4) == NFS4ERR_OLD_STATEID);
+    CHECK(nfs4_stateid_check_seqid(5, 6) == NFS4ERR_BAD_STATEID);
+    CHECK(nfs4_stateid_check_seqid(0xFFFFFFFFu, 0xFFFFFFFEu) ==
+          NFS4ERR_OLD_STATEID);
+    /* The server wrapped to 1; the client still presents 0xFFFFFFFF. */
+    CHECK(nfs4_stateid_check_seqid(1, 0xFFFFFFFFu) == NFS4ERR_OLD_STATEID);
+    /* Not issued yet: the server is at 0xFFFFFFFF, 1 lies ahead of it. */
+    CHECK(nfs4_stateid_check_seqid(0xFFFFFFFFu, 1) == NFS4ERR_BAD_STATEID);
+    printf("ok: stateid_seqid_wrap\n");
+} /* test_stateid_seqid_wrap */
+
 int
 main(
     int   argc,
@@ -359,6 +380,7 @@ main(
     test_replay_helpers();
     test_share_mode_conflict();
     test_acquire_status_translation();
+    test_stateid_seqid_wrap();
     printf("PASS: all state table tests\n");
     return 0;
 } /* main */

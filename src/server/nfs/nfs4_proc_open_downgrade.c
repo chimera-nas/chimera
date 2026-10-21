@@ -151,7 +151,7 @@ chimera_nfs4_open_downgrade(
      * (access, deny) pair (matching the model's `events` reset). */
     open_state->share_combos = nfs_open_combo_bit(args->share_access,
                                                   args->share_deny);
-    open_state->seqid += 1;
+    open_state->seqid = nfs4_stateid_seqid_next(open_state->seqid);
 
     nfs4_stateid_encode(&res->resok4.open_stateid,
                         open_state->seqid,

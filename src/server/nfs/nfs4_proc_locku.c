@@ -210,7 +210,7 @@ chimera_nfs4_locku(
         }
     }
 
-    lock_state->seqid += 1;
+    lock_state->seqid = nfs4_stateid_seqid_next(lock_state->seqid);
     nfs4_stateid_encode(&res->lock_stateid, lock_state->seqid,
                         NFS4_STATEID_TYPE_LOCK,
                         lock_state->shard, lock_state->slot_idx,
