@@ -600,8 +600,9 @@ op_getattr_size(void)
 } /* op_getattr_size */
 
 /* WRITE of `len` bytes of 'A' at offset 0 through `sid`, FILE_SYNC.  The
-* iovec is static for the same reason the bitmaps are: the argument only
-* borrows it, and the compound is sent before the next call reuses it. */
+ * iovec struct is static for the same reason the bitmaps are (the argument
+ * only borrows it), but its buffer is allocated afresh on every call: the
+ * send releases the reference it takes. */
 static struct nfs_argop4
 op_write_bytes(
     struct evpl           *evpl,
@@ -609,17 +610,13 @@ op_write_bytes(
     uint32_t               len)
 {
     static struct evpl_iovec iov;
-    static int               have_iov;
     struct nfs_argop4        a;
 
-    if (!have_iov) {
-        if (evpl_iovec_alloc(evpl, FILE_SIZE, 4096, 1, 0, &iov) < 0) {
-            fprintf(stderr, "iovec alloc failed\n");
-            exit(2);
-        }
-        memset(iov.data, 0x41, FILE_SIZE);
-        have_iov = 1;
+    if (evpl_iovec_alloc(evpl, len, 4096, 1, 0, &iov) < 0) {
+        fprintf(stderr, "iovec alloc failed\n");
+        exit(2);
     }
+    memset(iov.data, 0x41, len);
     iov.length = len;
 
     memset(&a, 0, sizeof(a));
@@ -906,6 +903,13 @@ static const struct {
     { "read-deleg-stateid",                  VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
     { "deleg-stateid-of-other-file",         VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
     { "write-deleg-stateid-under-recall",    VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK             },
+    { "write-via-write-deleg-stateid",       VIA_DELEG, OP_WRITE,   OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "write-via-write-deleg-stateid-under-recall", VIA_DELEG, OP_WRITE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK },
+    { "write-via-read-deleg-stateid",        VIA_DELEG, OP_WRITE,   OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
+    { "write-via-deleg-stateid-of-other-file", VIA_DELEG, OP_WRITE, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "read-via-write-deleg-stateid",        VIA_DELEG, OP_READ,    OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "read-via-read-deleg-stateid",         VIA_DELEG, OP_READ,    OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK             },
+    { "read-via-deleg-stateid-of-other-file", VIA_DELEG, OP_READ,  OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
 };
 /* *INDENT-ON* */
 
@@ -977,6 +981,22 @@ run_deleg_cell(
     }
     sid       = target_deleg;
     want_type = OPEN_DELEGATE_WRITE;
+
+    /* A READ needs data: fill the file through the creating open, which
+     * the write-open-stateid-under-own-deleg cell shows is recall-free, and
+     * which is still the write-capable creating open at this point. */
+    if (deleg_cells[i].op == OP_READ) {
+        ops[0] = op_putfh(&target_fh);
+        ops[1] = op_write_bytes(pc->env->evpl, &target_open, TRUNC_SIZE);
+        p      = pc_compound(pc, ops, 2, 1);
+        if (p.status != NFS4_OK) {
+            snprintf(buf, sizeof(buf), "fill of %s failed: %u", fname,
+                     p.status);
+            expect(label, 0, buf);
+            return;
+        }
+    }
+
 
     if (deleg_cells[i].other_file) {
         /* The stateid presented is another file's write delegation. */
@@ -1060,20 +1080,6 @@ run_deleg_cell(
                  p.status, NFS4ERR_DELAY,
                  recall_seen(pc, &target_deleg) ? "seen" : "NOT seen");
         if (p.status != NFS4ERR_DELAY || !recall_seen(pc, &target_deleg)) {
-            expect(label, 0, buf);
-            return;
-        }
-    }
-
-    /* A READ needs data: fill the file through the creating open, which
-     * the write-open-stateid-under-own-deleg cell shows is recall-free. */
-    if (deleg_cells[i].op == OP_READ) {
-        ops[0] = op_putfh(&target_fh);
-        ops[1] = op_write_bytes(pc->env->evpl, &target_open, TRUNC_SIZE);
-        p      = pc_compound(pc, ops, 2, 1);
-        if (p.status != NFS4_OK) {
-            snprintf(buf, sizeof(buf), "fill of %s failed: %u", fname,
-                     p.status);
             expect(label, 0, buf);
             return;
         }
