@@ -334,7 +334,11 @@ set_tests_properties(chimera/server/nfs/mbt4/open_access_probe_memfs PROPERTIES
 # an open stateid, or a lock stateid anchored to a write-capable open of the
 # same file, including the seqid-0 form a Linux client sends while it holds a
 # POSIX lock.  Runs on a passthrough backend as well, where the truncate is
-# applied through the open's own descriptor.  Needs no corpus.
+# applied through the open's own descriptor.  The _deleg variant serves
+# delegations and runs the holder's matrix instead: I/O through the holder's
+# own open, lock and delegation stateids must not recall its delegation, and
+# a delegation stateid authorizes exactly what the delegation grants.  Needs
+# no corpus.
 foreach(backend memfs linux)
     if(backend STREQUAL "linux" AND NOT CHIMERA_LINUX)
         continue()
@@ -344,6 +348,14 @@ foreach(backend memfs linux)
     set_tests_properties(chimera/server/nfs/mbt4/setattr_stateid_probe_${backend}
         PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_setattr_stateid_probe_${backend}"
+        LABELS "quint;nfs4_mbt;multiproto;${backend}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 90)
+    add_test(NAME chimera/server/nfs/mbt4/setattr_stateid_probe_${backend}_deleg
+        COMMAND $<TARGET_FILE:nfs4_setattr_stateid_probe> ${backend} --deleg)
+    set_tests_properties(chimera/server/nfs/mbt4/setattr_stateid_probe_${backend}_deleg
+        PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_setattr_stateid_probe_${backend}_deleg"
         LABELS "quint;nfs4_mbt;multiproto;${backend}"
         SKIP_RETURN_CODE 77
         TIMEOUT 90)
