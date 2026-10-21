@@ -91,9 +91,18 @@ chimera_nfs4_close(
             return;
         }
 
+        /* RFC 7530 9.1.4.2: reject a superseded (old) or never-issued
+         * stateid seqid.  Per 9.1.7 the owner seqid still advances for a
+         * consuming error (OLD_STATEID) but not for BAD_STATEID, so the
+         * owner's next request carries seqid+1 as the client expects. */
         status = nfs4_stateid_check_seqid(open_state->seqid,
                                           args->open_stateid.seqid);
         if (status != NFS4_OK) {
+            if (nfs4_seqid_should_advance(status)) {
+                owner->seqid = args->seqid;
+                nfs4_replay_record(&owner->replay, args->seqid, OP_CLOSE,
+                                   status, NULL);
+            }
             evpl_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
