@@ -108,7 +108,7 @@ chimera_nfs4_close(
     /* Bump stateid.seqid per RFC 7530 §16.2.4, then encode the returned
      * stateid before destroying.  Destroy cascades through any lock_states
      * rooted on this open. */
-    open_state->seqid += 1;
+    open_state->seqid = nfs4_stateid_seqid_next(open_state->seqid);
 
     nfs4_stateid_encode(&res->open_stateid, open_state->seqid,
                         NFS4_STATEID_TYPE_OPEN,

@@ -331,7 +331,7 @@ chimera_nfs4_lock_complete(
          * only increment when modifying an existing lock state -- including a
          * new_lock_owner request that re-established (reused) an emptied one. */
         if (!args->locker.new_lock_owner || req->lock_reused) {
-            lock_state->seqid += 1;
+            lock_state->seqid = nfs4_stateid_seqid_next(lock_state->seqid);
         }
 
         nfs4_stateid_encode(&res->resok4.lock_stateid, lock_state->seqid,

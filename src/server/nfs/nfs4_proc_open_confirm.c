@@ -113,9 +113,9 @@ chimera_nfs4_open_confirm(
     }
 
     /* New op: confirm the owner and advance state.seqid. */
-    owner->confirmed   = true;
-    owner->seqid       = args->seqid;
-    open_state->seqid += 1;
+    owner->confirmed  = true;
+    owner->seqid      = args->seqid;
+    open_state->seqid = nfs4_stateid_seqid_next(open_state->seqid);
 
     nfs4_stateid_encode(&res->resok4.open_stateid,
                         open_state->seqid,
