@@ -10,10 +10,10 @@ presented seqid with the state's current one: an older seqid is
 NFS4ERR_OLD_STATEID, a never-issued one NFS4ERR_BAD_STATEID, and zero means
 "use the most recent".  Under 4.1 OPEN-upgrade pipelining a LOCK, LOCKU or
 OPEN_DOWNGRADE built against a stateid a concurrent OPEN has since superseded
-must be refused rather than acting on stale state.  (CLOSE enforcement is
-part of the same rule but is deferred to a follow-up: rejecting a 4.1 CLOSE
-reaches a separate latent async-completion bug in the pNFS/diskfs commit
-path.)
+must be refused rather than acting on stale state.  CLOSE is the case that
+costs the most: a stale pipelined CLOSE that is honored destroys an open the
+client is still using and strands its locks (the Linux client reports "lost
+N locks" and later I/O on the descriptor fails with EIO).
 
 Separately, NFS4ERR_STALE_STATEID is a 4.0-only code (RFC 8881 15.2 lists it
 in no 4.1 operation's error set).  A 4.1+ client reads it as "the server
@@ -30,6 +30,11 @@ Cases (one minorversion=1 session, each case on its own fresh file):
                       OLD_STATEID; the current one succeeds.
   old_seqid_downgrade : OPEN_DOWNGRADE presenting a superseded open-stateid
                       seqid is OLD_STATEID; the current one succeeds.
+  old_seqid_close   : CLOSE presenting a superseded seqid is OLD_STATEID and
+                      a never-issued one BAD_STATEID; the open survives both
+                      (LOCK, LOCKU and CLOSE with the current seqid succeed).
+  current_stateid_close : OPEN then CLOSE through the current-stateid
+                      sentinel in one compound succeeds and destroys the open.
   stale_epoch_class : a wrong-epoch stateid (previous server instance) is
                       BAD_STATEID -- never STALE_STATEID -- on CLOSE, LOCK,
                       and WRITE.
@@ -238,6 +243,47 @@ def case_old_seqid_downgrade(h):
            h.close(fh, res.resarray[-1].open_stateid).status, NFS4_OK)
 
 
+def case_old_seqid_close(h):
+    case = "old_seqid_close"
+    fh, sid1, sid2 = h.open_advance(case, b"osc")
+    expect(case, "CLOSE presenting superseded seqid 1",
+           h.close(fh, sid1).status, NFS4ERR_OLD_STATEID)
+    expect(case, "CLOSE presenting never-issued seqid 3",
+           h.close(fh, stateid4(3, sid2.other)).status, NFS4ERR_BAD_STATEID)
+    # Both refusals must have left the open intact and usable.
+    res = h.lock_new_owner(fh, sid2, b"lo_osc_%s" % RUN)
+    expect(case, "LOCK citing current open seqid 2 after the refusals",
+           res.status, NFS4_OK)
+    lock_sid = res.resarray[-1].lock_stateid
+    expect(case, "LOCKU",
+           h.sess.compound([op.putfh(fh),
+                            op.locku(WRITE_LT, 0, lock_sid, 0, 100)]).status,
+           NFS4_OK)
+    expect(case, "CLOSE with current seqid 2", h.close(fh, sid2).status,
+           NFS4_OK)
+
+
+def case_current_stateid_close(h):
+    case = "current_stateid_close"
+    res = h.sess.compound([
+        op.putfh(h.dirfh),
+        op.open(0, OPEN4_SHARE_ACCESS_BOTH | OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
+                OPEN4_SHARE_DENY_NONE, open_owner4(0, b"owner_csc_%s" % RUN),
+                openflag4(OPEN4_CREATE,
+                          createhow4(GUARDED4, {FATTR4_MODE: 0o644})),
+                open_claim4(CLAIM_NULL, b"f_csc_%s" % RUN)),
+        op.getfh(),
+        # RFC 8881 16.2.3.1.2: seqid 1 + all-zero other names the current
+        # stateid, which the OPEN just set.
+        op.close(0, stateid4(1, bytes(12))),
+    ])
+    expect(case, "OPEN then CLOSE through the current-stateid sentinel",
+           res.status, NFS4_OK)
+    expect(case, "the open is gone afterwards",
+           h.close(res.resarray[2].object, res.resarray[1].stateid).status,
+           NFS4ERR_BAD_STATEID)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--host", default="127.0.0.1")
@@ -250,6 +296,8 @@ def main():
     fh, lock_sid = case_old_seqid_lock(h)
     case_old_seqid_locku(h, fh, lock_sid)
     case_old_seqid_downgrade(h)
+    case_old_seqid_close(h)
+    case_current_stateid_close(h)
     case_stale_epoch_class(h)
     case_livelock_lock(h)
 
