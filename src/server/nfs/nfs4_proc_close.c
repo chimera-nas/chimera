@@ -105,6 +105,23 @@ chimera_nfs4_close(
         evpl_mutex_unlock(&owner->lock);
     }
 
+    if (!is_v40) {
+        /* RFC 8881 8.2.2: a 4.1+ CLOSE presenting a seqid a concurrent OPEN
+         * has since superseded is refused, not honored -- honoring it
+         * destroys an open the client is still using and strands its locks.
+         * The 4.0 owner-seqid machinery above is not engaged here, so there
+         * is no owner lock to drop (unlike OPEN_DOWNGRADE). */
+        status = nfs4_stateid_check_seqid(open_state->seqid,
+                                          args->open_stateid.seqid);
+        if (status != NFS4_OK) {
+            nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                    thread->vfs_thread);
+            res->status = status;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+    }
+
     /* Bump stateid.seqid per RFC 7530 §16.2.4, then encode the returned
      * stateid before destroying.  Destroy cascades through any lock_states
      * rooted on this open. */
