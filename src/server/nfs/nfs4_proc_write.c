@@ -249,26 +249,39 @@ chimera_nfs4_write(
         return;
     }
 
-    /* A (write) delegation stateid authorizes the WRITE but carries no open
+    /* A delegation stateid authorizes the WRITE when it is a write
+     * delegation of the current filehandle: a read delegation grants no
+     * write (NFS4ERR_OPENMODE, as a read-only open), and a delegation on
+     * another file designates no state for this one.  It carries no open
      * handle; drop the ref and open the current FH on the fly. */
     if (state_type == NFS4_SLOT_TYPE_DELEG) {
+        struct nfs_delegation *deleg = state_void;
+
+        if (req->fhlen == 0) {
+            status = NFS4ERR_NOFILEHANDLE;
+        } else if (deleg->fh_len != req->fhlen ||
+                   memcmp(deleg->fh, req->fh, req->fhlen) != 0) {
+            status = NFS4ERR_BAD_STATEID;
+        } else if (deleg->type != OPEN_DELEGATE_WRITE) {
+            status = NFS4ERR_OPENMODE;
+        } else {
+            /* This write is the delegation holder's own: carry the holder
+             * as the claim actor on the on-the-fly write so it does not
+             * recall the client's own delegation.  The holder is the
+             * delegation's client, which a 4.0 compound (no session) names
+             * through the stateid alone. */
+            req->io_owner_valid     = true;
+            req->io_owner_client_id = deleg->client->client_id;
+        }
         nfs_state_table_release(table, state_void, state_type,
                                 thread->vfs_thread);
-        if (req->fhlen == 0) {
-            res->status = NFS4ERR_NOFILEHANDLE;
+        if (status != NFS4_OK) {
+            res->status = status;
             evpl_iovecs_release(thread->evpl, args->data.iov, args->data.niov);
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
         req->args_write4 = args;
-        /* This write is authorized by the client's own (write) delegation:
-         * carry the holder's lease owner on the on-the-fly write so it does
-         * not recall the client's own delegation. */
-        req->io_owner_valid = (req->session &&
-                               req->session->client_unified);
-        if (req->io_owner_valid) {
-            req->io_owner_client_id = req->session->client_unified->client_id;
-        }
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,
