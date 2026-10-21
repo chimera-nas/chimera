@@ -89,7 +89,38 @@ chimera_nfs4_setattr_apply(
         return;
     }
 
-    if (fd_rights) {
+    if (fd_rights && req->io_owner_valid) {
+        /* The size change is the stateid owner's own: carry that client's
+         * claim actor -- the exact owner its delegation claim was created
+         * with at OPEN, this client id and the file's hash
+         * (chimera_vfs_hash of the unwrapped filehandle, which is what the
+         * open cache stamps into handle->fh_hash) -- which
+         * chimera_vfs_claim_trigger_ns_full exempts from the size-change
+         * recall by owner identity.  Without it the recall
+         * exempts only a claim anchored to this very handle, and an NFSv4
+         * delegation claim has no handle anchor: the holder's own truncate
+         * would recall, and after the recall deadline revoke, its own
+         * delegation.  Other clients' conflicting claims are still
+         * recalled. */
+        struct chimera_claim_actor io_owner = {
+            .owner          = {
+                .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+                .client_key = req->io_owner_client_id,
+                .owner_lo   = handle->fh_hash,
+                .owner_hi   = 0,
+            },
+        };
+
+        chimera_vfs_fsetattr_owned(req->thread->vfs_thread,
+                                   &req->cred,
+                                   handle,
+                                   attr,
+                                   0,
+                                   0,
+                                   chimera_nfs4_setattr_complete,
+                                   req,
+                                   &io_owner);
+    } else if (fd_rights) {
         chimera_vfs_fsetattr(req->thread->vfs_thread,
                              &req->cred,
                              handle,
@@ -173,8 +204,11 @@ chimera_nfs4_setattr(
     res->attrsset     = NULL;
 
     /* nfs_request is pooled; nfs4_setattr_proceed keys off req->handle to
-     * decide between the stateid-handle and path-open application paths. */
-    req->handle = NULL;
+     * decide between the stateid-handle and path-open application paths,
+     * and the owner fields are set only by the stateid branch below. */
+    req->handle             = NULL;
+    req->io_owner_valid     = false;
+    req->io_owner_client_id = 0;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -289,12 +323,17 @@ chimera_nfs4_setattr(
          * size change the way a descriptor authorizes ftruncate(2), and the
          * OPEN-time handle carries that grant (and, on a passthrough
          * backend, the writable descriptor itself) where a fresh path-only
-         * open would face a per-operation permission re-check. */
+         * open would face a per-operation permission re-check.  The
+         * truncate is the stateid owner's own I/O: carry that client as the
+         * claim actor so it does not recall the client's own delegation. */
         state_handle = nfs_state_io_handle(state_void, state_type,
                                            OPEN4_SHARE_ACCESS_WRITE);
         if (state_handle) {
             chimera_vfs_dup_handle(thread->vfs_thread, state_handle);
-            req->handle = state_handle;
+            req->handle             = state_handle;
+            req->io_owner_valid     = true;
+            req->io_owner_client_id =
+                nfs_state_owner_client(state_void, state_type)->client_id;
         }
 
         nfs_state_table_release(table, state_void, state_type,

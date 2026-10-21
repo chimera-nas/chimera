@@ -89,7 +89,7 @@ chimera_nfs4_write_open_callback(
     req->handle      = handle;
     req->args_write4 = args;
 
-    if (req->io_owner_from_deleg) {
+    if (req->io_owner_valid) {
         /* A delegation-authorized write: present the delegation holder's own
          * claim actor (same protocol/client/fh as the cache claim created at
          * OPEN) so the VFS I/O path recognises the writer as the delegation
@@ -99,7 +99,7 @@ chimera_nfs4_write_open_callback(
         struct chimera_claim_actor io_owner = {
             .owner          = {
                 .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
-                .client_key = req->session->client_unified->client_id,
+                .client_key = req->io_owner_client_id,
                 .owner_lo   = handle->fh_hash,
                 .owner_hi   = 0,
             },
@@ -149,9 +149,10 @@ chimera_nfs4_write(
     struct nfs_open_state          *open_state;
     nfsstat4                        status;
 
-    req->nfs_state_ref       = NULL;
-    req->handle              = NULL;
-    req->io_owner_from_deleg = false;
+    req->nfs_state_ref      = NULL;
+    req->handle             = NULL;
+    req->io_owner_valid     = false;
+    req->io_owner_client_id = 0;
 
     /* RFC 7530 §9.6.2: WRITE is refused with NFS4ERR_GRACE while the
      * server-reboot grace window is open, because a byte-range lock that
@@ -263,8 +264,11 @@ chimera_nfs4_write(
         /* This write is authorized by the client's own (write) delegation:
          * carry the holder's lease owner on the on-the-fly write so it does
          * not recall the client's own delegation. */
-        req->io_owner_from_deleg = (req->session &&
-                                    req->session->client_unified);
+        req->io_owner_valid = (req->session &&
+                               req->session->client_unified);
+        if (req->io_owner_valid) {
+            req->io_owner_client_id = req->session->client_unified->client_id;
+        }
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,

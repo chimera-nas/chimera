@@ -26,6 +26,16 @@
  * the new size.  The refusal cells keep the check honest: a lock stateid does
  * not widen the open it is anchored to, and does not authorize a file other
  * than the one it was taken on.
+ *
+ * With --deleg the server serves delegations and a second matrix runs
+ * instead (deleg_cells): the stateids a delegation holder sends.  A Linux
+ * client holding a delegation and no POSIX lock sends the delegation stateid
+ * itself (nfs4_select_rw_stateid falls back to it before the open stateid;
+ * truncate(2) with no open context tries nfs4_copy_delegation_stateid before
+ * the anonymous stateid), and with a POSIX lock held it sends the lock
+ * stateid.  Either way the holder is coherent with its own size change, so
+ * the server must not recall the holder's own delegation; the probe's back
+ * channel counts CB_RECALLs to catch exactly that.
  */
 
 #include <stdio.h>
@@ -57,17 +67,21 @@ expect(
 
 /* ---- one probed 4.1 client ------------------------------------------------ */
 
+#define P_MAX_RECALL 8
+
 struct pc {
     struct mbt_env        *env;
     struct evpl_rpc2_conn *conn;
     uint64_t               clientid;
     uint8_t                sessionid[16];
     uint32_t               slot_seq;
+    int                    nrecalls;              /* CB_RECALLs received */
+    uint8_t                recalls[P_MAX_RECALL][12];
 };
 
-/* Minimal back-channel responder: this probe never takes a delegation, but the
- * session negotiates a back channel, so answer CB_SEQUENCE (and refuse the
- * rest) to keep the transport clean. */
+/* Minimal back-channel responder: answer CB_SEQUENCE, record and acknowledge
+ * CB_RECALL (the delegation cells measure that none arrives for the holder's
+ * own truncate), and refuse the rest to keep the transport clean. */
 static void
 ss_cb_compound(
     struct evpl               *evpl,
@@ -109,6 +123,13 @@ ss_cb_compound(
                     argop->opcbsequence.csa_highest_slotid;
                 resop->opcbsequence.csr_status = NFS4_OK;
                 break;
+            case OP_CB_RECALL:
+                if (pc->nrecalls < P_MAX_RECALL) {
+                    memcpy(pc->recalls[pc->nrecalls++],
+                           argop->opcbrecall.stateid.other, 12);
+                }
+                resop->opcbrecall.status = NFS4_OK;
+                break;
             default:
                 resop->opcbrecall.status = NFS4ERR_NOTSUPP;
                 break;
@@ -133,9 +154,13 @@ struct prep {
     struct mbt_fh   fh;               /* last GETFH */
     struct stateid4 open_sid;         /* last OPEN stateid */
     int             open_idx;         /* index of the last OPEN in st[] */
+    uint32_t        deleg_type;       /* last OPEN's delegation type */
+    struct stateid4 deleg_sid;        /* last OPEN's delegation stateid */
     struct stateid4 lock_sid;         /* last LOCK stateid */
     int             lock_idx;         /* index of the last LOCK in st[] */
-    int             setattr_idx;      /* index of the last SETATTR in st[] */
+    int             meas_idx;         /* index of the measured op (SETATTR,
+                                       * WRITE or READ) in st[] */
+    int             eof;              /* last READ's eof */
     int             has_size;         /* GETATTR returned FATTR4_SIZE */
     uint64_t        size;
     uint64_t        clientid;         /* EXCHANGE_ID */
@@ -168,10 +193,10 @@ prep_cb(
 
     (void) evpl;
     (void) verf;
-    p->rpc_err     = status;
-    p->open_idx    = -1;
-    p->lock_idx    = -1;
-    p->setattr_idx = -1;
+    p->rpc_err  = status;
+    p->open_idx = -1;
+    p->lock_idx = -1;
+    p->meas_idx = -1;
     if (status == 0) {
         p->status = reply->status;
         p->nres   = (int) reply->num_resarray;
@@ -201,8 +226,20 @@ prep_cb(
                     p->st[i]    = r->opopen.status;
                     p->open_idx = (int) i;
                     if (p->st[i] == NFS4_OK) {
-                        p->open_sid = r->opopen.resok4.stateid;
+                        p->open_sid   = r->opopen.resok4.stateid;
+                        p->deleg_type =
+                            r->opopen.resok4.delegation.delegation_type;
+                        if (p->deleg_type == OPEN_DELEGATE_READ) {
+                            p->deleg_sid =
+                                r->opopen.resok4.delegation.read.stateid;
+                        } else if (p->deleg_type == OPEN_DELEGATE_WRITE) {
+                            p->deleg_sid =
+                                r->opopen.resok4.delegation.write.stateid;
+                        }
                     }
+                    break;
+                case OP_DELEGRETURN:
+                    p->st[i] = r->opdelegreturn.status;
                     break;
                 case OP_LOCK:
                     p->st[i]    = r->oplock.status;
@@ -218,8 +255,26 @@ prep_cb(
                     p->st[i] = r->opclose.status;
                     break;
                 case OP_SETATTR:
-                    p->st[i]       = r->opsetattr.status;
-                    p->setattr_idx = (int) i;
+                    p->st[i]    = r->opsetattr.status;
+                    p->meas_idx = (int) i;
+                    break;
+                case OP_WRITE:
+                    p->st[i]    = r->opwrite.status;
+                    p->meas_idx = (int) i;
+                    break;
+                case OP_READ:
+                    p->st[i]    = r->opread.status;
+                    p->meas_idx = (int) i;
+                    if (p->st[i] == NFS4_OK) {
+                        int k;
+
+                        p->eof = r->opread.resok4.eof;
+                        /* The reply's data iovecs carry references the
+                         * caller now owns. */
+                        for (k = 0; k < r->opread.resok4.data.niov; k++) {
+                            evpl_iovec_release(evpl, &r->opread.resok4.data.iov[k]);
+                        }
+                    }
                     break;
                 case OP_GETATTR:
                     p->st[i] = r->opgetattr.status;
@@ -542,6 +597,56 @@ op_getattr_size(void)
     return a;
 } /* op_getattr_size */
 
+/* WRITE of `len` bytes of 'A' at offset 0 through `sid`, FILE_SYNC.  The
+* iovec is static for the same reason the bitmaps are: the argument only
+* borrows it, and the compound is sent before the next call reuses it. */
+static struct nfs_argop4
+op_write_bytes(
+    struct evpl           *evpl,
+    const struct stateid4 *sid,
+    uint32_t               len)
+{
+    static struct evpl_iovec iov;
+    static int               have_iov;
+    struct nfs_argop4        a;
+
+    if (!have_iov) {
+        if (evpl_iovec_alloc(evpl, FILE_SIZE, 4096, 1, 0, &iov) < 0) {
+            fprintf(stderr, "iovec alloc failed\n");
+            exit(2);
+        }
+        memset(iov.data, 0x41, FILE_SIZE);
+        have_iov = 1;
+    }
+    iov.length = len;
+
+    memset(&a, 0, sizeof(a));
+    a.argop               = OP_WRITE;
+    a.opwrite.stateid     = *sid;
+    a.opwrite.offset      = 0;
+    a.opwrite.stable      = FILE_SYNC4;
+    a.opwrite.data.iov    = &iov;
+    a.opwrite.data.niov   = 1;
+    a.opwrite.data.length = len;
+    return a;
+} /* op_write_bytes */
+
+/* READ of `len` bytes at offset 0 through `sid`. */
+static struct nfs_argop4
+op_read_bytes(
+    const struct stateid4 *sid,
+    uint32_t               len)
+{
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop          = OP_READ;
+    a.opread.stateid = *sid;
+    a.opread.offset  = 0;
+    a.opread.count   = len;
+    return a;
+} /* op_read_bytes */
+
 static struct nfs_argop4
 op_close(const struct stateid4 *sid)
 {
@@ -553,6 +658,17 @@ op_close(const struct stateid4 *sid)
     a.opclose.open_stateid = *sid;
     return a;
 } /* op_close */
+
+static struct nfs_argop4
+op_delegreturn(const struct stateid4 *sid)
+{
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop                       = OP_DELEGRETURN;
+    a.opdelegreturn.deleg_stateid = *sid;
+    return a;
+} /* op_delegreturn */
 
 /* ---- the matrix ----------------------------------------------------------- */
 
@@ -580,7 +696,10 @@ static const struct {
 /* *INDENT-ON* */
 
 /* Create `name`, grow it to FILE_SIZE through its creating open, and close
- * that open, so the cell's own open is the only state on the file. */
+ * that open, so the cell's own open is the only state on the file.  With
+ * delegations served, the creating open is granted a write delegation that
+ * outlives the close; `deleg` (optional) receives its stateid and
+ * `deleg_type` its type.  grow = 0 leaves the file empty. */
 static int
 create_file(
     struct pc           *pc,
@@ -588,12 +707,16 @@ create_file(
     const char          *name,
     const char          *owner,
     struct mbt_fh       *out_fh,
+    struct stateid4     *deleg,
+    uint32_t            *deleg_type,
+    int                  grow,
     char                *buf,
     size_t               buflen)
 {
     struct nfs_argop4 ops[4];
     struct prep       p;
     struct stateid4   sid;
+    int               n = 0;
 
     ops[0] = op_putfh(root);
     ops[1] = op_open(pc->clientid, owner, name, OPEN4_SHARE_ACCESS_BOTH, 1);
@@ -605,11 +728,17 @@ create_file(
     }
     *out_fh = p.fh;
     sid     = p.open_sid;
+    if (deleg) {
+        *deleg      = p.deleg_sid;
+        *deleg_type = p.deleg_type;
+    }
 
-    ops[0] = op_putfh(out_fh);
-    ops[1] = op_setattr_size(&sid, FILE_SIZE);
-    ops[2] = op_close(&sid);
-    p      = pc_compound(pc, ops, 3, 1);
+    ops[n++] = op_putfh(out_fh);
+    if (grow) {
+        ops[n++] = op_setattr_size(&sid, FILE_SIZE);
+    }
+    ops[n++] = op_close(&sid);
+    p        = pc_compound(pc, ops, n, 1);
     if (p.status != NFS4_OK) {
         snprintf(buf, buflen, "grow+close of %s failed: %u", name, p.status);
         return 0;
@@ -642,7 +771,7 @@ run_cell(
     snprintf(open_owner, sizeof(open_owner), "ss-open-%u", i);
     snprintf(lock_owner, sizeof(lock_owner), "ss-lock-%u", i);
 
-    if (!create_file(pc, root, fname, create_owner, &target_fh,
+    if (!create_file(pc, root, fname, create_owner, &target_fh, NULL, NULL, 1,
                      buf, sizeof(buf))) {
         expect(label, 0, buf);
         return;
@@ -650,7 +779,7 @@ run_cell(
     source_fh   = target_fh;
     source_name = fname;
     if (cells[i].other_file) {
-        if (!create_file(pc, root, oname, create_owner, &source_fh,
+        if (!create_file(pc, root, oname, create_owner, &source_fh, NULL, NULL, 1,
                          buf, sizeof(buf))) {
             expect(label, 0, buf);
             return;
@@ -698,12 +827,12 @@ run_cell(
     /* The SETATTR's own status, or nothing: a compound that short-circuited
      * before SETATTR must fail the cell rather than substitute an earlier
      * operation's error, which could coincide with the expected one. */
-    if (p.setattr_idx < 0) {
+    if (p.meas_idx < 0) {
         snprintf(buf, sizeof(buf),
                  "compound returned %u without reaching SETATTR", p.status);
         expect(label, 0, buf);
     } else {
-        got = p.st[p.setattr_idx];
+        got = p.st[p.meas_idx];
         snprintf(buf, sizeof(buf),
                  "SETATTR(size=%u) through %s stateid (seqid %u): "
                  "expected %u, got %u",
@@ -730,6 +859,279 @@ run_cell(
     pc_compound(pc, ops, 2, 1);
 } /* run_cell */
 
+/* ---- the delegation matrix (--deleg) -------------------------------------- */
+
+/* A Linux client holding a delegation and no POSIX lock sends the delegation
+ * stateid in SETATTR(size) (nfs4_select_rw_stateid falls back to it before
+ * the open stateid; truncate(2) with no open context tries
+ * nfs4_copy_delegation_stateid before the anonymous stateid).  A write
+ * delegation authorizes the truncate, and the holder is coherent with its own
+ * size change, so no CB_RECALL may be sent to it.  A read delegation grants
+ * no write (NFS4ERR_OPENMODE, as for a read-only open), and a delegation on
+ * another file designates no state for this one (NFS4ERR_BAD_STATEID).
+ *
+ * The holder is just as coherent with a size change it sends through its
+ * open or lock stateid while it holds the delegation (the process holds a
+ * POSIX lock, or the client prefers the open stateid): those must not recall
+ * the holder's own delegation either.
+ *
+ * The cells create the file empty and extend it, so the only size change
+ * the file ever sees is the measured one.
+ *
+ * via: which stateid the SETATTR carries.  access is the share_access of
+ * the open the delegation is granted on (BOTH -> write delegation, READ ->
+ * read delegation).
+ * *INDENT-OFF* */
+enum via { VIA_DELEG, VIA_OPEN, VIA_LOCK };
+
+static const struct {
+    const char *label;
+    enum via    via;         /* the stateid the measured op carries */
+    uint32_t    op;          /* OP_SETATTR (size), OP_WRITE or OP_READ */
+    uint32_t    access;
+    int         zero_seqid;
+    int         other_file;
+    uint32_t    expect;
+} deleg_cells[] = {
+    { "open-stateid-under-own-deleg",       VIA_OPEN, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, NFS4_OK },
+    { "lock-stateid-under-own-deleg",       VIA_LOCK, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, NFS4_OK },
+    { "write-open-stateid-under-own-deleg", VIA_OPEN, OP_WRITE,   OPEN4_SHARE_ACCESS_BOTH, 0, 0, NFS4_OK },
+};
+/* *INDENT-ON* */
+
+static int
+recall_seen(
+    const struct pc       *pc,
+    const struct stateid4 *sid)
+{
+    int i;
+
+    for (i = 0; i < pc->nrecalls; i++) {
+        if (memcmp(pc->recalls[i], sid->other, 12) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+} /* recall_seen */
+
+static void
+run_deleg_cell(
+    struct pc           *pc,
+    const struct mbt_fh *root,
+    unsigned int         i)
+{
+    const char       *label = deleg_cells[i].label;
+    char              fname[32], oname[40];
+    char              create_owner[40], open_owner[40], lock_owner[40];
+    char              buf[200];
+    struct nfs_argop4 ops[4];
+    struct prep       p;
+    struct mbt_fh     target_fh, other_fh;
+    struct stateid4   target_open, target_deleg, other_deleg, lock_sid, sid;
+    uint32_t          target_deleg_type, want_type, got;
+    const char       *opname;
+    int               has_open = 1, has_other = 0, has_lock = 0;
+
+    snprintf(fname, sizeof(fname), "d%u", i);
+    snprintf(oname, sizeof(oname), "d%u-other", i);
+    snprintf(create_owner, sizeof(create_owner), "sd-create-%u", i);
+    snprintf(open_owner, sizeof(open_owner), "sd-open-%u", i);
+    snprintf(lock_owner, sizeof(lock_owner), "sd-lock-%u", i);
+
+    /* Create the target empty; the creating open is granted a write
+     * delegation (4.1 with a back channel grants from the first open). */
+    ops[0] = op_putfh(root);
+    ops[1] = op_open(pc->clientid, create_owner, fname, OPEN4_SHARE_ACCESS_BOTH, 1);
+    ops[2] = op_getfh();
+    p      = pc_compound(pc, ops, 3, 1);
+    if (p.status != NFS4_OK || !p.fh.has) {
+        snprintf(buf, sizeof(buf), "create %s failed: %u", fname, p.status);
+        expect(label, 0, buf);
+        return;
+    }
+    target_fh         = p.fh;
+    target_open       = p.open_sid;
+    target_deleg      = p.deleg_sid;
+    target_deleg_type = p.deleg_type;
+    if (target_deleg_type != OPEN_DELEGATE_WRITE) {
+        snprintf(buf, sizeof(buf), "creating open of %s granted deleg type %u, "
+                 "expected write (%u)", fname, target_deleg_type,
+                 OPEN_DELEGATE_WRITE);
+        expect(label, 0, buf);
+        return;
+    }
+    sid       = target_deleg;
+    want_type = OPEN_DELEGATE_WRITE;
+
+    if (deleg_cells[i].other_file) {
+        /* The stateid presented is another file's write delegation. */
+        if (!create_file(pc, root, oname, create_owner, &other_fh,
+                         &other_deleg, &want_type, 0, buf, sizeof(buf))) {
+            expect(label, 0, buf);
+            return;
+        }
+        has_other = 1;
+        sid       = other_deleg;
+        if (want_type != OPEN_DELEGATE_WRITE) {
+            snprintf(buf, sizeof(buf), "creating open of %s granted deleg type "
+                     "%u, expected write", oname, want_type);
+            expect(label, 0, buf);
+            return;
+        }
+    } else if (deleg_cells[i].via == VIA_DELEG &&
+               deleg_cells[i].access == OPEN4_SHARE_ACCESS_READ) {
+        /* Close the creating open, hand its write delegation back and
+         * re-open read-only to be granted a read delegation. */
+        ops[0] = op_putfh(&target_fh);
+        ops[1] = op_close(&target_open);
+        ops[2] = op_delegreturn(&target_deleg);
+        p      = pc_compound(pc, ops, 3, 1);
+        if (p.status != NFS4_OK) {
+            snprintf(buf, sizeof(buf), "close+delegreturn of %s failed: %u",
+                     fname, p.status);
+            expect(label, 0, buf);
+            return;
+        }
+        ops[0] = op_putfh(root);
+        ops[1] = op_open(pc->clientid, open_owner, fname,
+                         OPEN4_SHARE_ACCESS_READ, 0);
+        p = pc_compound(pc, ops, 2, 1);
+        if (p.status != NFS4_OK || p.deleg_type != OPEN_DELEGATE_READ) {
+            snprintf(buf, sizeof(buf), "read open of %s: status %u, deleg "
+                     "type %u (expected read)", fname, p.status, p.deleg_type);
+            expect(label, 0, buf);
+            return;
+        }
+        target_open       = p.open_sid;
+        target_deleg      = p.deleg_sid;
+        target_deleg_type = p.deleg_type;
+        sid               = target_deleg;
+        want_type         = OPEN_DELEGATE_READ;
+    } else if (deleg_cells[i].via == VIA_OPEN) {
+        sid = target_open;
+    } else if (deleg_cells[i].via == VIA_LOCK) {
+        ops[0] = op_putfh(&target_fh);
+        ops[1] = op_lock(pc->clientid, lock_owner, &target_open, WRITE_LT);
+        p      = pc_compound(pc, ops, 2, 1);
+        if (p.status != NFS4_OK) {
+            snprintf(buf, sizeof(buf), "lock of %s failed: %u", fname,
+                     p.status);
+            expect(label, 0, buf);
+            return;
+        }
+        has_lock = 1;
+        lock_sid = p.lock_sid;
+        sid      = lock_sid;
+    }
+    if (deleg_cells[i].zero_seqid) {
+        sid.seqid = 0;
+    }
+
+    /* A READ needs data: fill the file through the creating open, which
+     * the write-open-stateid-under-own-deleg cell shows is recall-free. */
+    if (deleg_cells[i].op == OP_READ) {
+        ops[0] = op_putfh(&target_fh);
+        ops[1] = op_write_bytes(pc->env->evpl, &target_open, TRUNC_SIZE);
+        p      = pc_compound(pc, ops, 2, 1);
+        if (p.status != NFS4_OK) {
+            snprintf(buf, sizeof(buf), "fill of %s failed: %u", fname,
+                     p.status);
+            expect(label, 0, buf);
+            return;
+        }
+    }
+
+    /* The measurement: SETATTR extends the empty target to TRUNC_SIZE,
+     * WRITE writes TRUNC_SIZE bytes into it, READ reads them back -- each
+     * through that stateid. */
+    pc->nrecalls = 0;
+    ops[0]       = op_putfh(&target_fh);
+    switch (deleg_cells[i].op) {
+        case OP_WRITE:
+            ops[1] = op_write_bytes(pc->env->evpl, &sid, TRUNC_SIZE);
+            break;
+        case OP_READ:
+            ops[1] = op_read_bytes(&sid, TRUNC_SIZE);
+            break;
+        default:
+            ops[1] = op_setattr_size(&sid, TRUNC_SIZE);
+            break;
+    } /* switch */
+    ops[2] = op_getattr_size();
+    p      = pc_compound(pc, ops, 3, 1);
+
+    opname = deleg_cells[i].op == OP_WRITE ? "WRITE" :
+        deleg_cells[i].op == OP_READ ? "READ" : "SETATTR(size)";
+    if (p.meas_idx < 0) {
+        snprintf(buf, sizeof(buf),
+                 "compound returned %u without reaching %s", p.status, opname);
+        expect(label, 0, buf);
+    } else {
+        got = p.st[p.meas_idx];
+        snprintf(buf, sizeof(buf),
+                 "%s through %s stateid (seqid %u) while holding a %s "
+                 "delegation: expected %u, got %u",
+                 opname,
+                 deleg_cells[i].via == VIA_OPEN ? "open" :
+                 deleg_cells[i].via == VIA_LOCK ? "lock" : "delegation",
+                 sid.seqid,
+                 want_type == OPEN_DELEGATE_WRITE ? "write" : "read",
+                 deleg_cells[i].expect, got);
+        expect(label, got == deleg_cells[i].expect, buf);
+
+        if (got == NFS4_OK && deleg_cells[i].expect == NFS4_OK) {
+            if (deleg_cells[i].op == OP_READ) {
+                snprintf(buf, sizeof(buf), "READ of %u bytes: eof=%d",
+                         TRUNC_SIZE, p.eof);
+                expect(label, p.eof, buf);
+            } else {
+                snprintf(buf, sizeof(buf), "size after %s: expected %u, "
+                         "got %llu%s", opname, TRUNC_SIZE,
+                         (unsigned long long) p.size,
+                         p.has_size ? "" : " (no size returned)");
+                expect(label, p.has_size && p.size == TRUNC_SIZE, buf);
+            }
+
+            /* The holder is coherent with its own I/O: no recall. */
+            snprintf(buf, sizeof(buf), "CB_RECALLs during the %s: %d "
+                     "(own delegation recalled: %s)", opname, pc->nrecalls,
+                     recall_seen(pc, &target_deleg) ? "yes" : "no");
+            expect(label, pc->nrecalls == 0, buf);
+        }
+    }
+
+    /* Release every lock, open and delegation so no state outlives the
+     * cell.  A recalled delegation is still returnable. */
+    if (has_lock) {
+        ops[0] = op_putfh(&target_fh);
+        ops[1] = op_locku(&lock_sid, WRITE_LT);
+        pc_compound(pc, ops, 2, 1);
+    }
+    if (has_open) {
+        ops[0] = op_putfh(&target_fh);
+        ops[1] = op_close(&target_open);
+        pc_compound(pc, ops, 2, 1);
+    }
+    /* The delegations must still be the holder's to return.  A server that
+     * parked the measured op behind the holder's own delegation and revoked
+     * it at the recall deadline answers NFS4ERR_DELEG_REVOKED here, even
+     * though the op itself then went through without a new recall. */
+    ops[0] = op_putfh(&target_fh);
+    ops[1] = op_delegreturn(&target_deleg);
+    p      = pc_compound(pc, ops, 2, 1);
+    snprintf(buf, sizeof(buf), "DELEGRETURN of %s's delegation: expected %u, "
+             "got %u", fname, NFS4_OK, p.status);
+    expect(label, p.status == NFS4_OK, buf);
+    if (has_other) {
+        ops[0] = op_putfh(&other_fh);
+        ops[1] = op_delegreturn(&other_deleg);
+        p      = pc_compound(pc, ops, 2, 1);
+        snprintf(buf, sizeof(buf), "DELEGRETURN of %s's delegation: "
+                 "expected %u, got %u", oname, NFS4_OK, p.status);
+        expect(label, p.status == NFS4_OK, buf);
+    }
+} /* run_deleg_cell */
+
 int
 main(
     int    argc,
@@ -744,6 +1146,7 @@ main(
     struct pc           pc;
     struct mbt_fh       root;
     unsigned int        i;
+    int                 deleg = 0;
 
     setvbuf(stdout, NULL, _IONBF, 0);
     /* Passthrough backends create the export root on the host; keep its mode
@@ -751,7 +1154,18 @@ main(
     umask(0);
     mbt_watchdog_arm(60);
 
-    opts.module = argc > 1 ? argv[1] : "memfs";
+    /* Usage: nfs4_setattr_stateid_probe [<module>] [--deleg].  --deleg serves
+     * delegations and runs the delegation cells instead of the open/lock
+     * ones: the two matrices need different server policies. */
+    opts.module = "memfs";
+    for (i = 1; i < (unsigned int) argc; i++) {
+        if (strcmp(argv[i], "--deleg") == 0) {
+            deleg                 = 1;
+            opts.nfs4_delegations = 1;
+        } else {
+            opts.module = argv[i];
+        }
+    }
     mbt_env_start_opts(env, &opts);
     env->nfs_v4_cb.recv_call_CB_COMPOUND = ss_cb_compound;
 
@@ -788,11 +1202,17 @@ main(
 
     pc_setup(&pc, env);
 
-    printf("# --- NFSv4 SETATTR(size) stateid authorization (%s) ---\n",
-           opts.module);
+    printf("# --- NFSv4 SETATTR(size) %sstateid authorization (%s) ---\n",
+           deleg ? "delegation " : "", opts.module);
 
-    for (i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
-        run_cell(&pc, &root, i);
+    if (deleg) {
+        for (i = 0; i < sizeof(deleg_cells) / sizeof(deleg_cells[0]); i++) {
+            run_deleg_cell(&pc, &root, i);
+        }
+    } else {
+        for (i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {
+            run_cell(&pc, &root, i);
+        }
     }
 
     mbt_env_stop(env);
