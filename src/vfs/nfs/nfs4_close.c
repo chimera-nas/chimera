@@ -140,9 +140,24 @@ chimera_nfs4_close_transmit(
     argarray[1].opputfh.object.len  = fhlen;
 
     /* seqid is ignored in minor version 1 (RFC 8881 §18.2.3); OPEN sends 0 too. */
-    argarray[2].argop                = OP_CLOSE;
-    argarray[2].opclose.seqid        = 0;
-    argarray[2].opclose.open_stateid = ctx->stateid;
+    argarray[2].argop         = OP_CLOSE;
+    argarray[2].opclose.seqid = 0;
+    /* Seqid 0 here is what lets this CLOSE land whichever way it races an
+     * OPEN upgrade of the same file.  This client's one open-owner coalesces
+     * every handle of a file into one server-side open, nothing serializes
+     * the last handle's CLOSE against an OPEN another handle has in flight,
+     * and chimera_nfs4_open_file_get's closing/re-send protocol assumes the
+     * CLOSE lands: a CLOSE refused with OLD_STATEID leaves the open alive on
+     * the server while this client forgets it, after which every OPEN of the
+     * file coalesces into that untracked state and is re-sent forever.
+     *
+     * RFC 8881 8.2.2 warns that a zero-seqid CLOSE cancels a concurrent OPEN
+     * upgrade before the client hears of it.  That is intended here, and it
+     * is the case the re-send protocol exists for: an OPEN reply that
+     * coalesced into the state this CLOSE destroys is rejected by
+     * chimera_nfs4_open_file_get and the OPEN is sent again, so the upgrade
+     * is never lost, only redone. */
+    argarray[2].opclose.open_stateid = chimera_nfs4_stateid_current(&ctx->stateid);
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,

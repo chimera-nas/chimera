@@ -151,7 +151,7 @@ chimera_vfs_nfs4_write(
 
     /* Use the stateid from the open state, or anonymous stateid if not available */
     if (open_state) {
-        argarray[2].opwrite.stateid = open_state->stateid;
+        argarray[2].opwrite.stateid = chimera_nfs4_stateid_current(&open_state->stateid);
     } else {
         /* Anonymous stateid */
         memset(&argarray[2].opwrite.stateid, 0, sizeof(argarray[2].opwrite.stateid));
