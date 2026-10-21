@@ -364,14 +364,16 @@ pc_compound(
 static void
 pc_setup(
     struct pc      *pc,
-    struct mbt_env *env)
+    struct mbt_env *env,
+    int             ownersym)
 {
     struct evpl_rpc2_program         *cb_programs[1];
     struct evpl_endpoint             *ep;
     struct nfs_argop4                 op;
     struct prep                       p;
-    static char                       owner[32];
-    struct channel_attrs4             chan = {
+    static char                       owners[4][32];
+    char                             *owner = owners[ownersym & 3];
+    struct channel_attrs4             chan  = {
         .ca_headerpadsize          = 0,
         .ca_maxrequestsize         = 1048576,
         .ca_maxresponsesize        = 1048576,
@@ -394,8 +396,8 @@ pc_setup(
 
     memset(&op, 0, sizeof(op));
     op.argop = OP_EXCHANGE_ID;
-    snprintf(owner, sizeof(owner), "ss-probe");
-    memset(op.opexchange_id.eia_clientowner.co_verifier, 1, 8);
+    snprintf(owner, 32, "ss-probe-%d", ownersym);
+    memset(op.opexchange_id.eia_clientowner.co_verifier, ownersym + 1, 8);
     op.opexchange_id.eia_clientowner.co_ownerid.data = owner;
     op.opexchange_id.eia_clientowner.co_ownerid.len  = (uint32_t) strlen(owner);
     op.opexchange_id.eia_state_protect.spa_how       = SP4_NONE;
@@ -891,11 +893,19 @@ static const struct {
     uint32_t    access;
     int         zero_seqid;
     int         other_file;
+    int         recalled;    /* another client's conflicting OPEN first:
+                              * the delegation is under recall when the
+                              * holder sends the measured op */
     uint32_t    expect;
 } deleg_cells[] = {
-    { "open-stateid-under-own-deleg",       VIA_OPEN, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, NFS4_OK },
-    { "lock-stateid-under-own-deleg",       VIA_LOCK, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, NFS4_OK },
-    { "write-open-stateid-under-own-deleg", VIA_OPEN, OP_WRITE,   OPEN4_SHARE_ACCESS_BOTH, 0, 0, NFS4_OK },
+    { "open-stateid-under-own-deleg",        VIA_OPEN,  OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "lock-stateid-under-own-deleg",        VIA_LOCK,  OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "write-open-stateid-under-own-deleg",  VIA_OPEN,  OP_WRITE,   OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "write-deleg-stateid",                 VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "write-deleg-stateid-seqid0",          VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 1, 0, 0, NFS4_OK             },
+    { "read-deleg-stateid",                  VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
+    { "deleg-stateid-of-other-file",         VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "write-deleg-stateid-under-recall",    VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK             },
 };
 /* *INDENT-ON* */
 
@@ -914,15 +924,19 @@ recall_seen(
     return 0;
 } /* recall_seen */
 
+/* `other` is a second client, used by the recalled cells to break the
+ * holder's delegation with a conflicting OPEN. */
 static void
 run_deleg_cell(
     struct pc           *pc,
+    struct pc           *other,
     const struct mbt_fh *root,
     unsigned int         i)
 {
     const char       *label = deleg_cells[i].label;
     char              fname[32], oname[40];
     char              create_owner[40], open_owner[40], lock_owner[40];
+    char              other_owner[40];
     char              buf[200];
     struct nfs_argop4 ops[4];
     struct prep       p;
@@ -937,6 +951,7 @@ run_deleg_cell(
     snprintf(create_owner, sizeof(create_owner), "sd-create-%u", i);
     snprintf(open_owner, sizeof(open_owner), "sd-open-%u", i);
     snprintf(lock_owner, sizeof(lock_owner), "sd-lock-%u", i);
+    snprintf(other_owner, sizeof(other_owner), "sd-other-%u", i);
 
     /* Create the target empty; the creating open is granted a write
      * delegation (4.1 with a back channel grants from the first open). */
@@ -1002,11 +1017,10 @@ run_deleg_cell(
             expect(label, 0, buf);
             return;
         }
-        target_open       = p.open_sid;
-        target_deleg      = p.deleg_sid;
-        target_deleg_type = p.deleg_type;
-        sid               = target_deleg;
-        want_type         = OPEN_DELEGATE_READ;
+        target_open  = p.open_sid;
+        target_deleg = p.deleg_sid;
+        sid          = target_deleg;
+        want_type    = OPEN_DELEGATE_READ;
     } else if (deleg_cells[i].via == VIA_OPEN) {
         sid = target_open;
     } else if (deleg_cells[i].via == VIA_LOCK) {
@@ -1025,6 +1039,30 @@ run_deleg_cell(
     }
     if (deleg_cells[i].zero_seqid) {
         sid.seqid = 0;
+    }
+
+    /* Put the delegation under recall: the other client's conflicting OPEN
+     * is answered NFS4ERR_DELAY and a CB_RECALL reaches the holder.  The
+     * holder's stateid stays valid until it returns the delegation, so its
+     * own I/O still goes through -- without a second recall. */
+    if (deleg_cells[i].recalled) {
+        int k;
+
+        ops[0] = op_putfh(root);
+        ops[1] = op_open(other->clientid, other_owner, fname,
+                         OPEN4_SHARE_ACCESS_READ, 0);
+        p = pc_compound(other, ops, 2, 1);
+        for (k = 0; k < 100 && !recall_seen(pc, &target_deleg); k++) {
+            evpl_continue(pc->env->evpl);
+        }
+        snprintf(buf, sizeof(buf), "conflicting OPEN by another client: "
+                 "status %u (expected %u), recall of the delegation %s",
+                 p.status, NFS4ERR_DELAY,
+                 recall_seen(pc, &target_deleg) ? "seen" : "NOT seen");
+        if (p.status != NFS4ERR_DELAY || !recall_seen(pc, &target_deleg)) {
+            expect(label, 0, buf);
+            return;
+        }
     }
 
     /* A READ needs data: fill the file through the creating open, which
@@ -1143,7 +1181,7 @@ main(
         .disable_caches = 1,
     };
     struct mbt_env     *env = malloc(sizeof(*env));
-    struct pc           pc;
+    struct pc           pc, other;
     struct mbt_fh       root;
     unsigned int        i;
     int                 deleg = 0;
@@ -1200,14 +1238,17 @@ main(
         root = rp.fh;
     }
 
-    pc_setup(&pc, env);
+    pc_setup(&pc, env, 1);
+    if (deleg) {
+        pc_setup(&other, env, 2);
+    }
 
     printf("# --- NFSv4 SETATTR(size) %sstateid authorization (%s) ---\n",
            deleg ? "delegation " : "", opts.module);
 
     if (deleg) {
         for (i = 0; i < sizeof(deleg_cells) / sizeof(deleg_cells[0]); i++) {
-            run_deleg_cell(&pc, &root, i);
+            run_deleg_cell(&pc, &other, &root, i);
         }
     } else {
         for (i = 0; i < sizeof(cells) / sizeof(cells[0]); i++) {

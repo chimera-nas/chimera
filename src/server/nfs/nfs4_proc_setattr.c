@@ -160,10 +160,40 @@ chimera_nfs4_setattr_open_callback(
     chimera_nfs4_setattr_apply(req, handle, 0);
 } /* chimera_nfs4_setattr_open_callback */
 
+/* Completion of the on-the-fly open a delegation-authorized size change
+ * goes through.  The delegation carries the write grant the way an open
+ * does, so the attributes are applied with descriptor rights.  A handle the
+ * on-the-fly open creates has no bound grant, so chimera_vfs_setattr_common
+ * re-checks DAC the way it does for a path setattr; when the open cache
+ * hands back this credential's own OPEN-time handle for the file instead,
+ * that handle's bound grant authorizes the size change, as it would
+ * through the open stateid. */
+static void
+chimera_nfs4_setattr_deleg_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct SETATTR4res *res = &req->res_compound.resarray[req->index].opsetattr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        req->handle = handle;
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    chimera_nfs4_setattr_apply(req, handle, 1);
+} /* chimera_nfs4_setattr_deleg_open_callback */
+
 /* Apply the attributes -- through the open stateid's own handle when the
- * size-change validation stashed one (descriptor rights), otherwise via a
- * fresh path-only open of the target.  Invoked directly, or as the resume
- * continuation once a conflicting layout has been recalled. */
+ * size-change validation stashed one (descriptor rights); through an
+ * on-the-fly open of the current filehandle when a delegation stateid
+ * authorized the size change (it names the holder but carries no open
+ * handle, exactly as for WRITE); otherwise via a fresh path-only open of
+ * the target.  Invoked directly, or as the resume continuation once a
+ * conflicting layout has been recalled. */
 static void
 nfs4_setattr_proceed(void *arg)
 {
@@ -174,6 +204,19 @@ nfs4_setattr_proceed(void *arg)
 
         req->handle = NULL;
         chimera_nfs4_setattr_apply(req, handle, 1);
+        return;
+    }
+
+    if (req->io_owner_valid) {
+        chimera_vfs_open_fh(req->thread->vfs_thread,
+                            &req->cred,
+                            req->fh,
+                            req->fhlen,
+                            CHIMERA_VFS_OPEN_INFERRED |
+                            CHIMERA_VFS_OPEN_NOFOLLOW |
+                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
+                            chimera_nfs4_setattr_deleg_open_callback,
+                            req);
         return;
     }
 
@@ -280,11 +323,13 @@ chimera_nfs4_setattr(
         uint8_t                         state_type;
         nfsstat4                        status;
 
-        /* Look the stateid up by any type and let
-         * nfs_state_check_write_for_fh judge it: a client holding a
-         * byte-range lock on the file sends the lock stateid here, exactly
-         * as it would for a WRITE, and refusing it while TEST_STATEID
-         * reports it valid leaves the client resending the SETATTR forever. */
+        /* Look the stateid up by any type: a client holding a byte-range
+         * lock on the file sends the lock stateid here, and one holding a
+         * delegation the delegation stateid, exactly as it would for a
+         * WRITE, and refusing either while TEST_STATEID reports it valid
+         * leaves the client resending the SETATTR forever.  A delegation
+         * stateid is judged by the branch below, an open or lock stateid by
+         * nfs_state_check_write_for_fh. */
         status = nfs_state_table_acquire(table, &args->stateid, 0,
                                          &state_void, &state_type);
         status = nfs4_stateid_acquire_status(status, req->minorversion);
@@ -305,39 +350,72 @@ chimera_nfs4_setattr(
             return;
         }
 
-        /* RFC 7530 section 9.1.4.3: the stateid must name a write-capable
-         * open of the object that is the current filehandle -- directly, or
-         * as the open a lock stateid is anchored to -- not some other open
-         * file. */
-        status = nfs_state_check_write_for_fh(state_void, state_type,
-                                              req->fh, req->fhlen);
-        if (status != NFS4_OK) {
+        /* A delegation stateid: what a Linux client sends when it holds a
+         * delegation on the file and no POSIX lock (nfs4_select_rw_stateid
+         * falls back to it before the open stateid; truncate(2) with no
+         * open context tries the delegation stateid before the anonymous
+         * one).  A write delegation of the current filehandle authorizes
+         * the size change; a read delegation grants no write
+         * (NFS4ERR_OPENMODE, as a read-only open would); a delegation on
+         * another file designates no state for this one.  It carries no
+         * open handle, so nfs4_setattr_proceed opens the current filehandle
+         * on the fly with the holder as the claim actor, which keeps the
+         * holder's own delegation -- recalled or not -- out of the
+         * size-change recall. */
+        if (state_type == NFS4_SLOT_TYPE_DELEG) {
+            struct nfs_delegation *deleg = state_void;
+
+            if (deleg->fh_len != req->fhlen ||
+                memcmp(deleg->fh, req->fh, req->fhlen) != 0) {
+                status = NFS4ERR_BAD_STATEID;
+            } else if (deleg->type != OPEN_DELEGATE_WRITE) {
+                status = NFS4ERR_OPENMODE;
+            } else {
+                req->io_owner_valid     = true;
+                req->io_owner_client_id = deleg->client->client_id;
+            }
             nfs_state_table_release(table, state_void, state_type,
                                     thread->vfs_thread);
-            res->status = status;
-            chimera_nfs4_compound_complete(req, res->status);
-            return;
-        }
+            if (status != NFS4_OK) {
+                res->status = status;
+                chimera_nfs4_compound_complete(req, res->status);
+                return;
+            }
+        } else {
+            /* RFC 7530 section 9.1.4.3: the stateid must name a
+             * write-capable open of the object that is the current
+             * filehandle -- directly, or as the open a lock stateid is
+             * anchored to -- not some other open file. */
+            status = nfs_state_check_write_for_fh(state_void, state_type,
+                                                  req->fh, req->fhlen);
+            if (status != NFS4_OK) {
+                nfs_state_table_release(table, state_void, state_type,
+                                        thread->vfs_thread);
+                res->status = status;
+                chimera_nfs4_compound_complete(req, res->status);
+                return;
+            }
 
-        /* Apply through the open's own handle: the stateid authorizes the
-         * size change the way a descriptor authorizes ftruncate(2), and the
-         * OPEN-time handle carries that grant (and, on a passthrough
-         * backend, the writable descriptor itself) where a fresh path-only
-         * open would face a per-operation permission re-check.  The
-         * truncate is the stateid owner's own I/O: carry that client as the
-         * claim actor so it does not recall the client's own delegation. */
-        state_handle = nfs_state_io_handle(state_void, state_type,
-                                           OPEN4_SHARE_ACCESS_WRITE);
-        if (state_handle) {
-            chimera_vfs_dup_handle(thread->vfs_thread, state_handle);
-            req->handle             = state_handle;
-            req->io_owner_valid     = true;
-            req->io_owner_client_id =
-                nfs_state_owner_client(state_void, state_type)->client_id;
-        }
+            /* Apply through the open's own handle: the stateid authorizes the
+             * size change the way a descriptor authorizes ftruncate(2), and the
+             * OPEN-time handle carries that grant (and, on a passthrough
+             * backend, the writable descriptor itself) where a fresh path-only
+             * open would face a per-operation permission re-check.  The
+             * truncate is the stateid owner's own I/O: carry that client as the
+             * claim actor so it does not recall the client's own delegation. */
+            state_handle = nfs_state_io_handle(state_void, state_type,
+                                               OPEN4_SHARE_ACCESS_WRITE);
+            if (state_handle) {
+                chimera_vfs_dup_handle(thread->vfs_thread, state_handle);
+                req->handle             = state_handle;
+                req->io_owner_valid     = true;
+                req->io_owner_client_id =
+                    nfs_state_owner_client(state_void, state_type)->client_id;
+            }
 
-        nfs_state_table_release(table, state_void, state_type,
-                                thread->vfs_thread);
+            nfs_state_table_release(table, state_void, state_type,
+                                    thread->vfs_thread);
+        }
     }
 
     /* A size change conflicts with any outstanding writable layout for the
