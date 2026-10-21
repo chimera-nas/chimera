@@ -260,7 +260,7 @@ chimera_vfs_nfs4_setattr(
             request->setattr.handle->vfs_private;
 
         if (open_state) {
-            argarray[2].opsetattr.stateid = open_state->stateid;
+            argarray[2].opsetattr.stateid = chimera_nfs4_stateid_current(&open_state->stateid);
         } else {
             memset(&argarray[2].opsetattr.stateid, 0,
                    sizeof(argarray[2].opsetattr.stateid));

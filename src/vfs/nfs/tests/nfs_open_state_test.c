@@ -53,5 +53,15 @@ main(void)
     chimera_nfs4_open_file_close_done(&server, new_file);
     CHECK(server.open_files == NULL);
     evpl_mutex_destroy(&server.open_state_lock);
+
+    /* I/O and CLOSE present the current-seqid wildcard: same state, seqid 0. */
+    struct stateid4 held = { .seqid = 7, .other = { 3, 4, 5 } };
+    struct stateid4 cur  = chimera_nfs4_stateid_current(&held);
+    CHECK(cur.seqid == 0);
+    CHECK(memcmp(cur.other, held.other, sizeof(held.other)) == 0);
+    CHECK(chimera_nfs4_stateid_is_open(&cur));
+    struct stateid4 anon = { 0 };
+    cur = chimera_nfs4_stateid_current(&anon);
+    CHECK(!chimera_nfs4_stateid_is_open(&cur));
     return 0;
 } /* main */

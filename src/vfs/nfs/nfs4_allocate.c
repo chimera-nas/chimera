@@ -115,7 +115,7 @@ chimera_vfs_nfs4_allocate(
     if (is_dealloc) {
         argarray[2].argop = OP_DEALLOCATE;
         if (open_state) {
-            argarray[2].opdeallocate.da_stateid = open_state->stateid;
+            argarray[2].opdeallocate.da_stateid = chimera_nfs4_stateid_current(&open_state->stateid);
         } else {
             memset(&argarray[2].opdeallocate.da_stateid, 0,
                    sizeof(argarray[2].opdeallocate.da_stateid));
@@ -125,7 +125,7 @@ chimera_vfs_nfs4_allocate(
     } else {
         argarray[2].argop = OP_ALLOCATE;
         if (open_state) {
-            argarray[2].opallocate.aa_stateid = open_state->stateid;
+            argarray[2].opallocate.aa_stateid = chimera_nfs4_stateid_current(&open_state->stateid);
         } else {
             memset(&argarray[2].opallocate.aa_stateid, 0,
                    sizeof(argarray[2].opallocate.aa_stateid));

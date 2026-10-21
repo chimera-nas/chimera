@@ -108,7 +108,7 @@ chimera_vfs_nfs4_seek(
     /* Op 2: SEEK */
     argarray[2].argop = OP_SEEK;
     if (open_state) {
-        argarray[2].opseek.sa_stateid = open_state->stateid;
+        argarray[2].opseek.sa_stateid = chimera_nfs4_stateid_current(&open_state->stateid);
     } else {
         memset(&argarray[2].opseek.sa_stateid, 0,
                sizeof(argarray[2].opseek.sa_stateid));

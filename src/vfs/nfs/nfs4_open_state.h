@@ -125,6 +125,26 @@ chimera_nfs4_stateid_is_open(const struct stateid4 *stateid)
 } /* chimera_nfs4_stateid_is_open */
 
 /*
+ * The same state presented with seqid 0, which RFC 8881 8.2.2 defines as "the
+ * current seqid, whatever it is".  Every open stateid this client puts on the
+ * wire goes through here (layout stateids do not: RFC 8881 12.5.3 makes their
+ * seqid meaningful on the wire): I/O is authorized by the open, not by the
+ * seqid snapshot a handle took, and a server that enforces the seqid refuses
+ * one a later OPEN upgrade has superseded.  On CLOSE, seqid 0 is a deliberate
+ * departure from the 8.2.2 advice; see chimera_nfs4_close_transmit.  The
+ * anonymous stateid is all zero already, so it passes through unchanged.
+ */
+static inline struct stateid4
+chimera_nfs4_stateid_current(const struct stateid4 *stateid)
+{
+    struct stateid4 current = *stateid;
+
+    current.seqid = 0;
+
+    return current;
+} /* chimera_nfs4_stateid_current */
+
+/*
  * Free an open state.
  */
 static inline void
