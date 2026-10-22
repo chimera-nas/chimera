@@ -8,7 +8,7 @@ set(PYNFS_DIR /opt/pynfs)
 
 set(PYNFS_BACKENDS memfs linux io_uring diskfs_io_uring)
 
-if(HAVE_LIBAIO)
+if(HAVE_LIBAIO_USABLE)
     list(APPEND PYNFS_BACKENDS diskfs_aio)
 endif()
 

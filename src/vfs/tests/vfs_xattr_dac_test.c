@@ -422,9 +422,14 @@ main(
     chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", backend, session_dir,
                       NULL, mount_cb, &ctx);
     wait_done(&ctx);
-    if (ctx.status == CHIMERA_VFS_ENOTSUP) {
-        fprintf(stderr, "SKIP: %s cannot serve %s (ENOTSUP)\n", backend,
-                session_dir);
+    /* ENOTSUP: the scratch fs cannot mint handles.  EPERM: open_by_handle_at
+     * needs CAP_DAC_READ_SEARCH.  ENXIO: the backend module failed to init
+     * (e.g. io_uring_setup ENOSYS under container seccomp). */
+    if (ctx.status == CHIMERA_VFS_ENOTSUP ||
+        ctx.status == CHIMERA_VFS_EPERM ||
+        ctx.status == CHIMERA_VFS_ENXIO) {
+        fprintf(stderr, "SKIP: %s cannot serve %s (status %d)\n", backend,
+                session_dir, ctx.status);
         rmdir(session_dir);
         /* _exit: skip the leak checker, this is a skip not a failure. */
         _exit(SKIP_RC);
