@@ -43,6 +43,7 @@ enum CHIMERA_FS_FH_MAGIC {
     CHIMERA_VFS_FH_MAGIC_MEMKV    = 7,
     CHIMERA_VFS_FH_MAGIC_SQLITE   = 8,
     CHIMERA_VFS_FH_MAGIC_SMB      = 9,
+    CHIMERA_VFS_FH_MAGIC_DAOS     = 10,
 
     /* The last 16 values (240-255) are reserved for proprietary
      * out-of-tree VFS modules and will never be assigned to
