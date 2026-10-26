@@ -721,6 +721,12 @@ chimera_nfs_nlm4_lock_acquire_cb(
             if (ctx->was_blocked) {
                 chimera_nfs_nlm4_build_grant_locked(ctx, &work.grant);
                 work.deliver = true;
+                /* Only a grant that took nothing over can be handed back on
+                 * CANCEL.  One that replaced locks this owner already held
+                 * (a blocked upgrade or a re-lock over held bytes) cannot:
+                 * the client still believes it holds those, and releasing
+                 * the merged range would free bytes it never gave up. */
+                entry->grant_unconfirmed = (parents == NULL);
             }
         }
         evpl_mutex_unlock(&shared->nlm_state.mutex);
@@ -1212,6 +1218,9 @@ chimera_nfs_nlm4_do_lock(
                                entry->fh, entry->fh_len,
                                entry->offset, entry->length);
     if (dup && dup->exclusive == entry->exclusive) {
+        /* The reply below tells the client it holds the lock, so a later
+         * CANCEL must no longer take a deferred grant back. */
+        dup->grant_unconfirmed = false;
         evpl_mutex_unlock(&shared->nlm_state.mutex);
         chimera_nfs_debug("NLM LOCK: duplicate lock request -> NLM4_GRANTED (idempotent)");
         res.cookie.len  = ctx->cookie.len;
@@ -1287,7 +1296,7 @@ chimera_nfs_nlm4_do_cancel(
     struct chimera_server_nfs_shared *shared    = thread->shared;
     struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
     struct nlm_client                *client;
-    struct nlm_lock_entry            *entry, *match;
+    struct nlm_lock_entry            *entry, *match, *unconfirmed;
     char                              safe_hostname[LM_MAXSTRLEN + 1];
     size_t                            hn_len;
     uint64_t                          want_length;
@@ -1309,19 +1318,20 @@ chimera_nfs_nlm4_do_cancel(
 
     evpl_mutex_lock(&shared->nlm_state.mutex);
     HASH_FIND_STR(shared->nlm_state.clients, safe_hostname, client);
-    match = NULL;
+    match       = NULL;
+    unconfirmed = NULL;
     if (client) {
         DL_FOREACH(client->locks, entry)
         {
-            /* Only pending entries can be cancelled; granted entries
-             * require UNLOCK to release.  CANCEL identifies the specific
-             * outstanding blocked LOCK request, which per RFC 1813 (struct
-             * nlm4_cancargs / nlm4_lock) is keyed by its mode as well as
-             * owner+range, so match the exact
-             * (oh, svid, fh, range, exclusive) tuple. */
-            if (!entry->pending) {
-                continue;
-            }
+            /* CANCEL identifies the specific outstanding blocked LOCK
+             * request, which per RFC 1813 (struct nlm4_cancargs / nlm4_lock)
+             * is keyed by its mode as well as owner+range, so match the
+             * exact (oh, svid, fh, range, exclusive) tuple.  A pending entry
+             * is the request itself.  A granted one normally needs UNLOCK,
+             * except a deferred grant the client never confirmed (see
+             * grant_unconfirmed): its NLM_GRANTED may never have arrived,
+             * and the CANCEL says the waiter gave up, so leaving it held
+             * would orphan the lock behind every later request. */
             if (entry->oh_len    != args->alock.oh.len  ||
                 entry->fh_len    != args->alock.fh.len  ||
                 entry->svid      != args->alock.svid    ||
@@ -1332,9 +1342,24 @@ chimera_nfs_nlm4_do_cancel(
                 memcmp(entry->fh, args->alock.fh.data, entry->fh_len) != 0) {
                 continue;
             }
+            if (!entry->pending) {
+                if (entry->grant_unconfirmed && !unconfirmed) {
+                    unconfirmed = entry;
+                }
+                continue;
+            }
             match = entry;
             break;
         }
+    }
+
+    /* A pending request wins: the tuple cannot also be held, because a
+     * re-LOCK of a held tuple is answered without queueing.  Unhook the
+     * unconfirmed grant here so a concurrent reap cannot free it. */
+    if (match) {
+        unconfirmed = NULL;
+    } else if (unconfirmed) {
+        DL_DELETE(client->locks, unconfirmed);
     }
 
     if (match && match->file_state) {
@@ -1354,6 +1379,29 @@ chimera_nfs_nlm4_do_cancel(
         ctx_for_lock_cb = match->ticket.private_data;
     }
     evpl_mutex_unlock(&shared->nlm_state.mutex);
+
+    /* Release before replying, the way UNLOCK does, so the LOCK a client
+     * typically sends right after its CANCEL finds the range free.  Outside
+     * the mutex: the claim core may pump waiters whose completion callbacks
+     * take it. */
+    if (unconfirmed) {
+        chimera_nfs_debug("NLM CANCEL: releasing a deferred grant the client "
+                          "never confirmed (svid=%d)", unconfirmed->svid);
+        if (unconfirmed->claim_inserted) {
+            chimera_vfs_claim_release_ranged(thread->vfs_thread, vfs_state,
+                                             unconfirmed->file_state,
+                                             &unconfirmed->claim);
+            unconfirmed->claim_inserted = false;
+        }
+        if (unconfirmed->file_state) {
+            chimera_vfs_state_put(vfs_state, unconfirmed->file_state);
+            unconfirmed->file_state = NULL;
+        }
+        if (unconfirmed->handle) {
+            chimera_vfs_release(thread->vfs_thread, unconfirmed->handle);
+        }
+        nlm_lock_entry_free(unconfirmed);
+    }
 
     nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_GRANTED,
                   proc);
