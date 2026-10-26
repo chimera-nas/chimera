@@ -342,30 +342,19 @@ struct nlm_lock_resume {
     struct nlm_lock_resume         *next;
 };
 
-/* Snapshot a self-contained grant job from the now-granted lock entry.
- *
- * CALLER MUST HOLD nlm_state.mutex.  The entry is only guaranteed to exist
- * while it is held: a client reap (FREE_ALL, SM_NOTIFY, or the last
- * connection dropping) takes every entry off client->locks under the mutex
- * and frees them as soon as it drops it, so reading the entry afterwards is
- * a use-after-free.  The job is a pure value copy, so once it is filled in
- * nothing downstream aliases lock state. */
+/* The lock half of a grant request -- what nlm_granter_revoke matches on --
+ * filled from the entry alone, so a revoke names exactly what the submit
+ * did.  Leaves client_addr and the cookie empty. */
 static void
-chimera_nfs_nlm4_build_grant_locked(
-    struct nlm_lock_ctx      *ctx,
-    struct nlm_grant_request *reqp)
+chimera_nfs_nlm4_grant_lock_fill(
+    const struct nlm_lock_entry *entry,
+    const char                  *hostname,
+    struct nlm_grant_request    *reqp)
 {
-    struct nlm_lock_entry   *entry = ctx->entry;
     struct nlm_grant_request req;
 
     memset(&req, 0, sizeof(req));
-    snprintf(req.client_addr, sizeof(req.client_addr), "%s", ctx->client_addr);
-    snprintf(req.caller_name, sizeof(req.caller_name), "%s",
-             ctx->client->hostname);
-    req.cookie_len = ctx->cookie.len < LM_MAXSTRLEN ? ctx->cookie.len : LM_MAXSTRLEN;
-    if (req.cookie_len) {
-        memcpy(req.cookie, ctx->cookie.data, req.cookie_len);
-    }
+    snprintf(req.caller_name, sizeof(req.caller_name), "%s", hostname);
     req.fh_len = entry->fh_len < NFS4_FHSIZE ? entry->fh_len : NFS4_FHSIZE;
     memcpy(req.fh, entry->fh, req.fh_len);
     req.oh_len = entry->oh_len < LM_MAXSTRLEN ? entry->oh_len : LM_MAXSTRLEN;
@@ -379,6 +368,31 @@ chimera_nfs_nlm4_build_grant_locked(
      * nfs_nlm_range.h). */
     req.length    = nlm_posix_len_to_wire(entry->length);
     req.exclusive = entry->exclusive ? 1 : 0;
+
+    *reqp = req;
+} /* chimera_nfs_nlm4_grant_lock_fill */
+
+/* Snapshot a self-contained grant job from the now-granted lock entry.
+ *
+ * CALLER MUST HOLD nlm_state.mutex.  The entry is only guaranteed to exist
+ * while it is held: a client reap (FREE_ALL, SM_NOTIFY, or the last
+ * connection dropping) takes every entry off client->locks under the mutex
+ * and frees them as soon as it drops it, so reading the entry afterwards is
+ * a use-after-free.  The job is a pure value copy, so once it is filled in
+ * nothing downstream aliases lock state. */
+static void
+chimera_nfs_nlm4_build_grant_locked(
+    struct nlm_lock_ctx      *ctx,
+    struct nlm_grant_request *reqp)
+{
+    struct nlm_grant_request req;
+
+    chimera_nfs_nlm4_grant_lock_fill(ctx->entry, ctx->client->hostname, &req);
+    snprintf(req.client_addr, sizeof(req.client_addr), "%s", ctx->client_addr);
+    req.cookie_len = ctx->cookie.len < LM_MAXSTRLEN ? ctx->cookie.len : LM_MAXSTRLEN;
+    if (req.cookie_len) {
+        memcpy(req.cookie, ctx->cookie.data, req.cookie_len);
+    }
 
     *reqp = req;
 } /* chimera_nfs_nlm4_build_grant_locked */
@@ -1297,6 +1311,8 @@ chimera_nfs_nlm4_do_cancel(
     struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
     struct nlm_client                *client;
     struct nlm_lock_entry            *entry, *match, *unconfirmed;
+    struct nlm_granter               *granter = NULL;
+    struct nlm_grant_request          revoke;
     char                              safe_hostname[LM_MAXSTRLEN + 1];
     size_t                            hn_len;
     uint64_t                          want_length;
@@ -1360,6 +1376,9 @@ chimera_nfs_nlm4_do_cancel(
         unconfirmed = NULL;
     } else if (unconfirmed) {
         DL_DELETE(client->locks, unconfirmed);
+        chimera_nfs_nlm4_grant_lock_fill(unconfirmed, client->hostname,
+                                         &revoke);
+        granter = shared->nlm_granter;
     }
 
     if (match && match->file_state) {
@@ -1401,6 +1420,9 @@ chimera_nfs_nlm4_do_cancel(
             chimera_vfs_release(thread->vfs_thread, unconfirmed->handle);
         }
         nlm_lock_entry_free(unconfirmed);
+        /* A GRANTED still being retransmitted would now tell the client it
+         * holds a lock it does not. */
+        nlm_granter_revoke(granter, &revoke);
     }
 
     nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_GRANTED,

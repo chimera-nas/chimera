@@ -129,6 +129,61 @@ test_retry_and_ack(struct evpl *evpl)
     evpl_rpc2_server_destroy(server);
 } /* test_retry_and_ack */
 
+/* The server released the lock (a CANCEL took back a grant the client never
+ * confirmed): a GRANTED still waiting for its retry must not go out. */
+static void
+test_revoke(struct evpl *evpl)
+{
+    struct nlm_granter       granter;
+    struct nlm_grant_ctx    *ctx = start(evpl, &granter);
+    struct nlm_grant_job    *job = start_grant(ctx);
+    struct nlm_grant_request other, req;
+
+    while (job->inflight) {
+        evpl_continue(evpl);
+    }
+    CHECK(job->attempts == 1);
+    CHECK(!job->finishing);
+
+    /* A revoke naming another lock leaves this grant alone. */
+    other = job->req;
+    other.svid++;
+    nlm_granter_revoke(&granter, &other);
+    while (granter.intake_head) {
+        evpl_continue(evpl);
+    }
+    CHECK(ctx->active == job);
+    CHECK(!job->finishing);
+
+    nlm_granter_revoke(&granter, &job->req);
+    while (ctx->active) {
+        evpl_continue(evpl);
+    }
+
+    /* A submit and its revoke in one intake batch, the order CANCEL relies
+     * on when it releases a grant submitted under nlm_state.mutex: the FIFO
+     * hands the revoke the job its submit has just started, which finishes
+     * while its portmap query is still out, before any GRANTED attempt. */
+    memset(&req, 0, sizeof(req));
+    strcpy(req.client_addr, "127.0.0.1");
+    strcpy(req.caller_name, "grant-disconnect-test");
+    nlm_granter_submit(&granter, &req);
+    nlm_granter_revoke(&granter, &req);
+    CHECK(ctx->active == NULL);
+    /* Drain the batch by hand, as the doorbell would, so nothing else runs
+     * before the job is inspected: its portmap connection fails within the
+     * same loop iteration.  The doorbell, already rung, finds it empty. */
+    nlm_grant_doorbell_cb(evpl, &granter.doorbell);
+    CHECK(granter.intake_head == NULL);
+    CHECK(ctx->active != NULL);
+    CHECK(ctx->active->finishing);
+    CHECK(ctx->active->attempts == 0);
+    while (ctx->active) {
+        evpl_continue(evpl);
+    }
+    stop(evpl, ctx);
+} /* test_revoke */
+
 static void
 test_shutdown_pending(
     struct evpl *evpl,
@@ -173,6 +228,7 @@ main(void)
     mbt_watchdog_arm(15);
     test_lost_connection(evpl);
     test_retry_and_ack(evpl);
+    test_revoke(evpl);
     test_shutdown_pending(evpl, 0);
     test_shutdown_pending(evpl, 1);
     test_portmap_refusal(evpl);
