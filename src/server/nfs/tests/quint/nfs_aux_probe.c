@@ -26,9 +26,11 @@
 
 #include "common/compiler.h"
 #include "common/getopt.h"
+#include "common/atomic.h"
 
 #include "nfs_aux_mbt_common.h"
 #include "common/mbt_watchdog.h"
+#include "server/nfs/nfs_nlm_test_hooks.h"
 
 #define PROBE_EXPORT     "/share"
 #define PROBE_EXPORT2    "/share2"
@@ -1101,6 +1103,8 @@ probe_nlm_relock(struct mbt_env *env)
  */
 #define CG_BASE 65536ULL
 #define CG_LEN  16
+/* A second range clear of the first, for the cases that need two. */
+#define CG_R2   (CG_BASE + 2 * CG_LEN)
 
 static const uint8_t oh_c4[] = { 0xc4, 0xc4 };
 
@@ -1126,13 +1130,43 @@ cg_reset(struct mbt_env *env)
     mbt_nlm_free_all(env, "quint-c4", 1);
 } /* cg_reset */
 
+/* c3's exclusive TEST over [offset, offset + length): GRANTED when free. */
+static uint32_t
+cg_test_range(
+    struct mbt_env *env,
+    uint64_t        offset,
+    uint64_t        length)
+{
+    return mbt_nlm_test(env, 0, "quint-c3", &file_fh[0], oh_a, sizeof(oh_a),
+                        3, 1, offset, length, ck, sizeof(ck))->nlm_stat;
+} /* cg_test_range */
+
 /* c3's exclusive TEST over the range: GRANTED when it is free. */
 static uint32_t
 cg_test(struct mbt_env *env)
 {
-    return mbt_nlm_test(env, 0, "quint-c3", &file_fh[0], oh_a, sizeof(oh_a),
-                        3, 1, CG_BASE, CG_LEN, ck, sizeof(ck))->nlm_stat;
+    return cg_test_range(env, CG_BASE, CG_LEN);
 } /* cg_test */
+
+/* Server-initiated messages logged since the last mbt_aux_async_reset that
+ * carry `proc`, and `stat` unless it is negative. */
+static int
+cg_count_async(
+    struct mbt_env *env,
+    int             proc,
+    long            stat)
+{
+    const struct mbt_aux *a = mbt_aux(env);
+    int                   i, n = 0;
+
+    for (i = 0; i < a->nasync; i++) {
+        if (a->async[i].proc == proc &&
+            (stat < 0 || a->async[i].stat == (uint32_t) stat)) {
+            n++;
+        }
+    }
+    return n;
+} /* cg_count_async */
 
 /* c2's CANCEL of its exclusive blocking request, as the client sends it. */
 static uint32_t
@@ -1147,6 +1181,36 @@ cg_cancel_c2(
                           sizeof(ck))->nlm_stat;
 } /* cg_cancel_c2 */
 
+/* c1 holds the range exclusively and c2 queues an exclusive blocking LOCK
+ * behind it, sent as `proc`: 2 (LOCK) or 7 (LOCK_MSG, whose NLM4_BLOCKED
+ * comes back as a LOCK_RES). */
+static void
+cg_queue_c2(
+    struct mbt_env *env,
+    const char     *tag,
+    int             proc)
+{
+    const struct mbt_fh   *f = &file_fh[0];
+    struct mbt_aux_result *r;
+
+    cg_reset(env);
+    r = mbt_nlm_lock(env, 2, "quint-c1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     CG_BASE, CG_LEN, ck, sizeof(ck));
+    cg_check(tag, "c1 LOCK excl", r->nlm_stat, NLM4_GRANTED);
+    if (proc == 7) {
+        mbt_aux_async_reset(env);
+        mbt_nlm_lock(env, 7, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1, 0, 0,
+                     CG_BASE, CG_LEN, ck, sizeof(ck));
+        mbt_aux_drain_for(env, 1, 2000000);
+        cg_check(tag, "c2 blocking LOCK_MSG excl: LOCK_RES BLOCKED",
+                 cg_count_async(env, 12, NLM4_BLOCKED), 1);
+    } else {
+        r = mbt_nlm_lock(env, 2, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1, 0,
+                         0, CG_BASE, CG_LEN, ck, sizeof(ck));
+        cg_check(tag, "c2 blocking LOCK excl", r->nlm_stat, NLM4_BLOCKED);
+    }
+} /* cg_queue_c2 */
+
 /* c1 holds the range exclusively, c2 queues an exclusive blocking LOCK
  * behind it (and c4 too when asked), then c1 unlocks: c2 is granted out of
  * band and the callback is lost. */
@@ -1159,13 +1223,7 @@ cg_grant_to_c2(
     const struct mbt_fh   *f = &file_fh[0];
     struct mbt_aux_result *r;
 
-    cg_reset(env);
-    r = mbt_nlm_lock(env, 2, "quint-c1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
-                     CG_BASE, CG_LEN, ck, sizeof(ck));
-    cg_check(tag, "c1 LOCK excl", r->nlm_stat, NLM4_GRANTED);
-    r = mbt_nlm_lock(env, 2, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1, 0, 0,
-                     CG_BASE, CG_LEN, ck, sizeof(ck));
-    cg_check(tag, "c2 blocking LOCK excl", r->nlm_stat, NLM4_BLOCKED);
+    cg_queue_c2(env, tag, 2);
     if (with_c4) {
         r = mbt_nlm_lock(env, 2, "quint-c4", f, oh_c4, sizeof(oh_c4), 4, 1, 1,
                          0, 0, CG_BASE, CG_LEN, ck, sizeof(ck));
@@ -1233,6 +1291,72 @@ probe_nlm_cancel_after_grant(struct mbt_env *env)
     cg_check("mismatch", "c3 TEST excl after the CANCELs (still held)",
              cg_test(env), NLM4_DENIED);
 
+    /* A LOCK_MSG's grant is lost the same way; its NLM4_BLOCKED came back as
+     * a LOCK_RES.  CANCEL releases it, and nothing follows on the async
+     * side: the request was answered, and CANCEL replies synchronously. */
+    cg_queue_c2(env, "lock_msg", 7);
+    mbt_nlm_unlock(env, 0, "quint-c1", f, oh_a, sizeof(oh_a), 1, CG_BASE,
+                   CG_LEN, ck, sizeof(ck));
+    mbt_aux_drain_us(env, 200000);
+    cg_check("lock_msg", "c3 TEST excl after c1 left (c2 granted)",
+             cg_test(env), NLM4_DENIED);
+    mbt_aux_async_reset(env);
+    cg_check("lock_msg", "c2 CANCEL", cg_cancel_c2(env, 0, 1, CG_LEN),
+             NLM4_GRANTED);
+    cg_check("lock_msg", "c3 TEST excl after the CANCEL (released)",
+             cg_test(env), NLM4_GRANTED);
+    mbt_aux_drain_us(env, 200000);
+    cg_check("lock_msg", "async messages after the CANCEL",
+             mbt_aux(env)->nasync, 0);
+
+    /* c2 unlocks the middle of its unconfirmed grant.  What is left are
+     * locks of their own, narrower than the request, so a CANCEL naming the
+     * request releases neither. */
+    cg_grant_to_c2(env, "carved", 0);
+    r = mbt_nlm_unlock(env, 0, "quint-c2", f, oh_b, sizeof(oh_b), 2,
+                       CG_BASE + 4, 4, ck, sizeof(ck));
+    cg_check("carved", "c2 UNLOCK [4,8)", r->nlm_stat, NLM4_GRANTED);
+    cg_check("carved", "c3 TEST excl [4,8) (carved out)",
+             cg_test_range(env, CG_BASE + 4, 4), NLM4_GRANTED);
+    cg_check("carved", "c2 CANCEL", cg_cancel_c2(env, 0, 1, CG_LEN),
+             NLM4_GRANTED);
+    cg_check("carved", "c3 TEST excl [0,4) after the CANCEL (still held)",
+             cg_test_range(env, CG_BASE, 4), NLM4_DENIED);
+    cg_check("carved", "c3 TEST excl [8,16) after the CANCEL (still held)",
+             cg_test_range(env, CG_BASE + 8, CG_LEN - 8), NLM4_DENIED);
+
+    /* A pending request on another range is withdrawn, and the unconfirmed
+     * grant stays: c2 holds an unconfirmed grant on R1 and has a request
+     * pending on R2 behind c1, and CANCELling the R2 request leaves R1 held
+     * until a CANCEL of its own.  One tuple both pending and held
+     * unconfirmed, where do_cancel's "a pending request wins" would decide,
+     * is unreachable from a conforming client: a re-LOCK of a held tuple is
+     * answered as a duplicate (confirming it), never queued. */
+    cg_grant_to_c2(env, "other_range", 0);
+    r = mbt_nlm_lock(env, 2, "quint-c1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     CG_R2, CG_LEN, ck, sizeof(ck));
+    cg_check("other_range", "c1 LOCK excl R2", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1, 0, 0,
+                     CG_R2, CG_LEN, ck, sizeof(ck));
+    cg_check("other_range", "c2 blocking LOCK excl R2", r->nlm_stat,
+             NLM4_BLOCKED);
+    r = mbt_nlm_cancel(env, 0, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1,
+                       CG_R2, CG_LEN, ck, sizeof(ck));
+    cg_check("other_range", "c2 CANCEL R2", r->nlm_stat, NLM4_GRANTED);
+    cg_check("other_range", "c3 TEST excl R1 (c2's grant untouched)",
+             cg_test(env), NLM4_DENIED);
+    cg_check("other_range", "c3 TEST excl R2 (c1 still holds)",
+             cg_test_range(env, CG_R2, CG_LEN), NLM4_DENIED);
+    mbt_nlm_unlock(env, 0, "quint-c1", f, oh_a, sizeof(oh_a), 1, CG_R2,
+                   CG_LEN, ck, sizeof(ck));
+    mbt_aux_drain_us(env, 200000);
+    cg_check("other_range", "c3 TEST excl R2 after c1 left (withdrawn)",
+             cg_test_range(env, CG_R2, CG_LEN), NLM4_GRANTED);
+    cg_check("other_range", "c2 CANCEL R1", cg_cancel_c2(env, 0, 1, CG_LEN),
+             NLM4_GRANTED);
+    cg_check("other_range", "c3 TEST excl R1 after its CANCEL (released)",
+             cg_test(env), NLM4_GRANTED);
+
     /* A blocked upgrade: c2's deferred exclusive grant replaced the shared
      * lock c2 already held.  The client still believes it holds that shared
      * lock after cancelling the upgrade, so CANCEL must not free the range. */
@@ -1259,6 +1383,422 @@ probe_nlm_cancel_after_grant(struct mbt_env *env)
 
     cg_reset(env);
 } /* probe_nlm_cancel_after_grant */
+
+/*
+ * CANCEL racing the pump that grants the request it names.  c1's UNLOCK
+ * frees the range, and from inside that release the claim core grants c2's
+ * queued LOCK by calling the NLM acquire completion on the thread serving
+ * the UNLOCK.  A CANCEL served by another thread just before that
+ * completion takes the NLM state mutex finds c2's request still pending but
+ * already off the claim core's queue, so it cannot withdraw it: the
+ * completion that follows has to take the grant back rather than deliver
+ * it, or the client that gave up holds a lock it will never release.
+ *
+ * The test hooks park that completion before it takes the mutex, and the
+ * CANCEL goes out on another connection, one a live thread serves.  c1's
+ * UNLOCK goes out as UNLOCK_MSG and is not waited on: its void reply is
+ * flushed by the very thread that is parked.  "No GRANTED went out" is
+ * observed at the granter through the submit hook -- the probe has no NLM
+ * listener, and a GRANTED delivered in process lands on chimera's own
+ * service, so the probe would not see one either way.
+ */
+#define RG_NCONN    3
+#define RG_TICK_US  5000
+#define RG_PARK_US  2000000
+#define RG_PING_US  500000
+#define RG_REPLY_US 2000000
+
+/* Shared with the server thread the hook parks, hence the atomics. */
+struct rg_hooks {
+    int armed;        /* park the next completion of c2 ... */
+    int want_blocked; /* ... that was (1) or was not (0) answered BLOCKED */
+    int parked;       /* a server thread sits in rg_park */
+    int release;      /* let it go */
+    int submits;      /* grants handed to the granter */
+};
+
+static struct rg_hooks rg;
+
+/* Reply flags of the requests sent without waiting.  Static: a reply can
+ * land after the wait for it gave up. */
+static int             rg_unlock_acked;
+static int             rg_ping_acked[RG_NCONN];
+
+static void
+rg_park(
+    int32_t svid,
+    bool    was_blocked,
+    void   *arg)
+{
+    struct rg_hooks *h = &rg;
+
+    (void) arg;
+    if (svid != 2 || (int) was_blocked != h->want_blocked ||
+        !chimera_atomic_exchange_n(&h->armed, 0, CHIMERA_MEMORY_ACQ_REL)) {
+        return;
+    }
+    chimera_atomic_store_n(&h->parked, 1, CHIMERA_MEMORY_RELEASE);
+    while (!chimera_atomic_load_n(&h->release, CHIMERA_MEMORY_ACQUIRE)) {
+        usleep(1000);
+    }
+} /* rg_park */
+
+static void
+rg_submit(
+    const struct nlm_grant_request *req,
+    void                           *arg)
+{
+    struct rg_hooks *h = &rg;
+
+    (void) req;
+    (void) arg;
+    chimera_atomic_fetch_add(&h->submits, 1, CHIMERA_MEMORY_RELAXED);
+} /* rg_submit */
+
+static void
+rg_install(int want_blocked)
+{
+    memset(&rg, 0, sizeof(rg));
+    rg.armed                                    = 1;
+    rg.want_blocked                             = want_blocked;
+    chimera_nfs_nlm_test_hooks.grant_submitted  = rg_submit;
+    chimera_nfs_nlm_test_hooks.acquire_cb_enter = rg_park;
+} /* rg_install */
+
+/* Every exit path goes through here, so no server thread stays parked: it
+ * disarms and releases, and unsets the hooks only once the traffic the
+ * release lets through has drained.  The hooks read rg directly and rg is
+ * left as it is (release stays set): a thread that won the armed exchange
+ * but has not yet read release must not park, and rg_install resets it only
+ * to arm the next variant. */
+static void
+rg_uninstall(struct mbt_env *env)
+{
+    chimera_atomic_store_n(&rg.armed, 0, CHIMERA_MEMORY_RELEASE);
+    chimera_atomic_store_n(&rg.release, 1, CHIMERA_MEMORY_RELEASE);
+    mbt_aux_drain_us(env, 200000);
+    chimera_nfs_nlm_test_hooks.acquire_cb_enter = NULL;
+    chimera_nfs_nlm_test_hooks.grant_submitted  = NULL;
+} /* rg_uninstall */
+
+static void
+rg_void_cb(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    int                          status,
+    void                        *private_data)
+{
+    (void) evpl;
+    (void) verf;
+    *(int *) private_data = status == 0 ? 1 : -1;
+} /* rg_void_cb */
+
+/* Pump the client loop until *flag is set or timeout_us has passed. */
+static int
+rg_wait_flag(
+    struct mbt_env *env,
+    const int      *flag,
+    uint64_t        timeout_us)
+{
+    uint64_t waited;
+
+    for (waited = 0; !*flag && waited < timeout_us; waited += RG_TICK_US) {
+        mbt_aux_drain_us(env, RG_TICK_US);
+    }
+    return *flag;
+} /* rg_wait_flag */
+
+static int
+rg_wait_parked(struct mbt_env *env)
+{
+    uint64_t waited;
+
+    for (waited = 0; waited < RG_PARK_US; waited += RG_TICK_US) {
+        if (chimera_atomic_load_n(&rg.parked, CHIMERA_MEMORY_ACQUIRE)) {
+            return 1;
+        }
+        mbt_aux_drain_us(env, RG_TICK_US);
+    }
+    return chimera_atomic_load_n(&rg.parked, CHIMERA_MEMORY_ACQUIRE);
+} /* rg_wait_parked */
+
+/* NLM NULL on conns[i]: 1 once answered within timeout_us. */
+static int
+rg_ping(
+    struct mbt_env         *env,
+    struct evpl_rpc2_conn **conns,
+    int                     i,
+    uint64_t                timeout_us)
+{
+    rg_ping_acked[i] = 0;
+    env->nlm_v4.send_call_NLMPROC4_NULL(&env->nlm_v4.rpc2, env->evpl,
+                                        conns[i], &env->aux_cred, 0, 0, NULL,
+                                        0, 0, rg_void_cb, &rg_ping_acked[i]);
+    return rg_wait_flag(env, &rg_ping_acked[i], timeout_us) == 1;
+} /* rg_ping */
+
+/* c1's UNLOCK_MSG, sent without waiting for its void reply. */
+static void
+rg_unlock_c1_nowait(struct mbt_env *env)
+{
+    static struct mbt_nlm_args scratch;
+    struct nlm4_unlockargs     args;
+
+    rg_unlock_acked = 0;
+    mbt_nlm_fill_cookie(&args.cookie, &scratch, ck, sizeof(ck));
+    mbt_nlm_fill_lock(&args.alock, &scratch, "quint-c1", &file_fh[0], oh_a,
+                      sizeof(oh_a), 1, CG_BASE, CG_LEN);
+    env->nlm_v4.send_call_NLMPROC4_UNLOCK_MSG(&env->nlm_v4.rpc2, env->evpl,
+                                              env->nlm_conn, &env->aux_cred,
+                                              &args, 0, 0, NULL, 0, 0,
+                                              rg_void_cb, &rg_unlock_acked);
+} /* rg_unlock_c1_nowait */
+
+/* c2's LOCK reply, for the LOCK sent without waiting.  Static for the same
+ * reason as the flags above. */
+static struct {
+    int      done;
+    uint32_t stat;
+} rg_lock;
+
+static void
+rg_lock_cb(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct nlm4_res             *reply,
+    int                          status,
+    void                        *private_data)
+{
+    (void) evpl;
+    (void) verf;
+    (void) private_data;
+    if (status == 0) {
+        rg_lock.stat = reply->stat;
+    }
+    rg_lock.done = status == 0 ? 1 : -1;
+} /* rg_lock_cb */
+
+/* c2's exclusive blocking LOCK (proc 2) or LOCK_MSG (proc 7), sent without
+ * waiting for its reply; a LOCK_MSG's void reply sets rg_lock.done, its
+ * answer comes back as a LOCK_RES. */
+static void
+rg_lock_c2_nowait(
+    struct mbt_env *env,
+    int             proc)
+{
+    static struct mbt_nlm_args scratch;
+    struct nlm4_lockargs       args;
+
+    rg_lock.done = 0;
+    rg_lock.stat = UINT32_MAX;
+    mbt_nlm_fill_cookie(&args.cookie, &scratch, ck, sizeof(ck));
+    args.block     = true;
+    args.exclusive = true;
+    args.reclaim   = false;
+    args.state     = 0;
+    mbt_nlm_fill_lock(&args.alock, &scratch, "quint-c2", &file_fh[0], oh_b,
+                      sizeof(oh_b), 2, CG_BASE, CG_LEN);
+    if (proc == 7) {
+        env->nlm_v4.send_call_NLMPROC4_LOCK_MSG(&env->nlm_v4.rpc2, env->evpl,
+                                                env->nlm_conn, &env->aux_cred,
+                                                &args, 0, 0, NULL, 0, 0,
+                                                rg_void_cb, &rg_lock.done);
+        return;
+    }
+    env->nlm_v4.send_call_NLMPROC4_LOCK(&env->nlm_v4.rpc2, env->evpl,
+                                        env->nlm_conn, &env->aux_cred, &args,
+                                        0, 0, NULL, 0, 0, rg_lock_cb, NULL);
+} /* rg_lock_c2_nowait */
+
+/* c2's CANCEL -- or with `reap`, a FREE_ALL of c2 -- while the thread
+ * serving env->nlm_conn is parked, sent on the first of conns[] another
+ * thread answers (a connection whose NULL is stuck behind the park only gets
+ * it answered after the release).  0 when no connection answers. */
+static int
+rg_withdraw_c2_live(
+    struct mbt_env         *env,
+    struct evpl_rpc2_conn **conns,
+    const char             *tag,
+    int                     reap)
+{
+    struct evpl_rpc2_conn *live = NULL;
+    struct evpl_rpc2_conn *saved;
+    int                    i;
+
+    for (i = 0; i < RG_NCONN && !live; i++) {
+        if (rg_ping(env, conns, i, RG_PING_US)) {
+            live = conns[i];
+        }
+    }
+    if (!live) {
+        fail("%s: no NLM connection answered while the grant was parked",
+             tag);
+        return 0;
+    }
+
+    saved         = env->nlm_conn;
+    env->nlm_conn = live;
+    if (reap) {
+        mbt_nlm_free_all(env, "quint-c2", 1);
+        cg_check(tag, "c2 FREE_ALL while the grant is parked",
+                 env->res.rpc_err, 0);
+    } else {
+        cg_check(tag, "c2 CANCEL while the grant is parked",
+                 cg_cancel_c2(env, 0, 1, CG_LEN), NLM4_GRANTED);
+    }
+    env->nlm_conn = saved;
+    return 1;
+} /* rg_withdraw_c2_live */
+
+/* One race, with c2's LOCK sent as `proc` (2 = LOCK, 7 = LOCK_MSG). */
+static void
+rg_case(
+    struct mbt_env         *env,
+    struct evpl_rpc2_conn **conns,
+    int                     proc)
+{
+    const char *tag = proc == 7 ? "race_lock_msg" : "race_lock";
+
+    cg_queue_c2(env, tag, proc);
+    rg_install(1);
+
+    mbt_aux_async_reset(env);
+    rg_unlock_c1_nowait(env);
+    if (!rg_wait_parked(env)) {
+        fail("%s: c1's UNLOCK never reached c2's acquire completion", tag);
+        goto out;
+    }
+    if (!rg_withdraw_c2_live(env, conns, tag, 0)) {
+        goto out;
+    }
+
+    chimera_atomic_store_n(&rg.release, 1, CHIMERA_MEMORY_RELEASE);
+    /* Wait for what the released thread sends rather than a fixed window:
+     * c1's UNLOCK_RES and, for a LOCK_MSG, c2's LOCK_RES. */
+    mbt_aux_drain_for(env, proc == 7 ? 2 : 1, RG_REPLY_US);
+
+    cg_check(tag, "c1 UNLOCK_MSG answered", rg_wait_flag(env, &rg_unlock_acked,
+                                                         RG_REPLY_US), 1);
+    cg_check(tag, "c3 TEST excl after the raced CANCEL (released)",
+             cg_test(env), NLM4_GRANTED);
+    cg_check(tag, "grants submitted to the granter",
+             chimera_atomic_load_n(&rg.submits, CHIMERA_MEMORY_ACQUIRE), 0);
+    if (proc == 7) {
+        cg_check(tag, "LOCK_RES DENIED", cg_count_async(env, 12, NLM4_DENIED),
+                 1);
+        cg_check(tag, "LOCK_RES GRANTED",
+                 cg_count_async(env, 12, NLM4_GRANTED), 0);
+    } else {
+        cg_check(tag, "LOCK_RES of any kind", cg_count_async(env, 12, -1), 0);
+    }
+
+ out:
+    rg_uninstall(env);
+    cg_reset(env);
+} /* rg_case */
+
+/* A CANCEL that arrives before the LOCK is answered at all.  Linux lockd
+ * sends one when the process is killed during the LOCK call: nlmclnt_lock
+ * presets the result to NLM4_BLOCKED, so its cancel path runs although no
+ * BLOCKED ever came back.  Here c2's LOCK finds the range free and is
+ * granted at once; its completion is parked before it publishes the grant,
+ * the CANCEL lands, and the still-open LOCK must then be answered
+ * NLM4_DENIED with the range left free.  Sent as `proc` (2 = LOCK, 7 =
+ * LOCK_MSG): the LOCK_MSG's void reply says nothing, so its NLM4_DENIED must
+ * arrive as exactly one LOCK_RES.
+ *
+ * With `reap`, a FREE_ALL of c2 lands there instead.  The reaper cannot
+ * withdraw a ticket the claim core has already decided, so it marks the
+ * request reaped and leaves it to the completion, which releases the grant.
+ * The still-open LOCK is answered NLM4_DENIED as above, but a LOCK_MSG gets
+ * no LOCK_RES: a reaped client is owed none. */
+static void
+rg_early_case(
+    struct mbt_env         *env,
+    struct evpl_rpc2_conn **conns,
+    int                     proc,
+    int                     reap)
+{
+    const char *tag;
+
+    if (reap) {
+        tag = proc == 7 ? "early_reap_lock_msg" : "early_reap";
+    } else {
+        tag = proc == 7 ? "early_cancel_lock_msg" : "early_cancel";
+    }
+
+    cg_reset(env);
+    rg_install(0);
+
+    mbt_aux_async_reset(env);
+    rg_lock_c2_nowait(env, proc);
+    if (!rg_wait_parked(env)) {
+        fail("%s: c2's LOCK never reached its acquire completion", tag);
+        goto out;
+    }
+    if (!rg_withdraw_c2_live(env, conns, tag, reap)) {
+        goto out;
+    }
+
+    chimera_atomic_store_n(&rg.release, 1, CHIMERA_MEMORY_RELEASE);
+    /* A LOCK_MSG taken back by CANCEL is answered by a LOCK_RES: wait for
+     * it rather than a fixed window.  Every other variant expects none,
+     * which only a window can show. */
+    if (proc == 7 && !reap) {
+        mbt_aux_drain_for(env, 1, RG_REPLY_US);
+    } else {
+        mbt_aux_drain_us(env, 200000);
+    }
+
+    cg_check(tag, "c2 LOCK answered", rg_wait_flag(env, &rg_lock.done,
+                                                   RG_REPLY_US), 1);
+    if (proc != 7) {
+        cg_check(tag, "c2 LOCK reply", rg_lock.stat, NLM4_DENIED);
+    }
+    cg_check(tag, "c3 TEST excl after the release (free)",
+             cg_test(env), NLM4_GRANTED);
+    cg_check(tag, "grants submitted to the granter",
+             chimera_atomic_load_n(&rg.submits, CHIMERA_MEMORY_ACQUIRE), 0);
+    if (proc == 7 && !reap) {
+        cg_check(tag, "LOCK_RES DENIED", cg_count_async(env, 12, NLM4_DENIED),
+                 1);
+        cg_check(tag, "LOCK_RES GRANTED",
+                 cg_count_async(env, 12, NLM4_GRANTED), 0);
+    } else {
+        cg_check(tag, "LOCK_RES of any kind", cg_count_async(env, 12, -1), 0);
+    }
+
+ out:
+    rg_uninstall(env);
+    cg_reset(env);
+} /* rg_early_case */
+
+static void
+probe_nlm_cancel_races_grant(struct mbt_env *env)
+{
+    struct evpl_rpc2_conn *conns[RG_NCONN];
+    int                    i;
+
+    printf("nlm cancel racing the grant:\n");
+
+    for (i = 0; i < RG_NCONN; i++) {
+        conns[i] = mbt_aux_nlm_connect2(env);
+        if (!rg_ping(env, conns, i, RG_REPLY_US)) {
+            fail("race: extra NLM connection %d never answered", i);
+        }
+    }
+
+    rg_case(env, conns, 2);
+    rg_case(env, conns, 7);
+    rg_early_case(env, conns, 2, 0);
+    rg_early_case(env, conns, 7, 0);
+    rg_early_case(env, conns, 2, 1);
+    rg_early_case(env, conns, 7, 1);
+
+    for (i = 0; i < RG_NCONN; i++) {
+        evpl_rpc2_client_disconnect(env->rpc2_thread, conns[i]);
+    }
+} /* probe_nlm_cancel_races_grant */
 
 /* ---------------------------------------------------------------------- */
 
@@ -1394,6 +1934,7 @@ main(
     probe_nlm(&env);
     probe_nlm_relock(&env);
     probe_nlm_cancel_after_grant(&env);
+    probe_nlm_cancel_races_grant(&env);
     probe_nsm(&env);
 
     chimera_server_remove_export(env.server, PROBE_EXPORT2);

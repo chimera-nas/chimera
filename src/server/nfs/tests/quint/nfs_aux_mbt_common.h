@@ -1598,6 +1598,33 @@ mbt_aux_env_open(
     env->nlm_v4.recv_call_NLMPROC4_GRANTED_MSG = mbt_aux_recv_NLMPROC4_GRANTED_MSG;
 } /* mbt_aux_env_open */
 
+/* Another connection to the server's NLM service, made the way
+ * mbt_env_open_opts makes env->nlm_conn (it exports NLM_V4 too, so a *_MSG
+ * sent on it is answered on it).  The server hands accepted connections to
+ * its threads in turn, so this one is usually served by a different thread
+ * than env->nlm_conn.  To send one of the wrappers above on it, swap it into
+ * env->nlm_conn around the call and restore it afterwards.  The caller
+ * disconnects it with evpl_rpc2_client_disconnect(env->rpc2_thread, conn)
+ * before mbt_env_stop. */
+static inline struct evpl_rpc2_conn *
+mbt_aux_nlm_connect2(struct mbt_env *env)
+{
+    static struct evpl_rpc2_program *nlm_srv[1];
+    struct evpl_endpoint            *nlm_ep;
+    struct evpl_rpc2_conn           *conn;
+
+    nlm_ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
+                                                "127.0.0.1", MBT_NLM_PORT);
+    nlm_srv[0] = &env->nlm_v4.rpc2;
+    conn       = evpl_rpc2_client_connect(env->rpc2_thread, EVPL_STREAM_INPROC,
+                                          nlm_ep, nlm_srv, 1, env);
+    if (!conn) {
+        fprintf(stderr, "failed to open a second NLM connection\n");
+        exit(1);
+    }
+    return conn;
+} /* mbt_aux_nlm_connect2 */
+
 /* Pump the client loop until the server's asynchronous messages have been
  * dispatched.
  *
