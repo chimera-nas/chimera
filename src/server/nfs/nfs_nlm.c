@@ -14,6 +14,7 @@
 #include "nfs_nlm_state.h"
 #include "nfs_nlm_range.h"
 #include "nfs_nlm_granted.h"
+#include "nfs_nlm_test_hooks.h"
 #include "nfs_nsm.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
@@ -334,6 +335,8 @@ struct nlm_lock_resume {
      * (chimera_nfs_nlm4_lock_replace): their claims are released already,
      * their open handles are released on ctx->thread, then they are freed. */
     struct nlm_lock_entry          *drop;
+    /* A deferred grant that replaced held locks: submitted on ctx->thread
+     * once chimera_nfs_nlm4_lock_replace has carved them. */
     struct nlm_grant_request        grant;  /* when deliver             */
     bool                            deliver;
     bool                            monitor;
@@ -397,24 +400,34 @@ chimera_nfs_nlm4_build_grant_locked(
     *reqp = req;
 } /* chimera_nfs_nlm4_build_grant_locked */
 
-/* Hand a snapshot built above to the outbound NLM_GRANTED engine.  Caller
- * must NOT hold nlm_state.mutex. */
+/* Test-only seams (nfs_nlm_test_hooks.h); all NULL unless a test sets them. */
+SYMBOL_EXPORT struct chimera_nfs_nlm_test_hooks chimera_nfs_nlm_test_hooks;
+
+/* Hand a snapshot built above to the outbound NLM_GRANTED engine.
+ *
+ * CALLER MUST HOLD nlm_state.mutex.  A grant CANCEL can release is submitted
+ * from inside the mutex section that published it, so the revoke that
+ * CANCEL queues after it drops the mutex lands behind this submit on the
+ * granter's intake FIFO; a grant that replaced held locks is submitted from the
+ * resume instead (chimera_nfs_nlm4_lock_acquire_cb says why).  Both granter
+ * calls are fine under the mutex: get_or_create wants it held (so two
+ * threads cannot both create a granter), and submit takes only the
+ * granter's own lock. */
 static void
-chimera_nfs_nlm4_submit_grant(
-    struct nlm_lock_ctx      *ctx,
-    struct nlm_grant_request *req)
+chimera_nfs_nlm4_submit_grant_locked(
+    struct chimera_server_nfs_shared *shared,
+    const struct nlm_grant_request   *req)
 {
-    struct chimera_server_nfs_shared *shared = ctx->thread->shared;
-    struct nlm_granter               *granter;
+    struct nlm_granter *granter;
 
-    /* Lazily create the granter (idempotent).  Done under nlm_state.mutex so two
-     * threads cannot both create one. */
-    evpl_mutex_lock(&shared->nlm_state.mutex);
     granter = nlm_granter_get_or_create(shared);
-    evpl_mutex_unlock(&shared->nlm_state.mutex);
-
     nlm_granter_submit(granter, req);
-} /* chimera_nfs_nlm4_submit_grant */
+
+    if (chimera_nfs_nlm_test_hooks.grant_submitted) {
+        chimera_nfs_nlm_test_hooks.grant_submitted(
+            req, chimera_nfs_nlm_test_hooks.arg);
+    }
+} /* chimera_nfs_nlm4_submit_grant_locked */
 
 /* Fired (once) synchronously inside chimera_vfs_claim_acquire when a blocking
  * LOCK queues on a conflict.  Sends the RFC 1813 / XNFS NLM4_BLOCKED interim
@@ -493,10 +506,16 @@ chimera_nfs_nlm4_lock_resume_run(
     }
 
     /* A blocked lock already had its original RPC answered with
-     * NLM4_BLOCKED, so its grant goes out of band via NLM_GRANTED. */
+     * NLM4_BLOCKED, so its grant goes out of band via NLM_GRANTED.  Only one
+     * that replaced held locks is submitted here, after their carve; any
+     * other was submitted by chimera_nfs_nlm4_lock_acquire_cb under the
+     * mutex that published it, and lands in the !reply case below. */
     if (r->deliver) {
-        chimera_nfs_debug("NLM LOCK: deferred lock granted -> NLM_GRANTED callback");
-        chimera_nfs_nlm4_submit_grant(ctx, &r->grant);
+        chimera_nfs_debug("NLM LOCK: deferred lock granted -> "
+                          "NLM_GRANTED callback submitted after the carve");
+        evpl_mutex_lock(&shared->nlm_state.mutex);
+        chimera_nfs_nlm4_submit_grant_locked(shared, &r->grant);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
         free(ctx);
         return;
     }
@@ -668,7 +687,9 @@ chimera_nfs_nlm4_lock_replace(
  * the claim.  Only the RPC send and the VFS handle release are marshalled
  * home, because an evpl send and a VFS request pool both belong to one
  * thread -- doing either from a foreign one corrupts the pool or trips
- * libevpl's LOCAL-iovec owner check. */
+ * libevpl's LOCAL-iovec owner check.  The resume also carries an upgrade's
+ * GRANTED submit, for ordering after the carve rather than thread
+ * ownership. */
 static void
 chimera_nfs_nlm4_lock_acquire_cb(
     enum chimera_vfs_claim_result            result,
@@ -683,6 +704,11 @@ chimera_nfs_nlm4_lock_acquire_cb(
     struct nlm_lock_entry            *entry     = ctx->entry;
     struct nlm_lock_resume            work;
     struct nlm_lock_resume           *r;
+
+    if (chimera_nfs_nlm_test_hooks.acquire_cb_enter) {
+        chimera_nfs_nlm_test_hooks.acquire_cb_enter(
+            entry->svid, ctx->was_blocked, chimera_nfs_nlm_test_hooks.arg);
+    }
 
     (void) conflict;
     (void) granted;
@@ -734,13 +760,26 @@ chimera_nfs_nlm4_lock_acquire_cb(
              * reap, which frees it. */
             if (ctx->was_blocked) {
                 chimera_nfs_nlm4_build_grant_locked(ctx, &work.grant);
-                work.deliver = true;
                 /* Only a grant that took nothing over can be handed back on
                  * CANCEL.  One that replaced locks this owner already held
                  * (a blocked upgrade or a re-lock over held bytes) cannot:
                  * the client still believes it holds those, and releasing
                  * the merged range would free bytes it never gave up. */
                 entry->grant_unconfirmed = (parents == NULL);
+                /* The two kinds are submitted at different times.  CANCEL
+                 * can release one that took nothing over the moment this
+                 * mutex drops, and its revoke only catches a submit already
+                 * on the granter's intake FIFO -- so submit that one here.
+                 * One that replaced held locks is never released by CANCEL,
+                 * but the client must not hear of it before
+                 * chimera_nfs_nlm4_lock_replace has carved those locks, or
+                 * it could act on the merged range while their remainders
+                 * are still detached -- so the resume submits it. */
+                if (parents) {
+                    work.deliver = true;
+                } else {
+                    chimera_nfs_nlm4_submit_grant_locked(shared, &work.grant);
+                }
             }
         }
         evpl_mutex_unlock(&shared->nlm_state.mutex);
@@ -768,9 +807,13 @@ chimera_nfs_nlm4_lock_acquire_cb(
                                                           reap_gen);
             }
             work.monitor = !ctx->nm_lock;
-            if (!work.deliver) {
+            if (!ctx->was_blocked) {
                 work.reply = true;
                 work.stat  = NLM4_GRANTED;
+            } else if (!work.deliver) {
+                chimera_nfs_debug("NLM LOCK: deferred lock granted -> "
+                                  "NLM_GRANTED callback submitted "
+                                  "under the lock");
             }
         }
     } else {
@@ -1421,7 +1464,11 @@ chimera_nfs_nlm4_do_cancel(
         }
         nlm_lock_entry_free(unconfirmed);
         /* A GRANTED still being retransmitted would now tell the client it
-         * holds a lock it does not. */
+         * holds a lock it does not.  The grant was submitted under the same
+         * nlm_state.mutex section that published grant_unconfirmed, so its
+         * submit is already on the granter's intake FIFO and this revoke is
+         * ordered after it -- and the granter we read under the mutex is
+         * the one that submit created. */
         nlm_granter_revoke(granter, &revoke);
     }
 
