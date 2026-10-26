@@ -57,6 +57,17 @@ nlm_granter_submit(
     struct nlm_granter             *granter,
     const struct nlm_grant_request *req);
 
+/* Stop delivering any grant for the lock *req names (caller, fh, oh, svid,
+ * range, mode): the server released it, so a GRANTED still being
+ * retransmitted would tell the client it holds a lock it does not.  Ordered
+ * after every earlier nlm_granter_submit, so it also catches a grant still
+ * on the intake queue.  Copies *req.  Safe to call from any server thread;
+ * NULL-safe. */
+void
+nlm_granter_revoke(
+    struct nlm_granter             *granter,
+    const struct nlm_grant_request *req);
+
 /* Stop and free the granter (called from nfs_server_destroy).  Joins the
  * granter thread, aborting any in-flight grant jobs cleanly.  NULL-safe. */
 void

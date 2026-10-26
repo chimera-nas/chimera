@@ -48,9 +48,12 @@
 #define NLM_VERSION                 4u
 
 /* Producer-side queue node carries the request payload plus an intake link.
- * The granter copies the payload into its own job and frees the node. */
+ * The granter copies the payload into its own job and frees the node.  A
+ * revoke node instead names a lock whose grant must stop being delivered;
+ * sharing the one FIFO orders it after the submit it revokes. */
 struct nlm_grant_intake {
     struct nlm_grant_request req;
+    int                      revoke;
     struct nlm_grant_intake *next;
 };
 
@@ -399,6 +402,44 @@ nlm_grant_job_start(
                                        nlm_grant_getport_cb, job);
 } /* nlm_grant_job_start */
 
+/* Same lock: everything a GRANTED names except the cookie. */
+static int
+nlm_grant_req_same_lock(
+    const struct nlm_grant_request *a,
+    const struct nlm_grant_request *b)
+{
+    return strcmp(a->caller_name, b->caller_name) == 0 &&
+           a->fh_len == b->fh_len &&
+           a->oh_len == b->oh_len &&
+           a->svid == b->svid &&
+           a->offset == b->offset &&
+           a->length == b->length &&
+           a->exclusive == b->exclusive &&
+           memcmp(a->fh, b->fh, a->fh_len) == 0 &&
+           memcmp(a->oh, b->oh, a->oh_len) == 0;
+} /* nlm_grant_req_same_lock */
+
+/* The server released the lock: finish every job still delivering it. */
+static void
+nlm_grant_job_revoke(
+    struct nlm_grant_ctx           *ctx,
+    const struct nlm_grant_request *req)
+{
+    struct nlm_grant_job *job, *tmp;
+
+    DL_FOREACH_SAFE(ctx->active, job, tmp)
+    {
+        if (job->finishing || !nlm_grant_req_same_lock(&job->req, req)) {
+            continue;
+        }
+        chimera_nfs_debug("NLM GRANTED: host '%s' (%s) lock released; "
+                          "stopping delivery after %d attempt(s)",
+                          job->req.caller_name, job->req.client_addr,
+                          job->attempts);
+        nlm_grant_job_finish(job);
+    }
+} /* nlm_grant_job_revoke */
+
 /* ------------------------------------------------------------------ *
 *  intake doorbell                                                    *
 * ------------------------------------------------------------------ */
@@ -423,7 +464,11 @@ nlm_grant_doorbell_cb(
 
     for (node = head; node; node = next) {
         next = node->next;
-        nlm_grant_job_start(ctx, &node->req);
+        if (node->revoke) {
+            nlm_grant_job_revoke(ctx, &node->req);
+        } else {
+            nlm_grant_job_start(ctx, &node->req);
+        }
         free(node);
     }
 } /* nlm_grant_doorbell_cb */
@@ -549,10 +594,11 @@ nlm_granter_get_or_create(struct chimera_server_nfs_shared *shared)
     return granter;
 } /* nlm_granter_get_or_create */
 
-void
-nlm_granter_submit(
+static void
+nlm_granter_enqueue(
     struct nlm_granter             *granter,
-    const struct nlm_grant_request *req)
+    const struct nlm_grant_request *req,
+    int                             revoke)
 {
     struct nlm_grant_intake *node;
 
@@ -564,8 +610,9 @@ nlm_granter_submit(
     if (!node) {
         return;
     }
-    node->req  = *req;
-    node->next = NULL;
+    node->req    = *req;
+    node->revoke = revoke;
+    node->next   = NULL;
 
     evpl_mutex_lock(&granter->lock);
     if (granter->shutdown) {
@@ -587,7 +634,23 @@ nlm_granter_submit(
     if (granter->doorbell_armed) {
         evpl_ring_doorbell(&granter->doorbell);
     }
+} /* nlm_granter_enqueue */
+
+void
+nlm_granter_submit(
+    struct nlm_granter             *granter,
+    const struct nlm_grant_request *req)
+{
+    nlm_granter_enqueue(granter, req, 0);
 } /* nlm_granter_submit */
+
+void
+nlm_granter_revoke(
+    struct nlm_granter             *granter,
+    const struct nlm_grant_request *req)
+{
+    nlm_granter_enqueue(granter, req, 1);
+} /* nlm_granter_revoke */
 
 void
 nlm_granter_destroy(struct nlm_granter *granter)
