@@ -1088,6 +1088,178 @@ probe_nlm_relock(struct mbt_env *env)
     relock_reset(env);
 } /* probe_nlm_relock */
 
+/*
+ * CANCEL after a deferred grant whose NLM_GRANTED never reached the client.
+ * A blocking LOCK answered NLM4_BLOCKED is granted out of band once the
+ * blocker lets go.  Behind a Kubernetes Service that callback lands
+ * on chimera's own NLM service, and this harness reproduces exactly that: the
+ * deferred GRANTED goes to the server's own receiver, never to the probe.
+ * When the client's waiter gives up it sends CANCEL, and that CANCEL has to
+ * release the grant the client never saw or the lock is orphaned.  A grant
+ * the client confirmed by re-polling LOCK belongs to the client, and CANCEL
+ * must not take it back.
+ */
+#define CG_BASE 65536ULL
+#define CG_LEN  16
+
+static const uint8_t oh_c4[] = { 0xc4, 0xc4 };
+
+static void
+cg_check(
+    const char *tag,
+    const char *what,
+    long        got,
+    long        want)
+{
+    char label[128];
+
+    snprintf(label, sizeof(label), "%s: %s", tag, what);
+    check_eq(label, got, want);
+} /* cg_check */
+
+static void
+cg_reset(struct mbt_env *env)
+{
+    mbt_nlm_free_all(env, "quint-c1", 1);
+    mbt_nlm_free_all(env, "quint-c2", 1);
+    mbt_nlm_free_all(env, "quint-c3", 1);
+    mbt_nlm_free_all(env, "quint-c4", 1);
+} /* cg_reset */
+
+/* c3's exclusive TEST over the range: GRANTED when it is free. */
+static uint32_t
+cg_test(struct mbt_env *env)
+{
+    return mbt_nlm_test(env, 0, "quint-c3", &file_fh[0], oh_a, sizeof(oh_a),
+                        3, 1, CG_BASE, CG_LEN, ck, sizeof(ck))->nlm_stat;
+} /* cg_test */
+
+/* c2's CANCEL of its exclusive blocking request, as the client sends it. */
+static uint32_t
+cg_cancel_c2(
+    struct mbt_env *env,
+    int             msg,
+    int             exclusive,
+    uint64_t        length)
+{
+    return mbt_nlm_cancel(env, msg, "quint-c2", &file_fh[0], oh_b,
+                          sizeof(oh_b), 2, exclusive, 1, CG_BASE, length, ck,
+                          sizeof(ck))->nlm_stat;
+} /* cg_cancel_c2 */
+
+/* c1 holds the range exclusively, c2 queues an exclusive blocking LOCK
+ * behind it (and c4 too when asked), then c1 unlocks: c2 is granted out of
+ * band and the callback is lost. */
+static void
+cg_grant_to_c2(
+    struct mbt_env *env,
+    const char     *tag,
+    int             with_c4)
+{
+    const struct mbt_fh   *f = &file_fh[0];
+    struct mbt_aux_result *r;
+
+    cg_reset(env);
+    r = mbt_nlm_lock(env, 2, "quint-c1", f, oh_a, sizeof(oh_a), 1, 1, 0, 0, 0,
+                     CG_BASE, CG_LEN, ck, sizeof(ck));
+    cg_check(tag, "c1 LOCK excl", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1, 0, 0,
+                     CG_BASE, CG_LEN, ck, sizeof(ck));
+    cg_check(tag, "c2 blocking LOCK excl", r->nlm_stat, NLM4_BLOCKED);
+    if (with_c4) {
+        r = mbt_nlm_lock(env, 2, "quint-c4", f, oh_c4, sizeof(oh_c4), 4, 1, 1,
+                         0, 0, CG_BASE, CG_LEN, ck, sizeof(ck));
+        cg_check(tag, "c4 blocking LOCK excl", r->nlm_stat, NLM4_BLOCKED);
+    }
+    mbt_nlm_unlock(env, 0, "quint-c1", f, oh_a, sizeof(oh_a), 1, CG_BASE,
+                   CG_LEN, ck, sizeof(ck));
+    mbt_aux_drain_us(env, 200000);
+    cg_check(tag, "c3 TEST excl after c1 left (c2 granted)", cg_test(env),
+             NLM4_DENIED);
+} /* cg_grant_to_c2 */
+
+static void
+probe_nlm_cancel_after_grant(struct mbt_env *env)
+{
+    const struct mbt_fh   *f = &file_fh[0];
+    struct mbt_aux_result *r;
+
+    printf("nlm cancel after a deferred grant:\n");
+
+    /* The client never saw the grant; its waiter gives up. */
+    cg_grant_to_c2(env, "orphan", 0);
+    cg_check("orphan", "c2 CANCEL", cg_cancel_c2(env, 0, 1, CG_LEN),
+             NLM4_GRANTED);
+    cg_check("orphan", "c3 TEST excl after the CANCEL (released)",
+             cg_test(env), NLM4_GRANTED);
+
+    /* The client re-polled and was told GRANTED: the lock is the client's. */
+    cg_grant_to_c2(env, "confirmed", 0);
+    r = mbt_nlm_lock(env, 2, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1, 0, 0,
+                     CG_BASE, CG_LEN, ck, sizeof(ck));
+    cg_check("confirmed", "c2 re-poll LOCK", r->nlm_stat, NLM4_GRANTED);
+    cg_check("confirmed", "c2 CANCEL", cg_cancel_c2(env, 0, 1, CG_LEN),
+             NLM4_GRANTED);
+    cg_check("confirmed", "c3 TEST excl after the CANCEL (still held)",
+             cg_test(env), NLM4_DENIED);
+
+    /* Releasing the cancelled grant promotes the next waiter. */
+    cg_grant_to_c2(env, "promote", 1);
+    cg_check("promote", "c2 CANCEL", cg_cancel_c2(env, 0, 1, CG_LEN),
+             NLM4_GRANTED);
+    mbt_aux_drain_us(env, 200000);
+    cg_check("promote", "c3 TEST excl after the CANCEL (c4 promoted)",
+             cg_test(env), NLM4_DENIED);
+    mbt_nlm_unlock(env, 0, "quint-c4", f, oh_c4, sizeof(oh_c4), 4, CG_BASE,
+                   CG_LEN, ck, sizeof(ck));
+    cg_check("promote", "c3 TEST excl after c4 unlocked", cg_test(env),
+             NLM4_GRANTED);
+
+    /* CANCEL_MSG releases the same way and still answers once. */
+    cg_grant_to_c2(env, "cancel_msg", 0);
+    mbt_aux_async_reset(env);
+    cg_cancel_c2(env, 1, 1, CG_LEN);
+    mbt_aux_drain_for(env, 1, 2000000);
+    cg_check("cancel_msg", "CANCEL_MSG async replies", mbt_aux(env)->nasync, 1);
+    cg_check("cancel_msg", "c3 TEST excl after the CANCEL_MSG (released)",
+             cg_test(env), NLM4_GRANTED);
+
+    /* A CANCEL naming another mode or range is not for this grant. */
+    cg_grant_to_c2(env, "mismatch", 0);
+    cg_check("mismatch", "c2 CANCEL shared", cg_cancel_c2(env, 0, 0, CG_LEN),
+             NLM4_GRANTED);
+    cg_check("mismatch", "c2 CANCEL longer range",
+             cg_cancel_c2(env, 0, 1, 2 * CG_LEN), NLM4_GRANTED);
+    cg_check("mismatch", "c3 TEST excl after the CANCELs (still held)",
+             cg_test(env), NLM4_DENIED);
+
+    /* A blocked upgrade: c2's deferred exclusive grant replaced the shared
+     * lock c2 already held.  The client still believes it holds that shared
+     * lock after cancelling the upgrade, so CANCEL must not free the range. */
+    cg_reset(env);
+    r = mbt_nlm_lock(env, 2, "quint-c2", f, oh_b, sizeof(oh_b), 2, 0, 0, 0, 0,
+                     CG_BASE, CG_LEN, ck, sizeof(ck));
+    cg_check("upgrade", "c2 LOCK shared", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-c1", f, oh_a, sizeof(oh_a), 1, 0, 0, 0, 0,
+                     CG_BASE, CG_LEN, ck, sizeof(ck));
+    cg_check("upgrade", "c1 LOCK shared", r->nlm_stat, NLM4_GRANTED);
+    r = mbt_nlm_lock(env, 2, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1, 0, 0,
+                     CG_BASE, CG_LEN, ck, sizeof(ck));
+    cg_check("upgrade", "c2 blocking LOCK excl (upgrade)", r->nlm_stat,
+             NLM4_BLOCKED);
+    mbt_nlm_unlock(env, 0, "quint-c1", f, oh_a, sizeof(oh_a), 1, CG_BASE,
+                   CG_LEN, ck, sizeof(ck));
+    mbt_aux_drain_us(env, 200000);
+    cg_check("upgrade", "c3 TEST excl after c1 left (c2 upgraded)",
+             cg_test(env), NLM4_DENIED);
+    cg_check("upgrade", "c2 CANCEL", cg_cancel_c2(env, 0, 1, CG_LEN),
+             NLM4_GRANTED);
+    cg_check("upgrade", "c3 TEST excl after the CANCEL (c2 still holds)",
+             cg_test(env), NLM4_DENIED);
+
+    cg_reset(env);
+} /* probe_nlm_cancel_after_grant */
+
 /* ---------------------------------------------------------------------- */
 
 static void
@@ -1221,6 +1393,7 @@ main(
     probe_mount(&env);
     probe_nlm(&env);
     probe_nlm_relock(&env);
+    probe_nlm_cancel_after_grant(&env);
     probe_nsm(&env);
 
     chimera_server_remove_export(env.server, PROBE_EXPORT2);

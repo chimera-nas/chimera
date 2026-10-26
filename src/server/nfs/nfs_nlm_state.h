@@ -60,6 +60,17 @@ struct nlm_lock_entry {
      * acquire callback must tear the entry down instead of completing it.
      * Exactly one of the reaper and the callback frees the entry. */
     bool                               reaped;
+    /* Set under nlm_state.mutex when the lock was granted out of band, after
+     * its LOCK had already been answered NLM4_BLOCKED, and took over none of
+     * the locks its owner already held: a grant that replaced held locks (a
+     * blocked upgrade, or a re-lock over held bytes) is never marked, since
+     * the client still believes it holds those.  The flag is cleared when the
+     * client re-polls the lock and is answered NLM4_GRANTED.  While set, the
+     * client may never have learned of the grant: the NLM_GRANTED callback
+     * can be lost, or -- behind a Kubernetes Service -- answered by this
+     * server's own NLM service.  A CANCEL for such a lock means the client
+     * gave up waiting, so chimera_nfs_nlm4_do_cancel releases it. */
+    bool                               grant_unconfirmed;
     /* Place on client->locks, which is kept in seq order: the order the
      * client asked for its locks.  That is the release order of
      * nlm_client_release_all_locks, which pumps the blocking queue after
