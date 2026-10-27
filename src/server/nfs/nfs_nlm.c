@@ -1339,6 +1339,42 @@ chimera_nfs_nlm4_do_lock(
         return;
     }
 
+    /* A blocking LOCK of a tuple this owner already has pending is the
+     * re-send a waiting client polls with (Linux lockd every 30 s, same
+     * arguments and cookie).  Answer it NLM4_BLOCKED from the request
+     * already queued and queue nothing beside it, as knfsd
+     * (nlmsvc_lookup_block) and ganesha do: a second copy would be granted
+     * after the client's CANCEL withdrew the first, to a waiter that no
+     * longer exists, and its promotion replaces the first's so neither is
+     * a deferred grant a CANCEL could hand back.  A request a CANCEL has
+     * already marked (cancel_requested) or the reaper has already taken
+     * (reaped) is withdrawn, so a re-send that meets only one of those is
+     * a new request and queues as one. */
+    if (ctx->block) {
+        DL_FOREACH(client->locks, dup)
+        {
+            if (dup->pending && !dup->cancel_requested && !dup->reaped &&
+                dup->oh_len    == entry->oh_len    &&
+                dup->fh_len    == entry->fh_len    &&
+                dup->svid      == entry->svid      &&
+                dup->offset    == entry->offset    &&
+                dup->length    == entry->length    &&
+                dup->exclusive == entry->exclusive &&
+                memcmp(dup->oh, entry->oh, entry->oh_len) == 0 &&
+                memcmp(dup->fh, entry->fh, entry->fh_len) == 0) {
+                break;
+            }
+        }
+        if (dup) {
+            evpl_mutex_unlock(&shared->nlm_state.mutex);
+            chimera_nfs_debug("NLM LOCK: re-sent blocking request joins the one already queued -> NLM4_BLOCKED");
+            nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_BLOCKED, proc);
+            nlm_lock_entry_free(entry);
+            free(ctx);
+            return;
+        }
+    }
+
     /* Pre-insert the pending entry so concurrent requests see it immediately */
     entry->seq = ++client->next_seq;
     DL_APPEND(client->locks, entry);

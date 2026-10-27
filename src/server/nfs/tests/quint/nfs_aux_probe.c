@@ -1309,6 +1309,32 @@ probe_nlm_cancel_after_grant(struct mbt_env *env)
     cg_check("lock_msg", "async messages after the CANCEL",
              mbt_aux(env)->nasync, 0);
 
+    /* A blocked client re-sends its LOCK while it waits (Linux lockd every
+     * 30 s).  The re-send, as LOCK or LOCK_MSG, joins the request already
+     * queued and is answered NLM4_BLOCKED again; one CANCEL then withdraws
+     * it, and c1 leaving grants nothing: no second copy was queued. */
+    cg_queue_c2(env, "repoll", 2);
+    r = mbt_nlm_lock(env, 2, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1, 0, 0,
+                     CG_BASE, CG_LEN, ck, sizeof(ck));
+    cg_check("repoll", "c2 re-sent blocking LOCK excl", r->nlm_stat,
+             NLM4_BLOCKED);
+    mbt_aux_async_reset(env);
+    mbt_nlm_lock(env, 7, "quint-c2", f, oh_b, sizeof(oh_b), 2, 1, 1, 0, 0,
+                 CG_BASE, CG_LEN, ck, sizeof(ck));
+    mbt_aux_drain_for(env, 1, 2000000);
+    cg_check("repoll", "c2 re-sent blocking LOCK_MSG excl: LOCK_RES BLOCKED",
+             cg_count_async(env, 12, NLM4_BLOCKED), 1);
+    cg_check("repoll", "c2 CANCEL", cg_cancel_c2(env, 0, 1, CG_LEN),
+             NLM4_GRANTED);
+    mbt_aux_async_reset(env);
+    mbt_nlm_unlock(env, 0, "quint-c1", f, oh_a, sizeof(oh_a), 1, CG_BASE,
+                   CG_LEN, ck, sizeof(ck));
+    mbt_aux_drain_us(env, 200000);
+    cg_check("repoll", "c3 TEST excl after c1 left (nothing was queued)",
+             cg_test(env), NLM4_GRANTED);
+    cg_check("repoll", "async messages after c1 left",
+             mbt_aux(env)->nasync, 0);
+
     /* c2 unlocks the middle of its unconfirmed grant.  What is left are
      * locks of their own, narrower than the request, so a CANCEL naming the
      * request releases neither. */
