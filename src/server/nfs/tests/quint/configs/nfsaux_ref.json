@@ -21,7 +21,8 @@
     "nlmShareEnforced": false,
     "nlmInGrace": false,
     "nlmGrantCallbackObservable": false,
-    "nlmCancelMsgCancels": true
+    "nlmCancelMsgCancels": true,
+    "nlmCancelReleasesUnconfirmedGrant": true
   },
 
   "batches": [
