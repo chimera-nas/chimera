@@ -462,6 +462,11 @@ main(
     signal(SIGTERM, signal_handler);
 #ifdef _WIN32
     signal(SIGBREAK, signal_handler);
+#else  /* ifdef _WIN32 */
+    /* Some supervisors stop the daemons they manage with SIGQUIT and expect an
+     * orderly shutdown.  Its default action would terminate with a core dump,
+     * so treat it like SIGTERM; a core is still available through SIGABRT. */
+    signal(SIGQUIT, signal_handler);
 #endif /* ifdef _WIN32 */
 
     chimera_server_info("Initializing server...");
