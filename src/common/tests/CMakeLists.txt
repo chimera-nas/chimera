@@ -30,5 +30,13 @@ endif()
 set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/crypto COMMAND crypto_test)
 
+if(NOT WIN32)
+    add_executable(fatal_exit_test fatal_exit_test.c)
+    target_link_libraries(fatal_exit_test chimera_common evpl)
+    target_compile_options(fatal_exit_test PRIVATE -UNDEBUG)
+    add_test(NAME chimera/common/fatal_exit COMMAND fatal_exit_test)
+    set_tests_properties(chimera/common/fatal_exit PROPERTIES TIMEOUT 30)
+endif()
+
 # Portable runtime regressions participate in the normal platform suite.
 add_subdirectory(native)

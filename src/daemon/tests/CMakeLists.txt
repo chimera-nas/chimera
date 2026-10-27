@@ -31,3 +31,11 @@ add_test(NAME chimera/daemon/native_lifecycle
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/daemon_native_test.py
             $<TARGET_FILE:chimera>)
 set_tests_properties(chimera/daemon/native_lifecycle PROPERTIES TIMEOUT 120)
+
+# Supervisors that stop with SIGQUIT must get an orderly shutdown, not a core.
+if(NOT WIN32)
+    add_test(NAME chimera/daemon/sigquit_shutdown
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/daemon_signal_test.py
+                $<TARGET_FILE:chimera>)
+    set_tests_properties(chimera/daemon/sigquit_shutdown PROPERTIES TIMEOUT 120)
+endif()
