@@ -909,8 +909,9 @@ apply_nfs_config(
     }
 
     /* nfs_fh_sign: sign wire file handles (default true).  nfs_fh_key: optional
-     * 32-hex-char (128-bit) signing key, required when multiple nodes must mint
-     * interchangeable handles. */
+     * 32-hex-char (128-bit) node key.  Nodes sharing a KV store share the
+     * signing keyring without it; nodes with separate stores need the same key
+     * to verify each other's handles. */
     json_value = json_object_get(server_params, "nfs_fh_sign");
     if (json_value) {
         chimera_server_config_set_nfs_fh_sign(server_config,

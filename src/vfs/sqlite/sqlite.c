@@ -17,10 +17,15 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sqlite3.h>
 #include <jansson.h>
+#ifndef _WIN32
+#include <errno.h>
+#include <sys/stat.h>
+#endif /* ifndef _WIN32 */
 
 #include "vfs/sdk/chimera_vfs_sdk.h"
 #include "sqlite.h"
@@ -48,6 +53,27 @@ struct sqlite_thread {
     sqlite3_stmt         *get_stmt;
     sqlite3_stmt         *del_stmt;
 };
+
+#ifndef _WIN32
+/* The store holds secrets (the NFS FH signing keys) and the daemon runs with
+ * umask(0).  SQLite gives the -wal and -shm files it creates later the
+ * database's mode. */
+static void
+sqlite_restrict_mode(const char *path)
+{
+    static const char *const suffixes[] = { "", "-wal", "-shm" };
+    char                     name[4096];
+    unsigned int             i;
+
+    for (i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+        snprintf(name, sizeof(name), "%s%s", path, suffixes[i]);
+        if (chmod(name, 0600) != 0 && errno != ENOENT) {
+            chimera_sqlite_error("sqlite: cannot make '%s' owner-only: %s",
+                                 name, strerror(errno));
+        }
+    }
+} /* sqlite_restrict_mode */
+#endif /* ifndef _WIN32 */
 
 static void *
 sqlite_init(
@@ -93,6 +119,10 @@ sqlite_init(
     chimera_sqlite_abort_if(rc != SQLITE_OK, "sqlite: schema init failed: %s",
                             errmsg ? errmsg : "(unknown)");
     sqlite3_free(errmsg);
+
+#ifndef _WIN32
+    sqlite_restrict_mode(shared->path);
+#endif /* ifndef _WIN32 */
 
     sqlite3_close(db);
 

@@ -56,7 +56,8 @@
  *   mount_id                                      16
  *   inum + gen varints                            15   (CHIMERA_VFS_FH_INUM_EMITTED_MAX
  *   stream id varint                               5     covers all three)
- *   wire wrap: tag + export_id                     3   (CHIMERA_NFS_FH_HDR)
+ *   wire wrap: tag + export_id                     3   (CHIMERA_NFS_FH_HDR, and
+ *                                                        _HDR_V2: kid in the tag)
  *   SipHash MAC, when fh_sign is enabled           8   (CHIMERA_NFS_FH_MAC)
  *                                                 --
  *                                                  47  == the ceiling, exactly

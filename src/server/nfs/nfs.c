@@ -78,13 +78,15 @@ chimera_nfs_init_metrics(
 } /* chimera_nfs_init_metrics */
 
 /*
- * Initialize the file-handle signing key.
+ * Initialize the node's file-handle key.
  *
  * Honors the nfs_fh_sign config flag and resolves the 128-bit key in priority
- * order: an explicit 32-hex-char config key (for multi-node deployments that
- * must mint interchangeable handles), then a key persisted under state_dir
- * (so handles survive a restart), otherwise a freshly generated key that is
- * persisted for next time.  Signing degrades to off if no key can be obtained.
+ * order: an explicit 32-hex-char config key, then a key persisted under
+ * state_dir, otherwise a freshly generated key that is persisted for next
+ * time.  The key verifies V1 handles and seeds kid=1 of the fleet keyring,
+ * which signs new handles: nodes sharing a KV store need no configured key,
+ * and nodes with separate stores agree on kid=1 only if they share
+ * nfs_fh_key.  Signing degrades to off if no key can be obtained.
  */
 static void
 nfs_fh_key_init(
@@ -457,6 +459,9 @@ nfs_server_init(
                       shared->nfs_grace_time_s,
                       chimera_server_config_get_nfs4_drc(config));
 
+    nfs_fh_keyring_init(&shared->nfs_fh_keyring, shared->node_id,
+                        shared->nfs4_recovery.persistence_disabled);
+
     nlm_state_init(&shared->nlm_state,
                    chimera_server_config_get_state_dir(config));
 
@@ -616,6 +621,12 @@ nfs_server_start(void *arg)
      * must find the load finished, not race it. */
     nfs_recovery_cold_start(&shared->nfs4_recovery);
 
+    /* Likewise no handle may be minted or verified before the fleet FH keyring
+     * is loaded (or the fleet's first key minted). */
+    if (shared->fh_sign) {
+        nfs_fh_keyring_load(&shared->nfs_fh_keyring, shared->vfs, shared->fh_key);
+    }
+
     /* One transport for every service this server offers.  The auxiliary ones
      * used to name EVPL_STREAM_SOCKET_TCP outright, which meant they ignored
      * the configured flavor and would have stayed on TCP while the NFS service
@@ -770,6 +781,7 @@ nfs_server_destroy(void *data)
     evpl_mutex_destroy(&shared->nfs4_pnfs_devcache.lock);
 
     nfs_recovery_free(&shared->nfs4_recovery);
+    nfs_fh_keyring_free(&shared->nfs_fh_keyring);
 
     if (shared->op_histogram) {
         prometheus_histogram_destroy(shared->metrics, shared->op_histogram);

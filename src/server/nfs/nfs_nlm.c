@@ -1062,8 +1062,8 @@ chimera_nfs_nlm4_do_test(
     /* The wire handle is wrapped (export id + signing MAC); recover the inner
      * VFS handle for the open below.  NLM keeps the client's wrapped bytes for
      * lock identity, but the VFS layer needs the unwrapped handle. */
-    if (chimera_nfs_fh_unwrap(args->alock.fh.data, args->alock.fh.len, &vexp,
-                              vfh, &vfh_len, shared->fh_key, shared->fh_sign) !=
+    if (chimera_nfs_fh_verify(shared, args->alock.fh.data, args->alock.fh.len,
+                              &vexp, vfh, &vfh_len) !=
         CHIMERA_NFS_FH_OK) {
         struct nlm4_testres err_res;
         err_res.cookie.len     = args->cookie.len;
@@ -1202,8 +1202,8 @@ chimera_nfs_nlm4_do_lock(
 
     /* Recover the inner VFS handle from the wrapped wire handle for the open
     * below (lock identity keeps the client's wrapped bytes in entry->fh). */
-    if (chimera_nfs_fh_unwrap(args->alock.fh.data, args->alock.fh.len, &vexp,
-                              vfh, &vfh_len, shared->fh_key, shared->fh_sign) !=
+    if (chimera_nfs_fh_verify(shared, args->alock.fh.data, args->alock.fh.len,
+                              &vexp, vfh, &vfh_len) !=
         CHIMERA_NFS_FH_OK) {
         nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_STALE_FH, proc);
         return;

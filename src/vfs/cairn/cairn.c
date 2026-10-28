@@ -1714,6 +1714,15 @@ cairn_init(
     shared->datadb = rocksdb_open(shared->data_options, data_path, &err);
     chimera_cairn_abort_if(err, "Failed to open datadb at %s: %s\n", data_path, err);
 
+#ifndef _WIN32
+    /* The stores hold secrets (the NFS FH signing keys) and the daemon runs
+     * with umask(0), under which RocksDB leaves them readable by everyone. */
+    if (chmod(meta_path, 0700) != 0 || chmod(data_path, 0700) != 0) {
+        chimera_cairn_error("cairn: cannot make the stores under '%s' "
+                            "owner-only: %s", base_path, strerror(errno));
+    }
+#endif /* ifndef _WIN32 */
+
     json_decref(cfg);
 
 
