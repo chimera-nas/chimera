@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "common/thread.h"
+#include "common/thread_name.h"
 #ifndef _WIN32
 #include <pwd.h>
 #include <grp.h>
@@ -230,6 +231,8 @@ chimera_vfs_identity_worker(void *arg)
     struct chimera_vfs_identity         *identity = arg;
     struct chimera_vfs_identity_request *req;
     struct chimera_vfs_thread           *origin;
+
+    chimera_thread_set_name("chm_identity");
 
     /* Pure writer: this worker only runs miss handlers and populates the cache
      * (retire + publish), never taking the read side -- the read-side

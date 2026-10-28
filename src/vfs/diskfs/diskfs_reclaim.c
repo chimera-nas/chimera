@@ -10,6 +10,7 @@
  */
 
 #include "common/atomic.h"
+#include "common/thread_name.h"
 #include "common/thread.h"
 #include "diskfs_internal.h"
 
@@ -756,7 +757,8 @@ diskfs_reclaim_create(struct diskfs_shared *shared)
 
         w->shared = shared;
         evpl_mutex_init(&w->lock, NULL);
-        w->thread = evpl_thread_create(NULL, diskfs_reclaim_thread_init,
+        w->thread = evpl_thread_create(chimera_thread_config("chm_dfs_rcl_%d", i),
+                                       diskfs_reclaim_thread_init,
                                        diskfs_reclaim_thread_shutdown, w);
         while (!chimera_atomic_load_n(&w->ready, CHIMERA_MEMORY_ACQUIRE)) {
             /* spin briefly; context construction is fast */

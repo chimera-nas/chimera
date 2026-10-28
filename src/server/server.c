@@ -11,6 +11,7 @@
 #include <unistd.h>
 #endif /* ifdef _WIN32 */
 #include "common/thread.h"
+#include "common/thread_name.h"
 #ifndef _WIN32
 #include <sys/resource.h>
 #endif /* ifndef _WIN32 */
@@ -1408,7 +1409,7 @@ chimera_server_start(struct chimera_server *server)
 {
     int i;
 
-    server->pool = evpl_threadpool_create(NULL,
+    server->pool = evpl_threadpool_create(chimera_thread_config("chm_core"),
                                           server->config->core_threads,
                                           chimera_server_thread_init,
                                           chimera_server_thread_shutdown,

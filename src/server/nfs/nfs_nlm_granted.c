@@ -23,6 +23,7 @@
  */
 
 #include "common/compiler.h"
+#include "common/thread_name.h"
 #include <string.h>
 #include <stdlib.h>
 #include "common/thread.h"
@@ -582,7 +583,8 @@ nlm_granter_get_or_create(struct chimera_server_nfs_shared *shared)
     granter->shared = shared;
     evpl_mutex_init(&granter->lock, NULL);
 
-    granter->thread = evpl_thread_create(NULL, nlm_granter_thread_init,
+    granter->thread = evpl_thread_create(chimera_thread_config("chm_nlm_grant"),
+                                         nlm_granter_thread_init,
                                          nlm_granter_thread_shutdown, granter);
     if (!granter->thread) {
         evpl_mutex_destroy(&granter->lock);

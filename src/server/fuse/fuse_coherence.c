@@ -37,6 +37,7 @@
  */
 
 #include "common/thread.h"
+#include "common/thread_name.h"
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
@@ -335,6 +336,8 @@ chimera_fuse_notifier(void *arg)
     struct chimera_fuse_shared *shared = arg;
     struct chimera_fuse_notice *notice;
 
+    chimera_thread_set_name("chm_fuse_notify");
+
     evpl_mutex_lock(&shared->notifier_lock);
 
     for (;;) {
@@ -385,6 +388,8 @@ chimera_fuse_dir_notifier(void *arg)
 {
     struct chimera_fuse_mount  *mount = arg;
     struct chimera_fuse_notice *notice;
+
+    chimera_thread_set_name("chm_fuse_dir");
 
     evpl_mutex_lock(&mount->dir_notifier_lock);
 

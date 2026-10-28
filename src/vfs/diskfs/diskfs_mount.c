@@ -11,6 +11,7 @@
 
 #include <inttypes.h>
 #include "common/atomic.h"
+#include "common/thread_name.h"
 #include "common/thread.h"
 #include "diskfs_internal.h"
 
@@ -1146,7 +1147,8 @@ diskfs_init(
         }
     }
 
-    shared->device_thread = evpl_thread_create(NULL, diskfs_device_thread_init,
+    shared->device_thread = evpl_thread_create(chimera_thread_config("chm_dfs_device"),
+                                               diskfs_device_thread_init,
                                                diskfs_device_thread_shutdown, shared);
 
     /* Opt-in unsafe async I/O: when set, block writes are submitted without
@@ -1443,7 +1445,7 @@ diskfs_init(
 
     /* Commit thread first: it allocates the cross-thread hand-off ring the
      * push thread consumes, and opens the intent-log device queue. */
-    shared->intent_log.thread = evpl_thread_create(NULL,
+    shared->intent_log.thread = evpl_thread_create(chimera_thread_config("chm_dfs_ilog"),
                                                    diskfs_intent_log_thread_init,
                                                    diskfs_intent_log_thread_shutdown,
                                                    &shared->intent_log);
@@ -1455,7 +1457,7 @@ diskfs_init(
      * applies their space-map deltas off the commit hot path.  The commit thread
      * allocated the apply ring in its init above, so it exists before any
      * record is produced into it. */
-    shared->intent_log.apply_thread = evpl_thread_create(NULL,
+    shared->intent_log.apply_thread = evpl_thread_create(chimera_thread_config("chm_dfs_apply"),
                                                          diskfs_il_apply_thread_init,
                                                          diskfs_il_apply_thread_shutdown,
                                                          &shared->intent_log);
@@ -1463,7 +1465,7 @@ diskfs_init(
         /* spin briefly */
     }
 
-    shared->intent_log.push_thread = evpl_thread_create(NULL,
+    shared->intent_log.push_thread = evpl_thread_create(chimera_thread_config("chm_dfs_push"),
                                                         diskfs_il_push_thread_init,
                                                         diskfs_il_push_thread_shutdown,
                                                         &shared->intent_log);

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include "common/thread.h"
+#include "common/thread_name.h"
 #include <time.h>
 
 #include "nfs_common.h"
@@ -316,7 +317,8 @@ nsm_spawn_notify(
 
     evpl_mutex_lock(&nsm->mutex);
     old                = nsm->notify_thread;
-    nsm->notify_thread = evpl_thread_create(NULL, nsm_notify_thread_init,
+    nsm->notify_thread = evpl_thread_create(chimera_thread_config("chm_nsm_notify"),
+                                            nsm_notify_thread_init,
                                             nsm_notify_thread_shutdown, job);
     evpl_mutex_unlock(&nsm->mutex);
 

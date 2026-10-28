@@ -377,7 +377,7 @@ chimera_smb_server_init(
                                                                    shared->config.rdma_port);
     }
 
-    shared->listener = evpl_listener_create();
+    shared->listener = evpl_listener_create_named("chm_smb_listen");
 
     evpl_mutex_init(&shared->sessions_lock, NULL);
     evpl_mutex_init(&shared->shares_lock, NULL);

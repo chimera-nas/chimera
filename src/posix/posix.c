@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "common/thread.h"
+#include "common/thread_name.h"
 #include "common/compiler.h"
 #include <stdlib.h>
 
@@ -205,7 +206,7 @@ chimera_posix_init(
     atomic_init(&posix->init_cursor, 0);
 
     posix->pool = evpl_threadpool_create(
-        NULL,
+        chimera_thread_config("chm_posix"),
         posix->nworkers,
         chimera_posix_worker_init,
         chimera_posix_worker_shutdown,
@@ -299,7 +300,7 @@ chimera_posix_init_json(
     atomic_init(&posix->init_cursor, 0);
 
     posix->pool = evpl_threadpool_create(
-        NULL,
+        chimera_thread_config("chm_posix"),
         posix->nworkers,
         chimera_posix_worker_init,
         chimera_posix_worker_shutdown,

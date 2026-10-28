@@ -21,6 +21,7 @@
  */
 
 #include "common/thread.h"
+#include "common/thread_name.h"
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
@@ -784,7 +785,7 @@ chimera_nfs4_cb_establish_session(
      * until chimera_nfs4_cb_control_init has run (and armed cb_doorbell), so the
      * ring below always lands on a registered doorbell. */
     if (!shared->cb_started) {
-        shared->cb_thread = evpl_thread_create(NULL,
+        shared->cb_thread = evpl_thread_create(chimera_thread_config("chm_nfs4_cb"),
                                                chimera_nfs4_cb_control_init,
                                                chimera_nfs4_cb_control_shutdown,
                                                shared);

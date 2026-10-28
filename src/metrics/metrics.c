@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "common/host_file.h"
+#include "common/thread_name.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -147,7 +148,7 @@ chimera_metrics_thread_init(
     metrics->endpoint = chimera_tcp_flavor_endpoint_create(metrics->flavor,
                                                            "0.0.0.0",
                                                            metrics->port);
-    metrics->listener = evpl_listener_create();
+    metrics->listener = evpl_listener_create_named("chm_prom_listen");
 
     metrics->server = evpl_http_attach(metrics->agent, metrics->listener, chimera_metrics_dispatch, metrics);
 
@@ -187,7 +188,7 @@ chimera_metrics_init(
     metrics->port   = port;
     metrics->flavor = flavor;
 
-    metrics->thread = evpl_thread_create(NULL,
+    metrics->thread = evpl_thread_create(chimera_thread_config("chm_metrics"),
                                          chimera_metrics_thread_init,
                                          chimera_metrics_thread_shutdown,
                                          metrics);

@@ -842,13 +842,13 @@ chimera_rest_init(
         rest->http_endpoint = chimera_tcp_flavor_endpoint_create(rest->flavor,
                                                                  "0.0.0.0",
                                                                  http_port);
-        rest->http_listener = evpl_listener_create();
+        rest->http_listener = evpl_listener_create_named("chm_rest_listen");
         chimera_rest_info("REST API HTTP initialized on port %d", http_port);
     }
 
     if (https_port != 0) {
         rest->https_endpoint = evpl_endpoint_create("0.0.0.0", https_port);
-        rest->https_listener = evpl_listener_create();
+        rest->https_listener = evpl_listener_create_named("chm_rest_tls");
         chimera_rest_info("REST API HTTPS initialized on port %d", https_port);
     }
 

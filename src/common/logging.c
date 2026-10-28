@@ -19,6 +19,7 @@
 #include <unistd.h>
 #endif /* ifdef _WIN32 */
 #include "common/thread.h"
+#include "common/thread_name.h"
 #ifndef _WIN32
 #include <execinfo.h>
 #endif /* ifndef _WIN32 */
@@ -166,6 +167,8 @@ chimera_log_thread(void *arg)
     int   i;
     char *tmp;
     FILE *out = ChimeraLogFile ? ChimeraLogFile : stdout;
+
+    chimera_thread_set_name("chm_log");
 
     while (ChimeraLogRun || ChimeraLogBufPtr > ChimeraLogBuf) {
 
