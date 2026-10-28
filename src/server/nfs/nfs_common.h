@@ -50,6 +50,12 @@ void nfs_set_callback_tcp_flavor(
 enum chimera_tcp_flavor nfs_callback_tcp_flavor(
     void);
 
+/* Port of the portmapper on a client we call back (NSM reboot notify, NLM
+ * GRANTED).  Unit tests redefine it to a loopback port they own. */
+#ifndef NFS_PEER_PORTMAP_PORT
+#define NFS_PEER_PORTMAP_PORT 111
+#endif /* ifndef NFS_PEER_PORTMAP_PORT */
+
 struct chimera_server_nfs_thread;
 
 /*

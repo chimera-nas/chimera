@@ -29,7 +29,8 @@ add_test(NAME chimera/server/nfs/open_state_lookup COMMAND test_open_state_looku
 set(CHIMERA_TEST_TIER extended)
 
 # Exercise the asynchronous RPC2 disconnect / NLM grant-job lifetime directly.
-add_executable(test_nlm_grant_disconnect test_nlm_grant_disconnect.c)
+add_executable(test_nlm_grant_disconnect test_nlm_grant_disconnect.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c)
 target_include_directories(test_nlm_grant_disconnect PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -40,6 +41,21 @@ add_dependencies(test_nlm_grant_disconnect chimera_nfs_common)
 set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/server/nfs/nlm_grant_disconnect COMMAND test_nlm_grant_disconnect)
 set_tests_properties(chimera/server/nfs/nlm_grant_disconnect PROPERTIES TIMEOUT 30)
+set(CHIMERA_TEST_TIER extended)
+
+# A GRANTED callback to an unreachable client is dropped, not aborted on.
+add_executable(test_nlm_grant_unreachable test_nlm_grant_unreachable.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c)
+target_include_directories(test_nlm_grant_unreachable PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_nlm_grant_unreachable
+    chimera_nfs_common chimera_common evpl evpl_rpc2)
+add_dependencies(test_nlm_grant_unreachable chimera_nfs_common)
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/server/nfs/nlm_grant_unreachable COMMAND test_nlm_grant_unreachable)
+set_tests_properties(chimera/server/nfs/nlm_grant_unreachable PROPERTIES TIMEOUT 30)
 set(CHIMERA_TEST_TIER extended)
 
 # Reachability probe used before connecting to client-supplied addresses.
