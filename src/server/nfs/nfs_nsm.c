@@ -116,7 +116,11 @@ nsm_unmonitor(
 } /* nsm_unmonitor */
 
 /* Snapshot the monitor list and, if non-empty, spawn the reboot-notify worker.
- * A previously-spawned (idle, work-already-done) worker is reaped first. */
+ * The worker is not waited for here.  At most one worker notifies and one
+ * waits behind it (it joins the notifying one before it starts): a snapshot
+ * taken while a worker is already waiting replaces that worker's job, so a
+ * flood of SM_SIMU_CRASH calls cannot grow the thread count, and no server
+ * thread ever blocks on a worker. */
 static void
 nsm_spawn_notify(
     struct chimera_server_nfs_thread *thread,
@@ -126,7 +130,6 @@ nsm_spawn_notify(
     struct nsm_notify_job    *job;
     struct nsm_notify_target *targets;
     uint32_t                  count;
-    struct evpl_thread       *old;
 
     evpl_mutex_lock(&nsm->mutex);
     count = nsm_monitors_snapshot(nsm, &targets);
@@ -136,20 +139,15 @@ nsm_spawn_notify(
         return;
     }
 
-    job          = malloc(sizeof(*job));
-    job->targets = targets;
-    job->count   = count;
-    job->state   = state;
+    job              = malloc(sizeof(*job));
+    job->predecessor = NULL;
+    job->nsm         = nsm;
+    job->targets     = targets;
+    job->count       = count;
+    job->state       = state;
     snprintf(job->my_name, sizeof(job->my_name), "%s", nsm->my_name);
 
-    evpl_mutex_lock(&nsm->mutex);
-    old                = nsm->notify_thread;
-    nsm->notify_thread = nsm_notify_spawn(job);
-    evpl_mutex_unlock(&nsm->mutex);
-
-    if (old) {
-        evpl_thread_destroy(old);
-    }
+    nsm_notify_submit(nsm, job);
 } /* nsm_spawn_notify */
 
 /* ------------------------------------------------------------------ *

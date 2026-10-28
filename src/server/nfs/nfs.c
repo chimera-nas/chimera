@@ -818,8 +818,9 @@ nfs_server_destroy(void *data)
     shared->nlm_granter = NULL;
 
     nlm_state_destroy(&shared->nlm_state);
-    /* Join the reboot-notify worker (idle once its notifies completed) before
-     * tearing down NSM state. */
+    /* Join the newest reboot-notify worker, and through it the one before it,
+     * before tearing down NSM state.  Each host costs at most two probe waits
+     * plus four bounded RPC waits. */
     if (shared->nsm_state.notify_thread) {
         evpl_thread_destroy(shared->nsm_state.notify_thread);
         shared->nsm_state.notify_thread = NULL;

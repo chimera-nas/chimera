@@ -49,14 +49,17 @@ struct nsm_monitor {
  * nlm_state.mutex to release locks.  If both are ever needed, take this lock
  * first and drop it before taking nlm_state.mutex.
  */
+struct nsm_notify_job;
+
 struct nsm_state {
-    evpl_mutex_t        mutex;
-    struct nsm_monitor *monitors;            /* uthash, keyed by host */
-    uint32_t            state_number;        /* monotonic; odd == "we are up" */
-    int                 persistence_disabled; /* 1 when kv_module is non-persistent */
-    _Atomic int         load_state;          /* enum nsm_load_state */
-    char                my_name[SM_MAXSTRLEN + 1]; /* our identity in SM_NOTIFY */
-    struct evpl_thread *notify_thread;       /* short-lived reboot-notify worker */
+    evpl_mutex_t           mutex;
+    struct nsm_monitor    *monitors;         /* uthash, keyed by host */
+    uint32_t               state_number;     /* monotonic; odd == "we are up" */
+    int                    persistence_disabled; /* 1 when kv_module is non-persistent */
+    _Atomic int            load_state;       /* enum nsm_load_state */
+    char                   my_name[SM_MAXSTRLEN + 1]; /* our identity in SM_NOTIFY */
+    struct evpl_thread    *notify_thread;    /* short-lived reboot-notify worker */
+    struct nsm_notify_job *notify_queued;    /* newest worker not yet notifying */
 };
 
 /* 4-byte record magics validated before trusting any persisted bytes. */
