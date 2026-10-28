@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+//
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <string.h>
@@ -60,11 +61,18 @@ nfs_peer_reachable(
         reachable = true;
     } else if (!chimera_socket_connect_pending()) {
         reachable = false;
-    } else if (timeout_ms == 0) {
-        reachable = true;
     } else {
-        reachable = chimera_socket_wait_writable(fd, timeout_ms) > 0 &&
-            chimera_socket_error(fd) == 0;
+        /* A zero timeout still polls once: a refusal the kernel already
+         * knows (a closed loopback port on Linux) makes the socket
+         * writable with a pending error at once. */
+        rc = chimera_socket_wait_writable(fd, timeout_ms);
+        if (rc > 0) {
+            reachable = chimera_socket_error(fd) == 0;
+        } else {
+            /* Still in progress counts as reachable only for a caller
+             * that cannot wait; a failed poll never does. */
+            reachable = rc == 0 && timeout_ms == 0;
+        }
     }
 
     chimera_socket_close(fd);
