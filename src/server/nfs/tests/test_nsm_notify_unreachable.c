@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 /* The reboot notify must skip a monitored host whose portmapper or statd
-* cannot be reached: a refused connect must not abort the server and a dead
-* address must cost one bounded probe, never libevpl's multi-minute connect.
-* The worker must also be started without parking the spawning thread. */
+ * cannot be reached: a refused connect must not abort the server, a dead
+ * address must cost one bounded probe, never libevpl's multi-minute connect,
+ * and a peer that closes the connection mid-call must not leave the worker
+ * touching a connection rpc2 already freed.  The worker must also be
+ * started without parking the spawning thread. */
 #include "common/tcp_flavor.h"
 static int                     test_portmap_port;
 static enum chimera_tcp_flavor test_flavor = CHIMERA_TCP_FLAVOR_PLAIN;
@@ -68,6 +70,60 @@ closed_port(void)
     return port;
 } /* closed_port */
 
+/* A peer service that accepts each connection and closes it at once, as
+ * an rpcbind denied by TCP wrappers does.  It runs on its own thread so it
+ * answers while nsm_notify_one pumps the loop. */
+struct closer {
+    chimera_socket_t     fd;
+    int                  port;
+    _Atomic int          stop;
+    evpl_native_thread_t thread;
+};
+
+static void *
+closer_main(void *arg)
+{
+    struct closer   *c = arg;
+    chimera_socket_t s;
+
+    while (!atomic_load(&c->stop)) {
+        s = accept(c->fd, NULL, NULL);
+        if (s == CHIMERA_INVALID_SOCKET) {
+            break;
+        }
+        chimera_socket_close(s);
+    }
+    return NULL;
+} /* closer_main */
+
+static void
+closer_start(struct closer *c)
+{
+    c->fd = listen_on(&c->port);
+    atomic_store(&c->stop, 0);
+    CHECK(evpl_native_thread_create(&c->thread, NULL, closer_main, c) == 0);
+} /* closer_start */
+
+static void
+closer_stop(struct closer *c)
+{
+    struct sockaddr_in sin;
+    chimera_socket_t   s;
+
+    /* Wake the blocked accept with one last connection. */
+    atomic_store(&c->stop, 1);
+    s = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(s != CHIMERA_INVALID_SOCKET);
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family      = AF_INET;
+    sin.sin_port        = htons((uint16_t) c->port);
+    sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    CHECK(connect(s, (struct sockaddr *) &sin, sizeof(sin)) == 0);
+    chimera_socket_close(s);
+    CHECK(evpl_native_thread_join(c->thread, NULL) == 0);
+    chimera_socket_close(c->fd);
+} /* closer_stop */
+
 static long
 now_ms(void)
 {
@@ -99,7 +155,7 @@ fixture_init(
     f->programs[0] = &f->pm.rpc2;
     f->programs[1] = &f->sm.rpc2;
     f->keep        = NULL;
-    f->rpc2_thread = evpl_rpc2_thread_init(evpl, f->programs, 2, NULL, NULL);
+    f->rpc2_thread = nsm_rpc2_thread_init(evpl, f->programs);
     notified       = 0;
 } /* fixture_init */
 
@@ -116,19 +172,22 @@ fixture_fini(struct fixture *f)
     }
 } /* fixture_fini */
 
-static void
+/* Notify one host at addr; returns nsm_notify_one's verdict. */
+static int
 notify_target(
     struct evpl *evpl,
     const char  *addr)
 {
     struct fixture           f;
     struct nsm_notify_target t = { { 0 }, { 0 } };
+    int                      told;
 
     strcpy(t.host, "nsm-test-host");
     strcpy(t.addr, addr);
     fixture_init(&f, evpl);
-    nsm_notify_one(evpl, f.rpc2_thread, &f.pm, &f.sm, &t, "chimera-test", 3, &f.keep);
+    told = nsm_notify_one(evpl, f.rpc2_thread, &f.pm, &f.sm, &t, "chimera-test", 3, &f.keep);
     fixture_fini(&f);
+    return told;
 } /* notify_target */
 
 static void
@@ -137,7 +196,7 @@ test_portmap_refused(struct evpl *evpl)
     long t0 = now_ms();
 
     test_portmap_port = closed_port();
-    notify_target(evpl, "127.0.0.1");
+    CHECK(notify_target(evpl, "127.0.0.1") == 0);
     CHECK(notified == 0);
     CHECK(now_ms() - t0 < 2000);
 } /* test_portmap_refused */
@@ -148,7 +207,7 @@ test_dead_host_skipped(struct evpl *evpl)
     long t0 = now_ms();
 
     test_portmap_port = 111;
-    notify_target(evpl, "192.0.2.1");
+    CHECK(notify_target(evpl, "192.0.2.1") == 0);
     CHECK(notified == 0);
     CHECK(now_ms() - t0 < 2000);
 } /* test_dead_host_skipped */
@@ -218,7 +277,8 @@ test_live_host_told(struct evpl *evpl)
     evpl_rpc2_server_attach(f.rpc2_thread, pm_server, &f.pm);
     evpl_rpc2_server_attach(f.rpc2_thread, sm_server, &f.sm);
 
-    nsm_notify_one(evpl, f.rpc2_thread, &f.pm, &f.sm, &t, "chimera-test", 3, &f.keep);
+    CHECK(nsm_notify_one(evpl, f.rpc2_thread, &f.pm, &f.sm, &t, "chimera-test",
+                         3, &f.keep) == 1);
     CHECK(notified == 1);
 
     evpl_rpc2_server_stop(pm_server);
@@ -229,6 +289,57 @@ test_live_host_told(struct evpl *evpl)
     evpl_rpc2_server_destroy(pm_server);
     evpl_rpc2_server_destroy(sm_server);
 } /* test_live_host_told */
+
+static void
+test_portmap_closes(struct evpl *evpl)
+{
+    struct closer pm;
+
+    /* The GETPORT call is completed with CONN_LOST and rpc2 frees the
+     * connection before the worker would disconnect it. */
+    closer_start(&pm);
+    test_portmap_port = pm.port;
+    CHECK(notify_target(evpl, "127.0.0.1") == 0);
+    CHECK(notified == 0);
+    closer_stop(&pm);
+} /* test_portmap_closes */
+
+static void
+test_statd_closes(struct evpl *evpl)
+{
+    struct fixture            f;
+    struct nsm_notify_target  t = { { 0 }, { 0 } };
+    struct evpl_rpc2_program *pm_progs[1];
+    struct evpl_rpc2_server  *pm_server;
+    struct evpl_endpoint     *pm_ep;
+    struct closer             statd;
+
+    /* The portmapper answers; the statd it names closes on SM_NOTIFY. */
+    closer_start(&statd);
+    statd_port        = statd.port;
+    test_portmap_port = closed_port();
+    strcpy(t.host, "nsm-test-host");
+    strcpy(t.addr, "127.0.0.1");
+    fixture_init(&f, evpl);
+
+    f.pm.recv_call_PMAPPROC_GETPORT = getport_received;
+    pm_progs[0]                     = &f.pm.rpc2;
+    pm_server                       = evpl_rpc2_server_init(pm_progs, 1);
+    pm_ep                           = evpl_endpoint_create("127.0.0.1", test_portmap_port);
+    CHECK(evpl_rpc2_server_start(pm_server, EVPL_STREAM_SOCKET_TCP, pm_ep) == 0);
+    evpl_rpc2_server_attach(f.rpc2_thread, pm_server, &f.pm);
+
+    /* The call completes with CONN_LOST: not counted as told. */
+    CHECK(nsm_notify_one(evpl, f.rpc2_thread, &f.pm, &f.sm, &t, "chimera-test",
+                         3, &f.keep) == 0);
+    CHECK(notified == 0);
+
+    evpl_rpc2_server_stop(pm_server);
+    evpl_rpc2_server_detach(f.rpc2_thread, pm_server);
+    fixture_fini(&f);
+    evpl_rpc2_server_destroy(pm_server);
+    closer_stop(&statd);
+} /* test_statd_closes */
 
 static void
 test_inproc_skips_probe(void)
@@ -341,6 +452,8 @@ main(void)
     test_portmap_refused(evpl);
     test_dead_host_skipped(evpl);
     test_live_host_told(evpl);
+    test_portmap_closes(evpl);
+    test_statd_closes(evpl);
     test_inproc_skips_probe();
     test_spawn_returns_at_once();
     test_submit_coalesces();

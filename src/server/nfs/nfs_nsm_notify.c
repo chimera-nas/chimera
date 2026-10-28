@@ -35,11 +35,15 @@
  * completes in the pump that follows it; if outstanding kernel operations hold
  * the close back it completes from inside evpl_rpc2_thread_destroy instead, so
  * the state is kept on a list owned by the worker and freed only after that
- * returns. */
+ * returns.  conn is the call's connection until rpc2 frees it: a peer that
+ * closes mid-call makes rpc2 complete the call with CONN_LOST and free the
+ * connection inside the pump, and the worker must not disconnect it then. */
 struct nsm_rpc_state {
-    struct nsm_rpc_state *next;
-    unsigned int          port;
-    int                   done;
+    struct nsm_rpc_state  *next;
+    struct evpl_rpc2_conn *conn;
+    unsigned int           port;
+    int                    status;
+    int                    done;
 };
 
 static struct nsm_rpc_state *
@@ -64,8 +68,9 @@ nsm_getport_cb(
 {
     struct nsm_rpc_state *g = private_data;
 
-    g->port = (status == 0) ? port : 0;
-    g->done = 1;
+    g->status = status;
+    g->port   = (status == 0) ? port : 0;
+    g->done   = 1;
 } /* nsm_getport_cb */
 
 static void
@@ -77,9 +82,38 @@ nsm_notify_reply_cb(
 {
     struct nsm_rpc_state *rs = private_data;
 
-    (void) status;
-    rs->done = 1;
+    rs->status = status;
+    rs->done   = 1;
 } /* nsm_notify_reply_cb */
+
+/* rpc2 has freed conn: forget it so the worker does not disconnect it. */
+static void
+nsm_rpc_notify(
+    struct evpl_rpc2_thread *thread,
+    struct evpl_rpc2_conn   *conn,
+    struct evpl_rpc2_notify *notify,
+    void                    *private_data)
+{
+    struct nsm_rpc_state *rs = evpl_rpc2_conn_get_private_data(conn);
+
+    (void) thread;
+    (void) private_data;
+
+    if (notify->notify_type == EVPL_RPC2_NOTIFY_DISCONNECTED && rs &&
+        rs->conn == conn) {
+        rs->conn = NULL;
+    }
+} /* nsm_rpc_notify */
+
+/* The worker's outbound-only rpc2 thread (programs: portmap, statd);
+ * replies are matched on the conns it opens. */
+static struct evpl_rpc2_thread *
+nsm_rpc2_thread_init(
+    struct evpl               *evpl,
+    struct evpl_rpc2_program **programs)
+{
+    return evpl_rpc2_thread_init(evpl, programs, 2, nsm_rpc_notify, NULL);
+} /* nsm_rpc2_thread_init */
 
 static int64_t
 nsm_now_ms(void)
@@ -135,7 +169,41 @@ nsm_peer_reachable(
     return nfs_peer_reachable(addr, port, NSM_NOTIFY_CONNECT_TIMEOUT_MS);
 } /* nsm_peer_reachable */
 
+/* Open the connection for rs's call and tag it with rs; NULL on failure. */
+static struct evpl_rpc2_conn *
+nsm_rpc_connect(
+    struct evpl_rpc2_thread *rpc2_thread,
+    struct evpl_endpoint    *ep,
+    struct nsm_rpc_state    *rs)
+{
+    rs->conn = evpl_rpc2_client_connect(rpc2_thread,
+                                        chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()), ep,
+                                        NULL, 0, NULL);
+    if (rs->conn) {
+        evpl_rpc2_conn_set_private_data(rs->conn, rs);
+    }
+    return rs->conn;
+} /* nsm_rpc_connect */
+
+/* Wait for rs's call, then close its connection unless rpc2 already freed
+ * it.  A call still pending after a timeout completes with an error as the
+ * connection goes away; give that callback its chance to run now. */
 static void
+nsm_rpc_wait(
+    struct evpl             *evpl,
+    struct evpl_rpc2_thread *rpc2_thread,
+    struct nsm_rpc_state    *rs)
+{
+    nsm_pump_until(evpl, &rs->done);
+    if (rs->conn) {
+        evpl_rpc2_client_disconnect(rpc2_thread, rs->conn);
+    }
+    nsm_pump_until(evpl, &rs->done);
+} /* nsm_rpc_wait */
+
+/* Tell one monitored host's statd that we restarted.  Returns 1 when its
+ * statd answered SM_NOTIFY, 0 when the host was skipped. */
+static int
 nsm_notify_one(
     struct evpl                    *evpl,
     struct evpl_rpc2_thread        *rpc2_thread,
@@ -146,16 +214,15 @@ nsm_notify_one(
     uint32_t                        state,
     struct nsm_rpc_state          **keep)
 {
-    struct evpl_endpoint  *ep;
-    struct evpl_rpc2_conn *conn;
-    struct mapping         mapping;
-    struct nsm_rpc_state  *g;
-    struct nsm_rpc_state  *d;
-    struct stat_chge       arg;
+    struct evpl_endpoint *ep;
+    struct mapping        mapping;
+    struct nsm_rpc_state *g;
+    struct nsm_rpc_state *d;
+    struct stat_chge      arg;
 
     g = nsm_rpc_state_new(keep);
     if (!g) {
-        return;
+        return 0;
     }
 
     /* Resolve the peer's statd port via its portmapper. */
@@ -163,73 +230,77 @@ nsm_notify_one(
         chimera_nfs_info("NSM notify: host '%s' (%s:%u) is unreachable; "
                          "skipping", t->host, t->addr,
                          (unsigned) NFS_PEER_PORTMAP_PORT);
-        return;
+        return 0;
     }
 
-    ep   = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(), t->addr, NFS_PEER_PORTMAP_PORT);
-    conn = evpl_rpc2_client_connect(rpc2_thread,
-                                    chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()), ep,
-                                    NULL, 0, NULL);
-    if (!conn) {
+    ep = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(), t->addr, NFS_PEER_PORTMAP_PORT);
+    if (!nsm_rpc_connect(rpc2_thread, ep, g)) {
         evpl_endpoint_close(ep);
-        chimera_nfs_info("NSM notify: cannot reach portmap at %s", t->addr);
-        return;
+        chimera_nfs_info("NSM notify: cannot reach portmap at %s:%u for "
+                         "host '%s'", t->addr,
+                         (unsigned) NFS_PEER_PORTMAP_PORT, t->host);
+        return 0;
     }
 
     mapping.prog = 100024;
     mapping.vers = 1;
     mapping.prot = 6;
     mapping.port = 0;
-    pm->send_call_PMAPPROC_GETPORT(&pm->rpc2, evpl, conn, NULL, &mapping,
+    pm->send_call_PMAPPROC_GETPORT(&pm->rpc2, evpl, g->conn, NULL, &mapping,
                                    0, 0, NULL, 0, 0, nsm_getport_cb, g);
-    nsm_pump_until(evpl, &g->done);
-    evpl_rpc2_client_disconnect(rpc2_thread, conn);
-    /* A call still pending after a timeout completes with an error as the
-     * connection goes away; give that callback its chance to run now. */
-    nsm_pump_until(evpl, &g->done);
+    nsm_rpc_wait(evpl, rpc2_thread, g);
     evpl_endpoint_close(ep);
 
-    if (!g->done || g->port == 0) {
+    if (!g->done || g->status != 0) {
+        chimera_nfs_info("NSM notify: host '%s' (%s:%u) is unreachable (no "
+                         "answer to GETPORT); skipping", t->host, t->addr,
+                         (unsigned) NFS_PEER_PORTMAP_PORT);
+        return 0;
+    }
+
+    if (g->port == 0) {
         chimera_nfs_info("NSM notify: host '%s' (%s) has no statd registered; "
                          "skipping", t->host, t->addr);
-        return;
+        return 0;
     }
 
     /* Tell the peer's statd that we (mon_name) restarted with `state`. */
     if (!nsm_peer_reachable(t->addr, (int) g->port)) {
         chimera_nfs_info("NSM notify: host '%s' (%s:%u) is unreachable; "
                          "skipping", t->host, t->addr, g->port);
-        return;
-    }
-
-    ep   = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(), t->addr, g->port);
-    conn = evpl_rpc2_client_connect(rpc2_thread,
-                                    chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()), ep,
-                                    NULL, 0, NULL);
-    if (!conn) {
-        evpl_endpoint_close(ep);
-        return;
+        return 0;
     }
 
     d = nsm_rpc_state_new(keep);
     if (!d) {
-        evpl_rpc2_client_disconnect(rpc2_thread, conn);
+        return 0;
+    }
+
+    ep = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(), t->addr, g->port);
+    if (!nsm_rpc_connect(rpc2_thread, ep, d)) {
         evpl_endpoint_close(ep);
-        return;
+        chimera_nfs_info("NSM notify: cannot reach statd at %s:%u for "
+                         "host '%s'", t->addr, g->port, t->host);
+        return 0;
     }
 
     arg.mon_name.str = (char *) my_name;
     arg.mon_name.len = strlen(my_name);
     arg.state        = (int) state;
-    sm->send_call_SM_NOTIFY(&sm->rpc2, evpl, conn, NULL, &arg,
+    sm->send_call_SM_NOTIFY(&sm->rpc2, evpl, d->conn, NULL, &arg,
                             0, 0, NULL, 0, 0, nsm_notify_reply_cb, d);
-    nsm_pump_until(evpl, &d->done);
-    evpl_rpc2_client_disconnect(rpc2_thread, conn);
-    nsm_pump_until(evpl, &d->done);
+    nsm_rpc_wait(evpl, rpc2_thread, d);
     evpl_endpoint_close(ep);
+
+    if (!d->done || d->status != 0) {
+        chimera_nfs_info("NSM notify: host '%s' (%s:%u) did not answer "
+                         "SM_NOTIFY; skipping", t->host, t->addr, g->port);
+        return 0;
+    }
 
     chimera_nfs_info("NSM notify: told host '%s' (%s:%u) we restarted (state %u)",
                      t->host, t->addr, g->port, state);
+    return 1;
 } /* nsm_notify_one */
 
 static void *
@@ -257,12 +328,11 @@ nsm_notify_thread_init(
     job->nsm->notify_queued = NULL;
     evpl_mutex_unlock(&job->nsm->mutex);
 
-    /* Outbound-only client programs; replies are matched by this rpc2 thread. */
     PORTMAP_V2_init(&pm);
     SM_INTER_V1_init(&sm);
     programs[0] = &pm.rpc2;
     programs[1] = &sm.rpc2;
-    rpc2_thread = evpl_rpc2_thread_init(evpl, programs, 2, NULL, NULL);
+    rpc2_thread = nsm_rpc2_thread_init(evpl, programs);
 
     chimera_nfs_info("NSM: notifying %u monitored host(s) of restart (state %u)",
                      job->count, job->state);
