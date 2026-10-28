@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "common/thread.h"
+#include "common/thread_name.h"
 #include <time.h>
 #include "common/chimera_rcu.h"
 
@@ -254,6 +255,8 @@ chimera_vfs_user_cache_expiry_thread(void *arg)
     struct chimera_vfs_group      *group, *group_next;
     struct timespec                ts;
     int                            i;
+
+    chimera_thread_set_name("chm_user_exp");
 
     /* Pure writer: sweeps expired entries inside a publish region on the cache
      * domain, never on the read side.  Not registered as a QSBR reader -- a

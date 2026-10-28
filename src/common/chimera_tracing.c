@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "common/chimera_tracing.h"
+#include "common/thread_name.h"
 #include "common/common_config.h"
 #include "common/macros.h"
 
@@ -144,7 +145,8 @@ chimera_tracing_init(json_t *config)
             otel_shutdown();
             return 0;
         }
-        g_grpc_thread = evpl_thread_create(NULL, chimera_tracing_grpc_init,
+        g_grpc_thread = evpl_thread_create(chimera_thread_config("chm_otel_grpc"),
+                                           chimera_tracing_grpc_init,
                                            chimera_tracing_grpc_shutdown, NULL);
         if (!g_grpc_thread) {
             chimera_tracing_log("failed to start OTLP/gRPC exporter thread");

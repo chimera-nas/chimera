@@ -4,6 +4,7 @@
 
 #pragma once
 #include "common/platform.h"
+#include "common/thread_name.h"
 
 #include "common/atomic.h"
 #include <stdio.h>
@@ -173,6 +174,8 @@ chimera_s3_cred_cache_expiry_thread(void *arg)
 {
     struct chimera_s3_cred_cache *cache = arg;
     struct timespec               ts;
+
+    chimera_thread_set_name("chm_s3_cred_exp");
 
     /* Not registered as a QSBR reader -- a thread parked in cond_timedwait
      * must not sit in the grace-period quorum. */

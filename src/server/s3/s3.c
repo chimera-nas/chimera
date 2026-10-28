@@ -1414,7 +1414,7 @@ s3_server_init(
     shared->endpoint = chimera_tcp_flavor_endpoint_create(shared->tcp_flavor, "0.0.0.0",
                                                           shared->config->port);
 
-    shared->listener = evpl_listener_create();
+    shared->listener = evpl_listener_create_named("chm_s3_listen");
 
     shared->bucket_map = s3_bucket_map_create();
 

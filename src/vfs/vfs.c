@@ -5,6 +5,7 @@
 #define _GNU_SOURCE 1
 
 #include "common/atomic.h"
+#include "common/thread_name.h"
 #include "common/thread.h"
 #include "common/compiler.h"
 #include <stdio.h>
@@ -543,7 +544,8 @@ chimera_vfs_spawn_delegation_pool(
         evpl_mutex_init(&pool[i].lock, NULL);
 
         pool[i].evpl_thread = evpl_thread_create(
-            NULL,
+            chimera_thread_config("chm_%s_%d",
+                                  mode == CHIMERA_VFS_DELEGATION_SYNC ? "sync" : "async", i),
             chimera_vfs_delegation_thread_init,
             chimera_vfs_delegation_thread_shutdown,
             &pool[i]);
@@ -571,6 +573,39 @@ chimera_vfs_spawn_delegation_pool(
  * Best-effort throughout: any failure leaves liburcu's single default worker in
  * place, which is correct, just slower to reclaim.
  */
+
+/* liburcu starts its reclaim workers itself, so they are named from here.
+ * Only Linux can name a thread other than the calling one. */
+static void
+chimera_vfs_name_call_rcu_worker(
+    struct call_rcu_data *crdp,
+    long                  index)
+{
+#ifdef __linux__
+    char name[32];
+    int  rc;
+
+    if (!crdp) {
+        return;
+    }
+
+    /* Linux takes at most 15 bytes.  Any real CPU index fits after the
+     * prefix; the cut keeps the bound the compiler cannot see. */
+    snprintf(name, sizeof(name), "chm_rcu_%ld", index);
+    name[15] = '\0';
+
+    rc = pthread_setname_np(get_call_rcu_thread(crdp), name);
+
+    if (rc) {
+        chimera_vfs_debug("failed to name RCU reclaim worker '%s': %s",
+                          name, strerror(rc));
+    }
+#else /* ifdef __linux__ */
+    (void) crdp;
+    (void) index;
+#endif /* ifdef __linux__ */
+} /* chimera_vfs_name_call_rcu_worker */
+
 static void
 chimera_vfs_create_call_rcu_workers(int nworkers)
 {
@@ -581,6 +616,10 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
         if (create_all_cpu_call_rcu_data(0) != 0) {
             chimera_vfs_error("Failed to create per-CPU call_rcu workers; "
                               "falling back to the default RCU reclaim thread");
+            return;
+        }
+        for (long cpu = 0; cpu < ncpu; cpu++) {
+            chimera_vfs_name_call_rcu_worker(get_cpu_call_rcu_data(cpu), cpu);
         }
         return;
     }
@@ -607,6 +646,7 @@ chimera_vfs_create_call_rcu_workers(int nworkers)
             free(workers);
             return;
         }
+        chimera_vfs_name_call_rcu_worker(workers[i], i);
     }
 
     for (long cpu = 0; cpu < ncpu; cpu++) {
@@ -975,7 +1015,7 @@ chimera_vfs_init(
     vfs->close_thread.shutdown = 0;
 
     vfs->close_thread.evpl_thread = evpl_thread_create(
-        NULL,
+        chimera_thread_config("chm_close"),
         chimera_vfs_close_thread_init,
         chimera_vfs_close_thread_shutdown,
         &vfs->close_thread);
@@ -1065,6 +1105,8 @@ static void *
 chimera_vfs_rcu_teardown_worker(void *arg)
 {
     struct chimera_rcu_teardown_ctx *ctx = arg;
+
+    chimera_thread_set_name("chm_rcu_free");
 
     for (int i = 0; i < ctx->count; i++) {
         call_rcu_data_free(ctx->crdps[i]);
