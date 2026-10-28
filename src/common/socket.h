@@ -25,8 +25,32 @@ chimera_socket_connect_pending(void)
 
     return error == WSAEWOULDBLOCK || error == WSAEINPROGRESS || error == WSAEALREADY;
 } // chimera_socket_connect_pending
+static inline int
+chimera_socket_wait_writable(
+    chimera_socket_t fd,
+    int              timeout_ms)
+{
+    WSAPOLLFD pfd;
+
+    pfd.fd      = fd;
+    pfd.events  = POLLWRNORM;
+    pfd.revents = 0;
+    return WSAPoll(&pfd, 1, timeout_ms);
+} // chimera_socket_wait_writable
+static inline int
+chimera_socket_error(chimera_socket_t fd)
+{
+    int err = 0;
+    int len = sizeof(err);
+
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *) &err, &len) != 0) {
+        return -1;
+    }
+    return err;
+} // chimera_socket_error
 #else // ifdef _WIN32
 #include <sys/socket.h>
+#include <poll.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -50,4 +74,31 @@ chimera_socket_connect_pending(void)
 {
     return errno == EINPROGRESS || errno == EALREADY;
 } // chimera_socket_connect_pending
+static inline int
+chimera_socket_wait_writable(
+    chimera_socket_t fd,
+    int              timeout_ms)
+{
+    struct pollfd pfd;
+    int           rc;
+
+    pfd.fd      = fd;
+    pfd.events  = POLLOUT;
+    pfd.revents = 0;
+    do {
+        rc = poll(&pfd, 1, timeout_ms);
+    } while (rc < 0 && errno == EINTR);
+    return rc;
+} // chimera_socket_wait_writable
+static inline int
+chimera_socket_error(chimera_socket_t fd)
+{
+    int       err = 0;
+    socklen_t len = sizeof(err);
+
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *) &err, &len) != 0) {
+        return -1;
+    }
+    return err;
+} // chimera_socket_error
 #endif // ifdef _WIN32
