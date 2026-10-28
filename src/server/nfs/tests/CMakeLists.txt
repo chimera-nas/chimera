@@ -42,6 +42,21 @@ add_test(NAME chimera/server/nfs/nlm_grant_disconnect COMMAND test_nlm_grant_dis
 set_tests_properties(chimera/server/nfs/nlm_grant_disconnect PROPERTIES TIMEOUT 30)
 set(CHIMERA_TEST_TIER extended)
 
+# Reachability probe used before connecting to client-supplied addresses.
+add_executable(test_peer_probe test_peer_probe.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c)
+target_include_directories(test_peer_probe PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_peer_probe
+    chimera_nfs_common chimera_common evpl evpl_rpc2)
+add_dependencies(test_peer_probe chimera_nfs_common)
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/server/nfs/peer_probe COMMAND test_peer_probe)
+set_tests_properties(chimera/server/nfs/peer_probe PROPERTIES TIMEOUT 30)
+set(CHIMERA_TEST_TIER extended)
+
 # Unit test for the NFS4.1 SEQUENCE replay slot state machine.  Drives
 # nfs4_replay_slot_acquire / _finalize directly.  We compile the
 # session source file straight into the test executable (rather than
