@@ -10,22 +10,11 @@
 #include <unistd.h>
 #endif /* ifdef _WIN32 */
 #include "common/thread.h"
-#ifdef _WIN32
-#include "common/platform.h"
-#else  /* ifdef _WIN32 */
-#include <sys/socket.h>
-#endif /* ifdef _WIN32 */
-#ifdef _WIN32
-#include "common/platform.h"
-#else  /* ifdef _WIN32 */
-#include <netinet/in.h>
-#endif /* ifdef _WIN32 */
-
-#include "common/socket.h"
 
 #include "nfs_internal.h"
 #include "nfs_common.h"
 #include "nfs_external_portmap.h"
+#include "nfs_peer_probe.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 
@@ -89,34 +78,15 @@ portmap_unset_callback(
     }
 } /* portmap_unset_callback */
 
-/* evpl treats a synchronously refused connect() as fatal, so handing an
- * absent rpcbind to evpl_rpc2_client_connect would take the whole server
- * down before the error paths below ever ran.  Probe with a throwaway
- * socket first so "no portmapper" surfaces as a failed init instead --
- * hosts without rpcbind (macOS by default) then run unregistered rather
- * than not at all. */
-static int
-portmap_reachable(void)
-{
-    struct sockaddr_in sin;
-    chimera_socket_t   fd;
-    int                rc;
+/* The local rpcbind's port.  A unit test points it at a loopback port it
+ * owns. */
+#ifndef NFS_EXTERNAL_PORTMAP_PORT
+#define NFS_EXTERNAL_PORTMAP_PORT               111
+#endif /* ifndef NFS_EXTERNAL_PORTMAP_PORT */
 
-    fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd == CHIMERA_INVALID_SOCKET) {
-        return 0;
-    }
-
-    memset(&sin, 0, sizeof(sin));
-    sin.sin_family      = AF_INET;
-    sin.sin_port        = htons(111);
-    sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-    rc = connect(fd, (struct sockaddr *) &sin, sizeof(sin));
-    chimera_socket_close(fd);
-
-    return rc == 0;
-} /* portmap_reachable */
+/* Budget for the rpcbind probe.  Registration runs on the server's start
+ * and stop path, not on a core thread, so it can wait for the handshake. */
+#define NFS_EXTERNAL_PORTMAP_CONNECT_TIMEOUT_MS 3000
 
 static int
 portmap_init_context(struct portmap_reg_ctx *ctx)
@@ -125,8 +95,18 @@ portmap_init_context(struct portmap_reg_ctx *ctx)
 
     memset(ctx, 0, sizeof(*ctx));
 
-    if (!portmap_reachable()) {
-        chimera_nfs_error("External portmap at 127.0.0.1:111 is not reachable");
+    /* evpl treats a refused connect() as fatal, so handing an absent
+     * rpcbind to evpl_rpc2_client_connect would take the whole server down
+     * before the error paths below ever ran.  Probe first so "no
+     * portmapper" surfaces as a failed init instead -- hosts without rpcbind
+     * (macOS by default) then run unregistered rather than not at all.  The
+     * probe waits for the handshake: a non-blocking connect to a closed
+     * loopback port can report in progress before it is refused.  This is
+     * the local rpcbind, not a peer's portmapper. */
+    if (!nfs_peer_reachable("127.0.0.1", NFS_EXTERNAL_PORTMAP_PORT,
+                            NFS_EXTERNAL_PORTMAP_CONNECT_TIMEOUT_MS)) {
+        chimera_nfs_error("External portmap at 127.0.0.1:%d is not reachable",
+                          NFS_EXTERNAL_PORTMAP_PORT);
         return -1;
     }
 
@@ -146,7 +126,8 @@ portmap_init_context(struct portmap_reg_ctx *ctx)
         return -1;
     }
 
-    ctx->portmap_endpoint = evpl_endpoint_create("127.0.0.1", 111);
+    ctx->portmap_endpoint = evpl_endpoint_create("127.0.0.1",
+                                                 NFS_EXTERNAL_PORTMAP_PORT);
     if (!ctx->portmap_endpoint) {
         chimera_nfs_error("Failed to create portmap endpoint");
         evpl_rpc2_thread_destroy(ctx->rpc2_thread);
@@ -159,7 +140,8 @@ portmap_init_context(struct portmap_reg_ctx *ctx)
                                                  ctx->portmap_endpoint,
                                                  NULL, 0, NULL);
     if (!ctx->portmap_conn) {
-        chimera_nfs_error("Failed to connect to external portmap at 127.0.0.1:111");
+        chimera_nfs_error("Failed to connect to external portmap at 127.0.0.1:%d",
+                          NFS_EXTERNAL_PORTMAP_PORT);
         evpl_rpc2_thread_destroy(ctx->rpc2_thread);
         evpl_destroy(ctx->evpl);
         return -1;

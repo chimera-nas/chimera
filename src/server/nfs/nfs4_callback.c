@@ -14,29 +14,13 @@
 #include <unistd.h>
 #endif /* ifdef _WIN32 */
 #include <fcntl.h>
-#ifdef _WIN32
-#include "common/platform.h"
-#else  /* ifdef _WIN32 */
-#include <sys/socket.h>
-#endif /* ifdef _WIN32 */
-#ifdef _WIN32
-#include "common/platform.h"
-#else  /* ifdef _WIN32 */
-#include <netinet/in.h>
-#endif /* ifdef _WIN32 */
-#ifdef _WIN32
-#include "common/platform.h"
-#else  /* ifdef _WIN32 */
-#include <arpa/inet.h>
-#endif /* ifdef _WIN32 */
 #include <xxhash.h>
-
-#include "common/socket.h"
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 
 #include "nfs4_callback.h"
+#include "nfs_peer_probe.h"
 #include "nfs4_cb.h"
 #include "nfs4_state.h"
 #include "nfs4_session.h"
@@ -90,60 +74,6 @@ nfs4_cb_parse_uaddr(
     *out_port = (hi << 8) | lo;
     return 0;
 } /* nfs4_cb_parse_uaddr */
-
-/*
- * Probe whether host:port (IPv4) is connectable.  evpl_rpc2_client_connect ->
- * evpl_socket_tcp_connect aborts the process on a synchronous connect() error
- * (e.g. ECONNREFUSED, which loopback returns immediately for a dead port).  A
- * client's callback address is untrusted and may be unreachable, so we must
- * never reach that abort: pre-flight with our own non-blocking socket and only
- * hand off to evpl when the peer is reachable.  Returns true if connectable.
- */
-static bool
-nfs4_cb_addr_reachable(
-    const char *host,
-    int         port)
-{
-    struct sockaddr_in sin;
-    chimera_socket_t   fd;
-    int                rc;
-    bool               ok = false;
-
-    memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET;
-    sin.sin_port   = htons((uint16_t) port);
-    if (inet_pton(AF_INET, host, &sin.sin_addr) != 1) {
-        return false;
-    }
-
-    fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd == CHIMERA_INVALID_SOCKET) {
-        return false;
-    }
-
-    /* Non-blocking so the probe below never stalls the caller.  SOCK_NONBLOCK
-     * as a socket() type flag is a Linux extension, so set O_NONBLOCK
-     * explicitly instead. */
-    if (chimera_socket_nonblocking(fd) < 0) {
-        chimera_socket_close(fd);
-        return false;
-    }
-
-    do {
-        rc = connect(fd, (struct sockaddr *) &sin, sizeof(sin));
-    } while (rc < 0 && chimera_socket_interrupted());
-
-    if (rc == 0) {
-        ok = true;
-    } else if (chimera_socket_connect_pending()) {
-        /* Connection underway; treat as reachable.  evpl will redo its own
-         * connect immediately after, which the listening peer accepts. */
-        ok = true;
-    }
-
-    chimera_socket_close(fd);
-    return ok;
-} /* nfs4_cb_addr_reachable */
 
 /* ---------------------------------------------------------------------- */
 /* CB_NULL liveness probe                                                 */
@@ -308,9 +238,12 @@ nfs4_cb_channel_open(
             return;
         }
 
-        /* Guard against evpl's fatal abort on a refused/unreachable callback
-         * address (the client's cb addr is untrusted). */
-        if (!nfs4_cb_addr_reachable(host, port)) {
+        /* evpl_rpc2_client_connect -> evpl_socket_tcp_connect aborts the
+         * process on a synchronous connect() error (e.g. ECONNREFUSED, which
+         * loopback returns at once for a dead port).  The client's callback
+         * address is untrusted, so pre-flight it with a non-blocking probe
+         * and only hand off to evpl when the peer is reachable. */
+        if (!nfs_peer_reachable(host, port, 0)) {
             atomic_store_explicit(&cb->cb_state, NFS4_CB_DOWN,
                                   memory_order_release);
             free(chan);
