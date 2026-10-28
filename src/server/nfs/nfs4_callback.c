@@ -239,10 +239,12 @@ nfs4_cb_channel_open(
         }
 
         /* evpl_rpc2_client_connect -> evpl_socket_tcp_connect aborts the
-         * process on a synchronous connect() error (e.g. ECONNREFUSED, which
-         * loopback returns at once for a dead port).  The client's callback
-         * address is untrusted, so pre-flight it with a non-blocking probe
-         * and only hand off to evpl when the peer is reachable. */
+         * process on a refused connect().  The client's callback address is
+         * untrusted, so pre-flight it and only hand off to evpl when the
+         * peer is reachable.  This runs on a core thread, so the probe uses
+         * a zero timeout: it reports a refusal the kernel already knows and
+         * otherwise never blocks.  A dead (blackholed) callback address is
+         * therefore not detected on this path. */
         if (!nfs_peer_reachable(host, port, 0)) {
             atomic_store_explicit(&cb->cb_state, NFS4_CB_DOWN,
                                   memory_order_release);

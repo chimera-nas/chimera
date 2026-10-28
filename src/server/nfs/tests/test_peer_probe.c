@@ -71,11 +71,12 @@ test_refused_port(void)
 {
     int port = closed_port();
 
-    /* Whether a refused loopback connect fails at once or reports in
-     * progress depends on the kernel, and timeout 0 counts in progress as
-     * reachable.  Only require that it returns; the bounded wait must see
-     * the refusal. */
-    (void) nfs_peer_reachable("127.0.0.1", port, 0);
+#ifdef __linux__
+    /* Only Linux knows a refused loopback connect by the time connect()
+     * returns (Windows retries the SYN, macOS takes the RST later), so only
+     * there must even the zero-timeout probe see the refusal. */
+    CHECK(!nfs_peer_reachable("127.0.0.1", port, 0));
+#endif /* ifdef __linux__ */
     CHECK(!nfs_peer_reachable("127.0.0.1", port, 500));
 } /* test_refused_port */
 
