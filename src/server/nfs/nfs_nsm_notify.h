@@ -16,10 +16,20 @@ struct nsm_notify_job {
     uint32_t                  count;
     uint32_t                  state;
     char                      my_name[SM_MAXSTRLEN + 1];
+    /* The previous worker, or NULL.  The new worker joins it before it starts
+     * notifying, so the server thread never waits on a worker and notifies
+     * run one at a time, in order. */
+    struct evpl_thread       *predecessor;
+    struct nsm_state         *nsm;
 };
 
-/* Start the reboot-notify worker for job; ownership of job passes to the
- * worker and is released by evpl_thread_destroy on the returned thread. */
-struct evpl_thread *
-nsm_notify_spawn(
+/* Hand job to the reboot-notify machinery; ownership of job passes to it.
+ * At most one worker is notifying and one is waiting its turn: a job
+ * submitted while a worker is still waiting replaces that worker's
+ * targets, state and name and starts no thread, so a flood of restarts
+ * cannot grow the thread count.  The newest worker is nsm->notify_thread;
+ * evpl_thread_destroy on it joins it and, through it, its predecessor. */
+void
+nsm_notify_submit(
+    struct nsm_state      *nsm,
     struct nsm_notify_job *job);

@@ -28,6 +28,7 @@ nsm_state_init(
     state->persistence_disabled = (strcmp(kvname, "memkv") == 0);
     atomic_store(&state->load_state, NSM_LOAD_IDLE);
     state->notify_thread = NULL;
+    state->notify_queued = NULL;
 
     if (gethostname(state->my_name, sizeof(state->my_name)) != 0) {
         snprintf(state->my_name, sizeof(state->my_name), "localhost");

@@ -58,6 +58,22 @@ add_test(NAME chimera/server/nfs/nlm_grant_unreachable COMMAND test_nlm_grant_un
 set_tests_properties(chimera/server/nfs/nlm_grant_unreachable PROPERTIES TIMEOUT 30)
 set(CHIMERA_TEST_TIER extended)
 
+# The reboot notify skips unreachable monitored hosts and spawns without
+# parking the spawning thread.
+add_executable(test_nsm_notify_unreachable test_nsm_notify_unreachable.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c)
+target_include_directories(test_nsm_notify_unreachable PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_nsm_notify_unreachable
+    chimera_nfs_common chimera_common evpl evpl_rpc2)
+add_dependencies(test_nsm_notify_unreachable chimera_nfs_common)
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/server/nfs/nsm_notify_unreachable COMMAND test_nsm_notify_unreachable)
+set_tests_properties(chimera/server/nfs/nsm_notify_unreachable PROPERTIES TIMEOUT 30)
+set(CHIMERA_TEST_TIER extended)
+
 # Reachability probe used before connecting to client-supplied addresses.
 add_executable(test_peer_probe test_peer_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c)
