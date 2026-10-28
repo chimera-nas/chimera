@@ -42,7 +42,9 @@
  * so a momentarily-unreachable client still converges.  After the cap the job
  * is dropped: the lock stays held (the grant already happened in vfs_state),
  * and the client recovers by retransmitting LOCK, which we answer GRANTED. */
+#ifndef NLM_GRANT_RETRY_INTERVAL_US
 #define NLM_GRANT_RETRY_INTERVAL_US  (2 * 1000 * 1000)  /* 2s */
+#endif /* ifndef NLM_GRANT_RETRY_INTERVAL_US */
 #define NLM_GRANT_MAX_ATTEMPTS       15                 /* ~30s total */
 
 /* Budget for the reachability probe that precedes each connect to the
@@ -118,10 +120,13 @@ struct nlm_grant_ctx {
  * armed, and read only on the granter thread. */
 static CHIMERA_THREAD_LOCAL struct nlm_grant_ctx *nlm_grant_tls_ctx;
 
-static void nlm_grant_job_send(
+static int nlm_grant_job_send(
     struct nlm_grant_job *job);
 static void nlm_grant_job_finish(
     struct nlm_grant_job *job);
+static void nlm_grant_retry_timer_cb(
+    struct evpl       *evpl,
+    struct evpl_timer *timer);
 
 /* ------------------------------------------------------------------ *
 *  job teardown                                                       *
@@ -254,15 +259,16 @@ nlm_grant_peer_reachable(
                               NLM_GRANT_CONNECT_TIMEOUT_MS);
 } /* nlm_grant_peer_reachable */
 
-/* Reconnect after a lost transport, then fire one GRANTED call. */
-static void
+/* Reconnect after a lost transport, then fire one GRANTED call.  Returns
+ * -1 when the job was finished instead (it may already be freed), else 0. */
+static int
 nlm_grant_job_send(struct nlm_grant_job *job)
 {
     struct nlm_grant_ctx *ctx = nlm_grant_tls_ctx;
     struct nlm4_testargs  args;
 
     if (job->finishing || job->inflight) {
-        return;
+        return 0;
     }
 
     job->attempts++;
@@ -274,13 +280,13 @@ nlm_grant_job_send(struct nlm_grant_job *job)
                              job->req.caller_name, job->req.client_addr,
                              job->nlm_port, job->attempts);
             nlm_grant_job_finish(job);
-            return;
+            return -1;
         }
         job->nlm_conn = evpl_rpc2_client_connect(ctx->rpc2_thread,
                                                  chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()),
                                                  job->nlm_ep, NULL, 0, NULL);
         if (!job->nlm_conn) {
-            return;
+            return 0;
         }
         evpl_rpc2_conn_set_private_data(job->nlm_conn, job);
     }
@@ -309,7 +315,23 @@ nlm_grant_job_send(struct nlm_grant_job *job)
                                         job->nlm_conn, NULL, &args,
                                         0, 0, NULL, 0, 0,
                                         nlm_grant_reply_cb, job);
+    return 0;
 } /* nlm_grant_job_send */
+
+/* Arm the next retry tick.  The timer is one-shot and re-armed only while
+ * the job lives on: evpl re-inserts a periodic timer after its callback
+ * returns, so a periodic one could not let its callback finish (and free)
+ * the job. */
+static void
+nlm_grant_retry_arm(struct nlm_grant_job *job)
+{
+    struct nlm_grant_ctx *ctx = nlm_grant_tls_ctx;
+
+    evpl_add_oneshot_timer(ctx->evpl, &job->retry_timer,
+                           nlm_grant_retry_timer_cb,
+                           NLM_GRANT_RETRY_INTERVAL_US);
+    job->timer_armed = 1;
+} /* nlm_grant_retry_arm */
 
 static void
 nlm_grant_retry_timer_cb(
@@ -318,9 +340,13 @@ nlm_grant_retry_timer_cb(
 {
     struct nlm_grant_job *job = container_of(timer, struct nlm_grant_job, retry_timer);
 
-    (void) evpl;
+    /* evpl took the fired one-shot off its timer set before calling us.
+     * Removing it again is then a no-op, and keeps a direct call (a forced
+     * retry) from arming it twice. */
+    evpl_remove_timer(evpl, timer);
+    job->timer_armed = 0;
 
-    if (job->acked) {
+    if (job->finishing) {
         return;     /* finish already ran (defensive) */
     }
 
@@ -335,9 +361,11 @@ nlm_grant_retry_timer_cb(
 
     /* Re-send only if the previous attempt is not still outstanding; otherwise
      * wait for its reply or the next tick. */
-    if (!job->inflight) {
-        nlm_grant_job_send(job);
+    if (!job->inflight && nlm_grant_job_send(job) != 0) {
+        return;     /* dropped: the job may already be freed */
     }
+
+    nlm_grant_retry_arm(job);
 } /* nlm_grant_retry_timer_cb */
 
 /* ------------------------------------------------------------------ *
@@ -382,12 +410,11 @@ nlm_grant_getport_cb(
     job->nlm_port = port;
     job->nlm_ep   = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(),
                                                        job->req.client_addr, port);
-    /* Arm the retransmit timer and fire the first GRANTED. */
-    evpl_add_timer(ctx->evpl, &job->retry_timer, nlm_grant_retry_timer_cb,
-                   NLM_GRANT_RETRY_INTERVAL_US);
-    job->timer_armed = 1;
-
-    nlm_grant_job_send(job);
+    /* Fire the first GRANTED and, unless that already ended the job, arm
+     * the retransmit timer. */
+    if (nlm_grant_job_send(job) == 0) {
+        nlm_grant_retry_arm(job);
+    }
 } /* nlm_grant_getport_cb */
 
 static void
@@ -431,8 +458,10 @@ nlm_grant_job_start(
                                             chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()),
                                             job->pm_ep, NULL, 0, NULL);
     if (!job->pm_conn) {
-        chimera_nfs_info("NLM GRANTED: cannot reach portmap at %s for host '%s'",
-                         job->req.client_addr, job->req.caller_name);
+        chimera_nfs_info("NLM GRANTED: cannot reach portmap at %s:%u for "
+                         "host '%s'", job->req.client_addr,
+                         (unsigned) NFS_PEER_PORTMAP_PORT,
+                         job->req.caller_name);
         nlm_grant_job_finish(job);
         return;
     }
