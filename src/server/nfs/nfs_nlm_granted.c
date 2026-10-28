@@ -31,6 +31,7 @@
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs_nlm_granted.h"
+#include "nfs_peer_probe.h"
 #include "portmap_xdr.h"
 #include "nlm4_xdr.h"
 #include "evpl/evpl.h"
@@ -41,12 +42,20 @@
  * so a momentarily-unreachable client still converges.  After the cap the job
  * is dropped: the lock stays held (the grant already happened in vfs_state),
  * and the client recovers by retransmitting LOCK, which we answer GRANTED. */
-#define NLM_GRANT_RETRY_INTERVAL_US (2 * 1000 * 1000)   /* 2s */
-#define NLM_GRANT_MAX_ATTEMPTS      15                  /* ~30s total */
+#define NLM_GRANT_RETRY_INTERVAL_US  (2 * 1000 * 1000)  /* 2s */
+#define NLM_GRANT_MAX_ATTEMPTS       15                 /* ~30s total */
+
+/* Budget for the reachability probe that precedes each connect to the
+ * client.  The client address is peer-supplied, and libevpl aborts the
+ * process on a refused connect and blocks for minutes on a dead address, so
+ * the granter only dials a peer that has just completed a handshake. */
+#ifndef NLM_GRANT_CONNECT_TIMEOUT_MS
+#define NLM_GRANT_CONNECT_TIMEOUT_MS 2000
+#endif /* ifndef NLM_GRANT_CONNECT_TIMEOUT_MS */
 
 /* NLM program/version, looked up via the client's portmapper. */
-#define NLM_PROGRAM                 100021u
-#define NLM_VERSION                 4u
+#define NLM_PROGRAM                  100021u
+#define NLM_VERSION                  4u
 
 /* Producer-side queue node carries the request payload plus an intake link.
  * The granter copies the payload into its own job and frees the node.  A
@@ -231,6 +240,20 @@ nlm_grant_reply_cb(
     }
 } /* nlm_grant_reply_cb */
 
+/* The in-process transport has no address to dial, so there is nothing to
+ * probe; every socket transport is probed before libevpl connects. */
+static int
+nlm_grant_peer_reachable(
+    const struct nlm_grant_job *job,
+    int                         port)
+{
+    if (nfs_callback_tcp_flavor() == CHIMERA_TCP_FLAVOR_INPROC) {
+        return 1;
+    }
+    return nfs_peer_reachable(job->req.client_addr, port,
+                              NLM_GRANT_CONNECT_TIMEOUT_MS);
+} /* nlm_grant_peer_reachable */
+
 /* Reconnect after a lost transport, then fire one GRANTED call. */
 static void
 nlm_grant_job_send(struct nlm_grant_job *job)
@@ -244,6 +267,15 @@ nlm_grant_job_send(struct nlm_grant_job *job)
 
     job->attempts++;
     if (!job->nlm_conn) {
+        if (!nlm_grant_peer_reachable(job, (int) job->nlm_port)) {
+            chimera_nfs_info("NLM GRANTED: host '%s' (%s:%u) is unreachable "
+                             "on attempt %d; dropping the grant (the client "
+                             "re-polls its lock)",
+                             job->req.caller_name, job->req.client_addr,
+                             job->nlm_port, job->attempts);
+            nlm_grant_job_finish(job);
+            return;
+        }
         job->nlm_conn = evpl_rpc2_client_connect(ctx->rpc2_thread,
                                                  chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()),
                                                  job->nlm_ep, NULL, 0, NULL);
@@ -379,10 +411,22 @@ nlm_grant_job_start(
     DL_APPEND(ctx->active, job);
 #endif /* ifndef __clang_analyzer__ */
 
+    if (!nlm_grant_peer_reachable(job, NFS_PEER_PORTMAP_PORT)) {
+        chimera_nfs_info("NLM GRANTED: portmap at %s:%u for host '%s' is "
+                         "unreachable; dropping the grant (the client "
+                         "re-polls its lock)",
+                         job->req.client_addr,
+                         (unsigned) NFS_PEER_PORTMAP_PORT,
+                         job->req.caller_name);
+        nlm_grant_job_finish(job);
+        return;
+    }
+
     /* Resolve the client's NLM (prog 100021 v4) callback port via its
      * portmapper, exactly as the NSM reboot-notify path resolves statd. */
     job->pm_ep = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(),
-                                                    job->req.client_addr, 111);
+                                                    job->req.client_addr,
+                                                    NFS_PEER_PORTMAP_PORT);
     job->pm_conn = evpl_rpc2_client_connect(ctx->rpc2_thread,
                                             chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()),
                                             job->pm_ep, NULL, 0, NULL);
