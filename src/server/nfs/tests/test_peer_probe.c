@@ -38,7 +38,7 @@ listen_on(chimera_socket_t *fd)
     sin.sin_family      = AF_INET;
     sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     CHECK(bind(*fd, (struct sockaddr *) &sin, sizeof(sin)) == 0);
-    CHECK(listen(*fd, 1) == 0);
+    CHECK(listen(*fd, 8) == 0);
     CHECK(getsockname(*fd, (struct sockaddr *) &sin, &len) == 0);
     return ntohs(sin.sin_port);
 } /* listen_on */
@@ -107,7 +107,7 @@ test_ipv6_listener(void)
     sin6.sin6_family = AF_INET6;
     sin6.sin6_addr   = in6addr_loopback;
     if (bind(fd, (struct sockaddr *) &sin6, sizeof(sin6)) != 0 ||
-        listen(fd, 1) != 0 ||
+        listen(fd, 8) != 0 ||
         getsockname(fd, (struct sockaddr *) &sin6, &len) != 0) {
         chimera_socket_close(fd);
         printf("SKIP: ipv6\n");
