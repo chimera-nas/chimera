@@ -12,6 +12,7 @@
 #include "common/platform.h"
 #else  /* ifdef _WIN32 */
 #include <unistd.h>
+#include <sys/stat.h>
 #endif /* ifdef _WIN32 */
 
 #include "evpl/evpl.h"
@@ -21,6 +22,28 @@
 #include "prometheus-c.h"
 
 #define TEST_PASS(name) fprintf(stderr, "  PASS: %s\n", name)
+
+#ifndef _WIN32
+/* A persistent store holds secrets (the NFS FH signing keys), so only its
+ * owner may read it, even though the daemon runs with umask(0). */
+static void
+check_owner_only(
+    const char *dir,
+    const char *name,
+    mode_t      expect)
+{
+    char        path[512];
+    struct stat st;
+
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    assert(stat(path, &st) == 0);
+    if ((st.st_mode & 0777) != expect) {
+        fprintf(stderr, "%s has mode %03o, expected %03o\n", path,
+                (unsigned) (st.st_mode & 0777), (unsigned) expect);
+        assert(0);
+    }
+} /* check_owner_only */
+#endif /* ifndef _WIN32 */
 
 struct test_ctx {
     int                        done;
@@ -606,6 +629,10 @@ main(
 
     chimera_log_init();
 
+#ifndef _WIN32
+    umask(0);  /* as the daemon does */
+#endif /* ifndef _WIN32 */
+
     /* Create minimal metrics object (required for VFS init) */
     metrics = prometheus_metrics_create(NULL, NULL, 0);
     assert(metrics != NULL);
@@ -620,6 +647,9 @@ main(
     snprintf(sqlite_cfg, sizeof(sqlite_cfg), "{\"path\":\"%s/kv.db\"}", db_dir);
 
     run_suite("sqlite", sqlite_cfg, metrics);
+#ifndef _WIN32
+    check_owner_only(db_dir, "kv.db", 0600);
+#endif /* ifndef _WIN32 */
 
     if (chimera_test_remove_tree(db_dir) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", db_dir);
@@ -644,6 +674,10 @@ main(
                  "{\"initialize\":true,\"path\":\"%s\"}", cdir);
 
         run_suite("cairn", cairn_cfg, metrics);
+#ifndef _WIN32
+        check_owner_only(cdir, "meta", 0700);
+        check_owner_only(cdir, "data", 0700);
+#endif /* ifndef _WIN32 */
 
         if (chimera_test_remove_tree(cdir) != 0) {
             fprintf(stderr, "warning: failed to remove %s\n", cdir);

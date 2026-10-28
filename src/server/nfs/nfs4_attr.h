@@ -22,6 +22,7 @@
 #include "vfs/vfs_pnfs.h"
 #include "nfs4_lease.h"
 #include "nfs_fh_wrap.h"
+#include "nfs_common.h"
 
 /*
  * Derive the NFSv4 fattr4_change value from a set of VFS attributes, using the
@@ -461,24 +462,23 @@ chimera_nfs4_attr_append_acl(
 
 static int
 chimera_nfs4_marshall_attrs(
-    const struct chimera_vfs_attrs *attr,
-    uint32_t                        num_req_mask,
-    uint32_t                       *req_mask,
-    uint32_t                       *num_rsp_mask,
-    uint32_t                       *rsp_mask,
-    uint32_t                        max_rsp_mask,
-    void                           *attrs,
-    uint32_t                       *attrvals_len,
-    uint32_t                        max_attrvals,
-    uint8_t                         minorversion,
-    uint32_t                        pnfs_layout_type,
-    int                             xattr_supported,
-    int                             nfs4_delegations,
-    uint32_t                        lease_time_s,
-    uint16_t                        export_id,
-    const uint8_t                  *fh_key,
-    int                             fh_sign,
-    uint32_t                        type_override)
+    const struct chimera_vfs_attrs   *attr,
+    uint32_t                          num_req_mask,
+    uint32_t                         *req_mask,
+    uint32_t                         *num_rsp_mask,
+    uint32_t                         *rsp_mask,
+    uint32_t                          max_rsp_mask,
+    void                             *attrs,
+    uint32_t                         *attrvals_len,
+    uint32_t                          max_attrvals,
+    uint8_t                           minorversion,
+    uint32_t                          pnfs_layout_type,
+    int                               xattr_supported,
+    int                               nfs4_delegations,
+    uint32_t                          lease_time_s,
+    uint16_t                          export_id,
+    struct chimera_server_nfs_shared *shared,
+    uint32_t                          type_override)
 {
     /* pnfs_layout_type is the single layouttype4 this file's backend supports
      * (LAYOUT4_FLEX_FILES 0x4 or LAYOUT4_BLOCK_VOLUME 0x3), or 0 when pNFS is
@@ -778,16 +778,16 @@ chimera_nfs4_marshall_attrs(
             uint8_t        wire[CHIMERA_NFS_FH_MAX];
             int            wirelen;
 
-            /* Wrap the FILEHANDLE attribute with its export id (and sign it)
-             * exactly as GETFH would, so a handle a client harvests from
-             * GETATTR/READDIR round-trips through PUTFH.  export_id 0 means a
-             * pseudo-fs / unattributed handle, emitted verbatim. */
-            if (export_id == 0) {
+            /* Wrap the FILEHANDLE attribute exactly as GETFH does, so a handle
+             * a client harvests from GETATTR/READDIR is the same handle and
+             * round-trips through PUTFH.  export_id 0 means a pseudo-fs /
+             * unattributed handle, emitted verbatim. */
+            if (export_id == 0 || !shared) {
                 fhp = attr->va_fh;
                 fhl = attr->va_fh_len;
             } else {
-                chimera_nfs_fh_wrap(wire, &wirelen, export_id, attr->va_fh,
-                                    attr->va_fh_len, fh_key, fh_sign);
+                chimera_nfs_fh_encode_shared(shared, export_id, attr->va_fh,
+                                             attr->va_fh_len, wire, &wirelen);
                 fhp = wire;
                 fhl = wirelen;
             }

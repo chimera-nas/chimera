@@ -594,9 +594,9 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
         /* Local DS (this server, local mount): backing_fh is a raw VFS handle,
         * so wrap it into the on-wire form the DS's NFS decode expects.  The DS
         * is this same server, so it shares the signing key and verifies it. */
-        chimera_nfs_fh_wrap(ds_fhwire, &ds_fhwire_len, req->export_id,
-                            backing_fh, backing_fh_len,
-                            req->thread->shared->fh_key, req->thread->shared->fh_sign);
+        chimera_nfs_fh_encode_shared(req->thread->shared, req->export_id,
+                                     backing_fh, backing_fh_len,
+                                     ds_fhwire, &ds_fhwire_len);
         native_fh     = ds_fhwire;
         native_fh_len = ds_fhwire_len;
     } else {

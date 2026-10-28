@@ -626,9 +626,9 @@ nfs4_cb_recall_send(
 
     /* The client matches the recall against the on-wire (wrapped) handle it
      * holds, so re-wrap the internal VFS handle with its export id + signing. */
-    chimera_nfs_fh_wrap(fhwire, &fhwire_len, deleg->export_id,
-                        deleg->fh, deleg->fh_len,
-                        thread->shared->fh_key, thread->shared->fh_sign);
+    chimera_nfs_fh_encode_shared(thread->shared, deleg->export_id,
+                                 deleg->fh, deleg->fh_len,
+                                 fhwire, &fhwire_len);
 
     ops[nops].argop               = OP_CB_RECALL;
     ops[nops].opcbrecall.stateid  = sid;
@@ -775,8 +775,8 @@ nfs4_cb_layoutrecall(
     ops[nops].opcblayoutrecall.clora_iomode                = LAYOUTIOMODE4_ANY;
     ops[nops].opcblayoutrecall.clora_changed               = 0;
     ops[nops].opcblayoutrecall.clora_recall.lor_recalltype = LAYOUTRECALL4_FILE;
-    chimera_nfs_fh_wrap(fhwire, &fhwire_len, export_id, fh, fh_len,
-                        thread->shared->fh_key, thread->shared->fh_sign);
+    chimera_nfs_fh_encode_shared(thread->shared, export_id, fh, fh_len,
+                                 fhwire, &fhwire_len);
     ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_fh.len  = fhwire_len;
     ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_fh.data = fhwire;
     ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_offset  = 0;
@@ -1018,9 +1018,9 @@ nfs4_cb_getattr_send(
         nops++;
     }
 
-    chimera_nfs_fh_wrap(fhwire, &fhwire_len, deleg->export_id,
-                        deleg->fh, deleg->fh_len,
-                        thread->shared->fh_key, thread->shared->fh_sign);
+    chimera_nfs_fh_encode_shared(thread->shared, deleg->export_id,
+                                 deleg->fh, deleg->fh_len,
+                                 fhwire, &fhwire_len);
 
     ops[nops].argop                        = OP_CB_GETATTR;
     ops[nops].opcbgetattr.fh.len           = fhwire_len;
