@@ -74,6 +74,24 @@ add_test(NAME chimera/server/nfs/nsm_notify_unreachable COMMAND test_nsm_notify_
 set_tests_properties(chimera/server/nfs/nsm_notify_unreachable PROPERTIES TIMEOUT 30)
 set(CHIMERA_TEST_TIER extended)
 
+# A host without rpcbind runs unregistered instead of aborting at startup or
+# shutdown.
+add_executable(test_external_portmap_unreachable
+    test_external_portmap_unreachable.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c)
+target_include_directories(test_external_portmap_unreachable PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_external_portmap_unreachable
+    chimera_nfs_common chimera_common evpl evpl_rpc2)
+add_dependencies(test_external_portmap_unreachable chimera_nfs_common)
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/server/nfs/external_portmap_unreachable
+    COMMAND test_external_portmap_unreachable)
+set_tests_properties(chimera/server/nfs/external_portmap_unreachable PROPERTIES TIMEOUT 30)
+set(CHIMERA_TEST_TIER extended)
+
 # Reachability probe used before connecting to client-supplied addresses.
 add_executable(test_peer_probe test_peer_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c)
@@ -104,6 +122,7 @@ add_executable(test_replay_slot
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c
     # nfs4_session.c's reply capture strips transport framing through this.
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_drc_reply.c)
@@ -130,6 +149,7 @@ add_executable(test_nfs_persist
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_v40_drc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_drc_reply.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c)
 target_include_directories(test_nfs_persist PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
