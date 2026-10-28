@@ -267,6 +267,19 @@ target_include_directories(test_fh_security PRIVATE
 add_dependencies(test_fh_security chimera_nfs_common)
 add_test(NAME chimera/server/nfs/fh_security COMMAND test_fh_security)
 
+# Fleet-wide FH signing keyring: record (de)serialization, key layout, and the
+# ring derived from the node key when the KV store is not persistent.
+add_executable(test_fh_keyring
+    test_fh_keyring.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_fh_keyring.c)
+target_include_directories(test_fh_keyring PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_fh_keyring chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
+add_dependencies(test_fh_keyring chimera_nfs_common)
+add_test(NAME chimera/server/nfs/fh_keyring COMMAND test_fh_keyring)
+
 # Unit test for the pseudo-fs root READDIR cookie policy (nfs4_root_cookie.h):
 # reserved and out-of-range client cookies must be rejected rather than
 # truncated into the int resume position.  The header includes the generated

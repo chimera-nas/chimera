@@ -187,6 +187,205 @@ test_bad_lengths(void)
     return 0;
 } /* test_bad_lengths */
 
+/* ------------------------------------------------------------------------- *
+*  V2 fleet-wide keyring tests                                 *
+* ------------------------------------------------------------------------- */
+
+/* Build a ring shaped like a mid-rotation fleet: kid 1 RETIRED, kid 2 ACTIVE.
+ * signing_kid must always point at an ACTIVE slot. */
+static void
+build_test_ring(
+    struct nfs_fh_keyring *kr,
+    uint8_t                signing_kid)
+{
+    memset(kr, 0, sizeof(*kr));
+    kr->signing_kid = signing_kid;
+
+    kr->slots[0].kid   = 1;
+    kr->slots[0].state = NFS_FH_KEY_RETIRED;
+    memset(kr->slots[0].key, 0xA1, 16);
+    kr->slots[0].created_ns = 1000;
+
+    kr->slots[1].kid   = 2;
+    kr->slots[1].state = NFS_FH_KEY_ACTIVE;
+    memset(kr->slots[1].key, 0xB2, 16);
+    kr->slots[1].created_ns = 2000;
+} /* build_test_ring */
+
+/* V2 wrap -> unwrap_ring round-trips and reports AUTHN_V2. */
+static int
+test_v2_roundtrip(void)
+{
+    struct nfs_fh_keyring          kr;
+    uint8_t                        wire[CHIMERA_NFS_FH_MAX];
+    uint8_t                        out[CHIMERA_VFS_FH_SIZE];
+    int                            wirelen, outlen, rc;
+    uint16_t                       export_id;
+    enum chimera_nfs_fh_authn_kind authn = CHIMERA_NFS_FH_AUTHN_PLAIN;
+
+    build_test_ring(&kr, 2);
+
+    rc = chimera_nfs_fh_wrap_v2(wire, &wirelen, 0x5678, sample_vfs_fh,
+                                sizeof(sample_vfs_fh), &kr);
+    CHECK(rc == CHIMERA_NFS_FH_OK);
+    CHECK(wire[0] == (CHIMERA_NFS_FH_TAG_SIGNED_V2 | 1));  /* signing kid 2 */
+    /* No longer than V1: a proxying chimera has no room for more. */
+    CHECK(wirelen == CHIMERA_NFS_FH_HDR + (int) sizeof(sample_vfs_fh) + CHIMERA_NFS_FH_MAC);
+
+    /* The kid is under the MAC: moving it to another ring entry fails. */
+    wire[0] = chimera_nfs_fh_v2_tag(1);
+    rc      = chimera_nfs_fh_unwrap_ring(wire, wirelen, &export_id, out, &outlen,
+                                         &kr, NULL, 1, &authn);
+    CHECK(rc == CHIMERA_NFS_FH_BADHANDLE);
+    wire[0] = chimera_nfs_fh_v2_tag(2);
+
+    rc = chimera_nfs_fh_unwrap_ring(wire, wirelen, &export_id, out, &outlen,
+                                    &kr, NULL, 1, &authn);
+    CHECK(rc == CHIMERA_NFS_FH_OK);
+    CHECK(authn == CHIMERA_NFS_FH_AUTHN_V2);
+    CHECK(export_id == 0x5678);
+    CHECK(outlen == (int) sizeof(sample_vfs_fh));
+    CHECK(memcmp(out, sample_vfs_fh, sizeof(sample_vfs_fh)) == 0);
+    return 0;
+} /* test_v2_roundtrip */
+
+/* Fleet interop: a handle minted on node A (kid 2 ACTIVE) verifies on node B
+ * even though node B has already moved kid 2 to RETIRED and promoted kid 3 to
+ * ACTIVE.  This is what lets a client keep its handles when it fails over:
+ * the surviving node must accept handles signed by the failed one. */
+static int
+test_v2_retired_verify(void)
+{
+    struct nfs_fh_keyring          kr_a, kr_b;
+    uint8_t                        wire[CHIMERA_NFS_FH_MAX];
+    uint8_t                        out[CHIMERA_VFS_FH_SIZE];
+    int                            wirelen, outlen, rc;
+    uint16_t                       export_id;
+    enum chimera_nfs_fh_authn_kind authn = CHIMERA_NFS_FH_AUTHN_PLAIN;
+
+    /* Node A: kid 2 ACTIVE (the pre-rotation state). */
+    build_test_ring(&kr_a, 2);
+
+    /* Node B: kid 2 has been RETIRED and kid 3 promoted to ACTIVE.  The kid 2
+     * key material is identical (fleet-wide ring), only the state differs. */
+    memset(&kr_b, 0, sizeof(kr_b));
+    kr_b.signing_kid    = 3;
+    kr_b.slots[0].kid   = 2;
+    kr_b.slots[0].state = NFS_FH_KEY_RETIRED;
+    memset(kr_b.slots[0].key, 0xB2, 16);
+    kr_b.slots[1].kid   = 3;
+    kr_b.slots[1].state = NFS_FH_KEY_ACTIVE;
+    memset(kr_b.slots[1].key, 0xC3, 16);
+
+    rc = chimera_nfs_fh_wrap_v2(wire, &wirelen, 42, sample_vfs_fh,
+                                sizeof(sample_vfs_fh), &kr_a);
+    CHECK(rc == CHIMERA_NFS_FH_OK);
+
+    rc = chimera_nfs_fh_unwrap_ring(wire, wirelen, &export_id, out, &outlen,
+                                    &kr_b, NULL, 1, &authn);
+    CHECK(rc == CHIMERA_NFS_FH_OK);
+    CHECK(authn == CHIMERA_NFS_FH_AUTHN_V2);
+    CHECK(export_id == 42);
+    return 0;
+} /* test_v2_retired_verify */
+
+/* Unknown kid (rotated out entirely, or client forgery) MUST be rejected, as
+ * must the tag just below the V2 range. */
+static int
+test_v2_unknown_kid(void)
+{
+    struct nfs_fh_keyring          kr;
+    uint8_t                        wire[CHIMERA_NFS_FH_MAX];
+    uint8_t                        out[CHIMERA_VFS_FH_SIZE];
+    int                            wirelen, outlen, rc;
+    uint16_t                       export_id;
+    enum chimera_nfs_fh_authn_kind authn = CHIMERA_NFS_FH_AUTHN_PLAIN;
+
+    build_test_ring(&kr, 2);
+    rc = chimera_nfs_fh_wrap_v2(wire, &wirelen, 1, sample_vfs_fh,
+                                sizeof(sample_vfs_fh), &kr);
+    CHECK(rc == CHIMERA_NFS_FH_OK);
+
+    /* Rewrite the kid to a value not in the ring. */
+    wire[0] = chimera_nfs_fh_v2_tag(5);
+    rc      = chimera_nfs_fh_unwrap_ring(wire, wirelen, &export_id, out, &outlen,
+                                         &kr, NULL, 1, &authn);
+    CHECK(rc == CHIMERA_NFS_FH_BADHANDLE);
+
+    wire[0] = CHIMERA_NFS_FH_TAG_SIGNED_V2 - 1;
+    rc      = chimera_nfs_fh_unwrap_ring(wire, wirelen, &export_id, out, &outlen,
+                                         &kr, NULL, 1, &authn);
+    CHECK(rc == CHIMERA_NFS_FH_BADHANDLE);
+    return 0;
+} /* test_v2_unknown_kid */
+
+/* Legacy V1 handles verify under the ring path when a legacy_key is supplied,
+ * and authn is reported as LEGACY_V1. */
+static int
+test_legacy_v1_accept(void)
+{
+    struct nfs_fh_keyring          kr;
+    uint8_t                        wire[CHIMERA_NFS_FH_MAX];
+    uint8_t                        out[CHIMERA_VFS_FH_SIZE];
+    int                            wirelen, outlen, rc;
+    uint16_t                       export_id;
+    enum chimera_nfs_fh_authn_kind authn = CHIMERA_NFS_FH_AUTHN_PLAIN;
+
+    build_test_ring(&kr, 2);
+
+    /* Mint a V1 handle with the legacy per-server key. */
+    rc = chimera_nfs_fh_wrap(wire, &wirelen, 9, sample_vfs_fh,
+                             sizeof(sample_vfs_fh), test_key, 1);
+    CHECK(rc == CHIMERA_NFS_FH_OK);
+    CHECK(wire[0] == CHIMERA_NFS_FH_TAG_SIGNED);
+
+    /* Ring path with legacy_key supplied: accepted, flagged as LEGACY_V1. */
+    rc = chimera_nfs_fh_unwrap_ring(wire, wirelen, &export_id, out, &outlen,
+                                    &kr, test_key, 1, &authn);
+    CHECK(rc == CHIMERA_NFS_FH_OK);
+    CHECK(authn == CHIMERA_NFS_FH_AUTHN_LEGACY_V1);
+    CHECK(export_id == 9);
+
+    /* Without legacy_key (post-transition, V1 acceptance turned off): rejected. */
+    rc = chimera_nfs_fh_unwrap_ring(wire, wirelen, &export_id, out, &outlen,
+                                    &kr, NULL, 1, &authn);
+    CHECK(rc == CHIMERA_NFS_FH_BADHANDLE);
+    return 0;
+} /* test_legacy_v1_accept */
+
+/* Cross-tag isolation: a V2 handle must not authenticate under the V1 unwrap
+ * even when the V1 caller has the correct-looking key, and vice versa.
+ * Prevents downgrade confusion. */
+static int
+test_v2_tag_isolation(void)
+{
+    struct nfs_fh_keyring          kr;
+    uint8_t                        wire[CHIMERA_NFS_FH_MAX];
+    uint8_t                        out[CHIMERA_VFS_FH_SIZE];
+    int                            wirelen, outlen, rc;
+    uint16_t                       export_id;
+    enum chimera_nfs_fh_authn_kind authn = CHIMERA_NFS_FH_AUTHN_PLAIN;
+
+    build_test_ring(&kr, 2);
+
+    /* V2 handle handed to the V1-only unwrap: BADHANDLE (tag mismatch). */
+    rc = chimera_nfs_fh_wrap_v2(wire, &wirelen, 3, sample_vfs_fh,
+                                sizeof(sample_vfs_fh), &kr);
+    CHECK(rc == CHIMERA_NFS_FH_OK);
+    rc = chimera_nfs_fh_unwrap(wire, wirelen, &export_id, out, &outlen,
+                               kr.slots[1].key, 1);
+    CHECK(rc == CHIMERA_NFS_FH_BADHANDLE);
+
+    /* V1 handle handed to ring with legacy_key=NULL: BADHANDLE. */
+    rc = chimera_nfs_fh_wrap(wire, &wirelen, 3, sample_vfs_fh,
+                             sizeof(sample_vfs_fh), test_key, 1);
+    CHECK(rc == CHIMERA_NFS_FH_OK);
+    rc = chimera_nfs_fh_unwrap_ring(wire, wirelen, &export_id, out, &outlen,
+                                    &kr, NULL, 1, &authn);
+    CHECK(rc == CHIMERA_NFS_FH_BADHANDLE);
+    return 0;
+} /* test_v2_tag_isolation */
+
 /* Squash: ROOT maps uid 0 only; ALL maps everyone; NONE passes through. */
 static int
 test_squash(void)
@@ -271,6 +470,21 @@ main(void)
         return 1;
     }
     if (test_bad_lengths()) {
+        return 1;
+    }
+    if (test_v2_roundtrip()) {
+        return 1;
+    }
+    if (test_v2_retired_verify()) {
+        return 1;
+    }
+    if (test_v2_unknown_kid()) {
+        return 1;
+    }
+    if (test_legacy_v1_accept()) {
+        return 1;
+    }
+    if (test_v2_tag_isolation()) {
         return 1;
     }
     if (test_squash()) {

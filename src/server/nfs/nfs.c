@@ -457,6 +457,9 @@ nfs_server_init(
                       shared->nfs_grace_time_s,
                       chimera_server_config_get_nfs4_drc(config));
 
+    nfs_fh_keyring_init(&shared->nfs_fh_keyring, shared->node_id,
+                        shared->nfs4_recovery.persistence_disabled);
+
     nlm_state_init(&shared->nlm_state,
                    chimera_server_config_get_state_dir(config));
 
@@ -616,6 +619,12 @@ nfs_server_start(void *arg)
      * must find the load finished, not race it. */
     nfs_recovery_cold_start(&shared->nfs4_recovery);
 
+    /* Likewise no handle may be minted or verified before the fleet FH keyring
+     * is loaded (or the fleet's first key minted). */
+    if (shared->fh_sign) {
+        nfs_fh_keyring_load(&shared->nfs_fh_keyring, shared->vfs, shared->fh_key);
+    }
+
     /* One transport for every service this server offers.  The auxiliary ones
      * used to name EVPL_STREAM_SOCKET_TCP outright, which meant they ignored
      * the configured flavor and would have stayed on TCP while the NFS service
@@ -770,6 +779,7 @@ nfs_server_destroy(void *data)
     evpl_mutex_destroy(&shared->nfs4_pnfs_devcache.lock);
 
     nfs_recovery_free(&shared->nfs4_recovery);
+    nfs_fh_keyring_free(&shared->nfs_fh_keyring);
 
     if (shared->op_histogram) {
         prometheus_histogram_destroy(shared->metrics, shared->op_histogram);

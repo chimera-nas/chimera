@@ -66,13 +66,13 @@
 #define CHIMERA_KV_PREFIX_LEN (CHIMERA_KV_HDR_LEN + CHIMERA_KV_NODE_LEN)
 
 enum chimera_kv_record_type {
-    CHIMERA_KV_TYPE_NFS4_RECOVERY = 0x01,  /* confirmed-client identity (node)   */
-    CHIMERA_KV_TYPE_NFS4_EPOCH    = 0x02,  /* per-node server boot-epoch (node)  */
-    CHIMERA_KV_TYPE_NFS4_SESSION  = 0x03,  /* 4.1 session metadata (by sessionid)*/
-    CHIMERA_KV_TYPE_NFS4_REPLY    = 0x04,  /* 4.1 reply slot entry (by sessionid)*/
-    CHIMERA_KV_TYPE_NFS3_REPLY    = 0x05,  /* NFSv3 DRC reply entry (by client)  */
-    CHIMERA_KV_TYPE_NSM_STATE     = 0x06,  /* singleton NSM/statd state number   */
-    CHIMERA_KV_TYPE_NSM_MONITOR   = 0x07,  /* per-host NSM monitor (node)        */
+    CHIMERA_KV_TYPE_NFS4_RECOVERY  = 0x01, /* confirmed-client identity (node)   */
+    CHIMERA_KV_TYPE_NFS4_EPOCH     = 0x02, /* per-node server boot-epoch (node)  */
+    CHIMERA_KV_TYPE_NFS4_SESSION   = 0x03, /* 4.1 session metadata (by sessionid)*/
+    CHIMERA_KV_TYPE_NFS4_REPLY     = 0x04, /* 4.1 reply slot entry (by sessionid)*/
+    CHIMERA_KV_TYPE_NFS3_REPLY     = 0x05, /* NFSv3 DRC reply entry (by client)  */
+    CHIMERA_KV_TYPE_NSM_STATE      = 0x06, /* singleton NSM/statd state number   */
+    CHIMERA_KV_TYPE_NSM_MONITOR    = 0x07, /* per-host NSM monitor (node)        */
     /* 0x07 keys written before the monitor band gained its node_id are
      * [hdr] + host with an unstamped value.  Like the 0x08 records below they
      * are left behind unread: the per-node cold-start scan never loads them
@@ -88,7 +88,8 @@ enum chimera_kv_record_type {
      * They occupy space until the store is discarded.  Do not reuse this
      * value: a new band here would be prefix-matched by those records, and
      * they parse cleanly against the shared value magic. */
-    /* 0x09 .. 0xFE reserved for future global record types */
+    CHIMERA_KV_TYPE_NFS_FH_SIGNING = 0x09, /* FH signing keyring (fleet-wide) */
+    /* 0x0A .. 0xFE reserved for future global record types */
 };
 
 /* Longest normalized client address string an NFSv3 DRC key embeds (IPv6
@@ -306,6 +307,24 @@ nfs_kv_nsm_state_key(uint8_t *buf)
 } /* nfs_kv_nsm_state_key */
 
 #define CHIMERA_KV_NSM_STATE_KEY_LEN (CHIMERA_KV_HDR_LEN + 1)
+
+/* FH signing keyring entry key = header + kid.  No node_id: every node loads
+ * the same ring, so a handle minted on one node verifies on any other.  kid 0
+ * is the unused-slot sentinel and is never written.  Value layout: see
+ * nfs_fh_keyring_serialize. */
+static inline uint32_t
+nfs_kv_fh_signing_key(
+    uint8_t *buf,
+    uint8_t  kid)
+{
+    uint32_t p = nfs_kv_type_prefix(buf, CHIMERA_KV_TYPE_NFS_FH_SIGNING);
+
+    buf[p] = kid;
+    return p + 1;
+} /* nfs_kv_fh_signing_key */
+
+#define CHIMERA_KV_FH_SIGNING_PREFIX_LEN CHIMERA_KV_HDR_LEN
+#define CHIMERA_KV_FH_SIGNING_KEY_LEN    (CHIMERA_KV_HDR_LEN + 1)
 
 /* NSM monitor key = the 5-byte node prefix + host name bytes (the NLM
  * caller_name / mon_name, the same stable identity a peer's statd presents in

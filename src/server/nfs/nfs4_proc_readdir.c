@@ -116,8 +116,7 @@ chimera_nfs4_readdir_callback(
                                     req->thread->shared->config),
                                 req->thread->shared->nfs_lease_time_s,
                                 req->export_id,
-                                req->thread->shared->fh_key,
-                                req->thread->shared->fh_sign,
+                                req->thread->shared,
                                 /* Named-attribute files report NF4REG (their
                                  * mode-derived type), like ordinary directory
                                  * entries -- see the type note in nfs4_proc_getattr. */
