@@ -60,6 +60,7 @@ struct nsm_state {
     char                   my_name[SM_MAXSTRLEN + 1]; /* our identity in SM_NOTIFY */
     struct evpl_thread    *notify_thread;    /* short-lived reboot-notify worker */
     struct nsm_notify_job *notify_queued;    /* newest worker not yet notifying */
+    _Atomic int            notify_stop;      /* set at shutdown: workers give up */
 };
 
 /* 4-byte record magics validated before trusting any persisted bytes. */

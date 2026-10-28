@@ -7,7 +7,8 @@
  * address must cost one bounded probe, never libevpl's multi-minute connect,
  * and a peer that closes the connection mid-call must not leave the worker
  * touching a connection rpc2 already freed.  The worker must also be
- * started without parking the spawning thread. */
+ * started without parking the spawning thread, and shutdown must be able to
+ * cut a running notify short. */
 #include "common/tcp_flavor.h"
 static int                     test_portmap_port;
 static enum chimera_tcp_flavor test_flavor = CHIMERA_TCP_FLAVOR_PLAIN;
@@ -16,6 +17,7 @@ static enum chimera_tcp_flavor test_flavor = CHIMERA_TCP_FLAVOR_PLAIN;
 #define NSM_NOTIFY_TIMEOUT_SECS       1
 #include "../nfs_nsm_notify.c"
 #include "common/mbt_watchdog.h"
+#include "common/thread.h"
 #include <time.h>
 #ifndef _WIN32
 #include <netinet/in.h>
@@ -185,7 +187,8 @@ notify_target(
     strcpy(t.host, "nsm-test-host");
     strcpy(t.addr, addr);
     fixture_init(&f, evpl);
-    told = nsm_notify_one(evpl, f.rpc2_thread, &f.pm, &f.sm, &t, "chimera-test", 3, &f.keep);
+    told = nsm_notify_one(evpl, f.rpc2_thread, &f.pm, &f.sm, &t, "chimera-test",
+                          3, &f.keep, NULL);
     fixture_fini(&f);
     return told;
 } /* notify_target */
@@ -278,7 +281,7 @@ test_live_host_told(struct evpl *evpl)
     evpl_rpc2_server_attach(f.rpc2_thread, sm_server, &f.sm);
 
     CHECK(nsm_notify_one(evpl, f.rpc2_thread, &f.pm, &f.sm, &t, "chimera-test",
-                         3, &f.keep) == 1);
+                         3, &f.keep, NULL) == 1);
     CHECK(notified == 1);
 
     evpl_rpc2_server_stop(pm_server);
@@ -331,7 +334,7 @@ test_statd_closes(struct evpl *evpl)
 
     /* The call completes with CONN_LOST: not counted as told. */
     CHECK(nsm_notify_one(evpl, f.rpc2_thread, &f.pm, &f.sm, &t, "chimera-test",
-                         3, &f.keep) == 0);
+                         3, &f.keep, NULL) == 0);
     CHECK(notified == 0);
 
     evpl_rpc2_server_stop(pm_server);
@@ -353,20 +356,42 @@ test_inproc_skips_probe(void)
 } /* test_inproc_skips_probe */
 
 static struct nsm_notify_job *
-new_job(uint32_t state)
+new_job(
+    uint32_t state,
+    uint32_t count)
 {
     struct nsm_notify_job *job = calloc(1, sizeof(*job));
+    uint32_t               i;
 
     CHECK(job != NULL);
-    job->targets = calloc(1, sizeof(*job->targets));
+    job->targets = calloc(count, sizeof(*job->targets));
     CHECK(job->targets != NULL);
-    job->count = 1;
+    job->count = count;
     job->state = state;
-    strcpy(job->targets[0].host, "nsm-test-host");
-    strcpy(job->targets[0].addr, "127.0.0.1");
+    for (i = 0; i < count; i++) {
+        strcpy(job->targets[i].host, "nsm-test-host");
+        strcpy(job->targets[i].addr, "127.0.0.1");
+    }
     strcpy(job->my_name, "chimera-test");
     return job;
 } /* new_job */
+
+/* Wait until the newest worker has taken its job and started notifying. */
+static void
+wait_taken(
+    struct nsm_state *nsm,
+    long              t0)
+{
+    int taken = 0;
+
+    while (!taken) {
+        CHECK(now_ms() - t0 < 1000);
+        chimera_thread_sleep_us(1000);
+        evpl_mutex_lock(&nsm->mutex);
+        taken = nsm->notify_queued == NULL;
+        evpl_mutex_unlock(&nsm->mutex);
+    }
+} /* wait_taken */
 
 static void
 test_spawn_returns_at_once(void)
@@ -382,7 +407,7 @@ test_spawn_returns_at_once(void)
     listener = listen_on(&test_portmap_port);
 
     t0 = now_ms();
-    nsm_notify_submit(&nsm, new_job(3));
+    nsm_notify_submit(&nsm, new_job(3, 1));
     CHECK(now_ms() - t0 < 500);
     evpl_thread_destroy(nsm.notify_thread);
     chimera_socket_close(listener);
@@ -391,14 +416,15 @@ test_spawn_returns_at_once(void)
 
 /* A flood of submits must neither park the caller nor grow the thread count:
  * at most one worker notifies and one waits, and a submit that finds a worker
- * waiting replaces that worker's job.  Three submits therefore run two
- * serialized notifies (about 2 s), not three. */
+ * waiting folds into that worker's job, keeping the higher state.  Three
+ * submits therefore start two threads and run two serialized notifies. */
 static void
 test_submit_coalesces(void)
 {
-    struct nsm_state nsm;
-    chimera_socket_t listener;
-    long             t0, t1;
+    struct nsm_state    nsm;
+    struct evpl_thread *waiting;
+    chimera_socket_t    listener;
+    long                t0, t1;
 
     memset(&nsm, 0, sizeof(nsm));
     evpl_mutex_init(&nsm.mutex, NULL);
@@ -406,36 +432,70 @@ test_submit_coalesces(void)
 
     t1 = now_ms();
     t0 = t1;
-    nsm_notify_submit(&nsm, new_job(3));
+    nsm_notify_submit(&nsm, new_job(3, 1));
     CHECK(now_ms() - t0 < 500);
 
     /* Wait for the first worker to start notifying; a submit before that
-     * would just replace its job. */
-    while (nsm.notify_queued != NULL) {
-        CHECK(now_ms() - t1 < 1000);
-        usleep(1000);
-    }
+     * would just fold into its job. */
+    wait_taken(&nsm, t1);
 
     t0 = now_ms();
-    nsm_notify_submit(&nsm, new_job(5));
+    nsm_notify_submit(&nsm, new_job(7, 1));
     CHECK(now_ms() - t0 < 500);
-    CHECK(nsm.notify_queued != NULL);
-    CHECK(nsm.notify_queued->state == 5);
-
-    t0 = now_ms();
-    nsm_notify_submit(&nsm, new_job(7));
-    CHECK(now_ms() - t0 < 500);
+    evpl_mutex_lock(&nsm.mutex);
     CHECK(nsm.notify_queued != NULL);
     CHECK(nsm.notify_queued->state == 7);
+    waiting = nsm.notify_thread;
+    evpl_mutex_unlock(&nsm.mutex);
 
+    /* A submit while that worker still waits starts no thread, and a lower
+     * state (submitted late by a racing thread) must not replace 7. */
+    t0 = now_ms();
+    nsm_notify_submit(&nsm, new_job(5, 1));
+    CHECK(now_ms() - t0 < 500);
+    evpl_mutex_lock(&nsm.mutex);
+    CHECK(nsm.notify_thread == waiting);
+    CHECK(nsm.notify_queued != NULL);
+    CHECK(nsm.notify_queued->state == 7);
+    evpl_mutex_unlock(&nsm.mutex);
+
+    /* The two notifies run one after the other. */
     evpl_thread_destroy(nsm.notify_thread);
-    t1 = now_ms() - t1;
-    CHECK(t1 >= 1800);
-    CHECK(t1 < 2700);
+    CHECK(now_ms() - t1 >= 1800);
     CHECK(nsm.notify_queued == NULL);
     chimera_socket_close(listener);
     evpl_mutex_destroy(&nsm.mutex);
 } /* test_submit_coalesces */
+
+/* Shutdown sets notify_stop before it joins the newest worker.  A worker in
+* the middle of a call must then end its pump at the next tick and skip
+* the hosts it has not reached, so the join returns well inside one pump
+* deadline (NSM_NOTIFY_TIMEOUT_SECS) instead of after every host's waits. */
+static void
+test_stop_cancels_notify(void)
+{
+    struct nsm_state nsm;
+    chimera_socket_t listener;
+    long             t0;
+
+    /* Two hosts whose portmapper completes the handshake and never answers
+     * GETPORT. */
+    memset(&nsm, 0, sizeof(nsm));
+    evpl_mutex_init(&nsm.mutex, NULL);
+    listener = listen_on(&test_portmap_port);
+
+    t0 = now_ms();
+    nsm_notify_submit(&nsm, new_job(3, 2));
+    wait_taken(&nsm, t0);
+    chimera_thread_sleep_us(200000);
+
+    atomic_store(&nsm.notify_stop, 1);
+    t0 = now_ms();
+    evpl_thread_destroy(nsm.notify_thread);
+    CHECK(now_ms() - t0 < 500);
+    chimera_socket_close(listener);
+    evpl_mutex_destroy(&nsm.mutex);
+} /* test_stop_cancels_notify */
 
 int
 main(void)
@@ -457,8 +517,10 @@ main(void)
     test_inproc_skips_probe();
     test_spawn_returns_at_once();
     test_submit_coalesces();
+    test_stop_cancels_notify();
     mbt_watchdog_disarm();
     evpl_destroy(evpl);
-    puts("PASS: NSM notify skips unreachable peers and spawns without waiting");
+    puts("PASS: NSM notify skips unreachable peers, spawns without waiting "
+         "and stops at shutdown");
     return 0;
 } /* main */

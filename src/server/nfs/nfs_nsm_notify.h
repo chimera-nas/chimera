@@ -26,9 +26,12 @@ struct nsm_notify_job {
 /* Hand job to the reboot-notify machinery; ownership of job passes to it.
  * At most one worker is notifying and one is waiting its turn: a job
  * submitted while a worker is still waiting replaces that worker's
- * targets, state and name and starts no thread, so a flood of restarts
- * cannot grow the thread count.  The newest worker is nsm->notify_thread;
- * evpl_thread_destroy on it joins it and, through it, its predecessor. */
+ * targets and name, raises its state to the higher of the two, and starts
+ * no thread, so a flood of restarts cannot grow the thread count.  The
+ * newest worker is nsm->notify_thread; evpl_thread_destroy on it joins it
+ * and, through it, its predecessor.  Setting nsm->notify_stop first makes
+ * both give up early: a wait ends at its next 100 ms tick and no further
+ * host is started. */
 void
 nsm_notify_submit(
     struct nsm_state      *nsm,

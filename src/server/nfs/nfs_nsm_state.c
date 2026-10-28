@@ -29,6 +29,7 @@ nsm_state_init(
     atomic_store(&state->load_state, NSM_LOAD_IDLE);
     state->notify_thread = NULL;
     state->notify_queued = NULL;
+    atomic_store(&state->notify_stop, 0);
 
     if (gethostname(state->my_name, sizeof(state->my_name)) != 0) {
         snprintf(state->my_name, sizeof(state->my_name), "localhost");

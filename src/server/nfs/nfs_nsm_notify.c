@@ -138,12 +138,21 @@ nsm_pump_tick_cb(
     (void) timer;
 } /* nsm_pump_tick_cb */
 
-/* Pump the dedicated evpl until *flag is set or the timeout elapses, so an
- * unreachable host cannot wedge the notify loop forever. */
+/* True once shutdown has asked the workers to give up (stop may be NULL). */
+static int
+nsm_stopping(_Atomic int *stop)
+{
+    return stop && atomic_load(stop);
+} /* nsm_stopping */
+
+/* Pump the dedicated evpl until *flag is set, the timeout elapses or
+ * shutdown asks the worker to stop, so an unreachable host can neither
+ * wedge the notify loop nor hold up the server's shutdown for long. */
 static void
 nsm_pump_until(
     struct evpl *evpl,
-    const int   *flag)
+    const int   *flag,
+    _Atomic int *stop)
 {
     struct evpl_timer tick;
     int64_t           deadline = nsm_now_ms() +
@@ -151,7 +160,7 @@ nsm_pump_until(
 
     evpl_add_timer(evpl, &tick, nsm_pump_tick_cb, NSM_PUMP_TICK_US);
 
-    while (!*flag && nsm_now_ms() < deadline) {
+    while (!*flag && nsm_now_ms() < deadline && !nsm_stopping(stop)) {
         evpl_continue(evpl);
     }
 
@@ -192,17 +201,19 @@ static void
 nsm_rpc_wait(
     struct evpl             *evpl,
     struct evpl_rpc2_thread *rpc2_thread,
-    struct nsm_rpc_state    *rs)
+    struct nsm_rpc_state    *rs,
+    _Atomic int             *stop)
 {
-    nsm_pump_until(evpl, &rs->done);
+    nsm_pump_until(evpl, &rs->done, stop);
     if (rs->conn) {
         evpl_rpc2_client_disconnect(rpc2_thread, rs->conn);
     }
-    nsm_pump_until(evpl, &rs->done);
+    nsm_pump_until(evpl, &rs->done, stop);
 } /* nsm_rpc_wait */
 
 /* Tell one monitored host's statd that we restarted.  Returns 1 when its
- * statd answered SM_NOTIFY, 0 when the host was skipped. */
+ * statd answered SM_NOTIFY, 0 when the host was skipped.  stop (may be
+ * NULL) is the shutdown flag: once set, waits end at the next tick. */
 static int
 nsm_notify_one(
     struct evpl                    *evpl,
@@ -212,7 +223,8 @@ nsm_notify_one(
     const struct nsm_notify_target *t,
     const char                     *my_name,
     uint32_t                        state,
-    struct nsm_rpc_state          **keep)
+    struct nsm_rpc_state          **keep,
+    _Atomic int                    *stop)
 {
     struct evpl_endpoint *ep;
     struct mapping        mapping;
@@ -248,8 +260,12 @@ nsm_notify_one(
     mapping.port = 0;
     pm->send_call_PMAPPROC_GETPORT(&pm->rpc2, evpl, g->conn, NULL, &mapping,
                                    0, 0, NULL, 0, 0, nsm_getport_cb, g);
-    nsm_rpc_wait(evpl, rpc2_thread, g);
+    nsm_rpc_wait(evpl, rpc2_thread, g, stop);
     evpl_endpoint_close(ep);
+
+    if (nsm_stopping(stop)) {
+        return 0;
+    }
 
     if (!g->done || g->status != 0) {
         chimera_nfs_info("NSM notify: host '%s' (%s:%u) is unreachable (no "
@@ -289,7 +305,7 @@ nsm_notify_one(
     arg.state        = (int) state;
     sm->send_call_SM_NOTIFY(&sm->rpc2, evpl, d->conn, NULL, &arg,
                             0, 0, NULL, 0, 0, nsm_notify_reply_cb, d);
-    nsm_rpc_wait(evpl, rpc2_thread, d);
+    nsm_rpc_wait(evpl, rpc2_thread, d, stop);
     evpl_endpoint_close(ep);
 
     if (!d->done || d->status != 0) {
@@ -339,10 +355,17 @@ nsm_notify_thread_init(
 
     /* All work is synchronous (each call self-pumps the dedicated evpl), so it
      * completes here before the framework's own idle loop starts.  The
-     * submitter does not wait for it (evpl_thread_create_async). */
+     * submitter does not wait for it (evpl_thread_create_async).  Shutdown
+     * sets notify_stop before it joins: then no further host is started. */
     for (i = 0; i < job->count; i++) {
+        if (nsm_stopping(&job->nsm->notify_stop)) {
+            chimera_nfs_info("NSM: shutting down; %u monitored host(s) not "
+                             "notified", job->count - i);
+            break;
+        }
         nsm_notify_one(evpl, rpc2_thread, &pm, &sm, &job->targets[i],
-                       job->my_name, job->state, &keep);
+                       job->my_name, job->state, &keep,
+                       &job->nsm->notify_stop);
     }
 
     evpl_rpc2_thread_destroy(rpc2_thread);
@@ -377,11 +400,15 @@ nsm_notify_submit(
     queued = nsm->notify_queued;
     if (queued) {
         /* The waiting worker has not read its job yet: give it the newer
-         * snapshot and start nothing. */
+         * monitor snapshot and start nothing.  Keep the higher state: two
+         * server threads can bump the state and submit in either order,
+         * and the notify must carry the newest one. */
         free(queued->targets);
         queued->targets = job->targets;
         queued->count   = job->count;
-        queued->state   = job->state;
+        if (job->state > queued->state) {
+            queued->state = job->state;
+        }
         memcpy(queued->my_name, job->my_name, sizeof(queued->my_name));
         free(job);
         evpl_mutex_unlock(&nsm->mutex);
