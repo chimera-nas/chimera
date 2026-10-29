@@ -1393,6 +1393,56 @@ test_retired_client_outlives_session(void)
 } /* test_retired_client_outlives_session */
 
 /*
+ * A client that comes back to a confirmed record (RFC 8881 18.35.4 case 2)
+ * must be told the CREATE_SESSION sequence after the last one it sent.  Told
+ * 1 again, its next CREATE_SESSION is taken for a retransmit of the first and
+ * answered with the old session.
+ */
+static void
+test_exchange_id_sequence_for_returning_client(void)
+{
+    struct nfs4_client_table       table;
+    struct nfs4_client_principal   princ;
+    struct nfs4_exchange_id_result eid;
+    struct nfs4_cs_classify        cs;
+    struct channel_attrs4          attrs;
+    static const uint8_t           owner[]                  = "co_owner_returning";
+    static const uint8_t           sid[NFS4_SESSIONID_SIZE] = { 1 };
+    struct nfs_client             *superseded               = NULL;
+
+    nfs4_client_table_init(&table,1);
+    memset(&princ,0,sizeof(princ));
+    memset(&attrs,0,sizeof(attrs));
+    princ.flavor = 1;
+
+    nfs4_client_exchange_id(&table,owner,(int) sizeof(owner) - 1,0x3333ULL,
+                            &princ,false,1,&eid);
+    CHECK(eid.status == NFS4_OK && !eid.confirmed);
+    CHECK(eid.sequenceid == 1);
+
+    nfs4_client_create_session_classify(&table,eid.clientid,1,&princ,&cs);
+    CHECK(cs.action == NFS4_CS_NEW);
+    CHECK(nfs4_client_confirm(&table,eid.clientid,&superseded));
+    nfs4_client_create_session_cache(&table,eid.clientid,1,NFS4_OK,sid,1,
+                                     0,&attrs,&attrs);
+
+    /* Case 2: same owner, verifier and principal. */
+    nfs4_client_exchange_id(&table,owner,(int) sizeof(owner) - 1,0x3333ULL,
+                            &princ,false,1,&eid);
+    CHECK(eid.status == NFS4_OK && eid.confirmed);
+    CHECK(eid.sequenceid == 2);
+
+    nfs4_client_create_session_classify(&table,eid.clientid,eid.sequenceid,
+                                        &princ,&cs);
+    CHECK(cs.action == NFS4_CS_NEW);
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    printf("ok: exchange_id_sequence_for_returning_client\n");
+} /* test_exchange_id_sequence_for_returning_client */
+
+/*
  * A cold-start loader that forced the grace window open before its async KV
  * reads have populated to_reclaim, so pending_reclaim is legitimately 0 while
  * the scan is in flight.  The 1 Hz sweep must not read that as "everybody
@@ -2470,6 +2520,7 @@ main(void)
     test_hydrate_refuses_fenced_client();
     test_hydrate_refuses_held_owner();
     test_retired_client_outlives_session();
+    test_exchange_id_sequence_for_returning_client();
     test_grace_survives_sweep_during_load();
     test_grace_survives_reclaim_complete_during_load();
     test_cold_start_without_store_is_ready();
