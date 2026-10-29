@@ -66,6 +66,9 @@ if(CHIMERA_NETNS_TESTING)
         add_test(NAME chimera/server/smb/smbclient_winbind
             COMMAND ${CMAKE_SOURCE_DIR}/scripts/ad_test_wrapper.sh
                     ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=winbind)
+        # One ad_test_wrapper.sh run at a time (see mbt/wire_probe_winbind).
+        set_tests_properties(chimera/server/smb/smbclient_winbind PROPERTIES
+            RESOURCE_LOCK samba_ad)
     endif()
 endif()
 
