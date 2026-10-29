@@ -473,6 +473,17 @@ build_evpl_global_config(
     evpl_global_config_set_huge_pages(evpl_global_config, 1);
     evpl_global_config_set_libaio_max_pending(evpl_global_config, 1024);
 
+    /*
+     * NFS dials addresses it does not own: the NSM reboot notify, the NLM
+     * GRANTED callback, the NFSv4 callback channel and the external rpcbind
+     * all connect to whatever the client registered.  Bound the SYN wait so a
+     * client that has gone away is reported in seconds rather than after the
+     * kernel's ~127 s retry schedule.  7 s allows two SYN retransmits on
+     * Linux (3 s would allow one); the peer probes remain the first line and
+     * this covers the window between a probe and the connect it clears.
+     */
+    evpl_global_config_set_tcp_connect_timeout_ms(evpl_global_config, 7000);
+
     /* XLIO enable/disable is derived from the common tcp_flavor and applied
      * by chimera_apply_common_config() below, before evpl_init(). */
 
