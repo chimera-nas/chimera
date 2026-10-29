@@ -652,10 +652,7 @@ validate_local_user(
     const char                    *username,
     const char                    *domain,
     const uint8_t                 *nt_response,
-    size_t                         nt_response_len,
-    uint32_t                       negotiate_flags,
-    const uint8_t                 *enc_session_key,
-    size_t                         enc_session_key_len)
+    size_t                         nt_response_len)
 {
     const uint8_t *client_blob;
     size_t         client_blob_len;
@@ -712,21 +709,6 @@ validate_local_user(
                              ctx->session_key, 16)) {
         smb_ntlm_error("NTLM: Failed to compute session key");
         return -1;
-    }
-
-    /* If the client negotiated key exchange, the actual session key is a
-     * random value the client generated and sent RC4-wrapped with the
-     * key-exchange key (MS-NLMP 3.2.5.1.2). Recover it; otherwise the
-     * key-exchange key is used directly as the session key. */
-    if ((negotiate_flags & NTLMSSP_NEGOTIATE_KEY_EXCH) &&
-        enc_session_key_len == 16) {
-        uint8_t exported_key[16];
-        /* Preserve MS-NLMP 3.2.5.1.2 key exchange; SMB payload encryption uses AES. */
-        if (!chimera_crypto_ntlm_key_exchange(ctx->session_key, enc_session_key, exported_key)) {
-            smb_ntlm_error("NTLM: Failed to unwrap exported session key");
-            return -1;
-        }
-        memcpy(ctx->session_key, exported_key, 16);
     }
 
     // Store user info
@@ -865,11 +847,10 @@ validate_authenticate(
     uint32_t       negotiate_flags     = 0;
     const uint8_t *enc_session_key     = NULL;
     size_t         enc_session_key_len = 0;
+    uint16_t       eskey_len           = 0;
+    uint32_t       eskey_offset        = 0;
 
     if (buf_len >= 64) {
-        uint16_t eskey_len;
-        uint32_t eskey_offset;
-
         memcpy(&eskey_len, buf + 52, 2);
         memcpy(&eskey_offset, buf + 56, 4);
         memcpy(&negotiate_flags, buf + 60, 4);
@@ -932,15 +913,27 @@ validate_authenticate(
         goto cleanup;
     }
 
+    /* A client that sets KEY_EXCH must send a valid EncryptedRandomSessionKey
+     * (MS-NLMP 3.2.5.1.2); without one there is no session key it will sign
+     * with, so the token is refused rather than keyed with the key-exchange
+     * key.  The log gives the raw fields: a key that runs past the end of the
+     * message was never taken. */
+    if ((negotiate_flags & NTLMSSP_NEGOTIATE_KEY_EXCH) &&
+        enc_session_key_len != 16) {
+        smb_ntlm_error("NTLM: KEY_EXCH with an EncryptedRandomSessionKey of "
+                       "length %u at offset %u in a %zu-byte AUTHENTICATE",
+                       eskey_len, eskey_offset, buf_len);
+        result = SMB_NTLM_STATUS_BAD_TOKEN;
+        goto cleanup;
+    }
+
     // First, try to look up user in local VFS cache
     user = chimera_vfs_lookup_user_by_name(vfs, username);
     if (user && user->smbpasswd[0]) {
         // Found a local user with SMB password - validate locally
         result = validate_local_user(ctx, user, username, domain,
-                                     nt_response, nt_response_len,
-                                     negotiate_flags, enc_session_key,
-                                     enc_session_key_len);
-        goto cleanup;
+                                     nt_response, nt_response_len);
+        goto exchange_key;
     }
 
     // User not found locally (or cached AD user without password) - try winbind
@@ -976,7 +969,7 @@ validate_authenticate(
                               domain, username, ctx->uid, ctx->gid,
                               ctx->sid[0] ? ctx->sid : "none");
             }
-            goto cleanup;
+            goto exchange_key;
         } else {
             smb_ntlm_debug("NTLM: Winbind not available");
         }
@@ -985,6 +978,31 @@ validate_authenticate(
     // User not found in any authentication backend - reject
     smb_ntlm_error("NTLM: User '%s' not found in any authentication backend", username);
     result = -1;
+    goto cleanup;
+
+ exchange_key:
+    /* Either backend leaves the NTLMv2 session base key in ctx->session_key:
+     * the local path computes it, and winbind returns it as the user session
+     * key.  For NTLMv2 that is also the key-exchange key (MS-NLMP 3.4.5.1).
+     * Neither backend sees the EncryptedRandomSessionKey, so with KEY_EXCH the
+     * session key the client signs with is unwrapped here, once, for both
+     * (MS-NLMP 3.2.5.1.2). */
+    if (result == 0 && (negotiate_flags & NTLMSSP_NEGOTIATE_KEY_EXCH)) {
+        uint8_t exported_key[16];
+
+        /* Preserve MS-NLMP 3.2.5.1.2 key exchange; SMB payload encryption uses AES. */
+        if (!chimera_crypto_ntlm_key_exchange(ctx->session_key, enc_session_key, exported_key)) {
+            smb_ntlm_error("NTLM: Failed to unwrap exported session key; "
+                           "logon refused");
+            chimera_crypto_clear(exported_key, sizeof(exported_key));
+            chimera_crypto_clear(ctx->session_key, sizeof(ctx->session_key));
+            ctx->authenticated = 0;
+            result             = -1;
+            goto cleanup;
+        }
+        memcpy(ctx->session_key, exported_key, 16);
+        chimera_crypto_clear(exported_key, sizeof(exported_key));
+    }
 
  cleanup:
     free(username);

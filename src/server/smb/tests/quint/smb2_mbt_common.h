@@ -379,6 +379,16 @@ struct smb2_wire_profile {
     /* 3.1.1 preferences, offered in the negotiate contexts. */
     uint16_t    signing_alg;
     uint16_t    cipher;
+    /* Authenticate through winbind against this NetBIOS domain instead of as
+     * the registered local account: the server gets winbind enabled for the
+     * domain, no local account is registered, and the AUTHENTICATE names the
+     * domain.  NULL keeps the local account. */
+    const char *winbind_domain;
+    /* Leave KEY_EXCH out of the NEGOTIATE and the AUTHENTICATE and send no
+     * EncryptedRandomSessionKey, so the session is keyed with the key-exchange
+     * key itself: what a client that follows the server's flags does, since
+     * the server does not offer KEY_EXCH. */
+    int         no_key_exch;
 };
 
 /* Look up a wire profile by name, so a ctest command line can select one
@@ -1117,6 +1127,11 @@ smb2_env_open_wire(
          * it, and the client's own offer picks the dialect. */
         chimera_server_config_set_smb_min_dialect(config, 0x0210);
     }
+    if (env->wire && env->wire->winbind_domain) {
+        chimera_server_config_set_smb_winbind_enabled(config, 1);
+        chimera_server_config_set_smb_winbind_domain(config,
+                                                     env->wire->winbind_domain);
+    }
 
     if (opts) {
         chimera_server_config_set_smb_oplocks(config, opts->oplocks);
@@ -1140,7 +1155,7 @@ smb2_env_open_wire(
      * password is handed over in the clear because chimera stores it that way
      * (smb_ntlm.c derives the NT hash from user->smbpasswd at validation
      * time); it never crosses the wire. */
-    if (env->wire && env->wire->ntlmv2) {
+    if (env->wire && env->wire->ntlmv2 && !env->wire->winbind_domain) {
         const uint32_t gids[1] = { SMB2W_GID };
 
         if (chimera_server_add_user(env->server, SMB2W_USER, SMB2W_PASSWORD,
@@ -2326,7 +2341,7 @@ smb2_session_setup_as(
     int                             n;
     uint32_t                        st;
 
-    n  = w ? smb2w_ntlm_negotiate(blob, !w->ntlmv2) : ntlm_type1(blob);
+    n  = w ? smb2w_ntlm_negotiate(blob, !w->ntlmv2, !w->no_key_exch) : ntlm_type1(blob);
     st = smb2c_session_setup_leg(c, blob, n);
     if (st != ST_MORE_PROCESSING_REQUIRED) {
         return st;
@@ -2348,7 +2363,8 @@ smb2_session_setup_as(
         const uint8_t *chal  = c->rbuf + 4 + soff;
 
         n = smb2w_ntlm_auth_ntlmv2(chal, slen, user, password,
-                                   SMB2W_DOMAIN, blob, c->session_key);
+                                   w->winbind_domain ? w->winbind_domain : SMB2W_DOMAIN,
+                                   !w->no_key_exch, blob, c->session_key);
     }
 
     /* The final leg's request is folded into the preauth hash by smb2c_send,
