@@ -506,6 +506,7 @@ nfs4_client_exchange_id(
     out->status           = NFS4_OK;
     out->clientid         = 0;
     out->confirmed        = 0;
+    out->sequenceid       = 1;
     out->destroy_unified  = NULL;
     out->destroy_unified2 = NULL;
 
@@ -532,8 +533,9 @@ nfs4_client_exchange_id(
         } else if (existing->nfs4_client_verifier != verifier) {
             out->status = NFS4ERR_NOT_SAME;
         } else {
-            out->clientid  = existing->nfs4_client_id;
-            out->confirmed = 1;
+            out->clientid   = existing->nfs4_client_id;
+            out->confirmed  = 1;
+            out->sequenceid = existing->nfs4_client_cs_seqid + 1;
         }
         goto out_unlock;
     }
@@ -565,9 +567,12 @@ nfs4_client_exchange_id(
             /* Case 2: identical owner+verifier+principal -- return the same
              * confirmed clientid with CONFIRMED_R, leaving every record
              * (including an in-flight superseding one) intact: case 2
-             * mandates no state disturbance. */
-            out->clientid  = existing->nfs4_client_id;
-            out->confirmed = 1;
+             * mandates no state disturbance.  The client's next
+             * CREATE_SESSION must follow the last one it sent, or it is
+             * taken for a retransmit and answered with the old session. */
+            out->clientid   = existing->nfs4_client_id;
+            out->confirmed  = 1;
+            out->sequenceid = existing->nfs4_client_cs_seqid + 1;
             goto out_unlock;
         }
 

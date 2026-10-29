@@ -283,7 +283,7 @@ chimera_nfs4_exchange_id(
 
     res->eir_status                = NFS4_OK;
     res->eir_resok4.eir_clientid   = eid.clientid;
-    res->eir_resok4.eir_sequenceid = 1;
+    res->eir_resok4.eir_sequenceid = eid.sequenceid;
     res->eir_resok4.eir_flags      = pnfs_flags |
         (eid.confirmed ? EXCHGID4_FLAG_CONFIRMED_R : 0);
     /* eir_state_protect was already filled (and the mode recorded on the

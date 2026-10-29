@@ -275,6 +275,8 @@ struct nfs4_exchange_id_result {
     nfsstat4           status;
     uint64_t           clientid;
     uint32_t           confirmed;
+    /* eir_sequenceid: the csa_sequence the client must send next. */
+    uint32_t           sequenceid;
     struct nfs_client *destroy_unified;
     /* A second hierarchy to tear down: replacing a principal-mismatched
      * confirmed record also destroys its in-flight superseding record. */
