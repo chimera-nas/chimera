@@ -1332,13 +1332,20 @@ chimera_nfs4_open_parent_complete(
                             chimera_acl_size(CHIMERA_ACL_MAX_ACES), req->encoding->dbuf);
                         acl_buf_aces = acl_buf ? CHIMERA_ACL_MAX_ACES : 0;
                     }
-                    chimera_nfs4_unmarshall_attrs(attr,
-                                                  args->openhow.how.createattrs.num_attrmask,
-                                                  args->openhow.how.createattrs.attrmask,
-                                                  args->openhow.how.createattrs.attr_vals.data,
-                                                  args->openhow.how.createattrs.attr_vals.len,
-                                                  acl_buf,
-                                                  acl_buf_aces);
+                    status = chimera_nfs4_unmarshall_attrs(attr,
+                                                           args->openhow.how.createattrs.num_attrmask,
+                                                           args->openhow.how.createattrs.attrmask,
+                                                           args->openhow.how.createattrs.attr_vals.data,
+                                                           args->openhow.how.createattrs.attr_vals.len,
+                                                           acl_buf,
+                                                           acl_buf_aces);
+                }
+                if (status != NFS4_OK) {
+                    struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+                    res->status = status;
+                    chimera_nfs4_open_complete(req, status);
+                    return;
                 }
                 break;
             case EXCLUSIVE4_1:
@@ -1373,13 +1380,20 @@ chimera_nfs4_open_parent_complete(
                             chimera_acl_size(CHIMERA_ACL_MAX_ACES), req->encoding->dbuf);
                         acl_buf_aces = acl_buf ? CHIMERA_ACL_MAX_ACES : 0;
                     }
-                    chimera_nfs4_unmarshall_attrs(attr,
-                                                  args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
-                                                  args->openhow.how.ch_createboth.cva_attrs.attrmask,
-                                                  args->openhow.how.ch_createboth.cva_attrs.attr_vals.data,
-                                                  args->openhow.how.ch_createboth.cva_attrs.attr_vals.len,
-                                                  acl_buf,
-                                                  acl_buf_aces);
+                    status = chimera_nfs4_unmarshall_attrs(attr,
+                                                           args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
+                                                           args->openhow.how.ch_createboth.cva_attrs.attrmask,
+                                                           args->openhow.how.ch_createboth.cva_attrs.attr_vals.data,
+                                                           args->openhow.how.ch_createboth.cva_attrs.attr_vals.len,
+                                                           acl_buf,
+                                                           acl_buf_aces);
+                }
+                if (status != NFS4_OK) {
+                    struct OPEN4res *res = &req->res_compound.resarray[req->index].opopen;
+                    chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+                    res->status = status;
+                    chimera_nfs4_open_complete(req, status);
+                    return;
                 }
                 /* TODO: Store verifier in a server-private xattr (e.g. trusted.nfs4_excl_verf)
                  * once the VFS layer exposes setxattr/getxattr.  That would remove the

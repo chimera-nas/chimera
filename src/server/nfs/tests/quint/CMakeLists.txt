@@ -133,6 +133,13 @@ target_link_libraries(nfs4_setattr_stateid_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs4_setattr_stateid_probe)
 
+add_executable(nfs4_owner_probe nfs4_owner_probe.c)
+target_include_directories(nfs4_owner_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_owner_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_owner_probe)
+
 add_executable(nfs4_lock_relock_probe nfs4_lock_relock_probe.c)
 target_include_directories(nfs4_lock_relock_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
@@ -360,6 +367,15 @@ foreach(backend memfs linux)
         SKIP_RETURN_CODE 77
         TIMEOUT 90)
 endforeach()
+# Owner / owner_group strings the server cannot map: SETATTR, OPEN(create)
+# and CREATE answer NFS4ERR_BADOWNER and leave the object's owner alone --
+# never a file owned by uid 0.  Needs no corpus.
+add_test(NAME chimera/server/nfs/mbt4/owner_probe_memfs
+    COMMAND $<TARGET_FILE:nfs4_owner_probe>)
+set_tests_properties(chimera/server/nfs/mbt4/owner_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_owner_probe_memfs"
+    LABELS "quint;nfs4_mbt;multiproto;memfs"
+    TIMEOUT 90)
 # Byte-range re-lock probe: a LOCK by a lock-owner over bytes it already holds
 # replaces its coverage there (RFC 7530 section 9.3 downgrade/upgrade, the
 # fcntl semantics OPEN4_RESULT_LOCKTYPE_POSIX promises), so other lock-owners
