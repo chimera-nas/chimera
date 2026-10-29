@@ -448,6 +448,10 @@ nfs_server_init(
     shared->nfs_lease_time_s    = chimera_server_config_get_nfs4_lease_time(config);
     shared->nfs_grace_time_s    = chimera_server_config_get_nfs4_grace_time(config);
     shared->nfs_courtesy_time_s = chimera_server_config_get_nfs4_courtesy_time(config);
+    shared->nfs4_max_slots      = (uint32_t) chimera_server_config_get_nfs4_session_slots(config);
+    if (shared->nfs4_max_slots == 0) {
+        shared->nfs4_max_slots = NFS4_MAX_REPLY_CACHE_SLOTS;
+    }
 
     /* Server-reboot recovery / grace window.  Records the VFS, lease and
      * grace times for the cold-start load, which nfs_server_start runs

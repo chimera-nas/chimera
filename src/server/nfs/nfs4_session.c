@@ -1473,6 +1473,9 @@ nfs4_create_session(
      * insert (in particular not the getrandom syscall behind the session id).
      * If the client turns out to be gone the unhashed session is discarded. */
     session = calloc(1, sizeof(*session));
+    if (!session) {
+        return NULL;
+    }
 
     session->magic = NFS4_SESSION_MAGIC;
     /* refcount: 1 for the hash table, 1 for the caller (so the session
@@ -1510,12 +1513,16 @@ nfs4_create_session(
     if (session->replay_max_slots) {
         session->replay_slots = calloc(session->replay_max_slots,
                                        sizeof(*session->replay_slots));
+        if (!session->replay_slots) {
+            free(session);
+            return NULL;
+        }
         /* The slot table of a session rebuilt from the KV store
          * (nfs4_drc_reconstruct_session) has no seqids.  RFC 8881 section
          * 2.10.6.5 requires a persisted session to keep its slot table, and
          * the reply scan only fills the slots that have a record, so the rest
          * must take the client's seqid when it arrives rather than demand 1. */
-        if (session->replay_slots && restore_sessionid) {
+        if (restore_sessionid) {
             for (uint32_t i = 0; i < session->replay_max_slots; i++) {
                 atomic_init(&session->replay_slots[i].state_word,
                             nfs4_slot_word(0, NFS4_SLOT_RESYNC));
@@ -2016,9 +2023,13 @@ nfs4_replay_slot_acquire(
                     slot->cached_len = 0;
                     atomic_fetch_sub_explicit(&session->replay_bytes_in_use,
                                               freed_bytes, memory_order_relaxed);
-                    /* The client acknowledged the prior seqid by advancing;
-                     * drop its persisted reply so the KV store keeps at most
-                     * one entry per slot (the in-memory invariant). */
+                }
+                /* The client acknowledged the prior seqid by advancing;
+                 * drop its persisted reply so the KV store keeps at most
+                 * one entry per slot (the in-memory invariant).  A demoted
+                 * slot is COMPLETED but may still have one. */
+                if (slot->persisted) {
+                    slot->persisted = false;
                     if (session->nfs4_session_persist && req->thread) {
                         nfs4_drc_delete_reply(req->thread->vfs_thread,
                                               session->nfs4_session_id,
@@ -2202,9 +2213,9 @@ nfs4_replay_slot_acquire(
     if (freed_bytes) {
         nfs4_replay_bytes_delta(req, -(int64_t) freed_bytes);
     }
-    if (*out_is_replay) {
-        nfs4_replay_metric_inc(req, replay_field_hit);
-    } else if (status == NFS4ERR_SEQ_MISORDERED) {
+    /* A replay is counted once its cached reply has been sent or has failed
+     * to be (nfs4_replay_slot_replay_done / _replay_failed). */
+    if (status == NFS4ERR_SEQ_MISORDERED) {
         nfs4_replay_metric_inc(req, replay_field_seq_misordered);
     } else if (status == NFS4ERR_RETRY_UNCACHED_REP ||
                status == NFS4ERR_DELAY ||
@@ -2250,22 +2261,24 @@ nfs4_replay_slot_finalize(struct nfs_request *req)
             NFS4_SLOT_CACHED : NFS4_SLOT_COMPLETED;
         uint32_t             fseqid = (uint32_t) (cur >> NFS4_SLOT_SEQID_SHIFT);
 
-        atomic_store_explicit(&slot->state_word,
-                              nfs4_slot_word(fseqid, new_state),
-                              memory_order_release);
-
         /* Write-through the cached reply to the KV store for a persistent
          * session.  Write-only on the hot path: a copy of the bytes is handed
          * to an async put; the in-memory slot stays authoritative for
          * retransmit detection.  A returning client's hydrate reloads these
          * (nfs4_drc_session_hydrate).  nfs4_session_persist is only set when
-         * nfs4_drc is enabled. */
+         * nfs4_drc is enabled.  Done while the slot is still IN_PROGRESS: once
+         * it is published, a seqid+1 may free the bytes and reads `persisted`. */
         if (new_state == NFS4_SLOT_CACHED && session->nfs4_session_persist &&
             req->thread) {
             nfs4_drc_persist_reply(req->thread->vfs_thread, session,
                                    req->replay_slot_id, fseqid,
                                    slot->cached_buf, slot->cached_len);
+            slot->persisted = true;
         }
+
+        atomic_store_explicit(&slot->state_word,
+                              nfs4_slot_word(fseqid, new_state),
+                              memory_order_release);
     }
 
     req->replay_slot = NULL;
@@ -2294,7 +2307,55 @@ nfs4_replay_slot_replay_done(struct nfs_request *req)
                           memory_order_release);
 
     req->replay_slot = NULL;
+    nfs4_replay_metric_inc(req, replay_field_hit);
 } /* nfs4_replay_slot_replay_done */
+
+nfsstat4
+nfs4_replay_slot_replay_failed(struct nfs_request *req)
+{
+    struct nfs4_replay_slot *slot = req->replay_slot;
+    struct nfs_resop4       *resop;
+    uint64_t                 cur;
+    uint32_t                 freed;
+
+    req->replay_action = NFS4_REPLAY_ACTION_NONE;
+    nfs4_replay_metric_inc(req, replay_field_retry_uncached);
+
+    if (slot) {
+        /* Same ownership as replay_done: this request holds the slot
+         * IN_PROGRESS, so no other thread touches the buffer. */
+        freed = slot->cached_len;
+        free(slot->cached_buf);
+        slot->cached_buf = NULL;
+        slot->cached_len = 0;
+        if (freed && req->replay_session) {
+            atomic_fetch_sub_explicit(&req->replay_session->replay_bytes_in_use,
+                                      freed, memory_order_relaxed);
+            nfs4_replay_bytes_delta(req, -(int64_t) freed);
+        }
+
+        cur = atomic_load_explicit(&slot->state_word, memory_order_relaxed);
+        atomic_store_explicit(&slot->state_word,
+                              nfs4_slot_word((uint32_t) (cur >> NFS4_SLOT_SEQID_SHIFT),
+                                             NFS4_SLOT_COMPLETED),
+                              memory_order_release);
+        req->replay_slot = NULL;
+    }
+
+    /* SEQUENCE keeps its success; the next op, if any, carries
+     * NFS4ERR_RETRY_UNCACHED_REP (as in chimera_nfs4_sequence). */
+    if (req->args_compound->num_argarray > 1) {
+        resop = &req->res_compound.resarray[1];
+        memset(resop, 0, sizeof(*resop));
+        resop->resop                   = req->args_compound->argarray[1].argop;
+        resop->opillegal.status        = NFS4ERR_RETRY_UNCACHED_REP;
+        req->res_compound.num_resarray = 2;
+        return NFS4ERR_RETRY_UNCACHED_REP;
+    }
+
+    req->res_compound.num_resarray = 1;
+    return NFS4_OK;
+} /* nfs4_replay_slot_replay_failed */
 
 /*
  * Commit callback addressing onto a client's unified state record.  Re-setting

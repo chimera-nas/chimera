@@ -457,6 +457,9 @@ struct chimera_server_nfs_shared {
     uint32_t                            nfs_lease_time_s;
     uint32_t                            nfs_grace_time_s;
     uint32_t                            nfs_courtesy_time_s;
+    /* Fore-channel slot cap: what CREATE_SESSION grants and a rebuilt session
+     * keeps. */
+    uint32_t                            nfs4_max_slots;
 
     struct nfs4_client_table            nfs4_shared_clients;
     struct nfs_state_table              nfs4_state_table;
