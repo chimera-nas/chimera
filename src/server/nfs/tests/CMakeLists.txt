@@ -159,7 +159,36 @@ target_include_directories(test_nfs_persist PRIVATE
     ${NFS_COMMON_INCLUDE_DIR})
 target_link_libraries(test_nfs_persist chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
 add_dependencies(test_nfs_persist chimera_nfs_common)
+set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/server/nfs/nfs_persist COMMAND test_nfs_persist)
+set(CHIMERA_TEST_TIER extended)
+
+# Fleet-wide client recovery records over a shared (memkv) KV store: per-node
+# reload, legacy migration, owner-checked deletes, dead-peer import.
+add_executable(test_nfs_failover
+    test_nfs_failover.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_session.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_state.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/nsm_renew_stub.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs3_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_v40_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_drc_reply.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c)
+target_include_directories(test_nfs_failover PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_nfs_failover chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
+add_dependencies(test_nfs_failover chimera_nfs_common)
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/server/nfs/nfs_failover COMMAND test_nfs_failover)
+set(CHIMERA_TEST_TIER extended)
 
 # NSM/statd persistence: KV key/value formats, odd-state bump, monitor table.
 # Compiles nfs_nsm_state.c straight in (its helpers are not SYMBOL_EXPORT'd).

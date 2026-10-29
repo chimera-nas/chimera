@@ -459,6 +459,20 @@ nfs_server_init(
                       shared->nfs_grace_time_s,
                       chimera_server_config_get_nfs4_drc(config));
 
+    /* Client recovery records name their owner by node_id.  A derived id
+     * changes with the machine name, chimera version included: after an
+     * upgrade this node finds none of its own records, and they look like a
+     * dead peer's to it. */
+    if (!shared->nfs4_recovery.persistence_disabled) {
+        int cfg_node = chimera_server_config_get_nfs4_node_id(config);
+
+        if (cfg_node <= 0 || cfg_node >= 0xFFFF) {
+            chimera_nfs_info("NFSv4 client recovery is persisted with a derived "
+                             "node_id: pin nfs4_node_id, or clients lose "
+                             "reclaim across an upgrade or a hostname change");
+        }
+    }
+
     nfs_fh_keyring_init(&shared->nfs_fh_keyring, shared->node_id,
                         shared->nfs4_recovery.persistence_disabled);
 
