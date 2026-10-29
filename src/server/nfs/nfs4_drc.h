@@ -209,27 +209,34 @@ nfs4_drc_reconstruct_session(
     uint64_t                              boot_id);
 
 enum nfs4_drc_repopulate_result {
-    NFS4_DRC_REPOPULATE_INSTALLED, /* won the CAS from RESYNC; bytes cached */
+    NFS4_DRC_REPOPULATE_INSTALLED, /* the slot holds the record's bytes, CACHED */
+    NFS4_DRC_REPOPULATE_UNCACHED,  /* the slot holds the record's seqid as
+                                    * COMPLETED: its bytes are empty, too
+                                    * large or could not be allocated.  The
+                                    * record stays in the store */
     NFS4_DRC_REPOPULATE_KEPT,      /* slot already at this seqid, CACHED or
-                                    * IN_PROGRESS: the record is the live
-                                    * slot's own and must stay in the store */
+                                    * IN_PROGRESS (or COMPLETED from this
+                                    * scan): the record is the slot's own and
+                                    * must stay in the store */
     NFS4_DRC_REPOPULATE_STALE      /* anything else that did not install:
-                                    * the slot is at another seqid (a record
-                                    * this scan already installed, or a live
-                                    * request, got there first), COMPLETED or
-                                    * RESYNCING at this seqid, slotid out of
-                                    * range, record too large, or malloc
-                                    * failure; the caller deletes the record */
+                                    * the slot is at a newer seqid, or the
+                                    * scan is over and the slot is at another
+                                    * seqid or RESYNCING at this one, or the
+                                    * slotid is out of range; the caller
+                                    * deletes the record */
 };
 
-/* Fill one RESYNC slot from a persisted reply record (CACHED state) so a
- * post-restart retransmit on {slotid,seqid} replays.  A slot no longer in
- * RESYNC is left alone.  The result says whether the record installed, is the
- * live slot's own, or is stale (see enum nfs4_drc_repopulate_result). */
+/* Fill one slot of a restored session from a persisted reply record so a
+ * post-restart retransmit on {slotid,seqid} replays.  While the hydrate's
+ * reply scan runs, each slot keeps its newest record (wrap-aware): a newer one
+ * replaces one the scan installed, whose seqid is returned in *superseded
+ * (else -1) for the caller to delete.  Once the scan is over, only a slot
+ * still in RESYNC is filled.  See enum nfs4_drc_repopulate_result. */
 enum nfs4_drc_repopulate_result
 nfs4_drc_repopulate_slot(
     struct nfs4_session *session,
     uint32_t             slotid,
     uint32_t             seqid,
     const void          *data,
-    uint32_t             len);
+    uint32_t             len,
+    int64_t             *superseded);

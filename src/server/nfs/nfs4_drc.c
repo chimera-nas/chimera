@@ -718,68 +718,127 @@ nfs4_drc_repopulate_slot(
     uint32_t             slotid,
     uint32_t             seqid,
     const void          *data,
-    uint32_t             len)
+    uint32_t             len,
+    int64_t             *superseded)
 {
     struct nfs4_replay_slot *slot;
-    uint64_t expect;
+    uint64_t cur;
+    uint32_t state, cseq, freed;
+    int32_t diff;
+    bool hydrating;
 
-    if (slotid >= session->replay_max_slots ||
-        len > session->replay_maxresp_cached) {
+    if (superseded) {
+        *superseded = -1;
+    }
+    if (slotid >= session->replay_max_slots) {
         return NFS4_DRC_REPOPULATE_STALE;
     }
 
-    slot = &session->replay_slots[slotid];
+    slot      = &session->replay_slots[slotid];
+    hydrating = atomic_load_explicit(&session->replay_hydrating,
+                                     memory_order_acquire);
 
     /*
-     * A slot leaves RESYNC exactly once, through this CAS or through the one
-     * in nfs4_replay_slot_acquire, whichever runs first.  The session is in
-     * the table before the reply scan starts, but acquire leaves a RESYNC
-     * slot alone until the scan has finished (replay_hydrating), so within a
-     * scan this CAS fails only on a slot the scan already filled from another
-     * record, which a live request may since have replayed or advanced; the
-     * word that beat the CAS says whether the record is that slot's own
-     * (kept) or stale (dropped).  Holding IN_PROGRESS while the bytes are
-     * copied keeps a concurrent retry off cached_buf (it sees NFS4ERR_DELAY
-     * for that instant; an advance to seqid+1 landing then gets
-     * NFS4ERR_SEQ_MISORDERED, which the Linux client turns into a backoff).
+     * A slot leaves RESYNC exactly once, through the CAS below or through the
+     * one in nfs4_replay_slot_acquire, whichever runs first.  The session is
+     * in the table before the reply scan starts, but acquire leaves a RESYNC
+     * slot alone until the scan has finished (replay_hydrating), and SEQUENCE
+     * holds the session's requests off until its hydrate settles
+     * (nfs4_drc_session_hydrating), so while replay_hydrating is set only the
+     * scan moves a slot.  Holding IN_PROGRESS while the bytes are copied keeps
+     * any other reader off cached_buf.
+     *
+     * The scan meets a slot's records in key order, which is not seqid order
+     * (the seqid is stored little-endian), and a crash between persisting
+     * seqid+1 and deleting seqid leaves both.  So while the scan runs, a newer
+     * record replaces an older one (wrap-aware) and the older one is reported
+     * in *superseded for the caller to delete; an older one is stale.
+     *
+     * Once the scan is over, a slot not in RESYNC is the live slot's: the
+     * word says whether the record is its own (kept) or stale (dropped).
+     * CACHED at this seqid is the slot's own record (the finalize path marks
+     * it persisted before it publishes CACHED).  IN_PROGRESS at this seqid is
+     * either that record being replayed (the pin from CACHED) or a new request
+     * at this seqid, whose reply replaces the record only if it is captured;
+     * otherwise the slot ends COMPLETED with nothing persisted, and the record
+     * is kept all the same.  A resync in flight shows RESYNCING and does not
+     * keep the record: the slot ends COMPLETED with no bytes, so the record is
+     * stale.
      *
      * A record that did not install is reported to the caller, which deletes
-     * it from the KV store unless it is the live slot's own: the advance path
-     * only deletes the record of a slot it finds CACHED, so a dropped record
-     * would otherwise survive to win a RESYNC slot after the next restart.
+     * it from the KV store: the advance path only deletes the record of a slot
+     * marked persisted, so a dropped record would otherwise survive to win a
+     * RESYNC slot after the next restart.
      */
-    expect = nfs4_slot_word(0, NFS4_SLOT_RESYNC);
-    if (!atomic_compare_exchange_strong_explicit(
-            &slot->state_word, &expect,
-            nfs4_slot_word(seqid, NFS4_SLOT_IN_PROGRESS),
-            memory_order_acq_rel, memory_order_acquire)) {
-        /* expect now holds the word that beat us.  CACHED at this seqid is
-         * the live slot's own record (the finalize path stores CACHED before
-         * it persists).  IN_PROGRESS at this seqid is either that record
-         * being replayed (the pin from CACHED) or a new request at this
-         * seqid, whose reply replaces the record only if it is captured
-         * (cachethis=true, and not demoted over replay_maxresp_cached or the
-         * session byte cap); otherwise the slot ends COMPLETED with nothing
-         * persisted, and the record is kept all the same.  A resync in flight
-         * shows RESYNCING and does not keep the record: the slot ends
-         * COMPLETED with no bytes, so the record is stale. */
-        if ((expect >> NFS4_SLOT_SEQID_SHIFT) == seqid &&
-            ((expect & NFS4_SLOT_STATE_MASK) == NFS4_SLOT_CACHED ||
-             (expect & NFS4_SLOT_STATE_MASK) == NFS4_SLOT_IN_PROGRESS)) {
-            return NFS4_DRC_REPOPULATE_KEPT;
+    for (;;) {
+        cur   = atomic_load_explicit(&slot->state_word, memory_order_acquire);
+        state = cur & NFS4_SLOT_STATE_MASK;
+        cseq  = (uint32_t) (cur >> NFS4_SLOT_SEQID_SHIFT);
+
+        if (state == NFS4_SLOT_RESYNC) {
+            if (atomic_compare_exchange_strong_explicit(
+                    &slot->state_word, &cur,
+                    nfs4_slot_word(seqid, NFS4_SLOT_IN_PROGRESS),
+                    memory_order_acq_rel, memory_order_acquire)) {
+                break;
+            }
+            continue;
         }
-        return NFS4_DRC_REPOPULATE_STALE;
+
+        diff = (int32_t) (seqid - cseq);
+        if (diff == 0) {
+            if (state == NFS4_SLOT_CACHED || state == NFS4_SLOT_IN_PROGRESS ||
+                (hydrating && state == NFS4_SLOT_COMPLETED)) {
+                return NFS4_DRC_REPOPULATE_KEPT;
+            }
+            return NFS4_DRC_REPOPULATE_STALE;
+        }
+        if (diff < 0 || !hydrating ||
+            (state != NFS4_SLOT_CACHED && state != NFS4_SLOT_COMPLETED)) {
+            return NFS4_DRC_REPOPULATE_STALE;
+        }
+
+        /* A newer record for a slot this scan filled: take it over. */
+        if (!atomic_compare_exchange_strong_explicit(
+                &slot->state_word, &cur,
+                nfs4_slot_word(seqid, NFS4_SLOT_IN_PROGRESS),
+                memory_order_acq_rel, memory_order_acquire)) {
+            continue;
+        }
+        freed = slot->cached_len;
+        free(slot->cached_buf);
+        slot->cached_buf = NULL;
+        slot->cached_len = 0;
+        atomic_fetch_sub_explicit(&session->replay_bytes_in_use, freed,
+                                  memory_order_relaxed);
+        if (superseded) {
+            *superseded = cseq;
+        }
+        break;
     }
 
-    slot->cached_buf = malloc(len);
+    /* The record stays the slot's until the client advances past it, even
+     * when its bytes are not kept: it pins the seqid, so an older record met
+     * later in the scan cannot roll the slot back. */
+    slot->persisted = true;
+
+    /* The bytes come from the KV store, possibly written by a peer, and the
+     * session's cap came from the same place.  A record this node could not
+     * re-emit, or whose bytes cannot be allocated, keeps its seqid as
+     * COMPLETED, so a retransmit gets NFS4ERR_RETRY_UNCACHED_REP and seqid+1
+     * still advances. */
+    if (len == 0 || len > session->replay_maxresp_cached ||
+        len > NFS4_MAX_CACHED_RESPONSE_SIZE) {
+        chimera_nfs_error("NFS4.1 DRC: unreplayable hydrated reply slot=%u "
+                          "seqid=%u len=%u kept uncached", slotid, seqid, len);
+    } else {
+        slot->cached_buf = malloc(len);
+    }
     if (!slot->cached_buf) {
-        /* OOM: the seqid is known even though the bytes cannot be kept, so
-         * the slot degrades to an uncached retry rather than waiting to
-         * resync. */
         atomic_store_explicit(&slot->state_word,
                               nfs4_slot_word(seqid, NFS4_SLOT_COMPLETED),
                               memory_order_release);
-        return NFS4_DRC_REPOPULATE_STALE;
+        return NFS4_DRC_REPOPULATE_UNCACHED;
     }
     memcpy(slot->cached_buf, data, len);
     slot->cached_len = len;
@@ -988,7 +1047,9 @@ nfs4_drc_hydrate_reply_cb(
     const uint8_t                    *k      = key;
     const uint8_t                    *cached_data;
     struct nfs4_session              *session;
-    uint32_t                          slotid, seqid, cached_len;
+    uint32_t                          slotid, seqid, cached_len, okey_len;
+    uint8_t                           okey[CHIMERA_KV_REPLY_KEY_LEN];
+    int64_t                           superseded;
 
     if (key_len < CHIMERA_KV_REPLY_KEY_LEN ||
         memcmp(k + CHIMERA_KV_HDR_LEN, ctx->sessionid,
@@ -1011,10 +1072,11 @@ nfs4_drc_hydrate_reply_cb(
     }
 
     switch (nfs4_drc_repopulate_slot(session, slotid, seqid, cached_data,
-                                     cached_len)) {
+                                     cached_len, &superseded)) {
         case NFS4_DRC_REPOPULATE_INSTALLED:
             ctx->nreplies++;
             break;
+        case NFS4_DRC_REPOPULATE_UNCACHED:
         case NFS4_DRC_REPOPULATE_KEPT:
             break;
         case NFS4_DRC_REPOPULATE_STALE:
@@ -1023,6 +1085,12 @@ nfs4_drc_hydrate_reply_cb(
             nfs4_drc_hydrate_drop(ctx, key, key_len);
             break;
     } /* switch */
+
+    if (superseded >= 0) {
+        okey_len = nfs_kv_reply_key(okey, ctx->sessionid, slotid,
+                                    (uint32_t) superseded);
+        nfs4_drc_hydrate_drop(ctx, okey, okey_len);
+    }
 
     nfs4_session_put(session);
     return 0;
