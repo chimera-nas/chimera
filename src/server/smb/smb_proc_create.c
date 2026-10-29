@@ -2238,6 +2238,42 @@ chimera_smb_create_issue_truncate(struct chimera_smb_request *request)
     struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
     struct chimera_smb_open_file *open_file  = request->create.gen_parked_open;
 
+    /* Deferred DOS-attribute refusal (chimera_smb_create_overwrite_check_callback
+     * set overwrite_deny): the open is now adjudicated -- this path runs only
+     * once the share-mode claim is GRANTED, so a conflicting concurrent open has
+     * already been answered SHARING_VIOLATION.  Return the owed ACCESS_DENIED
+     * here instead of replacing the content, leaving the file untouched.  The
+     * granted-but-unhashed open is torn down exactly as the truncate-failure path
+     * in chimera_smb_create_truncate_cb does (it HOLDS its share claim: unlink it
+     * before the open is freed, or the claim list keeps a pointer into freed
+     * memory and the reservation never lifts). */
+    if (request->create.overwrite_deny) {
+        struct chimera_server_smb_thread *thread     = request->compound->thread;
+        struct chimera_vfs_state         *vfs_state  = vfs_thread->vfs->vfs_state;
+        struct chimera_vfs_file_state    *file_state = request->create.gen_parked_fs;
+
+        request->create.gen_truncating = 0;
+        request->create.trunc_deferred = 0;
+        request->create.overwrite_deny = 0;
+
+        chimera_vfs_claim_release(vfs_state, file_state, &open_file->share_lease);
+        chimera_vfs_state_put(vfs_state, file_state);
+        if (open_file->handle) {
+            chimera_vfs_release(vfs_thread, open_file->handle);
+            open_file->handle = NULL;
+        }
+        chimera_smb_open_file_free(thread, open_file);
+        request->create.gen_parked_open = NULL;
+        chimera_smb_create_pending_unregister(request);
+        if (request->create.base_oh) {
+            chimera_vfs_release(vfs_thread, request->create.base_oh);
+            request->create.base_oh = NULL;
+        }
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     /* What a truncating open would have had the backend apply as it replaced
      * the file (the request's FileAttributes, ARCHIVE, an AllocationSize
      * reservation) travels with the replacement instead, so the stamping stays
@@ -4759,6 +4795,8 @@ chimera_smb_create_overwrite_check_callback(
     struct chimera_smb_request *request = private_data;
     uint32_t                    existing, requested;
 
+    request->create.overwrite_deny = 0;
+
     if (error_code == CHIMERA_VFS_ENOENT) {
         /* OVERWRITE requires an existing file; OVERWRITE_IF / SUPERSEDE
          * create it. */
@@ -4782,16 +4820,25 @@ chimera_smb_create_overwrite_check_callback(
     requested = request->create.file_attributes;
 
     /* A supersede replaces the file outright, READONLY or not: NTFS refuses
-     * only an overwrite of a read-only file (IFSTest SupersedeFileAttrTest). */
+     * only an overwrite of a read-only file (IFSTest SupersedeFileAttrTest).
+     *
+     * When the DOS attributes DO forbid this overwrite (a non-supersede READONLY,
+     * or a HIDDEN/SYSTEM the request would clear), the ACCESS_DENIED that owes
+     * must NOT be returned here, before the open is adjudicated: a conflicting
+     * concurrent open must win with SHARING_VIOLATION (MS-FSA 2.1.5.1.2; samba
+     * smb2.acls.OVERWRITE_READ_ONLY_FILE sharing_tcases).  Record the verdict and
+     * let the open proceed through the share-mode claim; the ACCESS_DENIED is
+     * returned from chimera_smb_create_issue_truncate, which runs only once the
+     * claim is GRANTED -- exactly where the content replacement it gates would
+     * have happened, so the file is still left untouched.  A non-conflicting
+     * overwrite thus still returns ACCESS_DENIED (fs_tcases stays green). */
     if (((existing & SMB2_FILE_ATTRIBUTE_READONLY) &&
          request->create.create_disposition != SMB2_FILE_SUPERSEDE) ||
         ((existing & SMB2_FILE_ATTRIBUTE_HIDDEN) &&
          !(requested & SMB2_FILE_ATTRIBUTE_HIDDEN)) ||
         ((existing & SMB2_FILE_ATTRIBUTE_SYSTEM) &&
          !(requested & SMB2_FILE_ATTRIBUTE_SYSTEM))) {
-        chimera_smb_create_release_parent(request);
-        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
-        return;
+        request->create.overwrite_deny = 1;
     }
 
     chimera_smb_create_issue_open(request);

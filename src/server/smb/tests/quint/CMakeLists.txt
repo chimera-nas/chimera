@@ -39,6 +39,21 @@ set_tests_properties(chimera/server/smb/mbt/smoke_probe_memfs PROPERTIES
     LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 60)
 
+# A SUPERSEDE/OVERWRITE/OVERWRITE_IF create against an incompatible concurrent
+# open must return SHARING_VIOLATION, not an ACCESS_DENIED from the overwrite
+# attribute/permission path (MS-FSA 2.1.5.1.2; smb-create-overwrite-sharing-
+# violation-precedence).
+add_executable(smb2_overwrite_sharing_precedence_probe smb2_overwrite_sharing_precedence_probe.c)
+target_include_directories(smb2_overwrite_sharing_precedence_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_overwrite_sharing_precedence_probe chimera_server chimera_metrics)
+
+add_test(NAME chimera/server/smb/mbt/overwrite_sharing_precedence_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_overwrite_sharing_precedence_probe>)
+set_tests_properties(chimera/server/smb/mbt/overwrite_sharing_precedence_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_overwrite_sharing_precedence_probe_memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
+    TIMEOUT 90)
+
 # Hold a backend rename across TREE_DISCONNECT to exercise a completion after
 # the requesting tree has released its share.  The probe embeds memfs to hook
 # its dispatch; ENABLE_EXPORTS lets the server's VFS find that hooked vfs_memfs
