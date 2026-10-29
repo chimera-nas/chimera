@@ -103,6 +103,13 @@ test_key_encoding(void)
     nfs_kv_node_prefix(pfx, CHIMERA_KV_TYPE_NFS4_RECOVERY, node + 1);
     CHECK(memcmp(pfx, ckey, CHIMERA_KV_PREFIX_LEN) != 0);
 
+    /* The client recovery key is fleet-wide: no node_id, so every node finds
+     * a client's record under the same key. */
+    klen = nfs_kv_client_key(ckey, "owner", 5);
+    CHECK(klen == CHIMERA_KV_HDR_LEN + 5);
+    CHECK(ckey[2] == CHIMERA_KV_TYPE_NFS4_CLIENT);
+    CHECK(memcmp(ckey + CHIMERA_KV_HDR_LEN, "owner", 5) == 0);
+
     /* Type bytes are ordered recovery < epoch < session < reply. */
     CHECK(CHIMERA_KV_TYPE_NFS4_RECOVERY < CHIMERA_KV_TYPE_NFS4_EPOCH);
     CHECK(CHIMERA_KV_TYPE_NFS4_EPOCH < CHIMERA_KV_TYPE_NFS4_SESSION);
@@ -133,10 +140,11 @@ test_recovery_record_roundtrip(void)
      * next boot can compare it against the previous boot's heartbeat. */
     c.last_touch_ns = nfs_lease_now_ns() - 5ULL * 1000000000ULL;
 
-    len = nfs_recovery_serialize(buf, sizeof(buf), &c);
+    len = nfs_recovery_serialize(buf, sizeof(buf), &c, 0x0203);
     CHECK(len > 0);
 
-    CHECK(nfs_recovery_deserialize(buf, len, &out) == 0);
+    CHECK(nfs_recovery_deserialize(buf, len, &out, 9) == 0);
+    CHECK(out.owner_node == 0x0203);
     CHECK(out.client_id_hint == c.client_id);
     CHECK(out.verifier == c.verifier);
     CHECK(out.boot_id == c.boot_id);
@@ -155,9 +163,10 @@ test_recovery_record_roundtrip(void)
     }
 
     /* A truncated / corrupt buffer is rejected, not misparsed. */
-    CHECK(nfs_recovery_deserialize(buf, 4, &out) != 0);
+    CHECK(nfs_recovery_deserialize(buf, 4, &out, 0) != 0);
+    CHECK(nfs_recovery_deserialize(buf, 39, &out, 0) != 0);
     buf[0] ^= 0xff;  /* break the magic */
-    CHECK(nfs_recovery_deserialize(buf, len, &out) != 0);
+    CHECK(nfs_recovery_deserialize(buf, len, &out, 0) != 0);
 
     printf("ok: recovery_record_roundtrip\n");
 } /* test_recovery_record_roundtrip */
@@ -180,19 +189,49 @@ test_recovery_record_legacy_v1(void)
     memcpy(buf + p, "owner", 5);
     p += 5;
 
-    CHECK(nfs_recovery_deserialize(buf, p, &out) == 0);
+    CHECK(nfs_recovery_deserialize(buf, p, &out, 7) == 0);
     CHECK(out.boot_id == 0x11ULL);
     CHECK(out.verifier == 0x22ULL);
     CHECK(out.client_id_hint == 0x33ULL);
     CHECK(out.last_renew_ns == 0);
+    CHECK(out.owner_node == 7);
     CHECK(out.owner_len == 5);
     CHECK(memcmp(out.owner_string, "owner", 5) == 0);
 
     /* Truncated inside the v1 header is still rejected. */
-    CHECK(nfs_recovery_deserialize(buf, 29, &out) != 0);
+    CHECK(nfs_recovery_deserialize(buf, 29, &out, 7) != 0);
 
     printf("ok: recovery_record_legacy_v1\n");
 } /* test_recovery_record_legacy_v1 */
+
+/* A record written before the owning node moved into the value ("NFR2",
+ * 38-byte header, per-node key) parses with the caller's node as its owner. */
+static void
+test_recovery_record_legacy_v2(void)
+{
+    struct nfs_recovery_record out;
+    uint8_t                    buf[64];
+    uint32_t                   p = 0;
+
+    nfs_kv_put_le32(buf, &p, 0x3252464Eu);        /* "NFR2" */
+    nfs_kv_put_le64(buf, &p, 0x11ULL);            /* boot_id */
+    nfs_kv_put_le64(buf, &p, 0x22ULL);            /* verifier */
+    nfs_kv_put_le64(buf, &p, 0x33ULL);            /* client_id_hint */
+    nfs_kv_put_le64(buf, &p, 0x44ULL);            /* last_renew_ns */
+    buf[p++] = 5;
+    buf[p++] = 0;                                 /* owner_len = 5 */
+    memcpy(buf + p, "owner", 5);
+    p += 5;
+
+    CHECK(nfs_recovery_deserialize(buf, p, &out, 0x0102) == 0);
+    CHECK(out.last_renew_ns == 0x44ULL);
+    CHECK(out.owner_node == 0x0102);
+    CHECK(out.owner_len == 5);
+    CHECK(memcmp(out.owner_string, "owner", 5) == 0);
+    CHECK(nfs_recovery_deserialize(buf, 37, &out, 0x0102) != 0);
+
+    printf("ok: recovery_record_legacy_v2\n");
+} /* test_recovery_record_legacy_v2 */
 
 static void
 test_epoch_record_roundtrip(void)
@@ -1444,6 +1483,43 @@ test_grace_deadline_purges_unreclaimed_records(void)
     printf("ok: grace_deadline_purges_unreclaimed_records\n");
 } /* test_grace_deadline_purges_unreclaimed_records */
 
+/* A peer import adds records while its scan runs; neither the deadline nor
+ * the all-reclaimed exit may tear the window down under it. */
+static void
+test_grace_held_during_peer_import(void)
+{
+    struct nfs_recovery      rec;
+    static struct nfs_client a;
+
+    recovery_client(&a,"co_owner_import_a");
+
+    CHECK(nfs_recovery_load(&rec,NULL,1,90,180,true) == 0);
+    recovery_add_record(&rec,"co_owner_import_a");
+    atomic_store(&rec.load_state,NFS_REC_LOAD_READY);
+    nfs_recovery_begin_grace(&rec,180);
+    CHECK(rec.in_grace);
+
+    rec.imports_in_flight = 1;
+
+    nfs_recovery_reclaim_complete(&rec,&a);
+    CHECK(rec.pending_reclaim == 0);
+    CHECK(rec.in_grace);
+
+    evpl_mutex_lock(&rec.lock);
+    rec.grace_end_ns = 0;
+    evpl_mutex_unlock(&rec.lock);
+    nfs_recovery_sweep_once(&rec,NULL);
+    CHECK(rec.in_grace);
+    CHECK(HASH_COUNT(rec.to_reclaim) == 1);
+
+    rec.imports_in_flight = 0;
+    nfs_recovery_sweep_once(&rec,NULL);
+    CHECK(!rec.in_grace);
+
+    nfs_recovery_free(&rec);
+    printf("ok: grace_held_during_peer_import\n");
+} /* test_grace_held_during_peer_import */
+
 /*
  * A KV read that fails during the cold start must not masquerade as "nothing
  * was persisted": the loader counts it so the completion line can say the
@@ -2125,6 +2201,7 @@ main(void)
     test_key_encoding();
     test_recovery_record_roundtrip();
     test_recovery_record_legacy_v1();
+    test_recovery_record_legacy_v2();
     test_epoch_record_roundtrip();
     test_session_record_roundtrip();
     test_reply_record_roundtrip();
@@ -2144,6 +2221,7 @@ main(void)
     test_persist_and_heartbeat_cadence();
     test_stale_record_classification();
     test_grace_deadline_purges_unreclaimed_records();
+    test_grace_held_during_peer_import();
     test_cold_start_counts_store_errors();
 
     test_nfs3_key_encoding();

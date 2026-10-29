@@ -31,15 +31,19 @@
  * Within a type, the tail is keyed one of two ways, by what the record must
  * survive:
  *
- *   - NODE-scoped (recovery, epoch, NSM monitor): the tail begins with the
- *     2-byte minting node_id (big-endian, so keys sort by node) -- giving a
- *     5-byte [magic,version,type,node] scan prefix.  These back a node's OWN
- *     reboot: each instance reloads only the records it minted (it never
- *     reconstructs a live peer's grace state), and the boot epoch is
+ *   - NODE-scoped (epoch, NSM monitor, legacy recovery): the tail begins with
+ *     the 2-byte minting node_id (big-endian, so keys sort by node) -- giving
+ *     a 5-byte [magic,version,type,node] scan prefix.  The boot epoch is
  *     inherently per-node.  An NSM monitor record names a peer whose NLM locks
  *     this node granted, so a restarting node reloads -- and sends SM_NOTIFY
  *     to -- only the clients it served.  See nfs_kv_node_prefix and
  *     server.nfs4_node_id.
+ *
+ *   - FLEET-scoped (client recovery, FH signing keyring): the tail is the
+ *     record's own identity with no node_id, so every node sees the same key.
+ *     A client recovery record carries its owning node in the VALUE: a node
+ *     reloads only its own records at boot, and imports a dead peer's records
+ *     when that peer's clients fail over to it (nfs_recovery_import_peer).
  *
  *   - CLIENT-scoped (session, reply-4.1, NFSv3/NFSv4.0 DRC): the tail begins
  *     with the client's own stable identity -- the globally-unique sessionid
@@ -66,7 +70,7 @@
 #define CHIMERA_KV_PREFIX_LEN (CHIMERA_KV_HDR_LEN + CHIMERA_KV_NODE_LEN)
 
 enum chimera_kv_record_type {
-    CHIMERA_KV_TYPE_NFS4_RECOVERY  = 0x01, /* confirmed-client identity (node)   */
+    CHIMERA_KV_TYPE_NFS4_RECOVERY  = 0x01, /* legacy per-node client identity    */
     CHIMERA_KV_TYPE_NFS4_EPOCH     = 0x02, /* per-node server boot-epoch (node)  */
     CHIMERA_KV_TYPE_NFS4_SESSION   = 0x03, /* 4.1 session metadata (by sessionid)*/
     CHIMERA_KV_TYPE_NFS4_REPLY     = 0x04, /* 4.1 reply slot entry (by sessionid)*/
@@ -89,7 +93,8 @@ enum chimera_kv_record_type {
      * value: a new band here would be prefix-matched by those records, and
      * they parse cleanly against the shared value magic. */
     CHIMERA_KV_TYPE_NFS_FH_SIGNING = 0x09, /* FH signing keyring (fleet-wide) */
-    /* 0x0A .. 0xFE reserved for future global record types */
+    CHIMERA_KV_TYPE_NFS4_CLIENT    = 0x0A, /* confirmed-client identity (fleet) */
+    /* 0x0B .. 0xFE reserved for future global record types */
 };
 
 /* Longest normalized client address string an NFSv3 DRC key embeds (IPv6
@@ -177,8 +182,9 @@ nfs_kv_type_prefix(
     return CHIMERA_KV_HDR_LEN;
 } /* nfs_kv_type_prefix */
 
-/* Recovery record key = prefix + client owner bytes (the stable identity the
- * client re-presents at EXCHANGE_ID/SETCLIENTID, so re-confirm is idempotent). */
+/* Legacy per-node recovery record key = prefix + client owner bytes.  Written
+ * by older builds; a node migrates its own band to the fleet-wide one
+ * (nfs_kv_client_key) at cold start. */
 static inline uint32_t
 nfs_kv_recovery_key(
     uint8_t       *buf,
@@ -191,6 +197,21 @@ nfs_kv_recovery_key(
     memcpy(buf + p, owner, owner_len);
     return p + owner_len;
 } /* nfs_kv_recovery_key */
+
+/* Fleet-wide client recovery record key = [hdr] + client owner bytes (the
+ * stable identity the client re-presents at EXCHANGE_ID/SETCLIENTID, so
+ * re-confirm is idempotent).  The owning node is in the value. */
+static inline uint32_t
+nfs_kv_client_key(
+    uint8_t    *buf,
+    const void *owner,
+    uint32_t    owner_len)
+{
+    uint32_t p = nfs_kv_type_prefix(buf, CHIMERA_KV_TYPE_NFS4_CLIENT);
+
+    memcpy(buf + p, owner, owner_len);
+    return p + owner_len;
+} /* nfs_kv_client_key */
 
 /* Per-node boot-epoch key = the 5-byte prefix (node_id is the whole sub-id). */
 static inline uint32_t
