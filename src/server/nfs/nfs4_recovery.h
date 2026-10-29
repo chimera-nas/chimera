@@ -53,6 +53,18 @@ struct nfs_recovery_record {
     UT_hash_handle hh;
 };
 
+/* A peer's heartbeat as this node last read it.  Only this node's monotonic
+ * clock measures time: the peer's written_at is only compared with its own
+ * earlier values. */
+struct nfs_recovery_peer_watch {
+    uint16_t       node;
+    uint64_t       boot_id;
+    uint64_t       written_at;
+    uint64_t       since_ns;   /* when this boot_id/written_at was first read */
+    uint64_t       checked_ns; /* the last read */
+    UT_hash_handle hh;
+};
+
 /*
  * Cold-start load progresses IDLE -> RUNNING -> READY.  nfs_recovery_cold_start
  * drives the whole transition synchronously from nfs_server_start, before the
@@ -97,6 +109,15 @@ struct nfs_recovery {
     /* Peers whose records were imported this boot, by the boot of theirs that
      * died: a peer that restarts and dies again is scanned again. */
     struct nfs_recovery_imported_peer *imported_peers;
+    /* Peers' heartbeats as last read here, by node; under lock. */
+    struct nfs_recovery_peer_watch    *peer_watch;
+    /* Monotonic ns at which the owners of pending imported records are next
+     * re-read (nfs_recovery_sweep_once). */
+    _Atomic uint64_t                   next_owner_check_ns;
+    /* Heartbeat and client-record writes that failed, cumulative, and when
+     * the next failure may be logged. */
+    _Atomic uint32_t                   write_errors;
+    _Atomic uint64_t                   next_write_error_log_ns;
     /* CLOCK_REALTIME ns of the previous instance's last epoch heartbeat, read
      * by the cold start (0 = none on record).  Written before load_state turns
      * READY, so a reader that saw READY sees it.  The NSM cold start ages its
@@ -250,16 +271,24 @@ nfs_recovery_forget(
 /*
  * Failover import.  `owner`'s 4.1 session is being rebuilt here (see
  * nfs4_drc_session_hydrate) and its stored record names `peer` as its owner.
- * The result, from `peer`'s epoch heartbeat:
- *   NOT_FAILOVER      `peer` is this node, or its heartbeat has moved past
- *                     `seen_ns` (the written_at observed on an earlier call).
- *   LIVENESS_PENDING  fresh but not yet seen to move: a node that has just
- *                     died looks the same.  Retry with `seen_ns` = observed_ns.
+ * Liveness is judged by this node's own clock (struct nfs_recovery_peer_watch):
+ * the peer's epoch heartbeat is alive once it changes between two reads made
+ * within 1.5 leases, the first of them after `decision_since_ns`
+ * (monotonic: when the caller's decision began), and dead once it has stayed
+ * the same for 1.5 leases.
+ * The result:
+ *   NOT_FAILOVER      `peer` is this node, or its heartbeat has moved.
+ *   LIVENESS_PENDING  not yet seen to move or to stop: a node that has just
+ *                     died looks the same.  Retry later.
  *   STORE_ERROR       the epoch record cannot be read or decoded, or the scan
  *                     for the peer's records failed.  Retry later.
- *   FAILOVER          over 1.5 leases old, or absent: `peer` is dead, and
- *                     `owner` is owed a reclaim here (its record is in the
- *                     open window's set, not yet reclaimed).
+ *   FAILOVER          its heartbeat has stopped, or it has none: `peer` is
+ *                     dead, and `owner` is owed a reclaim here (its record is
+ *                     in the open window's set, not yet reclaimed).  Also when
+ *                     the heartbeat is from a later boot than `record_boot_id`
+ *                     (the boot that wrote owner's record; 0 = unknown):
+ *                     `peer` restarted and lost that state, so only records
+ *                     from its earlier boots are imported.
  * On a dead peer, the grace window is opened before the scan and every record
  * it owns is loaded into to_reclaim (once per boot of that peer; a failed scan
  * is retried on the next call).  Once no import is in flight and nobody is owed
@@ -280,15 +309,16 @@ nfs_recovery_import_peer(
     uint16_t                   peer,
     const void                *owner,
     uint16_t                   owner_len,
-    uint64_t                   seen_ns,
+    uint64_t                   record_boot_id,
+    uint64_t                   decision_since_ns,
     void (                    *done )(
         enum nfs_recovery_failover result,
-        uint64_t                   observed_ns,
         void                      *arg),
     void                      *arg);
 
 /*
- * Look up which node owns `owner`'s stored recovery record.  A record that
+ * Look up which node owns `owner`'s stored recovery record, and which boot of
+ * it wrote the record.  A record that
  * cannot be read or decoded is OWNER_ERROR, not OWNER_ABSENT: the caller must
  * not treat it as a client with no previous node.  Persistence off is
  * OWNER_ABSENT.  Asynchronous on vfs_thread.
@@ -308,6 +338,7 @@ nfs_recovery_lookup_owner(
     void (                    *done )(
         enum nfs_recovery_owner result,
         uint16_t                node,
+        uint64_t                boot_id,
         void                   *arg),
     void                      *arg);
 
@@ -347,7 +378,9 @@ nfs_recovery_reclaim_complete(
  * Ends the grace window when grace_end_ns has been reached or the to_reclaim
  * set is fully reclaimed; on the deadline, deletes the records of clients that
  * neither reclaimed nor returned (vfs_thread may be NULL in tests: bookkeeping
- * only).
+ * only).  Every refresh interval it also re-reads the records of imported
+ * clients still owed a reclaim, and retires those another node has taken over
+ * since: with several survivors, a client reclaims on only one of them.
  */
 void
 nfs_recovery_sweep_once(
@@ -371,12 +404,14 @@ nfs_recovery_note_returned(
 
 struct nfs_client;
 
+/* `boot_id` is the boot of the node writing the record. */
 uint32_t
 nfs_recovery_serialize(
     uint8_t                 *buf,
     uint32_t                 buf_size,
     const struct nfs_client *c,
-    uint16_t                 owner_node);
+    uint16_t                 owner_node,
+    uint64_t                 boot_id);
 
 /* Deserialize a recovery value.  A legacy value (NFR1/NFR2) carries no owning
  * node and comes back with owner_node = `legacy_owner`. */

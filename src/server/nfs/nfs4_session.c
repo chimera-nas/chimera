@@ -1081,6 +1081,9 @@ nfs4_client_mark_reclaim_complete(
     if (c) {
         already                         = c->nfs4_client_reclaim_complete;
         c->nfs4_client_reclaim_complete = 1;
+        if (c->unified) {
+            atomic_store(&c->unified->reclaim_needed, false);
+        }
     }
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
@@ -1109,6 +1112,55 @@ nfs4_client_reclaim_complete(
 
     return complete;
 } /* nfs4_client_reclaim_complete */
+
+bool
+nfs4_client_needs_reclaim_complete(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id)
+{
+    struct nfs4_client *c;
+    bool                needs = true;
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (c) {
+        needs = !c->nfs4_client_reclaim_complete && !c->nfs4_client_recovered;
+    }
+
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+
+    return needs;
+} /* nfs4_client_needs_reclaim_complete */
+
+void
+nfs4_client_mark_failover(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    bool                      recovered)
+{
+    struct nfs4_client *c;
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (c && !c->nfs4_client_failover_marked) {
+        c->nfs4_client_failover_marked  = 1;
+        c->nfs4_client_reclaim_complete = 0;
+        c->nfs4_client_recovered        = recovered;
+        if (c->unified) {
+            atomic_store(&c->unified->reclaim_needed, true);
+        }
+    } else if (c && recovered) {
+        c->nfs4_client_recovered = 1;
+    }
+
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_mark_failover */
 
 nfsstat4
 nfs4_client_destroy_clientid(

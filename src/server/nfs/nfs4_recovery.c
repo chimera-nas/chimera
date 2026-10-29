@@ -39,6 +39,7 @@
 struct nfs_recovery_imported_peer {
     uint16_t       node;
     uint64_t       boot_id;
+    bool           prior_only; /* only its earlier boots' records were loaded */
     UT_hash_handle hh;
 };
 
@@ -121,9 +122,10 @@ nfs_recovery_serialize(
     uint8_t                 *buf,
     uint32_t                 buf_size,
     const struct nfs_client *c,
-    uint16_t                 owner_node)
+    uint16_t                 owner_node,
+    uint64_t                 boot_id)
 {
-    return nfs_recovery_encode(buf, buf_size, c->boot_id, c->verifier,
+    return nfs_recovery_encode(buf, buf_size, boot_id, c->verifier,
                                c->client_id, nfs_recovery_last_renew_wall_ns(c),
                                owner_node, c->owner_string, c->owner_len);
 } /* nfs_recovery_serialize */
@@ -252,6 +254,10 @@ nfs_recovery_load(
     rec->failover_imported  = 0;
     rec->imports_in_flight  = 0;
     rec->imported_peers     = NULL;
+    rec->peer_watch         = NULL;
+    atomic_store(&rec->next_owner_check_ns, 0);
+    atomic_store(&rec->write_errors, 0);
+    atomic_store(&rec->next_write_error_log_ns, 0);
     atomic_store(&rec->next_heartbeat_ns, 0);
     rec->nfs4_drc = nfs4_drc;
     atomic_store(&rec->load_state, NFS_REC_LOAD_IDLE);
@@ -275,6 +281,7 @@ nfs_recovery_free(struct nfs_recovery *rec)
 #ifndef __clang_analyzer__
     struct nfs_recovery_record        *r, *tmp;
     struct nfs_recovery_imported_peer *p, *ptmp;
+    struct nfs_recovery_peer_watch    *w, *wtmp;
 
     evpl_mutex_lock(&rec->lock);
     HASH_ITER(hh, rec->to_reclaim, r, tmp)
@@ -287,6 +294,11 @@ nfs_recovery_free(struct nfs_recovery *rec)
         HASH_DEL(rec->imported_peers, p);
         free(p);
     }
+    HASH_ITER(hh, rec->peer_watch, w, wtmp)
+    {
+        HASH_DEL(rec->peer_watch, w);
+        free(w);
+    }
     rec->pending_reclaim = 0;
     evpl_mutex_unlock(&rec->lock);
     evpl_mutex_destroy(&rec->lock);
@@ -298,29 +310,67 @@ nfs_recovery_free(struct nfs_recovery *rec)
 * ------------------------------------------------------------------ */
 
 struct nfs_recovery_kv_ctx {
-    uint8_t  key[CHIMERA_KV_NFS_KEY_MAX];
-    uint32_t key_len;
-    uint8_t  value[NFS_RECOVERY_VALUE_MAX];
-    uint32_t value_len;
+    struct nfs_recovery *rec;
+    const char          *what;
+    uint8_t              key[CHIMERA_KV_NFS_KEY_MAX];
+    uint32_t             key_len;
+    uint8_t              value[NFS_RECOVERY_VALUE_MAX];
+    uint32_t             value_len;
 };
+
+static uint64_t
+nfs_recovery_refresh_interval_ns(
+    const struct nfs_recovery *rec);
+
+/* Logged at most once per refresh interval.  Peers take this node's clients
+ * over once its heartbeat has not changed for 1.5 leases, even while it keeps
+ * serving them, so a failing store must be visible. */
+static void
+nfs_recovery_note_write_error(
+    struct nfs_recovery *rec,
+    const char          *what,
+    int                  error)
+{
+    uint32_t n    = atomic_fetch_add(&rec->write_errors, 1) + 1;
+    uint64_t now  = nfs_lease_now_ns();
+    uint64_t next = atomic_load(&rec->next_write_error_log_ns);
+
+    if (now >= next &&
+        atomic_compare_exchange_strong(
+            &rec->next_write_error_log_ns, &next,
+            now + nfs_recovery_refresh_interval_ns(rec))) {
+        chimera_nfs_error("NFSv4 recovery: %s write failed (error %d), %u "
+                          "failed write(s) so far; peers take this node's "
+                          "clients over once its heartbeat stops for 1.5 "
+                          "leases", what, error, n);
+    }
+} /* nfs_recovery_note_write_error */
 
 static void
 nfs_recovery_kv_done(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
-    (void) error_code;
-    free(private_data);
+    struct nfs_recovery_kv_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        nfs_recovery_note_write_error(ctx->rec, ctx->what, error_code);
+    }
+    free(ctx);
 } /* nfs_recovery_kv_done */
 
 /* Delete the fleet-wide record for an owner only while `expected` still owns
- * it, so a node never removes the record of a client a peer has taken over.
+ * it (and, given `boot_id`, still from that boot), so a node never removes the
+ * record of a client a peer has taken over, nor one the owner wrote again
+ * after a restart.
  * Read-then-delete is not atomic: should a peer take the client over between
  * the two, its write is lost -- until it re-persists the client, which it does
  * every half lease while the client is live (nfs_recovery_persist_due). */
 struct nfs_recovery_cond_delete {
     struct chimera_vfs_thread *vfs_thread;
     uint16_t                   expected;
+    bool                       check_boot;
+    uint64_t                   boot_id;
     uint8_t                    key[CHIMERA_KV_NFS_KEY_MAX];
     uint32_t                   key_len;
     void                       (*done)(
@@ -354,7 +404,8 @@ nfs_recovery_cond_delete_get_cb(
 
     if (error_code == CHIMERA_VFS_OK && value &&
         nfs_recovery_deserialize(value, value_len, &r, c->expected) == 0 &&
-        r.owner_node == c->expected) {
+        r.owner_node == c->expected &&
+        (!c->check_boot || r.boot_id == c->boot_id)) {
         chimera_vfs_delete_key(c->vfs_thread, c->key, c->key_len,
                                nfs_recovery_cond_delete_finish, c);
         return;
@@ -368,6 +419,7 @@ nfs_recovery_delete_if_owner(
     const void                *owner,
     uint16_t                   owner_len,
     uint16_t                   expected,
+    const uint64_t            *boot_id,
     void (                    *done )(
         void *arg),
     void                      *arg)
@@ -382,6 +434,8 @@ nfs_recovery_delete_if_owner(
     }
     c->vfs_thread = vfs_thread;
     c->expected   = expected;
+    c->check_boot = boot_id != NULL;
+    c->boot_id    = boot_id ? *boot_id : 0;
     c->key_len    = nfs_kv_client_key(c->key, owner, owner_len);
     c->done       = done;
     c->arg        = arg;
@@ -414,11 +468,12 @@ nfs_recovery_close_grace_locked(
         if (!r->reclaimed && !r->returned) {
             if (vfs_thread) {
                 /* An imported record is still owned by the dead peer; the
-                 * owner check keeps this from deleting a record some other
-                 * node has since taken over. */
+                 * owner and boot checks keep this from deleting a record some
+                 * other node has since taken over, or the peer has written
+                 * again since restarting. */
                 nfs_recovery_delete_if_owner(vfs_thread, r->owner_string,
                                              r->owner_len, r->owner_node,
-                                             NULL, NULL);
+                                             &r->boot_id, NULL, NULL);
             }
             purged++;
         }
@@ -499,12 +554,16 @@ nfs_recovery_persist(
     }
 
     ctx          = malloc(sizeof(*ctx));
+    ctx->rec     = rec;
+    ctx->what    = "client record";
     ctx->key_len = nfs_kv_client_key(ctx->key, client->owner_string,
                                      client->owner_len);
-    /* Writing the record names this node as the client's owner: a client
-     * that failed over here moves to this node's set. */
+    /* Writing the record names this node, and this boot of it, as the
+     * client's owner: a client that failed over here moves to this node's
+     * set, and a peer can tell when this node has restarted since. */
     ctx->value_len = nfs_recovery_serialize(ctx->value, sizeof(ctx->value),
-                                            client, rec->node_id);
+                                            client, rec->node_id,
+                                            rec->current_boot_id);
     if (ctx->value_len == 0) {
         free(ctx);
         return;
@@ -544,7 +603,7 @@ nfs_recovery_forget(
     }
 
     nfs_recovery_delete_if_owner(vfs_thread, owner, owner_len, rec->node_id,
-                                 NULL, NULL);
+                                 NULL, NULL, NULL);
 } /* nfs_recovery_forget */
 
 /* ------------------------------------------------------------------ *
@@ -611,6 +670,8 @@ nfs_recovery_heartbeat(
     }
 
     ctx            = malloc(sizeof(*ctx));
+    ctx->rec       = rec;
+    ctx->what      = "heartbeat";
     ctx->key_len   = nfs_kv_epoch_key(ctx->key, rec->node_id);
     ctx->value_len = nfs_recovery_epoch_serialize(ctx->value,
                                                   rec->current_boot_id);
@@ -697,7 +758,10 @@ nfs_recovery_load_op_done(
 {
     struct nfs_recovery_load_op *op = private_data;
 
-    (void) error_code;
+    /* An epoch write, or a delete (of a key that may already be gone). */
+    if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_ENOENT) {
+        nfs_recovery_note_write_error(op->load->rec, "cold-start", error_code);
+    }
     op->load->outstanding--;
     free(op);
 } /* nfs_recovery_load_op_done */
@@ -789,20 +853,40 @@ nfs_recovery_load_defer(
 } /* nfs_recovery_load_defer */
 
 /* Add a loaded record to to_reclaim unless the owner is already there.  Takes
- * ownership of r; returns false (and frees r) on a duplicate. */
+ * ownership of r; returns false (and frees r) on a duplicate.  With
+ * `newer_wins`, a newer generation of the owner's record (its node restarted
+ * and wrote it again) replaces the entry and is owed a reclaim afresh. */
 static bool
 nfs_recovery_add_loaded(
     struct nfs_recovery        *rec,
-    struct nfs_recovery_record *r)
+    struct nfs_recovery_record *r,
+    bool                        newer_wins)
 {
     struct nfs_recovery_record *existing;
+    bool                        replaced = false;
 
     evpl_mutex_lock(&rec->lock);
     HASH_FIND(hh, rec->to_reclaim, r->owner_string, r->owner_len, existing);
     if (existing) {
+        if (newer_wins &&
+            (existing->owner_node != r->owner_node ||
+             existing->boot_id != r->boot_id) &&
+            r->last_renew_ns > existing->last_renew_ns) {
+            if (existing->reclaimed) {
+                rec->pending_reclaim++;
+            }
+            existing->owner_node     = r->owner_node;
+            existing->boot_id        = r->boot_id;
+            existing->verifier       = r->verifier;
+            existing->client_id_hint = r->client_id_hint;
+            existing->last_renew_ns  = r->last_renew_ns;
+            existing->reclaimed      = false;
+            existing->returned       = false;
+            replaced                 = true;
+        }
         evpl_mutex_unlock(&rec->lock);
         free(r);
-        return false;
+        return replaced;
     }
     HASH_ADD_KEYPTR(hh, rec->to_reclaim, r->owner_string, r->owner_len, r);
     rec->pending_reclaim++;
@@ -885,7 +969,7 @@ nfs_recovery_scan_cb(
         return 0;
     }
 
-    nfs_recovery_add_loaded(rec, r);
+    nfs_recovery_add_loaded(rec, r, false);
     return 0;
 } /* nfs_recovery_scan_cb */
 
@@ -927,7 +1011,7 @@ nfs_recovery_legacy_scan_cb(
      * whose owner already has a fleet record -- a migration cut short -- only
      * needs its legacy copy deleted. */
     nfs_recovery_load_defer(ctx, r, NFS_REC_ITEM_MIGRATE);
-    if (!nfs_recovery_add_loaded(rec, r)) {
+    if (!nfs_recovery_add_loaded(rec, r, false)) {
         ctx->items[ctx->nitems - 1].action = NFS_REC_ITEM_DROP_LEGACY;
     }
     return 0;
@@ -954,6 +1038,7 @@ nfs_recovery_legacy_scan_complete(
             ctx->outstanding++;
             nfs_recovery_delete_if_owner(ctx->vfs_thread, r->owner_string,
                                          r->owner_len, rec->node_id,
+                                         &r->boot_id,
                                          nfs_recovery_load_cond_done, ctx);
             continue;
         }
@@ -1265,13 +1350,106 @@ nfs_recovery_reclaim_complete(
     evpl_mutex_unlock(&rec->lock);
 } /* nfs_recovery_reclaim_complete */
 
+/* An imported client still owed a reclaim, whose record is re-read to see
+ * whether another node has taken it over. */
+struct nfs_recovery_owner_check {
+    struct nfs_recovery             *rec;
+    struct nfs_recovery_owner_check *next;
+    uint16_t                         expected; /* the peer it was imported from */
+    uint16_t                         owner_len;
+    uint8_t                          owner[NFS4_OPAQUE_LIMIT];
+    uint8_t                          key[CHIMERA_KV_NFS_KEY_MAX];
+    uint32_t                         key_len;
+};
+
+/* Claims the current owner-check slot; true for one caller per interval. */
+static bool
+nfs_recovery_owner_check_due(
+    struct nfs_recovery *rec,
+    uint64_t             now)
+{
+    uint64_t next = atomic_load(&rec->next_owner_check_ns);
+
+    return !rec->persistence_disabled && now >= next &&
+           atomic_compare_exchange_strong(
+        &rec->next_owner_check_ns, &next,
+        now + nfs_recovery_refresh_interval_ns(rec));
+} /* nfs_recovery_owner_check_due */
+
+/* Caller holds rec->lock. */
+static struct nfs_recovery_owner_check *
+nfs_recovery_owner_checks_locked(struct nfs_recovery *rec)
+{
+    struct nfs_recovery_owner_check *list = NULL;
+
+#ifndef __clang_analyzer__
+    struct nfs_recovery_owner_check *c;
+    struct nfs_recovery_record      *r, *tmp;
+
+    HASH_ITER(hh, rec->to_reclaim, r, tmp)
+    {
+        if (r->reclaimed || r->owner_node == rec->node_id) {
+            continue;
+        }
+        c = malloc(sizeof(*c));
+        if (!c) {
+            break;
+        }
+        c->rec       = rec;
+        c->expected  = r->owner_node;
+        c->owner_len = r->owner_len;
+        memcpy(c->owner, r->owner_string, r->owner_len);
+        c->key_len = nfs_kv_client_key(c->key, c->owner, c->owner_len);
+        c->next    = list;
+        list       = c;
+    }
+#endif /* ifndef __clang_analyzer__ */
+    return list;
+} /* nfs_recovery_owner_checks_locked */
+
+/* A record now owned by a third node means the client reclaims there, so it
+ * is owed nothing here.  Without this, with several survivors, the window
+ * would only ever close at its deadline. */
+static void
+nfs_recovery_owner_check_cb(
+    enum chimera_vfs_error error_code,
+    const void            *value,
+    uint32_t               value_len,
+    void                  *private_data)
+{
+    struct nfs_recovery_owner_check *c   = private_data;
+    struct nfs_recovery             *rec = c->rec;
+    struct nfs_recovery_record       stored, *r;
+
+    if (error_code == CHIMERA_VFS_OK && value &&
+        nfs_recovery_deserialize(value, value_len, &stored, 0) == 0 &&
+        stored.owner_node != c->expected && stored.owner_node != rec->node_id) {
+        evpl_mutex_lock(&rec->lock);
+        HASH_FIND(hh, rec->to_reclaim, c->owner, c->owner_len, r);
+        if (r && !r->reclaimed && r->owner_node == c->expected) {
+            r->reclaimed = true;
+            if (rec->pending_reclaim) {
+                rec->pending_reclaim--;
+            }
+            if (rec->in_grace && rec->pending_reclaim == 0 &&
+                !rec->imports_in_flight && !nfs_recovery_loading(rec)) {
+                nfs_recovery_close_grace_locked(
+                    rec, NULL, "remaining clients reclaimed on other nodes");
+            }
+        }
+        evpl_mutex_unlock(&rec->lock);
+    }
+    free(c);
+} /* nfs_recovery_owner_check_cb */
+
 void
 nfs_recovery_sweep_once(
     struct nfs_recovery       *rec,
     struct chimera_vfs_thread *vfs_thread)
 {
-    uint64_t now;
-    bool     loading;
+    struct nfs_recovery_owner_check *checks = NULL, *c;
+    uint64_t                         now;
+    bool                             loading;
 
     /* While a load is in flight, pending_reclaim counts only the clients
      * streamed in so far; a tick reading that zero as "every client has
@@ -1298,8 +1476,17 @@ nfs_recovery_sweep_once(
         nfs_recovery_close_grace_locked(rec, vfs_thread, "deadline");
     } else if (rec->pending_reclaim == 0 && !loading) {
         nfs_recovery_close_grace_locked(rec, NULL, "all clients reclaimed");
+    } else if (vfs_thread && nfs_recovery_owner_check_due(rec, now)) {
+        checks = nfs_recovery_owner_checks_locked(rec);
     }
     evpl_mutex_unlock(&rec->lock);
+
+    while (checks) {
+        c      = checks;
+        checks = c->next;
+        chimera_vfs_get_key(vfs_thread, c->key, c->key_len,
+                            nfs_recovery_owner_check_cb, c);
+    }
 } /* nfs_recovery_sweep_once */
 
 void
@@ -1326,6 +1513,7 @@ struct nfs_recovery_lookup_ctx {
     void    (*done)(
         enum nfs_recovery_owner result,
         uint16_t                node,
+        uint64_t                boot_id,
         void                   *arg);
     void   *arg;
 };
@@ -1344,14 +1532,14 @@ nfs_recovery_lookup_cb(
      * as a real owner for one. */
     if (error_code == CHIMERA_VFS_ENOENT ||
         (error_code == CHIMERA_VFS_OK && !value)) {
-        ctx->done(NFS_RECOVERY_OWNER_ABSENT, 0, ctx->arg);
+        ctx->done(NFS_RECOVERY_OWNER_ABSENT, 0, 0, ctx->arg);
     } else if (error_code == CHIMERA_VFS_OK &&
                nfs_recovery_deserialize(value, value_len, &r, 0) == 0) {
-        ctx->done(NFS_RECOVERY_OWNER_FOUND, r.owner_node, ctx->arg);
+        ctx->done(NFS_RECOVERY_OWNER_FOUND, r.owner_node, r.boot_id, ctx->arg);
     } else {
         chimera_nfs_error("NFSv4 recovery: cannot read a client's recovery "
                           "record (error %d)", error_code);
-        ctx->done(NFS_RECOVERY_OWNER_ERROR, 0, ctx->arg);
+        ctx->done(NFS_RECOVERY_OWNER_ERROR, 0, 0, ctx->arg);
     }
     free(ctx);
 } /* nfs_recovery_lookup_cb */
@@ -1365,6 +1553,7 @@ nfs_recovery_lookup_owner(
     void (                    *done )(
         enum nfs_recovery_owner result,
         uint16_t                node,
+        uint64_t                boot_id,
         void                   *arg),
     void                      *arg)
 {
@@ -1372,13 +1561,13 @@ nfs_recovery_lookup_owner(
     uint32_t                        key_len;
 
     if (rec->persistence_disabled) {
-        done(NFS_RECOVERY_OWNER_ABSENT, 0, arg);
+        done(NFS_RECOVERY_OWNER_ABSENT, 0, 0, arg);
         return;
     }
 
     ctx = malloc(sizeof(*ctx));
     if (!ctx) {
-        done(NFS_RECOVERY_OWNER_ERROR, 0, arg);
+        done(NFS_RECOVERY_OWNER_ERROR, 0, 0, arg);
         return;
     }
     ctx->done = done;
@@ -1398,26 +1587,29 @@ struct nfs_recovery_import_ctx {
     uint8_t                    fstart[CHIMERA_KV_HDR_LEN];
     uint64_t                   peer_alive_ns;
     uint64_t                   peer_boot_id;
-    uint64_t                   seen_ns;
+    uint64_t                   record_boot_id;
+    uint64_t                   decision_since_ns;
+    bool                       prior_only; /* peer restarted: its earlier boots */
     uint32_t                   imported;
     void                       (*done)(
         enum nfs_recovery_failover result,
-        uint64_t                   observed_ns,
         void                      *arg);
     void                      *arg;
 };
 
-/* Caller holds rec->lock. */
+/* Caller holds rec->lock.  A prior-boots-only import does not cover a later
+ * death of that same boot. */
 static bool
 nfs_recovery_peer_imported(
     const struct nfs_recovery *rec,
     uint16_t                   peer,
-    uint64_t                   boot_id)
+    uint64_t                   boot_id,
+    bool                       prior_only)
 {
     struct nfs_recovery_imported_peer *p;
 
     HASH_FIND(hh, rec->imported_peers, &peer, sizeof(peer), p);
-    return p && p->boot_id == boot_id;
+    return p && p->boot_id == boot_id && (prior_only || !p->prior_only);
 } /* nfs_recovery_peer_imported */
 
 /* Caller holds rec->lock. */
@@ -1425,7 +1617,8 @@ static void
 nfs_recovery_note_peer_imported(
     struct nfs_recovery *rec,
     uint16_t             peer,
-    uint64_t             boot_id)
+    uint64_t             boot_id,
+    bool                 prior_only)
 {
     struct nfs_recovery_imported_peer *p;
 
@@ -1438,7 +1631,10 @@ nfs_recovery_note_peer_imported(
         p->node = peer;
         HASH_ADD(hh, rec->imported_peers, node, sizeof(p->node), p);
     }
-    p->boot_id = boot_id;
+    if (p->boot_id != boot_id || p->prior_only) {
+        p->boot_id    = boot_id;
+        p->prior_only = prior_only;
+    }
 } /* nfs_recovery_note_peer_imported */
 
 /* The client is owed a reclaim here: its record is in the open window's set
@@ -1456,7 +1652,7 @@ nfs_recovery_import_finish(struct nfs_recovery_import_ctx *ctx)
     evpl_mutex_unlock(&rec->lock);
 
     ctx->done(owed ? NFS_RECOVERY_FAILOVER : NFS_RECOVERY_NOT_FAILOVER,
-              ctx->peer_alive_ns, ctx->arg);
+              ctx->arg);
     free(ctx);
 } /* nfs_recovery_import_finish */
 
@@ -1476,17 +1672,25 @@ nfs_recovery_import_scan_cb(
         return 1;
     }
 
+    /* A record from one of the peer's earlier boots is never judged stale,
+     * even once its latest boot has died too: that boot's last heartbeat is
+     * not known here (the epoch record is the latest boot's), and the latest
+     * boot's own cold start has already purged its stale records.  Judged
+     * against the latest heartbeat, every one of them would look stale after
+     * a restart that took over 1.5 leases. */
     r = calloc(1, sizeof(*r));
     if (nfs_recovery_deserialize(value, value_len, r, 0) != 0 ||
         r->owner_node != ctx->peer ||
-        nfs_recovery_record_stale(ctx->rec, r, ctx->peer_alive_ns)) {
+        (ctx->prior_only && r->boot_id == ctx->peer_boot_id) ||
+        (!ctx->prior_only && r->boot_id == ctx->peer_boot_id &&
+         nfs_recovery_record_stale(ctx->rec, r, ctx->peer_alive_ns))) {
         free(r);
         return 0;
     }
 
     /* The record keeps owner_node = peer: should the window close before the
     * client returns, the purge deletes it only if the peer still owns it. */
-    if (nfs_recovery_add_loaded(ctx->rec, r)) {
+    if (nfs_recovery_add_loaded(ctx->rec, r, true)) {
         ctx->imported++;
     }
     return 0;
@@ -1506,7 +1710,8 @@ nfs_recovery_import_scan_complete(
     /* A failed scan may have loaded only some of the peer's clients: leave it
      * unmarked so the next of its clients to fail over scans again. */
     if (error_code == CHIMERA_VFS_OK) {
-        nfs_recovery_note_peer_imported(rec, ctx->peer, ctx->peer_boot_id);
+        nfs_recovery_note_peer_imported(rec, ctx->peer, ctx->peer_boot_id,
+                                        ctx->prior_only);
     }
     rec->failover_imported += ctx->imported;
     if (ctx->imported) {
@@ -1530,15 +1735,72 @@ nfs_recovery_import_scan_complete(
         chimera_nfs_error("NFSv4 recovery: scan for node %u's client records "
                           "failed (error %d) after importing %u; will retry",
                           ctx->peer, error_code, ctx->imported);
-        ctx->done(NFS_RECOVERY_STORE_ERROR, ctx->peer_alive_ns, ctx->arg);
+        ctx->done(NFS_RECOVERY_STORE_ERROR, ctx->arg);
         free(ctx);
         return;
     }
-    chimera_nfs_info("NFSv4 recovery: node %u is down; imported %u client "
-                     "record(s) for failover", ctx->peer, ctx->imported);
+    chimera_nfs_info("NFSv4 recovery: node %u %s; imported %u client "
+                     "record(s) for failover", ctx->peer,
+                     ctx->prior_only ? "has restarted" : "is down",
+                     ctx->imported);
 
     nfs_recovery_import_finish(ctx);
 } /* nfs_recovery_import_scan_complete */
+
+enum nfs_recovery_beat {
+    NFS_RECOVERY_BEAT_PENDING, /* first read, or not unchanged for long enough */
+    NFS_RECOVERY_BEAT_MOVED,   /* changed since a read within 1.5 leases     */
+    NFS_RECOVERY_BEAT_STOPPED, /* unchanged for 1.5 leases                   */
+};
+
+/* Caller holds rec->lock.  Records this read of `peer`'s heartbeat.  Time is
+ * this node's monotonic clock alone; the peer's written_at is only compared
+ * with its own earlier values, so clock skew between nodes cannot make a live
+ * peer look dead.  The peer rewrites it every half lease, so three missed
+ * beats mean it has stopped.  The read a change is measured from is shared by
+ * every decision, so it proves the peer alive only for a decision that began
+ * before it: an earlier baseline could precede the peer's final beat. */
+static enum nfs_recovery_beat
+nfs_recovery_watch_peer(
+    struct nfs_recovery *rec,
+    uint16_t             peer,
+    uint64_t             boot_id,
+    uint64_t             written_at,
+    uint64_t             decision_since_ns)
+{
+    struct nfs_recovery_peer_watch *w;
+    enum nfs_recovery_beat          beat = NFS_RECOVERY_BEAT_PENDING;
+    uint64_t now, bound;
+
+    now   = nfs_lease_now_ns();
+    bound = 3 * nfs_recovery_refresh_interval_ns(rec);
+
+    HASH_FIND(hh, rec->peer_watch, &peer, sizeof(peer), w);
+    if (!w) {
+        w = calloc(1, sizeof(*w));
+        if (!w) {
+            return NFS_RECOVERY_BEAT_PENDING;
+        }
+        w->node = peer;
+        HASH_ADD(hh, rec->peer_watch, node, sizeof(w->node), w);
+    } else if (w->boot_id == boot_id && w->written_at == written_at) {
+        w->checked_ns = now;
+        return now - w->since_ns >= bound ? NFS_RECOVERY_BEAT_STOPPED :
+               NFS_RECOVERY_BEAT_PENDING;
+    } else if (w->boot_id == boot_id && written_at < w->written_at) {
+        return NFS_RECOVERY_BEAT_PENDING; /* a read that completed out of order */
+    } else if (now - w->checked_ns < bound &&
+               w->checked_ns > decision_since_ns) {
+        /* It wrote since a read this decision could have made: alive now.
+         * Strictly after: the clock is coarse enough for a tie. */
+        beat = NFS_RECOVERY_BEAT_MOVED;
+    }
+    w->boot_id    = boot_id;
+    w->written_at = written_at;
+    w->since_ns   = now;
+    w->checked_ns = now;
+    return beat;
+} /* nfs_recovery_watch_peer */
 
 static void
 nfs_recovery_import_epoch_cb(
@@ -1550,13 +1812,12 @@ nfs_recovery_import_epoch_cb(
     struct nfs_recovery_import_ctx *ctx    = private_data;
     struct nfs_recovery            *rec    = ctx->rec;
     enum nfs_recovery_failover      result = NFS_RECOVERY_NOT_FAILOVER;
-    uint64_t                        bound, end;
+    enum nfs_recovery_beat          beat;
+    uint64_t                        end;
 
-    /* The peer's heartbeat rewrites its epoch every refresh interval (half a
-     * lease); three missed beats mean it is gone.  A peer with no epoch on
-     * record never completed a start with persistence on, so nothing defends
-     * its records.  A read that fails, or a record that does not decode,
-     * proves neither. */
+    /* A peer with no epoch on record never completed a start with persistence
+     * on, so nothing defends its records.  A read that fails, or a record that
+     * does not decode, proves neither. */
     ctx->peer_alive_ns = 0;
     ctx->peer_boot_id  = 0;
     if (error_code == CHIMERA_VFS_OK && value) {
@@ -1564,13 +1825,21 @@ nfs_recovery_import_epoch_cb(
                                            &ctx->peer_alive_ns) != 0) {
             result = NFS_RECOVERY_STORE_ERROR;
         } else {
-            bound = 3 * nfs_recovery_refresh_interval_ns(rec);
-            if (ctx->peer_alive_ns + bound > nfs_recovery_wall_now_ns()) {
-                /* Fresh.  Alive only once it has moved since the caller last
-                 * looked: a node that has just died looks the same. */
-                result = (ctx->seen_ns && ctx->peer_alive_ns != ctx->seen_ns) ?
-                    NFS_RECOVERY_NOT_FAILOVER : NFS_RECOVERY_LIVENESS_PENDING;
-                ctx->done(result, ctx->peer_alive_ns, ctx->arg);
+            evpl_mutex_lock(&rec->lock);
+            beat = nfs_recovery_watch_peer(rec, ctx->peer, ctx->peer_boot_id,
+                                           ctx->peer_alive_ns,
+                                           ctx->decision_since_ns);
+            evpl_mutex_unlock(&rec->lock);
+            if (ctx->record_boot_id &&
+                ctx->record_boot_id != ctx->peer_boot_id) {
+                /* A later boot than the one that wrote the client's record:
+                 * the state that boot held is gone.  Its own clients stay
+                 * the peer's unless it has stopped too. */
+                ctx->prior_only = beat != NFS_RECOVERY_BEAT_STOPPED;
+            } else if (beat != NFS_RECOVERY_BEAT_STOPPED) {
+                ctx->done(beat == NFS_RECOVERY_BEAT_MOVED ?
+                          NFS_RECOVERY_NOT_FAILOVER :
+                          NFS_RECOVERY_LIVENESS_PENDING, ctx->arg);
                 free(ctx);
                 return;
             }
@@ -1583,13 +1852,14 @@ nfs_recovery_import_epoch_cb(
         chimera_nfs_error("NFSv4 recovery: cannot read node %u's epoch record "
                           "(error %d); not treating it as down",
                           ctx->peer, error_code);
-        ctx->done(result, 0, ctx->arg);
+        ctx->done(result, ctx->arg);
         free(ctx);
         return;
     }
 
     evpl_mutex_lock(&rec->lock);
-    if (nfs_recovery_peer_imported(rec, ctx->peer, ctx->peer_boot_id)) {
+    if (nfs_recovery_peer_imported(rec, ctx->peer, ctx->peer_boot_id,
+                                   ctx->prior_only)) {
         /* Proven dead again, and this boot's records are already in the set. */
         evpl_mutex_unlock(&rec->lock);
         nfs_recovery_import_finish(ctx);
@@ -1621,10 +1891,10 @@ nfs_recovery_import_peer(
     uint16_t                   peer,
     const void                *owner,
     uint16_t                   owner_len,
-    uint64_t                   seen_ns,
+    uint64_t                   record_boot_id,
+    uint64_t                   decision_since_ns,
     void (                    *done )(
         enum nfs_recovery_failover result,
-        uint64_t                   observed_ns,
         void                      *arg),
     void                      *arg)
 {
@@ -1633,20 +1903,21 @@ nfs_recovery_import_peer(
 
     if (peer == rec->node_id || rec->persistence_disabled ||
         owner_len > NFS4_OPAQUE_LIMIT) {
-        done(NFS_RECOVERY_NOT_FAILOVER, 0, arg);
+        done(NFS_RECOVERY_NOT_FAILOVER, arg);
         return;
     }
 
     ctx = calloc(1, sizeof(*ctx));
     if (!ctx) {
-        done(NFS_RECOVERY_STORE_ERROR, 0, arg);
+        done(NFS_RECOVERY_STORE_ERROR, arg);
         return;
     }
-    ctx->rec        = rec;
-    ctx->vfs_thread = vfs_thread;
-    ctx->peer       = peer;
-    ctx->seen_ns    = seen_ns;
-    ctx->owner_len  = owner_len;
+    ctx->rec               = rec;
+    ctx->vfs_thread        = vfs_thread;
+    ctx->peer              = peer;
+    ctx->record_boot_id    = record_boot_id;
+    ctx->decision_since_ns = decision_since_ns;
+    ctx->owner_len         = owner_len;
     memcpy(ctx->owner, owner, owner_len);
     ctx->done = done;
     ctx->arg  = arg;

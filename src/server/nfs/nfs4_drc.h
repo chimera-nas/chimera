@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "nfs4_xdr.h"
@@ -59,7 +60,8 @@ nfs4_drc_delete_reply(
 
 /* Persist a session's metadata so it can be reconstructed on demand.  Reads
  * owner/verifier/clientid from session->client_unified; principal and channel
- * attrs come from the CREATE_SESSION that established it. */
+ * attrs come from the CREATE_SESSION that established it.  `flags` are the
+ * CREATE_SESSION flags, plus NFS4_DRC_SESSION_RECLAIM_COMPLETE. */
 void
 nfs4_drc_persist_session(
     struct chimera_vfs_thread          *vfs_thread,
@@ -67,6 +69,26 @@ nfs4_drc_persist_session(
     const struct nfs4_client_principal *principal,
     uint32_t                            cb_program,
     uint32_t                            flags);
+
+/* Session-record flag (outside the CREATE_SESSION4_FLAG_* space): the client
+ * had completed reclaim, so a node it fails over to does not wait for a second
+ * RECLAIM_COMPLETE before serving its non-reclaim OPENs. */
+#define NFS4_DRC_SESSION_RECLAIM_COMPLETE 0x80000000u
+
+/* Set NFS4_DRC_SESSION_RECLAIM_COMPLETE on a persisted session record
+ * (read-modify-write).  done(ok) reports whether the bit is durable: ok when
+ * it was written or already set, and when there is no usable record for a node
+ * to rebuild the session from; not ok when the store could not be read or
+ * written.  The caller holds a reference on `session` until done runs; a
+ * record rewritten after the session was destroyed is deleted again. */
+void
+nfs4_drc_persist_reclaim_complete(
+    struct chimera_vfs_thread *vfs_thread,
+    struct nfs4_session       *session,
+    void (                    *done )(
+        bool  ok,
+        void *arg),
+    void                      *arg);
 
 /* Delete a session's metadata + all of its reply entries (DESTROY_SESSION). */
 void
@@ -102,6 +124,15 @@ enum nfs4_drc_hydrate_result {
 
 enum nfs4_drc_hydrate_result
 nfs4_drc_session_hydrate(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *sessionid);
+
+/* True while a hydrate of `sessionid` has not settled.  The session is
+ * published before its failover marking and reply slots are in place, so a
+ * request that finds it must still be held off with NFS4ERR_DELAY.  A session
+ * whose reply scan failed is rescanned on `thread` from here. */
+bool
+nfs4_drc_session_hydrating(
     struct chimera_server_nfs_thread *thread,
     const uint8_t                    *sessionid);
 
