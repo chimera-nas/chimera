@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -189,6 +190,60 @@ parse_decimal_u32(
     return 1;
 } /* parse_decimal_u32 */
 
+#ifndef _WIN32
+#define IDMAP_NSS_BUF_DEFAULT 1024
+#define IDMAP_NSS_BUF_MAX     (1024 * 1024)
+
+SYMBOL_EXPORT int
+chimera_idmap_nss_lookup(
+    const char *name,
+    int         is_group,
+    size_t      buflen,
+    uint32_t   *id)
+{
+    if (buflen == 0) {
+        buflen = IDMAP_NSS_BUF_DEFAULT;
+    }
+
+    for (;;) {
+        char *buf = malloc(buflen);
+        int   rc;
+        int   found = 0;
+
+        if (!buf) {
+            return -1;
+        }
+
+        if (is_group) {
+            struct group gr, *res = NULL;
+
+            rc = getgrnam_r(name, &gr, buf, buflen, &res);
+            if (rc == 0 && res) {
+                *id   = gr.gr_gid;
+                found = 1;
+            }
+        } else {
+            struct passwd pw, *res = NULL;
+
+            rc = getpwnam_r(name, &pw, buf, buflen, &res);
+            if (rc == 0 && res) {
+                *id   = pw.pw_uid;
+                found = 1;
+            }
+        }
+        free(buf);
+
+        if (found) {
+            return 0;
+        }
+        if (rc != ERANGE || buflen >= IDMAP_NSS_BUF_MAX) {
+            return -1;
+        }
+        buflen *= 2;
+    }
+} /* chimera_idmap_nss_lookup */
+#endif /* ifndef _WIN32 */
+
 SYMBOL_EXPORT int
 chimera_idmap_who_to_principal(
     const char               *who,
@@ -251,9 +306,9 @@ chimera_idmap_who_to_principal(
     /* name@domain: resolve the local part via nsswitch. */
     at = memchr(who, '@', len);
     if (at) {
-        char name[256];
-        int  nlen = (int) (at - who);
-        char namebuf[1024];
+        char     name[256];
+        int      nlen = (int) (at - who);
+        uint32_t id;
 
         (void) domain;
         if (nlen <= 0 || nlen >= (int) sizeof(name)) {
@@ -262,22 +317,10 @@ chimera_idmap_who_to_principal(
         memcpy(name, who, nlen);
         name[nlen] = '\0';
 
-        if (is_group) {
-            struct group gr, *res = NULL;
-
-            if (getgrnam_r(name, &gr, namebuf, sizeof(namebuf), &res) == 0 &&
-                res) {
-                *p = chimera_idmap_gid_principal(gr.gr_gid);
-                return 0;
-            }
-        } else {
-            struct passwd pw, *res = NULL;
-
-            if (getpwnam_r(name, &pw, namebuf, sizeof(namebuf), &res) == 0 &&
-                res) {
-                *p = chimera_idmap_uid_principal(pw.pw_uid);
-                return 0;
-            }
+        if (chimera_idmap_nss_lookup(name, is_group, 0, &id) == 0) {
+            *p = is_group ? chimera_idmap_gid_principal(id)
+                          : chimera_idmap_uid_principal(id);
+            return 0;
         }
     }
 

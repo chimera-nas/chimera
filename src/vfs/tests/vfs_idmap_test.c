@@ -264,6 +264,29 @@ test_numeric_bounds(void)
     TEST_PASS("numeric who strings parse within their length and 32 bits");
 } /* test_numeric_bounds */
 
+#ifndef _WIN32
+/* An nsswitch entry larger than the lookup buffer answers ERANGE; the lookup
+ * must grow the buffer and resolve, not report the name unknown (a group
+ * with a few dozen members overflows a 1 KiB buffer, and chgrp by name
+ * would get NFS4ERR_BADOWNER).  Starting from one byte forces the retry on
+ * every entry. */
+static void
+test_nss_buffer_grows(void)
+{
+    uint32_t id = 12345;
+
+    assert(chimera_idmap_nss_lookup("root", 0, 1, &id) == 0);
+    assert(id == 0);
+    id = 12345;
+    assert(chimera_idmap_nss_lookup("root", 1, 1, &id) == 0);
+    assert(id == 0);
+
+    assert(chimera_idmap_nss_lookup("no-such-user-xyzzy", 0, 1, &id) == -1);
+
+    TEST_PASS("an nss lookup grows its buffer past ERANGE");
+} /* test_nss_buffer_grows */
+#endif /* ifndef _WIN32 */
+
 int
 main(
     int    argc,
@@ -275,6 +298,9 @@ main(
     test_principal_fully_defined();
     test_sid_principal_unnamed();
     test_numeric_bounds();
+#ifndef _WIN32
+    test_nss_buffer_grows();
+#endif /* ifndef _WIN32 */
 
     fprintf(stderr, "All idmap tests passed\n");
     return 0;
