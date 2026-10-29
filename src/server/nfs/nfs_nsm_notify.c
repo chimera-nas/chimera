@@ -25,8 +25,10 @@
 #define NSM_NOTIFY_TIMEOUT_SECS       5
 #endif /* ifndef NSM_NOTIFY_TIMEOUT_SECS */
 
-/* Bound on the reachability probe made before each connect: libevpl aborts
-* the process on a refused connect and blocks for minutes on a dead one. */
+/* Bound on the reachability probe made before each connect.  libevpl used to
+ * abort the process on a refused connect and block for minutes on a dead one;
+ * it now reports a disconnect and bounds the SYN wait, and the probe stays as
+ * the first line of defence. */
 #ifndef NSM_NOTIFY_CONNECT_TIMEOUT_MS
 #define NSM_NOTIFY_CONNECT_TIMEOUT_MS 3000
 #endif /* ifndef NSM_NOTIFY_CONNECT_TIMEOUT_MS */

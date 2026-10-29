@@ -95,11 +95,12 @@ portmap_init_context(struct portmap_reg_ctx *ctx)
 
     memset(ctx, 0, sizeof(*ctx));
 
-    /* evpl treats a refused connect() as fatal, so handing an absent
-     * rpcbind to evpl_rpc2_client_connect would take the whole server down
-     * before the error paths below ever ran.  Probe first so "no
-     * portmapper" surfaces as a failed init instead -- hosts without rpcbind
-     * (macOS by default) then run unregistered rather than not at all.  The
+    /* libevpl used to treat a refused connect() as fatal, so handing an
+     * absent rpcbind to evpl_rpc2_client_connect took the whole server down
+     * before the error paths below ever ran.  It now reports a disconnect
+     * instead; probing first still makes "no portmapper" surface as a
+     * failed init -- hosts without rpcbind (macOS by default) then run
+     * unregistered rather than not at all -- without waiting on evpl.  The
      * probe waits for the handshake: a non-blocking connect to a closed
      * loopback port can report in progress before it is refused.  This is
      * the local rpcbind, not a peer's portmapper. */

@@ -48,9 +48,10 @@
 #define NLM_GRANT_MAX_ATTEMPTS       15                 /* ~30s total */
 
 /* Budget for the reachability probe that precedes each connect to the
- * client.  The client address is peer-supplied, and libevpl aborts the
- * process on a refused connect and blocks for minutes on a dead address, so
- * the granter only dials a peer that has just completed a handshake. */
+ * client.  The client address is peer-supplied; libevpl used to abort the
+ * process on a refused connect and block for minutes on a dead address, and
+ * although it now reports a disconnect and bounds the SYN wait, the granter
+ * still only dials a peer that has just completed a handshake. */
 #ifndef NLM_GRANT_CONNECT_TIMEOUT_MS
 #define NLM_GRANT_CONNECT_TIMEOUT_MS 2000
 #endif /* ifndef NLM_GRANT_CONNECT_TIMEOUT_MS */
