@@ -126,15 +126,25 @@ chimera_nfs4_create_open_callback(
         acl_buf_aces = acl_buf ? CHIMERA_ACL_MAX_ACES : 0;
     }
 
-    chimera_nfs4_unmarshall_attrs(attr,
-                                  args->createattrs.num_attrmask,
-                                  args->createattrs.attrmask,
-                                  args->createattrs.attr_vals.data,
-                                  args->createattrs.attr_vals.len,
-                                  acl_buf,
-                                  acl_buf_aces);
+    nfsstat4                          rc;
+
+    rc = chimera_nfs4_unmarshall_attrs(attr,
+                                       args->createattrs.num_attrmask,
+                                       args->createattrs.attrmask,
+                                       args->createattrs.attr_vals.data,
+                                       args->createattrs.attr_vals.len,
+                                       acl_buf,
+                                       acl_buf_aces);
 
     if (error_code == CHIMERA_VFS_OK) {
+
+        if (rc != NFS4_OK) {
+            struct CREATE4res *res = &req->res_compound.resarray[req->index].opcreate;
+            res->status = rc;
+            chimera_nfs4_compound_complete(req, rc);
+            chimera_vfs_release(thread->vfs_thread, handle);
+            return;
+        }
 
         switch (args->objtype.type) {
             case NF4DIR:
