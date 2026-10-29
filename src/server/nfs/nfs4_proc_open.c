@@ -1961,7 +1961,13 @@ chimera_nfs4_open(
                 return;
             }
 
-            if (!is_reclaim && !done) {
+            /* A failed-over client known to have completed reclaim before is
+             * not held back for a second RECLAIM_COMPLETE
+             * (nfs4_client_recovered). */
+            if (!is_reclaim && !done &&
+                nfs4_client_needs_reclaim_complete(
+                    &thread->shared->nfs4_shared_clients,
+                    req->session->nfs4_session_clientid)) {
                 res->status = NFS4ERR_GRACE;
                 chimera_nfs4_open_complete(req, res->status);
                 return;

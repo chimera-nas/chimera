@@ -34,6 +34,16 @@ nfs4_sequence_fill_resok(
     res->sr_resok4.sr_target_highest_slotid = res->sr_resok4.sr_highest_slotid;
     res->sr_resok4.sr_status_flags          = 0;
 
+    /* RFC 8881 §18.46.3: a client rebuilt here after its node died must
+     * reclaim its state (nfs4_drc_session_hydrate); without an error to
+     * prompt it, this flag is what tells it to, on every one of its sessions.
+     * Lowered once it has sent RECLAIM_COMPLETE. */
+    if (session->client_unified &&
+        atomic_load_explicit(&session->client_unified->reclaim_needed,
+                             memory_order_relaxed)) {
+        res->sr_resok4.sr_status_flags |= SEQ4_STATUS_RESTART_RECLAIM_NEEDED;
+    }
+
     /* RFC 8881 §2.10.6.3 / §18.46.3: signal the client that one or more of its
      * recallable objects (delegations) have been revoked, so it issues
      * TEST_STATEID / FREE_STATEID to recover.  Cleared once the client has
@@ -87,6 +97,13 @@ chimera_nfs4_sequence(
                                                   : NFS4ERR_BADSESSION;
         res->sr_status = hs;
         chimera_nfs4_compound_complete(req, hs);
+        return;
+    }
+
+    if (nfs4_drc_session_hydrating(thread, args->sa_sessionid)) {
+        nfs4_session_put(session);
+        res->sr_status = NFS4ERR_DELAY;
+        chimera_nfs4_compound_complete(req, NFS4ERR_DELAY);
         return;
     }
 

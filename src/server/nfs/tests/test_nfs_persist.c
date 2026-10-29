@@ -140,7 +140,7 @@ test_recovery_record_roundtrip(void)
      * next boot can compare it against the previous boot's heartbeat. */
     c.last_touch_ns = nfs_lease_now_ns() - 5ULL * 1000000000ULL;
 
-    len = nfs_recovery_serialize(buf, sizeof(buf), &c, 0x0203);
+    len = nfs_recovery_serialize(buf, sizeof(buf), &c, 0x0203, c.boot_id);
     CHECK(len > 0);
 
     CHECK(nfs_recovery_deserialize(buf, len, &out, 9) == 0);
@@ -797,6 +797,96 @@ test_cross_reboot_reclaim_complete(void)
 
     printf("ok: cross_reboot_reclaim_complete\n");
 } /* test_cross_reboot_reclaim_complete */
+
+/*
+ * A client rebuilt after its node DIED is the exception to the test above: its
+ * state's grace window is open on the new node, so it is asked to reclaim, and
+ * the mark the rebuild set is cleared so its CLAIM_PREVIOUS gets through.
+ * Whether its non-reclaim OPENs then wait for a RECLAIM_COMPLETE depends on
+ * the evidence its session record carries.
+ */
+static void
+test_failover_client_must_reclaim(void)
+{
+    struct nfs4_client_table       table;
+    struct nfs4_drc_session_record srec,out;
+    uint8_t                        sessionid[NFS4_SESSIONID_SIZE];
+    uint8_t                        sbuf[4096];
+    uint32_t                       slen;
+    static const uint8_t           owner[] = "co_owner_failed_over";
+    uint64_t                       clientid;
+    struct nfs_client             *unified;
+    struct nfs_client             *other;
+    uint8_t                        sessionid2[NFS4_SESSIONID_SIZE];
+
+    clientid = nfs4_make_clientid(2,9);
+    memset(sessionid,0x6B,NFS4_SESSIONID_SIZE);
+
+    memset(&srec,0,sizeof(srec));
+    srec.clientid              = clientid;
+    srec.verifier              = 0x7777ULL;
+    srec.princ_flavor          = 1;
+    srec.replay_max_slots      = 8;
+    srec.replay_maxresp_cached = 4096;
+    srec.flags                 = NFS4_DRC_SESSION_RECLAIM_COMPLETE;
+    srec.owner_len             = sizeof(owner) - 1;
+    memcpy(srec.owner,owner,srec.owner_len);
+
+    /* The evidence bit survives the record round-trip. */
+    slen = nfs4_drc_session_serialize(sbuf,sizeof(sbuf),&srec);
+    CHECK(slen > 0);
+    CHECK(nfs4_drc_session_deserialize(sbuf,slen,&out) == 0);
+    CHECK(out.flags & NFS4_DRC_SESSION_RECLAIM_COMPLETE);
+
+    /* No evidence: the client owes a RECLAIM_COMPLETE before non-reclaim
+     * OPENs, and its first one is not COMPLETE_ALREADY. */
+    nfs4_client_table_init(&table,1);
+    unified = nfs4_drc_reconstruct_session(&table,sessionid,&srec,0x9999ULL);
+    CHECK(nfs4_client_reclaim_complete(&table,clientid));
+    CHECK(!nfs4_client_needs_reclaim_complete(&table,clientid));
+    CHECK(!atomic_load(&unified->reclaim_needed));
+
+    nfs4_client_mark_failover(&table,clientid,false);
+    CHECK(!nfs4_client_reclaim_complete(&table,clientid));
+    CHECK(nfs4_client_needs_reclaim_complete(&table,clientid));
+
+    /* Reclaim is client-wide: a second session rebuilt later, without a
+     * failover of its own, shares the flag every SEQUENCE reports. */
+    memset(sessionid2,0x6C,NFS4_SESSIONID_SIZE);
+    other = nfs4_drc_reconstruct_session(&table,sessionid2,&srec,0x9999ULL);
+    CHECK(other == unified);
+    nfs_client_put(other);
+    CHECK(atomic_load(&unified->reclaim_needed));
+
+    CHECK(!nfs4_client_mark_reclaim_complete(&table,clientid));
+    CHECK(!atomic_load(&unified->reclaim_needed));
+    CHECK(!nfs4_client_needs_reclaim_complete(&table,clientid));
+    CHECK(nfs4_client_mark_reclaim_complete(&table,clientid));
+
+    /* Another of its sessions, rebuilt with the same failover decision, does
+     * not undo the completed reclaim. */
+    nfs4_client_mark_failover(&table,clientid,false);
+    CHECK(nfs4_client_reclaim_complete(&table,clientid));
+    CHECK(!atomic_load(&unified->reclaim_needed));
+    nfs_client_put(unified);
+
+    /* Evidence: it may still reclaim, but its OPENs are not held back. */
+    clientid       = nfs4_make_clientid(2,10);
+    srec.clientid  = clientid;
+    srec.owner[0] ^= 1;
+    memset(sessionid2,0x6D,NFS4_SESSIONID_SIZE);
+    other = nfs4_drc_reconstruct_session(&table,sessionid2,&srec,0x9999ULL);
+    CHECK(other != NULL);
+    nfs_client_put(other);
+    nfs4_client_mark_failover(&table,clientid,true);
+    CHECK(!nfs4_client_reclaim_complete(&table,clientid));
+    CHECK(!nfs4_client_needs_reclaim_complete(&table,clientid));
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    printf("ok: failover_client_must_reclaim\n");
+} /* test_failover_client_must_reclaim */
 
 /*
  * Guard rails for the test above, so it cannot pass for the wrong reason.
@@ -2210,6 +2300,7 @@ main(void)
     test_cross_reboot_retry_waits_for_reply_scan();
     test_repopulate_only_fills_a_resync_slot();
     test_cross_reboot_reclaim_complete();
+    test_failover_client_must_reclaim();
     test_reclaim_complete_not_granted_to_new_clients();
     test_hydrated_client_leaves_owner_table();
     test_hydrate_refuses_fenced_client();

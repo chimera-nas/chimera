@@ -68,6 +68,13 @@ chimera_nfs4_bind_conn_to_session(
         return;
     }
 
+    if (nfs4_drc_session_hydrating(thread, args->bctsa_sessid)) {
+        nfs4_session_put(session);
+        res->bctsr_status = NFS4ERR_DELAY;
+        chimera_nfs4_compound_complete(req, NFS4ERR_DELAY);
+        return;
+    }
+
     /* SP4_MACH_CRED: only the bound machine credential may bind a connection
      * to the session (RFC 8881 §2.10.8.3). */
     {

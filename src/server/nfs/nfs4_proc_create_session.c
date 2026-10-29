@@ -241,8 +241,16 @@ chimera_nfs4_create_session(
      * same sessionid (and its owning client), letting a persistent client's
      * retransmits replay from the reloaded reply cache. */
     if (session->nfs4_session_persist) {
+        uint32_t rec_flags = flags;
+
+        /* Evidence for a failover: whether this client had already completed
+         * reclaim (nfs4_client_recovered). */
+        if (!nfs4_client_needs_reclaim_complete(&shared->nfs4_shared_clients,
+                                                args->csa_clientid)) {
+            rec_flags |= NFS4_DRC_SESSION_RECLAIM_COMPLETE;
+        }
         nfs4_drc_persist_session(thread->vfs_thread, session, &principal,
-                                 args->csa_cb_program, flags);
+                                 args->csa_cb_program, rec_flags);
     }
 
     /* RFC 8881 §18.36: when the client asks to use this connection as the

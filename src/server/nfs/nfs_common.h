@@ -474,6 +474,7 @@ struct chimera_server_nfs_shared {
      * sessionid (see nfs4_drc_session_hydrate). */
     evpl_mutex_t                        nfs4_drc_hydra_lock;
     struct nfs4_drc_hydra              *nfs4_drc_hydra;
+    _Atomic uint32_t                    nfs4_drc_hydrating; /* hydrates not yet settled */
 };
 
 /* Forward decl for the per-thread lease sweeper (defined in nfs4_lease.h). */
