@@ -161,12 +161,18 @@ chimera_idmap_principal_to_who(
     return len;
 } /* chimera_idmap_principal_to_who */
 
-/* All-decimal check over [s, s+len). */
+/* Decimal parse of [s, s+len): the who string is an XDR opaque with no
+ * terminator, so the parse is bounded by len rather than by a NUL, and a
+ * value that does not fit a uint32_t names no id.  Returns 1 and sets *out
+ * when the whole range is digits whose value fits, 0 otherwise. */
 static int
-all_digits(
+parse_decimal_u32(
     const char *s,
-    int         len)
+    int         len,
+    uint32_t   *out)
 {
+    uint64_t v = 0;
+
     if (len <= 0) {
         return 0;
     }
@@ -174,9 +180,14 @@ all_digits(
         if (s[i] < '0' || s[i] > '9') {
             return 0;
         }
+        v = v * 10 + (uint64_t) (s[i] - '0');
+        if (v > UINT32_MAX) {
+            return 0;
+        }
     }
+    *out = (uint32_t) v;
     return 1;
-} /* all_digits */
+} /* parse_decimal_u32 */
 
 SYMBOL_EXPORT int
 chimera_idmap_who_to_principal(
@@ -224,13 +235,16 @@ chimera_idmap_who_to_principal(
         return chimera_idmap_sid_to_principal(sid, p);
     }
 
-    /* Pure numeric id. */
-    if (all_digits(who, len)) {
-        uint32_t id = (uint32_t) strtoul(who, NULL, 10);
+    /* Pure numeric id, parsed within len and 32 bits.  An all-digit string
+     * that overflows falls through: it has no '@' and names nothing. */
+    {
+        uint32_t id;
 
-        *p = is_group ? chimera_idmap_gid_principal(id)
-                      : chimera_idmap_uid_principal(id);
-        return 0;
+        if (parse_decimal_u32(who, len, &id)) {
+            *p = is_group ? chimera_idmap_gid_principal(id)
+                          : chimera_idmap_uid_principal(id);
+            return 0;
+        }
     }
 
 #ifndef _WIN32

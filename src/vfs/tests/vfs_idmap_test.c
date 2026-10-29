@@ -238,6 +238,32 @@ test_sid_principal_unnamed(void)
     TEST_PASS("an opaque SID principal is nameless to NFSv4 and the idmap");
 } /* test_sid_principal_unnamed */
 
+/* A numeric who string is parsed within its XDR length -- the bytes after
+ * it belong to the next attribute -- and a value that does not fit a
+ * uint32_t names no id. */
+static void
+test_numeric_bounds(void)
+{
+    struct chimera_principal p;
+
+    /* "2520" followed by more digits that are not part of the string */
+    assert(chimera_idmap_who_to_principal("25201111", 4, 0, NULL, &p) == 0);
+    assert(p.type == CHIMERA_PRINCIPAL_USER && p.id == 2520);
+
+    assert(chimera_idmap_who_to_principal("4294967295", 10, 0, NULL, &p) == 0);
+    assert(p.id == 4294967295u);
+
+    assert(chimera_idmap_who_to_principal("4294967296", 10, 0, NULL, &p) == -1);
+    assert(chimera_idmap_who_to_principal("99999999999999999999", 20, 1, NULL,
+                                          &p) == -1);
+
+    /* leading zeros are still decimal (knfsd's kstrtouint accepts them) */
+    assert(chimera_idmap_who_to_principal("007", 3, 1, NULL, &p) == 0);
+    assert(p.type == CHIMERA_PRINCIPAL_GROUP && p.id == 7);
+
+    TEST_PASS("numeric who strings parse within their length and 32 bits");
+} /* test_numeric_bounds */
+
 int
 main(
     int    argc,
@@ -248,6 +274,7 @@ main(
     test_buffer_limits();
     test_principal_fully_defined();
     test_sid_principal_unnamed();
+    test_numeric_bounds();
 
     fprintf(stderr, "All idmap tests passed\n");
     return 0;
