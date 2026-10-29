@@ -1148,6 +1148,40 @@ chimera_nfs4_marshall_attrs(
     return 0;
 } /* chimera_nfs4_marshall_attrs */
 
+/*
+ * Map an owner / owner_group string to a uid / gid.  RFC 7530 section 5.9:
+ * a server that cannot translate the string SHOULD answer NFS4ERR_BADOWNER
+ * rather than store a substitute.  The idmap also decodes special-whos and
+ * SID strings for ACL whos; those name no uid or gid and are refused here.
+ */
+static inline nfsstat4
+chimera_nfs4_who_to_id(
+    const char *who,
+    uint32_t    len,
+    int         is_group,
+    uint32_t   *id)
+{
+    struct chimera_principal p;
+
+    /* An owner is numeric or name@domain.  A SID string is neither, and the
+     * idmap decodes the unix-id forms (S-1-22-*, S-1-5-88-*) into user and
+     * group principals for ACL whos, which the type check below would pass. */
+    if (len >= 4 && memcmp(who, "S-1-", 4) == 0) {
+        return NFS4ERR_BADOWNER;
+    }
+
+    if (chimera_idmap_who_to_principal(who, (int) len, is_group, NULL, &p) != 0) {
+        return NFS4ERR_BADOWNER;
+    }
+
+    if (p.type != (is_group ? CHIMERA_PRINCIPAL_GROUP : CHIMERA_PRINCIPAL_USER)) {
+        return NFS4ERR_BADOWNER;
+    }
+
+    *id = p.id;
+    return NFS4_OK;
+} /* chimera_nfs4_who_to_id */
+
 static nfsstat4
 chimera_nfs4_unmarshall_attrs(
     struct chimera_vfs_attrs *attr,
@@ -1160,6 +1194,8 @@ chimera_nfs4_unmarshall_attrs(
 {
     char    *attrsend = (char *) attrs + attrvals_len;
     uint32_t set_it;
+    uint32_t id;
+    nfsstat4 status;
 
     attr->va_set_mask = 0;
 
@@ -1294,8 +1330,11 @@ chimera_nfs4_unmarshall_attrs(
                 return NFS4ERR_INVAL;
             }
 
-            /* Convert string to numeric uid */
-            attr->va_uid       = strtoul(attrs, NULL, 10);
+            status = chimera_nfs4_who_to_id(attrs, owner_len, 0, &id);
+            if (status != NFS4_OK) {
+                return status;
+            }
+            attr->va_uid       = id;
             attrs              = (char *) attrs + owner_padded_len;
             attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
         }
@@ -1321,8 +1360,11 @@ chimera_nfs4_unmarshall_attrs(
                 return NFS4ERR_INVAL;
             }
 
-            /* Convert string to numeric gid */
-            attr->va_gid       = strtoul(attrs, NULL, 10);
+            status = chimera_nfs4_who_to_id(attrs, group_len, 1, &id);
+            if (status != NFS4_OK) {
+                return status;
+            }
+            attr->va_gid       = id;
             attrs              = (char *) attrs + group_padded_len;
             attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
         }

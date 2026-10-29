@@ -183,6 +183,20 @@ target_link_libraries(test_protocol_advertise chimera_vfs chimera_common evpl ev
 add_dependencies(test_protocol_advertise chimera_nfs_common)
 add_test(NAME chimera/server/nfs/protocol_advertise COMMAND test_protocol_advertise)
 
+# Unit test for the NFSv4 owner / owner_group decoder (nfs4_attr.h): a who
+# string that names no uid or gid is NFS4ERR_BADOWNER, never uid 0.  Cheap
+# enough to gate merges.
+add_executable(test_attr_owner test_attr_owner.c)
+target_include_directories(test_attr_owner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_attr_owner chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
+add_dependencies(test_attr_owner chimera_nfs_common)
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/server/nfs/attr_owner COMMAND test_attr_owner)
+set(CHIMERA_TEST_TIER extended)
+
 # Unit test for the per-export read-only gate decision logic (nfs4_rofs.h) and
 # the NFS4_OP_FLAG_MUTATES set it keys on.  Header logic only, but nfs4_rofs.h
 # pulls in the generated nfs4_xdr.h, hence the chimera_nfs_common dependency.
