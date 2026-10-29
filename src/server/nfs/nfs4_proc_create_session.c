@@ -179,12 +179,7 @@ chimera_nfs4_create_session(
     clamped_fore.ca_headerpadsize              = 0;
     args->csa_back_chan_attrs.ca_headerpadsize = 0;
 
-    /* Server cap on fore-channel slots is configurable (server.nfs4_session_slots);
-     * fall back to the compiled-in default if it is unset/invalid. */
-    server_max_slots = (uint32_t) chimera_server_config_get_nfs4_session_slots(shared->config);
-    if (server_max_slots == 0) {
-        server_max_slots = NFS4_MAX_REPLY_CACHE_SLOTS;
-    }
+    server_max_slots = shared->nfs4_max_slots;
 
     replay_max_slots = clamped_fore.ca_maxrequests;
     if (replay_max_slots == 0 ||

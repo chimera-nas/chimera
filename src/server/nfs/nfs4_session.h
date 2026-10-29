@@ -59,7 +59,8 @@ enum nfs4_slot_state {
  * nfs4_replay_slot_acquire (to RESYNCING, then COMPLETED; not before the
  * reply scan has finished, see replay_hydrating in struct nfs4_session) or
  * the one in nfs4_drc_repopulate_slot (to IN_PROGRESS, then CACHED, or
- * COMPLETED when the bytes cannot be allocated).
+ * COMPLETED when the record's bytes cannot be kept; while the scan runs, a
+ * newer record takes over a slot the scan filled the same way).
  *
  * Distinct slots are independent (RFC 5661: a client has at most one
  * outstanding request per slot id), so concurrent SEQUENCEs touch different
@@ -81,6 +82,9 @@ struct nfs4_replay_slot {
     _Atomic uint64_t state_word;       /* (seqid << NFS4_SLOT_SEQID_SHIFT) | state */
     uint32_t         cached_len;       /* bytes in cached_buf (CACHED only) */
     void            *cached_buf;       /* RPC reply (header+body); malloc'd */
+    /* The KV store holds a reply record for the current seqid; it outlives a
+     * demotion to COMPLETED and is retired when the slot advances. */
+    bool             persisted;
     /* Who sent the request this slot holds.  RFC 8881 Section 2.10.6.1.3.1: a
      * retry "that uses a different principal in the RPC request's credential
      * field that translates to a different user" is a false retry, and "if the
@@ -696,6 +700,13 @@ void nfs4_replay_slot_finalize(
  * buffer stays pinned for the whole replay and no concurrent advance can free
  * it mid-send. */
 void nfs4_replay_slot_replay_done(
+    struct nfs_request *req);
+
+/* As nfs4_replay_slot_replay_done, for a cached reply that could not be
+ * re-sent: drops the bytes, releases the slot as COMPLETED, and shapes
+ * res_compound as an uncached retry (RFC 8881 2.10.6.1.3).  Returns the
+ * COMPOUND status. */
+nfsstat4 nfs4_replay_slot_replay_failed(
     struct nfs_request *req);
 
 /* Record the delegation callback path on a client's unified state record.
