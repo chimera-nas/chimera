@@ -24,6 +24,7 @@
  * consistently by another.
  */
 
+#include <stddef.h>
 #include <stdint.h>
 #include "sdk/vfs_acl.h"
 
@@ -83,6 +84,23 @@ SYMBOL_EXPORT int chimera_idmap_who_to_principal(
     int                       is_group,
     const char               *domain,
     struct chimera_principal *p);
+
+#ifndef _WIN32
+/*
+ * Resolve the NUL-terminated `name` through nsswitch to a uid (is_group == 0)
+ * or gid.  The lookup buffer starts at `buflen` bytes (0 selects the default)
+ * and grows while getpwnam_r / getgrnam_r answer ERANGE, up to 1 MiB: a
+ * group with a few dozen members overflows a fixed buffer, and reporting it
+ * unknown would refuse a chgrp by name.  Internal to the idmap; exported so
+ * the unit test can start from a buffer too small for any entry.  Returns 0
+ * on success, -1 when the name is unknown or the lookup fails.
+ */
+SYMBOL_EXPORT int chimera_idmap_nss_lookup(
+    const char *name,
+    int         is_group,
+    size_t      buflen,
+    uint32_t   *id);
+#endif /* ifndef _WIN32 */
 
 /*
  * Encode `p` as a Windows SID string ("S-1-...") into `buf`.  Special-whos map
