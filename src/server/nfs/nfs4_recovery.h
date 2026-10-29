@@ -259,7 +259,11 @@ nfs_recovery_forget(
  *                     for the peer's records failed.  Retry later.
  *   FAILOVER          over 1.5 leases old, or absent: `peer` is dead, and
  *                     `owner` is owed a reclaim here (its record is in the
- *                     open window's set, not yet reclaimed).
+ *                     open window's set, not yet reclaimed).  Also when the
+ *                     heartbeat is from a later boot than `record_boot_id`
+ *                     (the boot that wrote owner's record; 0 = unknown):
+ *                     `peer` restarted and lost that state, so only records
+ *                     from its earlier boots are imported.
  * On a dead peer, the grace window is opened before the scan and every record
  * it owns is loaded into to_reclaim (once per boot of that peer; a failed scan
  * is retried on the next call).  Once no import is in flight and nobody is owed
@@ -280,6 +284,7 @@ nfs_recovery_import_peer(
     uint16_t                   peer,
     const void                *owner,
     uint16_t                   owner_len,
+    uint64_t                   record_boot_id,
     uint64_t                   seen_ns,
     void (                    *done )(
         enum nfs_recovery_failover result,
@@ -288,7 +293,8 @@ nfs_recovery_import_peer(
     void                      *arg);
 
 /*
- * Look up which node owns `owner`'s stored recovery record.  A record that
+ * Look up which node owns `owner`'s stored recovery record, and which boot of
+ * it wrote the record.  A record that
  * cannot be read or decoded is OWNER_ERROR, not OWNER_ABSENT: the caller must
  * not treat it as a client with no previous node.  Persistence off is
  * OWNER_ABSENT.  Asynchronous on vfs_thread.
@@ -308,6 +314,7 @@ nfs_recovery_lookup_owner(
     void (                    *done )(
         enum nfs_recovery_owner result,
         uint16_t                node,
+        uint64_t                boot_id,
         void                   *arg),
     void                      *arg);
 
@@ -371,12 +378,14 @@ nfs_recovery_note_returned(
 
 struct nfs_client;
 
+/* `boot_id` is the boot of the node writing the record. */
 uint32_t
 nfs_recovery_serialize(
     uint8_t                 *buf,
     uint32_t                 buf_size,
     const struct nfs_client *c,
-    uint16_t                 owner_node);
+    uint16_t                 owner_node,
+    uint64_t                 boot_id);
 
 /* Deserialize a recovery value.  A legacy value (NFR1/NFR2) carries no owning
  * node and comes back with owner_node = `legacy_owner`. */

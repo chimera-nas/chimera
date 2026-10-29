@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "nfs4_drc.h"
+#include "nfs4_lease.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "nfs_common.h"
@@ -300,6 +301,140 @@ nfs4_drc_persist_session(
                         ctx->value, ctx->value_len, nfs4_drc_kv_done, ctx);
 } /* nfs4_drc_persist_session */
 
+struct nfs4_drc_rc_ctx {
+    struct chimera_vfs_thread *vfs_thread;
+    struct nfs4_session       *session;
+    uint8_t                    key[CHIMERA_KV_SESSION_KEY_LEN];
+    uint32_t                   key_len;
+    uint8_t                   *value;
+    void                       (*done)(
+        bool  ok,
+        void *arg);
+    void                      *arg;
+};
+
+static void
+nfs4_drc_rc_finish(
+    struct nfs4_drc_rc_ctx *ctx,
+    bool                    ok)
+{
+    ctx->done(ok, ctx->arg);
+    free(ctx->value);
+    free(ctx);
+} /* nfs4_drc_rc_finish */
+
+static void
+nfs4_drc_rc_undone(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    (void) error_code;
+    nfs4_drc_rc_finish(private_data, true);
+} /* nfs4_drc_rc_undone */
+
+static void
+nfs4_drc_rc_put_done(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct nfs4_drc_rc_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs_error("NFS4.1 DRC: cannot record RECLAIM_COMPLETE on the "
+                          "session record (error %d)", error_code);
+    } else if (atomic_load_explicit(&ctx->session->destroyed,
+                                    memory_order_acquire)) {
+        /* DESTROY_SESSION marks the session before deleting its record, so a
+         * write that landed after that delete is seen here: remove it again. */
+        chimera_vfs_delete_key(ctx->vfs_thread, ctx->key, ctx->key_len,
+                               nfs4_drc_rc_undone, ctx);
+        return;
+    }
+    nfs4_drc_rc_finish(ctx, error_code == CHIMERA_VFS_OK);
+} /* nfs4_drc_rc_put_done */
+
+static void
+nfs4_drc_rc_get_cb(
+    enum chimera_vfs_error error_code,
+    const void            *value,
+    uint32_t               value_len,
+    void                  *private_data)
+{
+    struct nfs4_drc_rc_ctx         *ctx = private_data;
+    struct nfs4_drc_session_record *rec;
+    uint32_t                        len;
+
+    /* No record: nothing a node could rebuild, so nothing to mark. */
+    if (error_code == CHIMERA_VFS_ENOENT ||
+        (error_code == CHIMERA_VFS_OK && !value)) {
+        nfs4_drc_rc_finish(ctx, true);
+        return;
+    }
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs_error("NFS4.1 DRC: cannot read the session record to "
+                          "record RECLAIM_COMPLETE (error %d)", error_code);
+        nfs4_drc_rc_finish(ctx, false);
+        return;
+    }
+
+    rec = malloc(sizeof(*rec));
+    if (!rec) {
+        nfs4_drc_rc_finish(ctx, false);
+        return;
+    }
+    if (nfs4_drc_session_deserialize(value, value_len, rec) != 0) {
+        /* A corrupt record cannot be rebuilt on any node either. */
+        chimera_nfs_error("NFS4.1 DRC: session record is corrupt; "
+                          "RECLAIM_COMPLETE not recorded on it");
+        free(rec);
+        nfs4_drc_rc_finish(ctx, true);
+        return;
+    }
+    if (rec->flags & NFS4_DRC_SESSION_RECLAIM_COMPLETE) {
+        free(rec);
+        nfs4_drc_rc_finish(ctx, true);
+        return;
+    }
+
+    rec->flags |= NFS4_DRC_SESSION_RECLAIM_COMPLETE;
+    len         = NFS4_DRC_SESSION_HDR_LEN + rec->mach_len + rec->owner_len;
+    ctx->value  = malloc(len);
+    if (!ctx->value) {
+        free(rec);
+        nfs4_drc_rc_finish(ctx, false);
+        return;
+    }
+    len = nfs4_drc_session_serialize(ctx->value, len, rec);
+    free(rec);
+
+    chimera_vfs_put_key(ctx->vfs_thread, ctx->key, ctx->key_len,
+                        ctx->value, len, nfs4_drc_rc_put_done, ctx);
+} /* nfs4_drc_rc_get_cb */
+
+void
+nfs4_drc_persist_reclaim_complete(
+    struct chimera_vfs_thread *vfs_thread,
+    struct nfs4_session       *session,
+    void (                    *done )(
+        bool  ok,
+        void *arg),
+    void                      *arg)
+{
+    struct nfs4_drc_rc_ctx *ctx = calloc(1, sizeof(*ctx));
+
+    if (!ctx) {
+        done(false, arg);
+        return;
+    }
+    ctx->vfs_thread = vfs_thread;
+    ctx->session    = session;
+    ctx->key_len    = nfs_kv_session_key(ctx->key, session->nfs4_session_id);
+    ctx->done       = done;
+    ctx->arg        = arg;
+    chimera_vfs_get_key(vfs_thread, ctx->key, ctx->key_len,
+                        nfs4_drc_rc_get_cb, ctx);
+} /* nfs4_drc_persist_reclaim_complete */
+
 /* ------------------------------------------------------------------ *
 *  DESTROY_SESSION cleanup: drop the session record + its replies     *
 * ------------------------------------------------------------------ */
@@ -473,13 +608,16 @@ nfs4_drc_ensure_client(
      * ever seeing NFS4ERR_BADSESSION, so it runs no EXCHANGE_ID and no
      * CREATE_SESSION.  RFC 8881 section 18.51.3 ties the RECLAIM_COMPLETE
      * obligation to establishing a NEW client ID, which this client does not
-     * do, and nothing in the protocol would prompt it for one (this server
-     * never raises SEQ4_STATUS_RESTART_RECLAIM_NEEDED).  Restore it already
-     * marked, or the per-client gate in chimera_nfs4_open() refuses every
-     * non-reclaim OPEN with NFS4ERR_GRACE for the life of the mount.  The
-     * server-wide reboot window still applies and still expires normally.
+     * do, and nothing prompts it for one unless the server raises
+     * SEQ4_STATUS_RESTART_RECLAIM_NEEDED -- which it does only for a client
+     * that failed over from a dead node (nfs4_drc_hydrate_failover_cb, which
+     * clears this mark again).  Restore it already marked, or the per-client
+     * gate in chimera_nfs4_open() refuses every non-reclaim OPEN with
+     * NFS4ERR_GRACE for the life of the mount.  The server-wide reboot window
+     * still applies and still expires normally.
      *
-     * Two consequences of the mark are accepted deliberately:
+     * Two consequences of the mark are accepted deliberately on a same-node
+     * restart, or when the client's last node is still alive:
      *  - The same gate answers a CLAIM_PREVIOUS from this client with
      *    NFS4ERR_NO_GRACE.  That forfeits nothing today: no open or lock
      *    state is persisted (nfs_kv_keys.h), so a reclaim could rebuild
@@ -672,13 +810,20 @@ nfs4_drc_repopulate_slot(
  */
 
 enum {
-    NFS4_DRC_HYDRA_INFLIGHT = 0, /* KV scan in progress -> reply DELAY        */
-    NFS4_DRC_HYDRA_DONE     = 1, /* scan settled; if still not live -> ABSENT */
+    NFS4_DRC_HYDRA_INFLIGHT    = 0, /* KV scan in progress -> reply DELAY        */
+    NFS4_DRC_HYDRA_DONE        = 1, /* scan settled; if still not live -> ABSENT */
+    NFS4_DRC_HYDRA_RETRY       = 2, /* nothing published yet -> rescan, DELAY    */
+    NFS4_DRC_HYDRA_REPLY_RETRY = 3, /* session published, its replies not all
+                                     * loaded -> rescan them, DELAY            */
 };
 
 struct nfs4_drc_hydra {
     uint8_t        sessionid[NFS4_SESSIONID_SIZE];
     uint8_t        state;
+    uint16_t       peer_seen_node;     /* the peer peer_seen_ns came from */
+    uint64_t       peer_seen_ns;       /* peer heartbeat seen while pending */
+    uint64_t       undecided_since_ns; /* monotonic; 0 = decision not open  */
+    uint64_t       replies_failing_ns; /* monotonic; 0 = no reply scan error */
     UT_hash_handle hh;
 };
 
@@ -687,6 +832,7 @@ nfs4_drc_hydra_init(struct chimera_server_nfs_shared *shared)
 {
     evpl_mutex_init(&shared->nfs4_drc_hydra_lock, NULL);
     shared->nfs4_drc_hydra = NULL;
+    atomic_store(&shared->nfs4_drc_hydrating, 0);
 } /* nfs4_drc_hydra_init */
 
 void
@@ -721,7 +867,67 @@ struct nfs4_drc_hydrate_ctx {
     uint32_t                          drop_key_lens[NFS4_MAX_REPLY_CACHE_SLOTS];
     uint32_t                          ndrop;
     uint32_t                          ndrop_over;
+    /* The session record, rebuilt only once the failover decision is made. */
+    struct nfs4_drc_session_record    srec;
+    uint16_t                          owner_node;
+    uint16_t                          peer_seen_node;
+    uint64_t                          peer_seen_ns;
+    bool                              rc_evidence;
+    bool                              failed_over;
 };
+
+/*
+ * Leave the hydrate for the client's next request to pick up again (it is held
+ * off with NFS4ERR_DELAY meanwhile), unless *since shows it has been failing
+ * for two leases.  `state` is RETRY while nothing is published, REPLY_RETRY
+ * once the session is: that keeps it gated (nfs4_drc_session_hydrating).
+ * Returns true when deferred, having freed ctx.
+ */
+static bool
+nfs4_drc_hydrate_defer(
+    struct nfs4_drc_hydrate_ctx *ctx,
+    uint8_t                      state,
+    bool                         pending,
+    uint64_t                     observed_ns)
+{
+    struct chimera_server_nfs_shared *shared = ctx->thread->shared;
+    struct nfs4_drc_hydra            *h;
+    uint64_t                         *since;
+    uint64_t                          now  = nfs_lease_now_ns();
+    uint64_t                          wait =
+        2ULL * shared->nfs4_recovery.lease_time_s * 1000000000ULL;
+    bool                              retry = false;
+
+    evpl_mutex_lock(&shared->nfs4_drc_hydra_lock);
+    HASH_FIND(hh, shared->nfs4_drc_hydra, ctx->sessionid,
+              NFS4_SESSIONID_SIZE, h);
+    if (h) {
+        since = (state == NFS4_DRC_HYDRA_REPLY_RETRY) ?
+            &h->replies_failing_ns : &h->undecided_since_ns;
+        if (!*since) {
+            *since = now;
+        }
+        if (pending && (!h->peer_seen_ns ||
+                        h->peer_seen_node != ctx->owner_node)) {
+            h->peer_seen_ns   = observed_ns;
+            h->peer_seen_node = ctx->owner_node;
+        }
+        retry = now - *since < wait;
+        if (retry) {
+            h->state = state;
+        }
+    }
+    evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+
+    if (retry) {
+        /* A published session stays counted, so its requests stay gated. */
+        if (state == NFS4_DRC_HYDRA_RETRY) {
+            atomic_fetch_sub(&shared->nfs4_drc_hydrating, 1);
+        }
+        free(ctx);
+    }
+    return retry;
+} /* nfs4_drc_hydrate_defer */
 
 static int
 nfs4_drc_hydrate_session_cb(
@@ -731,25 +937,19 @@ nfs4_drc_hydrate_session_cb(
     uint32_t    value_len,
     void       *private_data)
 {
-    struct nfs4_drc_hydrate_ctx      *ctx    = private_data;
-    struct chimera_server_nfs_thread *thread = ctx->thread;
-    struct nfs4_client_table         *table  = &thread->shared->nfs4_shared_clients;
-    struct nfs4_drc_session_record    rec;
+    struct nfs4_drc_hydrate_ctx *ctx = private_data;
 
     if (key_len < CHIMERA_KV_SESSION_PREFIX_LEN ||
         memcmp((const uint8_t *) key + CHIMERA_KV_HDR_LEN, ctx->sessionid,
                NFS4_SESSIONID_SIZE) != 0) {
         return 1;  /* past this session's metadata record */
     }
-    if (nfs4_drc_session_deserialize(value, value_len, &rec) != 0) {
+    if (nfs4_drc_session_deserialize(value, value_len, &ctx->srec) != 0) {
         return 0;  /* skip a corrupt record */
     }
 
-    ctx->hydrated = nfs4_drc_reconstruct_session(
-        table, ctx->sessionid, &rec,
-        thread->shared->nfs4_recovery.current_boot_id);
-    ctx->found    = true;
-    ctx->restored = ctx->hydrated != NULL;
+    ctx->rc_evidence = (ctx->srec.flags & NFS4_DRC_SESSION_RECLAIM_COMPLETE) != 0;
+    ctx->found       = true;
     return 0;
 } /* nfs4_drc_hydrate_session_cb */
 
@@ -839,7 +1039,17 @@ nfs4_drc_hydrate_reply_complete(
     struct nfs4_session              *session;
     uint32_t                          i;
 
-    (void) error_code;
+    /* A published session whose replies did not all load stays gated and is
+     * rescanned; one that was not restored has nothing to protect. */
+    if (error_code != CHIMERA_VFS_OK && ctx->restored) {
+        if (nfs4_drc_hydrate_defer(ctx, NFS4_DRC_HYDRA_REPLY_RETRY, false, 0)) {
+            return;
+        }
+        chimera_nfs_error("NFS4.1 DRC: reply records of a hydrated session "
+                          "still unreadable (error %d) after two leases; "
+                          "serving it with %u loaded", error_code,
+                          ctx->nreplies);
+    }
 
     /* The reply scan is over, whether it ran to the end, failed part way or
      * never dispatched (chimera_vfs_search_keys then completes inline with the
@@ -865,6 +1075,7 @@ nfs4_drc_hydrate_reply_complete(
         h->state = NFS4_DRC_HYDRA_DONE;
     }
     evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+    atomic_fetch_sub(&shared->nfs4_drc_hydrating, 1);
 
     /* Delete the records the scan dropped, from this (the owning) thread; see
      * nfs4_drc_hydrate_drop. */
@@ -886,8 +1097,9 @@ nfs4_drc_hydrate_reply_complete(
 
     if (ctx->restored) {
         chimera_nfs_info("NFS4.1 DRC: hydrated session + %u reply record(s), "
-                         "%u stale dropped, for a returning client",
-                         ctx->nreplies, ctx->nstale);
+                         "%u stale dropped, for a returning client%s",
+                         ctx->nreplies, ctx->nstale,
+                         ctx->failed_over ? " (failed over; asked to reclaim)" : "");
     } else if (ctx->found) {
         chimera_nfs_info("NFS4.1 DRC: dropped a persisted session whose client "
                          "was fenced or superseded");
@@ -895,25 +1107,23 @@ nfs4_drc_hydrate_reply_complete(
     free(ctx);
 } /* nfs4_drc_hydrate_reply_complete */
 
+/* Phase 3: re-persist the client's recovery record and repopulate the
+ * session's reply slots. */
 static void
-nfs4_drc_hydrate_session_complete(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+nfs4_drc_hydrate_replies(struct nfs4_drc_hydrate_ctx *ctx)
 {
-    struct nfs4_drc_hydrate_ctx      *ctx    = private_data;
     struct chimera_server_nfs_thread *thread = ctx->thread;
-
-    (void) error_code;
 
     /* The client is back without an EXCHANGE_ID, so nothing else re-persists
      * its recovery record: do it here, which also marks the reloaded record as
-     * returned so the grace-end purge keeps it. */
+     * returned so the grace-end purge keeps it, and makes this node its
+     * owner. */
     if (ctx->hydrated) {
         nfs_recovery_persist(thread->vfs_thread,
                              &thread->shared->nfs4_recovery, ctx->hydrated);
         nfs_client_put(ctx->hydrated);
         ctx->hydrated = NULL;
-    } else if (ctx->found) {
+    } else if (ctx->found && !ctx->restored) {
         /* The session's client must not come back (nfs4_drc_ensure_client):
         * drop its record so it is not rebuilt after a restart.  The reply
         * scan below finds no session and deletes its replies as orphans. */
@@ -924,11 +1134,129 @@ nfs4_drc_hydrate_session_complete(
      * The [hdr] + sessionid prefix selects exactly this session's reply band;
      * the callback stops once a key leaves it. */
     nfs_kv_reply_key(ctx->rstart, ctx->sessionid, 0, 0);
-    chimera_vfs_search_keys(ctx->thread->vfs_thread,
+    chimera_vfs_search_keys(thread->vfs_thread,
                             ctx->rstart, CHIMERA_KV_REPLY_KEY_LEN,
                             NULL, 0, 0,
                             nfs4_drc_hydrate_reply_cb,
                             nfs4_drc_hydrate_reply_complete, ctx);
+} /* nfs4_drc_hydrate_replies */
+
+static void
+nfs4_drc_hydrate_rebuild(
+    struct nfs4_drc_hydrate_ctx *ctx,
+    bool                         failed_over)
+{
+    struct chimera_server_nfs_shared *shared = ctx->thread->shared;
+
+    ctx->hydrated = nfs4_drc_reconstruct_session(
+        &shared->nfs4_shared_clients, ctx->sessionid, &ctx->srec,
+        shared->nfs4_recovery.current_boot_id);
+    ctx->restored = ctx->hydrated != NULL;
+
+    if (failed_over && ctx->restored) {
+        /* The client's node died with its state, and that state's grace window
+         * is now open here: ask it to reclaim (RFC 8881 §8.4.2.1), on every
+         * session it has, and let its CLAIM_PREVIOUS through the per-client
+         * gate that the rebuild closed (nfs4_drc_ensure_client). */
+        nfs4_client_mark_failover(&shared->nfs4_shared_clients,
+                                  ctx->srec.clientid, ctx->rc_evidence);
+        ctx->failed_over = true;
+    }
+
+    nfs4_drc_hydrate_replies(ctx);
+} /* nfs4_drc_hydrate_rebuild */
+
+static void
+nfs4_drc_hydrate_failover_cb(
+    enum nfs_recovery_failover result,
+    uint64_t                   observed_ns,
+    void                      *arg)
+{
+    struct nfs4_drc_hydrate_ctx *ctx = arg;
+
+    /* Nothing is rebuilt and no ownership moves while the decision is open.
+    * A store that keeps failing, or a live peer whose heartbeat never moves,
+    * is given two leases before the session is rebuilt without failover. */
+    if ((result == NFS_RECOVERY_STORE_ERROR ||
+         result == NFS_RECOVERY_LIVENESS_PENDING) &&
+        nfs4_drc_hydrate_defer(ctx, NFS4_DRC_HYDRA_RETRY,
+                               result == NFS_RECOVERY_LIVENESS_PENDING,
+                               observed_ns)) {
+        return;
+    }
+
+    if (result == NFS_RECOVERY_STORE_ERROR ||
+        result == NFS_RECOVERY_LIVENESS_PENDING) {
+        chimera_nfs_error("NFS4.1 DRC: could not decide whether the client's "
+                          "previous node is down; rebuilding the session "
+                          "without failover");
+    }
+    nfs4_drc_hydrate_rebuild(ctx, result == NFS_RECOVERY_FAILOVER);
+} /* nfs4_drc_hydrate_failover_cb */
+
+static void
+nfs4_drc_hydrate_owner_cb(
+    enum nfs_recovery_owner result,
+    uint16_t                node,
+    uint64_t                boot_id,
+    void                   *arg)
+{
+    struct nfs4_drc_hydrate_ctx *ctx = arg;
+    struct nfs_recovery         *rec = &ctx->thread->shared->nfs4_recovery;
+
+    /* Last served by another node: if that node is dead, its clients are
+     * failing over and this one is owed a reclaim here.  A record that cannot
+     * be read leaves that undecided. */
+    if (result == NFS_RECOVERY_OWNER_ERROR) {
+        nfs4_drc_hydrate_failover_cb(NFS_RECOVERY_STORE_ERROR, 0, ctx);
+        return;
+    }
+    if (result == NFS_RECOVERY_OWNER_FOUND && node != rec->node_id) {
+        /* A heartbeat saved from an earlier owner says nothing about this one. */
+        ctx->owner_node = node;
+        nfs_recovery_import_peer(ctx->thread->vfs_thread, rec, node,
+                                 ctx->srec.owner, ctx->srec.owner_len, boot_id,
+                                 ctx->peer_seen_node == node ?
+                                 ctx->peer_seen_ns : 0,
+                                 nfs4_drc_hydrate_failover_cb, ctx);
+        return;
+    }
+    nfs4_drc_hydrate_rebuild(ctx, false);
+} /* nfs4_drc_hydrate_owner_cb */
+
+static void
+nfs4_drc_hydrate_session_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct nfs4_drc_hydrate_ctx      *ctx    = private_data;
+    struct chimera_server_nfs_thread *thread = ctx->thread;
+
+    /* A failed scan that had not reached the record proves nothing about
+     * whether it exists; one that had read it lost nothing. */
+    if (error_code != CHIMERA_VFS_OK && !ctx->found) {
+        if (nfs4_drc_hydrate_defer(ctx, NFS4_DRC_HYDRA_RETRY, false, 0)) {
+            return;
+        }
+        chimera_nfs_error("NFS4.1 DRC: session record still unreadable "
+                          "(error %d) after two leases; treating the "
+                          "session as unknown", error_code);
+    }
+
+    /* Phase 2: before the session is rebuilt and its record re-persisted
+     * under this node, find which node owned the client -- a failover from a
+     * dead one changes how the client is treated (nfs4_drc_hydrate_owner_cb).
+     * All of it completes before the hydra entry flips to DONE, so the client,
+     * held off with NFS4ERR_DELAY until then, never sees a half-decided
+     * state. */
+    if (ctx->found) {
+        nfs_recovery_lookup_owner(thread->vfs_thread,
+                                  &thread->shared->nfs4_recovery,
+                                  ctx->srec.owner, ctx->srec.owner_len,
+                                  nfs4_drc_hydrate_owner_cb, ctx);
+        return;
+    }
+    nfs4_drc_hydrate_replies(ctx);
 } /* nfs4_drc_hydrate_session_complete */
 
 enum nfs4_drc_hydrate_result
@@ -940,6 +1268,8 @@ nfs4_drc_session_hydrate(
     struct nfs_recovery              *rec    = &shared->nfs4_recovery;
     struct nfs4_drc_hydra            *h;
     struct nfs4_drc_hydrate_ctx      *ctx;
+    uint64_t peer_seen_ns   = 0;
+    uint16_t peer_seen_node = 0;
 
     /* Nothing is persisted unless the 4.1 reply cache is on and the backend is
      * durable -- an unknown session is then simply unknown. */
@@ -947,26 +1277,51 @@ nfs4_drc_session_hydrate(
         return NFS4_DRC_HYDRATE_ABSENT;
     }
 
+    /* Out of memory: change nothing, and let the client retry on DELAY. */
+    ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return NFS4_DRC_HYDRATE_INFLIGHT;
+    }
+
     evpl_mutex_lock(&shared->nfs4_drc_hydra_lock);
     HASH_FIND(hh, shared->nfs4_drc_hydra, sessionid, NFS4_SESSIONID_SIZE, h);
-    if (h) {
+    if (h && h->state != NFS4_DRC_HYDRA_RETRY &&
+        h->state != NFS4_DRC_HYDRA_REPLY_RETRY) {
         enum nfs4_drc_hydrate_result r =
             (h->state == NFS4_DRC_HYDRA_DONE) ? NFS4_DRC_HYDRATE_ABSENT
                                               : NFS4_DRC_HYDRATE_INFLIGHT;
         evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+        free(ctx);
         return r;
     }
-    h = calloc(1, sizeof(*h));
-    memcpy(h->sessionid, sessionid, NFS4_SESSIONID_SIZE);
+    if (h) {
+        peer_seen_ns   = h->peer_seen_ns;
+        peer_seen_node = h->peer_seen_node;
+    } else {
+        h = calloc(1, sizeof(*h));
+        if (!h) {
+            evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+            free(ctx);
+            return NFS4_DRC_HYDRATE_INFLIGHT;
+        }
+        memcpy(h->sessionid, sessionid, NFS4_SESSIONID_SIZE);
+        HASH_ADD(hh, shared->nfs4_drc_hydra, sessionid, NFS4_SESSIONID_SIZE, h);
+    }
+    /* A REPLY_RETRY entry is still counted; its session went away meanwhile,
+     * so it is hydrated again from the start. */
+    if (h->state != NFS4_DRC_HYDRA_REPLY_RETRY) {
+        atomic_fetch_add(&shared->nfs4_drc_hydrating, 1);
+    }
     h->state = NFS4_DRC_HYDRA_INFLIGHT;
-    HASH_ADD(hh, shared->nfs4_drc_hydra, sessionid, NFS4_SESSIONID_SIZE, h);
     evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
 
     /* First contact for this sessionid: scan its band out of the KV store.
-     * Phase 1 reconstructs the session (+ client); phase 2 repopulates its
+     * Phase 1 reads the session record; phase 2 decides whether the client
+     * failed over and rebuilds the session (+ client); phase 3 repopulates its
      * reply slots; then the hydra entry flips to DONE. */
-    ctx         = calloc(1, sizeof(*ctx));
-    ctx->thread = thread;
+    ctx->thread         = thread;
+    ctx->peer_seen_ns   = peer_seen_ns;
+    ctx->peer_seen_node = peer_seen_node;
     memcpy(ctx->sessionid, sessionid, NFS4_SESSIONID_SIZE);
     nfs_kv_session_key(ctx->sstart, sessionid);
 
@@ -977,3 +1332,40 @@ nfs4_drc_session_hydrate(
                             nfs4_drc_hydrate_session_complete, ctx);
     return NFS4_DRC_HYDRATE_INFLIGHT;
 } /* nfs4_drc_session_hydrate */
+
+bool
+nfs4_drc_session_hydrating(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *sessionid)
+{
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct nfs4_drc_hydra            *h;
+    struct nfs4_drc_hydrate_ctx      *ctx = NULL;
+    bool                              hydrating;
+
+    if (atomic_load_explicit(&shared->nfs4_drc_hydrating,
+                             memory_order_acquire) == 0) {
+        return false;
+    }
+
+    evpl_mutex_lock(&shared->nfs4_drc_hydra_lock);
+    HASH_FIND(hh, shared->nfs4_drc_hydra, sessionid, NFS4_SESSIONID_SIZE, h);
+    hydrating = h && h->state != NFS4_DRC_HYDRA_DONE;
+    if (h && h->state == NFS4_DRC_HYDRA_REPLY_RETRY) {
+        ctx = calloc(1, sizeof(*ctx));
+        if (ctx) {
+            h->state = NFS4_DRC_HYDRA_INFLIGHT;
+        }
+    }
+    evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+
+    /* The session is published but its reply scan failed: scan again. */
+    if (ctx) {
+        ctx->thread   = thread;
+        ctx->found    = true;
+        ctx->restored = true;
+        memcpy(ctx->sessionid, sessionid, NFS4_SESSIONID_SIZE);
+        nfs4_drc_hydrate_replies(ctx);
+    }
+    return hydrating;
+} /* nfs4_drc_session_hydrating */

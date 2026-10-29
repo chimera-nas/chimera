@@ -219,6 +219,16 @@ struct nfs4_client {
     /* Set once the client has issued RECLAIM_COMPLETE; a second one is
      * NFS4ERR_COMPLETE_ALREADY (RFC 8881 §18.51.4). */
     uint8_t               nfs4_client_reclaim_complete;
+    /* A client that failed over from a dead peer and is asked to reclaim (see
+     * nfs4_client_mark_failover) has reclaim_complete cleared so its
+     * CLAIM_PREVIOUS is accepted.  This records whether it had already sent
+     * RECLAIM_COMPLETE before the failover (persisted evidence on its session
+     * record), so its non-reclaim OPENs are not held back waiting for a second
+     * one it may never send. */
+    uint8_t               nfs4_client_recovered;
+    /* Set by the first nfs4_client_mark_failover: each of the client's
+     * sessions is rebuilt, and may decide on the failover, separately. */
+    uint8_t               nfs4_client_failover_marked;
     /* NFSv4.0 SETCLIENTID/SETCLIENTID_CONFIRM handshake (RFC 7530 §16.33/16.34).
      * When a SETCLIENTID leaves a confirm pending on this record, the 8-byte
      * verifier the client must echo back is stored here and scid_confirm_valid
@@ -498,6 +508,24 @@ bool
 nfs4_client_reclaim_complete(
     struct nfs4_client_table *table,
     uint64_t                  client_id);
+
+/* True while the client owes a RECLAIM_COMPLETE before its non-reclaim OPENs
+ * are served: it has not sent one, and it is not a failed-over client known
+ * to have sent one before the failover. */
+bool
+nfs4_client_needs_reclaim_complete(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id);
+
+/* A client rebuilt from its session record after its node died: clear
+ * reclaim_complete so it may reclaim here, recording in `recovered` whether
+ * it had completed reclaim before.  Only the first call per client does so; a
+ * later one (another of its sessions) keeps what that reclaim has reached. */
+void
+nfs4_client_mark_failover(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    bool                      recovered);
 
 /*
  * DESTROY_CLIENTID (RFC 8881 §18.50): returns NFS4ERR_STALE_CLIENTID if no

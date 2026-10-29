@@ -283,6 +283,11 @@ struct nfs_client {
      * yet FREE_STATEID'd.  Drives SEQ4_STATUS_RECALLABLE_STATE_REVOKED. */
     _Atomic uint32_t         revoked_deleg_count;
 
+    /* Failed over from a dead node and owes a reclaim: every session's
+     * SEQUENCE raises SEQ4_STATUS_RESTART_RECLAIM_NEEDED until the client's
+     * RECLAIM_COMPLETE. */
+    _Atomic bool             reclaim_needed;
+
     /* pNFS layouts held by this client, hashed by file handle (NFSv4.1+).
      * Cascade-freed in nfs_client_destroy on lease expiry / DESTROY_CLIENTID.
      * Recalls reach the client over the shared cb_path (see nfs4_callback.c). */

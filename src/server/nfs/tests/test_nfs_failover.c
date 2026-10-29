@@ -25,6 +25,7 @@
 #include "nfs_common.h"
 #include "nfs4_session.h"
 #include "nfs4_recovery.h"
+#include "nfs4_drc.h"
 #include "nfs_kv_keys.h"
 
 #define CHECK(cond) do { \
@@ -196,10 +197,11 @@ kv_legacy_exists(
 } /* kv_legacy_exists */
 
 static void
-seed_client(
+seed_client_boot(
     struct kv_env *env,
     const char    *owner,
-    uint16_t       owner_node)
+    uint16_t       owner_node,
+    uint64_t       boot_id)
 {
     struct nfs_client c;
     uint8_t           key[CHIMERA_KV_NFS_KEY_MAX];
@@ -214,8 +216,19 @@ seed_client(
     memcpy(c.owner_string, owner, c.owner_len);
 
     key_len   = nfs_kv_client_key(key, owner, c.owner_len);
-    value_len = nfs_recovery_serialize(value, sizeof(value), &c, owner_node);
+    value_len = nfs_recovery_serialize(value, sizeof(value), &c, owner_node,
+                                       boot_id);
     kv_put(env, key, key_len, value, value_len);
+} /* seed_client_boot */
+
+/* Written by the boot seed_epoch() reports. */
+static void
+seed_client(
+    struct kv_env *env,
+    const char    *owner,
+    uint16_t       owner_node)
+{
+    seed_client_boot(env, owner, owner_node, 5);
 } /* seed_client */
 
 /* An NFR2 value under the legacy per-node key, as an older build wrote it. */
@@ -396,7 +409,30 @@ import_done(
     w->done        = true;
 } /* import_done */
 
-/* *seen is the heartbeat observed by the previous call; updated on return. */
+/* *seen is the heartbeat observed by the previous call; updated on return.
+ * `record_boot` is the boot that wrote owner's record (0 = unknown). */
+static enum nfs_recovery_failover
+import_boot(
+    struct kv_env       *env,
+    struct nfs_recovery *rec,
+    uint16_t             peer,
+    const char          *owner,
+    uint64_t             record_boot,
+    uint64_t            *seen)
+{
+    struct import_wait w = { 0 };
+
+    nfs_recovery_import_peer(env->vfs_thread, rec, peer, owner, strlen(owner),
+                             record_boot, *seen, import_done, &w);
+    while (!w.done) {
+        evpl_continue(env->evpl);
+    }
+    if (!*seen) {
+        *seen = w.observed_ns;
+    }
+    return w.result;
+} /* import_boot */
+
 static enum nfs_recovery_failover
 import_seen(
     struct kv_env       *env,
@@ -405,17 +441,7 @@ import_seen(
     const char          *owner,
     uint64_t            *seen)
 {
-    struct import_wait w = { 0 };
-
-    nfs_recovery_import_peer(env->vfs_thread, rec, peer, owner, strlen(owner),
-                             *seen, import_done, &w);
-    while (!w.done) {
-        evpl_continue(env->evpl);
-    }
-    if (!*seen) {
-        *seen = w.observed_ns;
-    }
-    return w.result;
+    return import_boot(env, rec, peer, owner, 0, seen);
 } /* import_seen */
 
 static enum nfs_recovery_failover
@@ -434,19 +460,22 @@ struct lookup_wait {
     bool     done;
     enum nfs_recovery_owner result;
     uint16_t node;
+    uint64_t boot_id;
 };
 
 static void
 lookup_done(
     enum nfs_recovery_owner result,
     uint16_t                node,
+    uint64_t                boot_id,
     void                   *arg)
 {
     struct lookup_wait *w = arg;
 
-    w->result = result;
-    w->node   = node;
-    w->done   = true;
+    w->result  = result;
+    w->node    = node;
+    w->boot_id = boot_id;
+    w->done    = true;
 } /* lookup_done */
 
 static struct lookup_wait
@@ -501,6 +530,7 @@ test_import_only_dead_peer(void)
     /* An unreadable record is an error, not an absent one. */
     lw = lookup(&env, &rec, "dead_a");
     CHECK(lw.result == NFS_RECOVERY_OWNER_FOUND && lw.node == 2);
+    CHECK(lw.boot_id == 5);
     CHECK(lookup(&env, &rec, "nobody").result == NFS_RECOVERY_OWNER_ABSENT);
     CHECK(lookup(&env, &rec, "corrupt_f").result == NFS_RECOVERY_OWNER_ERROR);
 
@@ -594,6 +624,154 @@ test_import_only_dead_peer(void)
     printf("ok: import_only_dead_peer\n");
 } /* test_import_only_dead_peer */
 
+/* A peer that restarted lost the state its earlier boot held: those clients
+ * fail over, while the ones its running boot wrote are still its own. */
+static void
+test_restarted_peer(void)
+{
+    struct kv_env       env;
+    struct nfs_recovery rec;
+    struct nfs_client   c;
+    uint64_t            seen = 0;
+
+    kv_env_init(&env);
+    seed_client_boot(&env, "old_boot_a", 2, 5);
+    seed_client_boot(&env, "new_boot_b", 2, 6);
+    seed_client_boot(&env, "new_boot_c", 2, 6);
+    seed_epoch_boot(&env, 2, 1, 6); /* node 2 is up again, on boot 6 */
+    node_start(&rec, &env, 1);
+
+    CHECK(import_boot(&env, &rec, 2, "new_boot_b", 6, &seen) ==
+          NFS_RECOVERY_LIVENESS_PENDING);
+    seen = 0;
+    CHECK(import_boot(&env, &rec, 2, "old_boot_a", 5, &seen) ==
+          NFS_RECOVERY_FAILOVER);
+    CHECK(in_reclaim_set(&rec, "old_boot_a", NULL));
+    CHECK(!in_reclaim_set(&rec, "new_boot_b", NULL));
+    CHECK(rec.in_grace);
+
+    /* Boot 6 then dies as well: its own clients are still scanned. */
+    seed_epoch_boot(&env, 2, 3600, 6);
+    CHECK(import_boot(&env, &rec, 2, "new_boot_b", 6, &seen) ==
+          NFS_RECOVERY_FAILOVER);
+    CHECK(in_reclaim_set(&rec, "new_boot_b", NULL));
+    CHECK(in_reclaim_set(&rec, "new_boot_c", NULL));
+
+    /* old_boot_a reclaims here, goes back to node 2's next boot, and that
+    * boot dies: the newer record is a new obligation, not a duplicate. */
+    memset(&c, 0, sizeof(c));
+    c.owner_len = 10;
+    memcpy(c.owner_string, "old_boot_a", 10);
+    nfs_recovery_reclaim_complete(&rec, &c);
+    seed_client_boot(&env, "old_boot_a", 2, 7);
+    seed_epoch_boot(&env, 2, 3600, 7);
+    CHECK(import_boot(&env, &rec, 2, "old_boot_a", 7, &seen) ==
+          NFS_RECOVERY_FAILOVER);
+
+    /* new_boot_b went back to node 2 as well (boot 8 rewrote its record):
+     * closing the window purges new_boot_c, never reclaimed and unchanged, but
+     * not the record a later boot wrote. */
+    seed_client_boot(&env, "new_boot_b", 2, 8);
+    evpl_mutex_lock(&rec.lock);
+    rec.grace_end_ns = 0;
+    evpl_mutex_unlock(&rec.lock);
+    nfs_recovery_sweep_once(&rec, env.vfs_thread);
+    CHECK(!rec.in_grace);
+    kv_wait_gone(&env, "new_boot_c");
+    CHECK(kv_client_owner(&env, "new_boot_b") == 2);
+
+    nfs_recovery_free(&rec);
+    kv_env_destroy(&env);
+    printf("ok: restarted_peer\n");
+} /* test_restarted_peer */
+
+struct rc_wait {
+    bool done;
+    bool ok;
+};
+
+static void
+rc_done(
+    bool  ok,
+    void *arg)
+{
+    struct rc_wait *w = arg;
+
+    w->ok   = ok;
+    w->done = true;
+} /* rc_done */
+
+static bool
+persist_rc(
+    struct kv_env       *env,
+    struct nfs4_session *session)
+{
+    struct rc_wait w = { 0 };
+
+    nfs4_drc_persist_reclaim_complete(env->vfs_thread, session, rc_done, &w);
+    while (!w.done) {
+        evpl_continue(env->evpl);
+    }
+    return w.ok;
+} /* persist_rc */
+
+/* RECLAIM_COMPLETE answers only once its bit is durable on the session
+ * record; no record (or a corrupt one) leaves nothing to mark. */
+static void
+test_reclaim_complete_persisted(void)
+{
+    struct kv_env                  env;
+    struct nfs4_drc_session_record srec, out;
+    struct kv_wait                 w = { 0 };
+    struct nfs4_session           *session;
+    uint8_t                        key[CHIMERA_KV_SESSION_KEY_LEN];
+    uint8_t                        val[512];
+    uint32_t                       key_len, val_len;
+
+    kv_env_init(&env);
+    session = calloc(1, sizeof(*session));
+    CHECK(session);
+    atomic_init(&session->destroyed, false);
+    memset(session->nfs4_session_id, 0x3C, NFS4_SESSIONID_SIZE);
+    memset(&srec, 0, sizeof(srec));
+    srec.clientid  = 42;
+    srec.owner_len = 5;
+    memcpy(srec.owner, "owner", 5);
+    key_len = nfs_kv_session_key(key, session->nfs4_session_id);
+    val_len = nfs4_drc_session_serialize(val, sizeof(val), &srec);
+    kv_put(&env, key, key_len, val, val_len);
+
+    CHECK(persist_rc(&env, session));
+    chimera_vfs_get_key(env.vfs_thread, key, key_len, kv_get_done, &w);
+    kv_wait_loop(&env, &w);
+    CHECK(nfs4_drc_session_deserialize(w.value, w.value_len, &out) == 0);
+    CHECK(out.flags & NFS4_DRC_SESSION_RECLAIM_COMPLETE);
+    CHECK(out.clientid == 42);
+
+    /* Already set, absent, or corrupt: nothing to write, still ok. */
+    CHECK(persist_rc(&env, session));
+    memset(session->nfs4_session_id, 0x3D, NFS4_SESSIONID_SIZE);
+    CHECK(persist_rc(&env, session));
+    key_len = nfs_kv_session_key(key, session->nfs4_session_id);
+    kv_put(&env, key, key_len, "garbage", 7);
+    CHECK(persist_rc(&env, session));
+
+    /* Destroyed while the bit was being written: the record is not left. */
+    memset(session->nfs4_session_id, 0x3E, NFS4_SESSIONID_SIZE);
+    key_len = nfs_kv_session_key(key, session->nfs4_session_id);
+    kv_put(&env, key, key_len, val, val_len);
+    atomic_store(&session->destroyed, true);
+    CHECK(persist_rc(&env, session));
+    memset(&w, 0, sizeof(w));
+    chimera_vfs_get_key(env.vfs_thread, key, key_len, kv_get_done, &w);
+    kv_wait_loop(&env, &w);
+    CHECK(w.error == CHIMERA_VFS_ENOENT || w.value_len == 0);
+
+    free(session);
+    kv_env_destroy(&env);
+    printf("ok: reclaim_complete_persisted\n");
+} /* test_reclaim_complete_persisted */
+
 int
 main(void)
 {
@@ -602,5 +780,7 @@ main(void)
     test_cold_start_filters_and_migrates();
     test_forget_only_owned();
     test_import_only_dead_peer();
+    test_restarted_peer();
+    test_reclaim_complete_persisted();
     return 0;
 } /* main */
