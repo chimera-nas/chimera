@@ -1124,9 +1124,11 @@ nfs_lock_state_lock_end(
     struct nfs_lock_state *state);
 
 /* Drop a LOCK's acquire ref on `state` when the LOCK establishes no lock (a
- * refused nfs_lock_state_lock_begin, DENIED, or an INVAL / RESOURCE failure),
- * destroying the state too if this LOCK `created` it.  Safe when a CLOSE,
- * expiry or FREE_STATEID teardown has already dropped the lifetime ref. */
+ * refused nfs_lock_state_lock_begin, DENIED, or an INVAL / RESOURCE failure).
+ * If this LOCK `created` the state, it is torn down first, through
+ * nfs_lock_state_free, unless another LOCK has pinned it or linked a range
+ * onto it since.  Safe when a CLOSE, expiry or FREE_STATEID teardown has
+ * already dropped the lifetime ref. */
 SYMBOL_EXPORT void
 nfs_lock_state_lock_abandon(
     struct nfs_lock_state     *state,

@@ -1777,11 +1777,17 @@ lock_state_cleanup(
     free(state);
 } /* lock_state_cleanup */
 
-void
-nfs_lock_state_destroy(
+/* With `caller_holds_ref` the caller owns an acquire ref it drops afterwards,
+ * so the lifetime ref dropped here is never the last one: say so with an
+ * abort rather than run cleanup under the caller.  Without that, the static
+ * analyzer cannot see the ref and reports the caller's release as a
+ * use-after-free. */
+static void
+lock_state_destroy_common(
     struct nfs_lock_state     *state,
     struct nfs_state_table    *table,
-    struct chimera_vfs_thread *vfs_thread)
+    struct chimera_vfs_thread *vfs_thread,
+    bool                       caller_holds_ref)
 {
     struct nfs_lock_owner *lock_owner = state->lock_owner;
     struct nfs_open_state *open_state = state->open_state;
@@ -1817,8 +1823,20 @@ nfs_lock_state_destroy(
     uint32_t prev = atomic_fetch_sub_explicit(&state->refcount, 1,
                                               memory_order_acq_rel);
     if (prev == 1) {
+        chimera_nfs_abort_if(caller_holds_ref,
+                             "lock_state %p lost its last ref to destroy "
+                             "while the caller still held one", state);
         lock_state_cleanup(state, table, vfs_thread);
     }
+} /* lock_state_destroy_common */
+
+void
+nfs_lock_state_destroy(
+    struct nfs_lock_state     *state,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    lock_state_destroy_common(state, table, vfs_thread, false);
 } /* nfs_lock_state_destroy */
 
 bool
@@ -1862,13 +1880,20 @@ nfs_lock_state_lock_abandon(
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread)
 {
-    /* Destroy before release.  A CLOSE or expiry teardown (or, behind a
-     * refused pin, a FREE_STATEID) may already have dropped the lifetime ref,
-     * leaving this LOCK's acquire ref as the last: released first, it would
-     * free the state under the destroy.  destroy is idempotent, and the
-     * acquire ref keeps the state alive through it. */
+    /* A state this LOCK created goes through the FREE_STATEID decision, as
+     * seqid 0, rather than straight to destroy: once on lock_owner->states it
+     * is open to the 4.1 reuse scan, so a second new_lock_owner LOCK by the
+     * same lock-owner on the same file may have re-acquired it meanwhile.
+     * That LOCK's pin (DELAY) or granted range (LOCKS_HELD) keeps the state
+     * alive as its own; BAD_STATEID means a CLOSE, expiry or FREE_STATEID
+     * teardown got there first and destroys it itself.
+     *
+     * Free before release.  That teardown may already have dropped the
+     * lifetime ref, leaving this LOCK's acquire ref as the last: released
+     * first, it would free the state under nfs_lock_state_free.  The acquire
+     * ref keeps the state alive through it. */
     if (created) {
-        nfs_lock_state_destroy(state, table, vfs_thread);
+        (void) nfs_lock_state_free(state, 0, table, vfs_thread);
     }
     nfs_state_table_release(table, state, NFS4_SLOT_TYPE_LOCK, vfs_thread);
 } /* nfs_lock_state_lock_abandon */
@@ -1914,7 +1939,7 @@ nfs_lock_state_free(
     evpl_mutex_unlock(&lock_owner->lock);
 
     /* The caller's acquire ref keeps `state` valid until it releases. */
-    nfs_lock_state_destroy(state, table, vfs_thread);
+    lock_state_destroy_common(state, table, vfs_thread, true);
     return NFS4_OK;
 } /* nfs_lock_state_free */
 
