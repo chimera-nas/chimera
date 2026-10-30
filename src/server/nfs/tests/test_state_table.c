@@ -437,6 +437,54 @@ test_lock_state_free_interlock(void)
     printf("ok: lock_state_free_interlock\n");
 } /* test_lock_state_free_interlock */
 
+/* A LOCK that created a lock state loses the pin to a CLOSE: the cascade
+ * destroys the state and leaves the LOCK's acquire ref as the last one, so
+ * abandoning the state must not touch it after that ref is dropped. */
+static void
+test_lock_pin_refused_after_close(void)
+{
+    struct nfs_state_table table;
+    struct nfs_client     *client;
+    struct nfs_open_owner *oo;
+    struct nfs_open_state *os;
+    struct nfs_lock_owner *lo;
+    struct nfs_lock_state *ls;
+    struct stateid4        sid, lock_sid;
+    void                  *acquired;
+    uint8_t                acquired_type;
+    bool                   created;
+    uint8_t                fh[4] = { 0x0F, 0x5E, 0xED, 0x02 };
+
+    nfs_state_table_init(&table, 1);
+    client = nfs_client_alloc(8, "client-pin", 10, 0x7923, /*minor*/ 1);
+    oo     = nfs_open_owner_find_or_create(client, "owner-P", 7, &created);
+    os     = nfs_open_state_create(oo, 0, NULL, 0, fh, sizeof(fh),
+                                   OPEN4_SHARE_ACCESS_BOTH,
+                                   OPEN4_SHARE_DENY_NONE,
+                                   /*handle_dup*/ NULL, &table, &sid);
+    lo = nfs_lock_owner_find_or_create(client, "lockowner-P", 11, &created);
+    ls = nfs_lock_state_create(lo, os, NULL, &table, &lock_sid);
+    CHECK(ls != NULL);
+
+    /* The LOCK's own acquire ref, held across the range claim. */
+    CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
+                                  &acquired, &acquired_type) == NFS4_OK);
+
+    /* CLOSE lands before the LOCK pins the state. */
+    nfs_open_state_destroy(os, &table, NULL);
+    CHECK(!nfs_lock_state_lock_begin(ls));
+
+    nfs_lock_state_lock_abandon(ls, /*created*/ true, &table, NULL);
+    CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
+                                  &acquired, &acquired_type) != NFS4_OK);
+
+    nfs_lock_owner_put(lo);
+    nfs_open_owner_put(oo);
+    nfs_client_destroy(client, &table, NULL, true);
+    nfs_state_table_free(&table, NULL);
+    printf("ok: lock_pin_refused_after_close\n");
+} /* test_lock_pin_refused_after_close */
+
 int
 main(
     int   argc,
@@ -452,6 +500,7 @@ main(
     test_acquire_status_translation();
     test_stateid_seqid_wrap();
     test_lock_state_free_interlock();
+    test_lock_pin_refused_after_close();
     printf("PASS: all state table tests\n");
     return 0;
 } /* main */

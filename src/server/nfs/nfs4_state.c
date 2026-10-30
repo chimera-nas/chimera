@@ -1855,6 +1855,24 @@ nfs_lock_state_lock_end(struct nfs_lock_state *state)
     evpl_mutex_unlock(&lock_owner->lock);
 } /* nfs_lock_state_lock_end */
 
+void
+nfs_lock_state_lock_abandon(
+    struct nfs_lock_state     *state,
+    bool                       created,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    /* Destroy before release.  A refused pin means a FREE_STATEID, CLOSE or
+     * expiry teardown already started and may have dropped the lifetime ref,
+     * leaving this LOCK's acquire ref as the last: released first, it would
+     * free the state under the destroy.  destroy is idempotent, and the
+     * acquire ref keeps the state alive through it. */
+    if (created) {
+        nfs_lock_state_destroy(state, table, vfs_thread);
+    }
+    nfs_state_table_release(table, state, NFS4_SLOT_TYPE_LOCK, vfs_thread);
+} /* nfs_lock_state_lock_abandon */
+
 nfsstat4
 nfs_lock_state_free(
     struct nfs_lock_state     *state,

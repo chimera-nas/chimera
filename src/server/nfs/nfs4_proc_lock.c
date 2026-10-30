@@ -339,6 +339,12 @@ chimera_nfs4_lock_complete(
                             lock_state->shard, lock_state->slot_idx,
                             lock_state->generation, table->epoch);
 
+        /* Drop the pin taken at dispatch.  Its unlock publishes the linked
+         * range and the advanced seqid to a FREE_STATEID waiting on
+         * lock_owner->lock, which then answers LOCKS_HELD or OLD_STATEID
+         * instead of destroying the state. */
+        nfs_lock_state_lock_end(lock_state);
+
         res->status = NFS4_OK;
         chimera_nfs4_set_current_stateid(req, &res->resok4.lock_stateid);
 
@@ -352,6 +358,10 @@ chimera_nfs4_lock_complete(
     /* DENIED (or wait=false BREAKING): discard the half-built range claim. */
     chimera_vfs_state_put(vfs_state, rl->file_state);
     free(rl);
+
+    /* Drop the pin taken at dispatch: the state is as it was before this
+     * LOCK, so a FREE_STATEID of it may proceed. */
+    nfs_lock_state_lock_end(lock_state);
 
     /* Tear down the freshly-allocated lock_state if this was a new
      * lock_owner request that created one; otherwise (existing stateid, or a
@@ -947,6 +957,26 @@ chimera_nfs4_lock(
         rl->claim.is_alive_cb = nfs_client_lease_alive;
         rl->claim.revoked_cb  = nfs_client_lease_revoked_cb;
         rl->claim.cb_private  = lock_state->lock_owner->client;
+
+        /* Pin the lock_state until chimera_nfs4_lock_complete, so a
+         * FREE_STATEID cannot destroy it while this LOCK's claim is in
+         * flight: the Linux client reuses a lock-owner as soon as it frees
+         * its stateid, and under nconnect that FREE can land after this LOCK
+         * re-established the same stateid.  A failed pin means FREE_STATEID,
+         * CLOSE or expiry got there first; DELAY makes the client re-send,
+         * and the retry creates a fresh state. */
+        if (!nfs_lock_state_lock_begin(lock_state)) {
+            chimera_vfs_state_put(vfs_state, file_state);
+            free(rl);
+            nfs_lock_state_lock_abandon(lock_state,
+                                        args->locker.new_lock_owner &&
+                                        !req->lock_reused,
+                                        table, thread->vfs_thread);
+            req->nfs_state_ref = NULL;
+            res->status        = NFS4ERR_DELAY;
+            chimera_nfs4_lock_finish(req, res->status);
+            return;
+        }
 
         req->nfs_inflight_range = rl;
 

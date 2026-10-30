@@ -1123,6 +1123,16 @@ SYMBOL_EXPORT void
 nfs_lock_state_lock_end(
     struct nfs_lock_state *state);
 
+/* Drop a LOCK's acquire ref on `state` after nfs_lock_state_lock_begin
+ * refused it, destroying the state too if this LOCK `created` it.  Safe when
+ * the teardown that refused the pin has already dropped the lifetime ref. */
+SYMBOL_EXPORT void
+nfs_lock_state_lock_abandon(
+    struct nfs_lock_state     *state,
+    bool                       created,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
 /* FREE_STATEID of a lock stateid presented with `sid_seqid` (RFC 8881
  * 18.38).  Decided under lock_owner->lock, in this order: a state already
  * being torn down is NFS4ERR_BAD_STATEID; a superseded or never-issued seqid
