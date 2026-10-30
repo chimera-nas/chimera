@@ -207,7 +207,8 @@ chimera_nfs4_create_session(
         replay_maxresp_cached,
         &clamped_fore,
         &args->csa_back_chan_attrs,
-        NULL);
+        NULL,
+        (flags & CREATE_SESSION4_FLAG_PERSIST) != 0);
 
     if (!session) {
         res->csr_status = NFS4ERR_STALE_CLIENTID;
@@ -234,8 +235,7 @@ chimera_nfs4_create_session(
     }
 
     nfs4_session_bind_conn(conn, session);
-    req->session                  = session;
-    session->nfs4_session_persist = (flags & CREATE_SESSION4_FLAG_PERSIST) != 0;
+    req->session = session;
 
     /* Persist this session's metadata so a restart can reconstruct it with the
      * same sessionid (and its owning client), letting a persistent client's

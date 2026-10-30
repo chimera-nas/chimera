@@ -156,7 +156,12 @@ struct nfs4_client_table;
 
 /* Reconstruct a persistent session (and its owning confirmed client, with the
  * persisted clientid) into `table`, keyed by the original `sessionid`.  Exposed
- * for the cold-start reload and for unit tests (test_nfs_persist). */
+ * for the cold-start reload and for unit tests (test_nfs_persist).
+ *
+ * Returns the owning client with a reference the caller drops with
+ * nfs_client_put, or NULL, with no session created, when the client must not
+ * come back: its record here was fenced after a cancelled lease, or the
+ * clientid is unknown and another record already holds its owner. */
 struct nfs_client *
 nfs4_drc_reconstruct_session(
     struct nfs4_client_table             *table,

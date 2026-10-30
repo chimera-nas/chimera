@@ -646,6 +646,37 @@ nfs_client_alloc(
     return c;
 } /* nfs_client_alloc */
 
+struct nfs_client *
+nfs_client_get(struct nfs_client *client)
+{
+    if (client) {
+        atomic_fetch_add_explicit(&client->refcount, 1, memory_order_acq_rel);
+    }
+    return client;
+} /* nfs_client_get */
+
+void
+nfs_client_put(struct nfs_client *client)
+{
+    uint32_t prev;
+
+    if (!client) {
+        return;
+    }
+
+    prev = atomic_fetch_sub_explicit(&client->refcount, 1,
+                                     memory_order_acq_rel);
+
+    chimera_nfs_abort_if(prev == 0,
+                         "nfs_client_put: refcount underflow on client %p",
+                         client);
+
+    if (prev == 1) {
+        evpl_mutex_destroy(&client->lock);
+        free(client);
+    }
+} /* nfs_client_put */
+
 /* Destroy a single open_state (unhash + unlink locks + free slot + release
  * lifetime ref).  Caller holds owner->lock or is in single-threaded teardown.
  *
@@ -805,9 +836,13 @@ nfs_client_destroy(
      * connection) before the client struct goes away. */
     nfs4_cb_path_teardown(&client->cb_path, synchronous);
 
+    /* A session can still name the client (see nfs_client_put), so leave it
+     * reading as a cancelled lease rather than a live one. */
+    client->expired = 1;
+
     evpl_mutex_unlock(&client->lock);
-    evpl_mutex_destroy(&client->lock);
-    free(client);
+
+    nfs_client_put(client);
 } /* nfs_client_destroy */
 
 void

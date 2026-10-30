@@ -68,7 +68,7 @@ make_session(
 
     session = nfs4_create_session(table, clientid, 0,
                                   replay_max_slots, replay_maxresp_cached,
-                                  NULL, NULL, NULL);
+                                  NULL, NULL, NULL, false);
     CHECK(session != NULL);
 
     return session;
@@ -483,7 +483,8 @@ test_implicit_session_no_slots(void)
                                     0xfeedfaceULL, 40, NULL, NULL);
 
     /* implicit=1 -> replay_slots stays NULL, replay_max_slots = 0. */
-    session = nfs4_create_session(&table, clientid, 1, 0, 0, NULL, NULL, NULL);
+    session = nfs4_create_session(&table, clientid, 1, 0, 0, NULL, NULL, NULL,
+                                  false);
     CHECK(session != NULL);
     CHECK(session->replay_slots == NULL);
     CHECK(session->replay_max_slots == 0);

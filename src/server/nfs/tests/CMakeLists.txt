@@ -310,6 +310,32 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py")
         ENVIRONMENT "PYTHONUNBUFFERED=1")
 endif()
 
+# Lease-cancel regression, NFSv4.0 and NFSv4.1: a client whose courtesy state
+# another client's OPEN reclaimed must re-register under a new clientid,
+# whatever its verifier, rather than be handed the dead clientid back and stuck
+# (4.0: NFS4ERR_EXPIRED on every OPEN_CONFIRM; 4.1: CONFIRMED_R on the dead
+# clientid).  Runs against a real daemon with a short lease; needs pynfs's 4.0
+# and 4.1 clients, and a network namespace to own port 2049.  The wrapper exits
+# 77 (skip) if pynfs is missing at run time.
+if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py" AND
+   EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
+    add_test(NAME chimera/server/nfs/v40_lease_cancel
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_lease_cancel_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs
+                ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_v40_lease_cancel.py)
+    add_test(NAME chimera/server/nfs/nfs4_41_lease_cancel
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_lease_cancel_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs
+                ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_41_lease_cancel.py)
+    set_tests_properties(chimera/server/nfs/v40_lease_cancel
+                         chimera/server/nfs/nfs4_41_lease_cancel PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180
+        ENVIRONMENT "PYTHONUNBUFFERED=1")
+endif()
+
 # End-to-end NFSv4.1 presented-stateid validation: a superseded stateid seqid
 # must be NFS4ERR_OLD_STATEID (not silently honored -- a stale pipelined CLOSE
 # must not destroy live state), and a wrong-epoch stateid must be

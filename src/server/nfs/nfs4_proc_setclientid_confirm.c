@@ -77,7 +77,8 @@ chimera_nfs4_setclientid_confirm(
                                             args->clientid);
     if (!session) {
         session = nfs4_create_session(&shared->nfs4_shared_clients,
-                                      args->clientid, 1, 0, 0, NULL, NULL, NULL);
+                                      args->clientid, 1, 0, 0, NULL, NULL, NULL,
+                                      false);
     }
 
     if (session) {
