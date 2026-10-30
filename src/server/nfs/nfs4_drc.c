@@ -368,22 +368,31 @@ nfs4_drc_forget_complete(
     free(ctx);
 } /* nfs4_drc_forget_complete */
 
-void
-nfs4_drc_forget_session(
+/* Delete a session's metadata record (fire-and-forget). */
+static void
+nfs4_drc_delete_session_record(
     struct chimera_vfs_thread *vfs_thread,
     const uint8_t             *sessionid)
 {
-    struct nfs4_drc_forget_ctx *ctx;
-    struct nfs4_drc_kv_ctx     *sctx;
-    uint32_t                    slen;
+    struct nfs4_drc_kv_ctx *sctx;
 
-    /* Delete the session-metadata record (fire-and-forget). */
     sctx            = malloc(sizeof(*sctx));
     sctx->value     = NULL;
     sctx->value_len = 0;
     sctx->key_len   = nfs_kv_session_key(sctx->key, sessionid);
     chimera_vfs_delete_key(vfs_thread, sctx->key, sctx->key_len,
                            nfs4_drc_kv_done, sctx);
+} /* nfs4_drc_delete_session_record */
+
+void
+nfs4_drc_forget_session(
+    struct chimera_vfs_thread *vfs_thread,
+    const uint8_t             *sessionid)
+{
+    struct nfs4_drc_forget_ctx *ctx;
+    uint32_t                    slen;
+
+    nfs4_drc_delete_session_record(vfs_thread, sessionid);
 
     /* Then scan + delete this session's reply entries. */
     ctx             = calloc(1, sizeof(*ctx));
@@ -405,7 +414,15 @@ nfs4_drc_forget_session(
 
 /* Reconstruct (idempotently) a confirmed client record with its original
  * clientid so the post-restart EXCHANGE_ID from the same owner resolves to it.
- * Runs under the table lock. */
+ * Runs under the table lock.  Returns the client with a reference for the
+ * caller, or NULL when the session must not bring its client back:
+ *
+ *  - the clientid's record is here but its lease was cancelled.  The fence
+ *    removed the session from memory; rebuilding it on the tombstone would let
+ *    SEQUENCE succeed while every OPEN answers NFS4ERR_EXPIRED.
+ *  - the clientid is unknown but another record holds the owner.  The session
+ *    belongs to a record that was superseded or retired, and restoring it would
+ *    put a second record under the owner. */
 static struct nfs_client *
 nfs4_drc_ensure_client(
     struct nfs4_client_table *table,
@@ -420,15 +437,27 @@ nfs4_drc_ensure_client(
     uint16_t                  princ_mach_len,
     uint64_t                  boot_id)
 {
-    struct nfs4_client *client;
+    struct nfs4_client *client, *holder;
+    struct nfs_client  *unified = NULL;
 
     evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
               &client_id, sizeof(client_id), client);
     if (client) {
+        if (client->unified && !client->nfs4_client_fenced_ns &&
+            !nfs_client_lease_cancelled(client->unified)) {
+            unified = nfs_client_get(client->unified);
+        }
         evpl_mutex_unlock(&table->nfs4_ct_lock);
-        return client->unified;
+        return unified;
+    }
+
+    HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+              owner, owner_len, holder);
+    if (holder) {
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
+        return NULL;
     }
 
     client                        = calloc(1, sizeof(*client));
@@ -506,8 +535,10 @@ nfs4_drc_ensure_client(
         }
     }
 
+    unified = nfs_client_get(client->unified);
+
     evpl_mutex_unlock(&table->nfs4_ct_lock);
-    return client->unified;
+    return unified;
 } /* nfs4_drc_ensure_client */
 
 struct nfs_client *
@@ -525,15 +556,21 @@ nfs4_drc_reconstruct_session(
                                      rec->princ_flavor, rec->princ_uid,
                                      rec->princ_gid,
                                      rec->mach, rec->mach_len, boot_id);
+    if (!unified) {
+        return NULL;
+    }
 
     session = nfs4_create_session(table, rec->clientid, 0,
                                   rec->replay_max_slots, rec->replay_maxresp_cached,
-                                  &rec->fore, &rec->back, sessionid);
-    if (session) {
-        session->nfs4_session_persist = true;
-        /* Drop the +1 caller ref; the hash holds the session. */
-        nfs4_session_put(session);
+                                  &rec->fore, &rec->back, sessionid, true);
+    if (!session) {
+        /* The record went away between the two lookups. */
+        nfs_client_put(unified);
+        return NULL;
     }
+
+    /* Drop the +1 caller ref; the hash holds the session. */
+    nfs4_session_put(session);
     return unified;
 } /* nfs4_drc_reconstruct_session */
 
@@ -627,8 +664,9 @@ struct nfs4_drc_hydrate_ctx {
     uint8_t                           sstart[CHIMERA_KV_SESSION_KEY_LEN];
     uint8_t                           rstart[CHIMERA_KV_REPLY_KEY_LEN];
     bool                              found;
+    bool                              restored;
     uint32_t                          nreplies;
-    struct nfs_client                *hydrated; /* the client the session rebuilt */
+    struct nfs_client                *hydrated; /* the client the session rebuilt (a reference) */
 };
 
 static int
@@ -656,7 +694,8 @@ nfs4_drc_hydrate_session_cb(
     ctx->hydrated = nfs4_drc_reconstruct_session(
         table, ctx->sessionid, &rec,
         thread->shared->nfs4_recovery.current_boot_id);
-    ctx->found = true;
+    ctx->found    = true;
+    ctx->restored = ctx->hydrated != NULL;
     return 0;
 } /* nfs4_drc_hydrate_session_cb */
 
@@ -723,9 +762,12 @@ nfs4_drc_hydrate_reply_complete(
     }
     evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
 
-    if (ctx->found) {
+    if (ctx->restored) {
         chimera_nfs_info("NFS4.1 DRC: hydrated session + %u reply record(s) "
                          "for a returning client", ctx->nreplies);
+    } else if (ctx->found) {
+        chimera_nfs_info("NFS4.1 DRC: dropped a persisted session whose client "
+                         "was fenced or superseded");
     }
     free(ctx);
 } /* nfs4_drc_hydrate_reply_complete */
@@ -746,6 +788,13 @@ nfs4_drc_hydrate_session_complete(
     if (ctx->hydrated) {
         nfs_recovery_persist(thread->vfs_thread,
                              &thread->shared->nfs4_recovery, ctx->hydrated);
+        nfs_client_put(ctx->hydrated);
+        ctx->hydrated = NULL;
+    } else if (ctx->found) {
+        /* The session's client must not come back (nfs4_drc_ensure_client):
+        * drop its record so it is not rebuilt after a restart.  The reply
+        * scan below finds no session and deletes its replies as orphans. */
+        nfs4_drc_delete_session_record(thread->vfs_thread, ctx->sessionid);
     }
 
     /* Session (and its client) are in place; now repopulate its reply slots.

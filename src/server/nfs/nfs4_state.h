@@ -291,6 +291,8 @@ struct nfs_client {
     UT_hash_handle           hh_by_owner;
     UT_hash_handle           hh_by_id;
 
+    /* One reference for the nfs4_client record, one per session naming the
+     * client (see nfs_client_get / nfs_client_put). */
     _Atomic uint32_t         refcount;
     evpl_mutex_t             lock;
 };
@@ -878,9 +880,24 @@ nfs_client_alloc(
     uint64_t    verifier,
     uint8_t     minor);
 
+/* Reference counting.  nfs_client_alloc returns the client with the one
+ * reference its nfs4_client record owns, which nfs_client_destroy drops.  Each
+ * session that names the client in client_unified holds another, so a request
+ * still running on a session never reads a freed client.  The last put frees
+ * the struct.  Both tolerate NULL; get returns its argument so a field can
+ * take the reference in one assignment. */
+SYMBOL_EXPORT struct nfs_client *
+nfs_client_get(
+    struct nfs_client *client);
+
+SYMBOL_EXPORT void
+nfs_client_put(
+    struct nfs_client *client);
+
 /* Tear down everything underneath a client (owners → states → locks),
- * releasing every dup'd VFS handle via vfs_thread, and freeing the struct.
- * Idempotent; safe to call on a fully-empty client. */
+ * releasing every dup'd VFS handle via vfs_thread, mark it expired, and drop
+ * the record's reference; the struct is freed once no session names it.
+ * Call once per client; safe on a fully-empty client. */
 SYMBOL_EXPORT void
 nfs_client_destroy(
     struct nfs_client         *client,
@@ -1282,3 +1299,13 @@ nfs_client_touch(struct nfs_client *client)
     atomic_store_explicit((_Atomic uint64_t *) &client->last_touch_ns,
                           nfs_lease_now_ns(), memory_order_relaxed);
 } /* nfs_client_touch */
+
+/* The client's lease is gone for good: the sweep reaped it, or a conflicting
+ * acquirer reclaimed its courtesy state.  Neither flag is ever cleared, so the
+ * client can only go on under a new clientid (RFC 7530 §9.6.3.2). */
+static inline bool
+nfs_client_lease_cancelled(struct nfs_client *client)
+{
+    return client->expired ||
+           atomic_load_explicit(&client->reclaim_pending, memory_order_acquire);
+} /* nfs_client_lease_cancelled */

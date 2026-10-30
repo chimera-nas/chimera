@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "nfs4_drc.h"
 #include "nfs4_lease.h"
 #include "nfs4_recovery.h"
 #include "nfs4_session.h"
@@ -53,6 +54,45 @@ nfs_deleg_recall_timeout_check(struct nfs_client *uc)
     }
 } /* nfs_deleg_recall_timeout_check */
 
+/* What the sweep does to a client once the table lock is dropped. */
+enum nfs_lease_action {
+    /* Revoke its state, and drop its stable-storage record. */
+    NFS_LEASE_EXPIRE,
+    /* Revoke its state, but keep the stable-storage record: a newer record
+    * for the same owner holds the slot and may already have written it. */
+    NFS_LEASE_EXPIRE_KEEP_RECORD,
+    /* Its tombstone was retired: destroy the state hierarchy. */
+    NFS_LEASE_RETIRE,
+};
+
+struct nfs_lease_victim {
+    struct nfs_client *uc;
+    enum nfs_lease_action action;
+};
+
+static void
+nfs_lease_victim_add(
+    struct nfs_lease_victim **victims,
+    size_t                   *count,
+    size_t                   *capacity,
+    struct nfs_client        *uc,
+    enum nfs_lease_action     action)
+{
+    if (*count == *capacity) {
+        size_t                   new_capacity = *capacity ? *capacity * 2 : 8;
+        struct nfs_lease_victim *new_victims;
+
+        new_victims = realloc(*victims, new_capacity * sizeof(*new_victims));
+        chimera_nfs_abort_if(new_victims == NULL,
+                             "expired client list realloc failed");
+        *victims  = new_victims;
+        *capacity = new_capacity;
+    }
+    (*victims)[*count].uc     = uc;
+    (*victims)[*count].action = action;
+    (*count)++;
+} /* nfs_lease_victim_add */
+
 void
 nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
 {
@@ -60,10 +100,12 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs4_client_table         *table  = &shared->nfs4_shared_clients;
     struct nfs4_client               *cur, *tmp;
-    struct nfs_client               **expired_clients  = NULL;
-    size_t                            expired_count    = 0;
-    size_t                            expired_capacity = 0;
-    uint64_t                          now_ns           = nfs_lease_now_ns();
+    struct nfs_lease_victim          *victims         = NULL;
+    size_t                            victim_count    = 0;
+    size_t                            victim_capacity = 0;
+    struct nfs4_sessionid            *forget_ids;
+    uint32_t                          forget_count;
+    uint64_t                          now_ns = nfs_lease_now_ns();
     uint64_t                          lease_ns;
 
     uint64_t                          courtesy_ns;
@@ -137,21 +179,43 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
             }
 
             if (reap) {
-                uc->expired = 1;
-                if (expired_count == expired_capacity) {
-                    size_t              new_capacity = expired_capacity ?
-                        expired_capacity * 2 : 8;
-                    struct nfs_client **new_clients;
+                struct nfs4_client *holder;
 
-                    new_clients = realloc(expired_clients,
-                                          new_capacity * sizeof(*new_clients));
-                    chimera_nfs_abort_if(new_clients == NULL,
-                                         "expired client list realloc failed");
-                    expired_clients  = new_clients;
-                    expired_capacity = new_capacity;
+                uc->expired = 1;
+
+                if (cur->nfs4_client_confirmed) {
+                    /* The lease is cancelled: take the record out of owner
+                     * matching so the client registers a new clientid.  The
+                     * tombstone's hold restarts now, so it is not retired
+                     * while the teardown below may still be running. */
+                    nfs4_client_fence_locked(table, cur);
+                    cur->nfs4_client_fenced_ns = now_ns ? now_ns : 1;
                 }
-                expired_clients[expired_count++] = uc;
+
+                HASH_FIND(nfs4_client_hh_by_owner,
+                          table->nfs4_ct_clients_by_owner,
+                          cur->nfs4_client_owner, cur->nfs4_client_owner_len,
+                          holder);
+
+                /* Held until the teardown below is done: a superseding
+                 * confirmation may destroy the record once the lock drops. */
+                nfs_client_get(uc);
+                nfs_lease_victim_add(&victims, &victim_count, &victim_capacity,
+                                     uc, holder && holder != cur ?
+                                     NFS_LEASE_EXPIRE_KEEP_RECORD :
+                                     NFS_LEASE_EXPIRE);
             }
+        } else if (cur->nfs4_client_fenced_ns &&
+                   now_ns > cur->nfs4_client_fenced_ns &&
+                   now_ns - cur->nfs4_client_fenced_ns >= lease_ns) {
+            /* The tombstone has answered NFS4ERR_EXPIRED for a full lease,
+             * which is long enough for the client to have seen it.  Without
+             * this a cancelled client would leak its record, since it is never
+             * matched again. */
+            nfs_lease_victim_add(&victims, &victim_count, &victim_capacity,
+                                 nfs4_client_retire_locked(table, cur),
+                                 NFS_LEASE_RETIRE);
+            continue;
         }
 
         /* Keep the client's stable-storage record within half a lease of the
@@ -169,19 +233,42 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
         nfs_deleg_recall_timeout_check(uc);
     }
 
+    forget_count = nfs4_client_take_forgets_locked(table, &forget_ids);
+
     evpl_mutex_unlock(&table->nfs4_ct_lock);
 
-    for (size_t i = 0; i < expired_count; i++) {
-        struct nfs_client *uc = expired_clients[i];
+    for (size_t i = 0; i < victim_count; i++) {
+        struct nfs_client *uc = victims[i].uc;
+
+        if (victims[i].action == NFS_LEASE_RETIRE) {
+            nfs_client_destroy(uc, &shared->nfs4_state_table,
+                               thread->vfs_thread, false);
+            continue;
+        }
 
         nfs_client_expire_state(uc, &shared->nfs4_state_table,
                                 thread->vfs_thread);
         /* Its lease is gone for good: drop the stable-storage record too, so
-         * the next reboot does not wait on a client that cannot reclaim. */
-        nfs_recovery_forget(thread->vfs_thread, &shared->nfs4_recovery,
-                            uc->owner_string, uc->owner_len);
+         * the next reboot does not wait on a client that cannot reclaim.  The
+         * record is keyed by owner, so leave it alone when a newer record for
+         * the owner exists: that one persists or forgets it. */
+        if (victims[i].action == NFS_LEASE_EXPIRE) {
+            nfs_recovery_forget(thread->vfs_thread, &shared->nfs4_recovery,
+                                uc->owner_string, uc->owner_len);
+        }
+        nfs_client_put(uc);
     }
-    free(expired_clients);
+    free(victims);
+
+    /* Persistent sessions of fenced or superseded clients: delete their KV
+     * records, or a SEQUENCE on one would hydrate the session back. */
+    if (shared->nfs4_recovery.nfs4_drc &&
+        !shared->nfs4_recovery.persistence_disabled) {
+        for (uint32_t i = 0; i < forget_count; i++) {
+            nfs4_drc_forget_session(thread->vfs_thread, forget_ids[i].id);
+        }
+    }
+    free(forget_ids);
 #endif /* ifndef __clang_analyzer__ */
 
     /* Record that this instance was alive (see nfs_recovery_heartbeat). */

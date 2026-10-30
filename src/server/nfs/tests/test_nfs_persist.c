@@ -329,9 +329,8 @@ test_cross_reboot_replay(void)
     clientid = nfs4_client_register(&table_a,owner,(int) sizeof(owner) - 1,
                                     0x1234ULL,40,NULL,NULL);
     session = nfs4_create_session(&table_a,clientid,0,8,4096,
-                                  NULL,NULL,NULL);
+                                  NULL,NULL,NULL,true);
     CHECK(session != NULL);
-    session->nfs4_session_persist = true;
     memcpy(sessionid,session->nfs4_session_id,NFS4_SESSIONID_SIZE);
 
     /* Persist its metadata + the cached reply exactly as the write path does. */
@@ -361,18 +360,19 @@ test_cross_reboot_replay(void)
     nfs4_client_table_init(&table_b,1);
 
     CHECK(nfs4_drc_session_deserialize(sbuf,slen,&srec) == 0);
-    nfs4_drc_reconstruct_session(&table_b,sessionid,&srec,0x9999ULL);
+    nfs_client_put(nfs4_drc_reconstruct_session(&table_b,sessionid,&srec,
+                                                0x9999ULL));
 
     /* The session is back, under its ORIGINAL sessionid. */
-    session = nfs4_session_lookup(&table_b,sessionid);
+    session = nfs4_session_lookup(&table_b, sessionid);
     CHECK(session != NULL);
-    CHECK(memcmp(session->nfs4_session_id,sessionid,NFS4_SESSIONID_SIZE) == 0);
+    CHECK(memcmp(session->nfs4_session_id, sessionid, NFS4_SESSIONID_SIZE) == 0);
     CHECK(session->nfs4_session_clientid == srec.clientid);
     CHECK(session->nfs4_session_persist);
 
     /* Repopulate the slot from the persisted reply. */
-    CHECK(nfs4_drc_reply_parse(rbuf,rlen,&pseqid,&pdata,&pdata_len) == 0);
-    nfs4_drc_repopulate_slot(session,SLOT,pseqid,pdata,pdata_len);
+    CHECK(nfs4_drc_reply_parse(rbuf, rlen, &pseqid, &pdata, &pdata_len) == 0);
+    nfs4_drc_repopulate_slot(session, SLOT,pseqid,pdata,pdata_len);
     CHECK(nfs4_slot_state(&session->replay_slots[SLOT]) == NFS4_SLOT_CACHED);
 
     /* The decisive check: a retransmit on {SLOT, SEQ} is served from cache,
@@ -429,9 +429,8 @@ test_cross_reboot_reclaim_complete(void)
     clientid = nfs4_client_register(&table_a,owner,(int) sizeof(owner) - 1,
                                     0x4321ULL,41,NULL,NULL);
     session = nfs4_create_session(&table_a,clientid,0,8,4096,
-                                  NULL,NULL,NULL);
+                                  NULL,NULL,NULL,true);
     CHECK(session != NULL);
-    session->nfs4_session_persist = true;
     memcpy(sessionid,session->nfs4_session_id,NFS4_SESSIONID_SIZE);
     CHECK(!nfs4_client_reclaim_complete(&table_a,clientid));
 
@@ -457,7 +456,8 @@ test_cross_reboot_reclaim_complete(void)
     /* --- instance B: the lazy hydrate a SEQUENCE on the old sessionid runs */
     nfs4_client_table_init(&table_b,1);
     CHECK(nfs4_drc_session_deserialize(sbuf,slen,&srec) == 0);
-    nfs4_drc_reconstruct_session(&table_b,sessionid,&srec,0x9999ULL);
+    nfs_client_put(nfs4_drc_reconstruct_session(&table_b,sessionid,&srec,
+                                                0x9999ULL));
 
     session = nfs4_session_lookup(&table_b,sessionid);
     CHECK(session != NULL);
@@ -525,7 +525,8 @@ test_reclaim_complete_not_granted_to_new_clients(void)
     srec.owner_len             = sizeof(owner) - 1;
     memcpy(srec.owner,owner,srec.owner_len);
 
-    nfs4_drc_reconstruct_session(&table,sessionid,&srec,0x9999ULL);
+    nfs_client_put(nfs4_drc_reconstruct_session(&table,sessionid,&srec,
+                                                0x9999ULL));
     CHECK(!nfs4_client_reclaim_complete(&table,clientid));
 
     nfs4_client_table_destroy_unified(&table,NULL,NULL);
@@ -579,7 +580,8 @@ test_hydrated_client_leaves_owner_table(void)
     srec.owner_len             = sizeof(owner) - 1;
     memcpy(srec.owner,owner,srec.owner_len);
 
-    nfs4_drc_reconstruct_session(&table,sessionid,&srec,0x9999ULL);
+    nfs_client_put(nfs4_drc_reconstruct_session(&table,sessionid,&srec,
+                                                0x9999ULL));
 
     HASH_FIND(nfs4_client_hh_by_owner,table.nfs4_ct_clients_by_owner,
               owner,sizeof(owner) - 1,c);
@@ -617,6 +619,204 @@ test_hydrated_client_leaves_owner_table(void)
 
     printf("ok: hydrated_client_leaves_owner_table\n");
 } /* test_hydrated_client_leaves_owner_table */
+
+/* ------------------------------------------------------------------ *
+*  Cancelled lease: a persisted session must not bring it back       *
+* ------------------------------------------------------------------ */
+
+/* Register a confirmed client with one persistent session; returns the session
+ * with the caller's reference and fills its persisted record. */
+static struct nfs4_session*
+make_persistent_session(
+    struct nfs4_client_table      *table,
+    const uint8_t                 *owner,
+    uint16_t                       owner_len,
+    struct nfs4_drc_session_record*srec)
+{
+    struct nfs4_session*session;
+    struct nfs4_client *c;
+    uint64_t            clientid;
+
+    clientid = nfs4_client_register(table,owner,owner_len,0x7777ULL,41,
+                                    NULL,NULL);
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    HASH_FIND(nfs4_client_hh_by_id,table->nfs4_ct_clients_by_id,
+              &clientid,sizeof(clientid),c);
+    CHECK(c != NULL);
+    c->nfs4_client_confirmed = 1;
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+
+    session = nfs4_create_session(table,clientid,0,8,4096,NULL,NULL,NULL,true);
+    CHECK(session != NULL);
+
+    memset(srec,0,sizeof(*srec));
+    srec->clientid              = clientid;
+    srec->verifier              = 0x7777ULL;
+    srec->princ_flavor          = 1;
+    srec->replay_max_slots      = session->replay_max_slots;
+    srec->replay_maxresp_cached = session->replay_maxresp_cached;
+    srec->owner_len             = owner_len;
+    memcpy(srec->owner,owner,owner_len);
+
+    return session;
+} /* make_persistent_session */
+
+/* Cancel the client's lease and fence its record, as the lease sweep does when
+ * it reaps a confirmed client. */
+static struct nfs4_client*
+cancel_and_fence(
+    struct nfs4_client_table*table,
+    uint64_t                 clientid)
+{
+    struct nfs4_client*c;
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    HASH_FIND(nfs4_client_hh_by_id,table->nfs4_ct_clients_by_id,
+              &clientid,sizeof(clientid),c);
+    CHECK(c != NULL);
+    c->unified->expired = 1;
+    nfs4_client_fence_locked(table,c);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+
+    return c;
+} /* cancel_and_fence */
+
+/*
+ * The fence takes a cancelled client's 4.1 sessions out of memory so the next
+ * SEQUENCE gets NFS4ERR_BADSESSION and the client registers a new clientid.  A
+ * persistent session is still in the KV store, and that SEQUENCE then misses
+ * and hydrates it.  The fence must queue the session's KV records for deletion,
+ * and the hydrate must refuse to rebuild a session on the tombstone: otherwise
+ * SEQUENCE succeeds again while every OPEN answers NFS4ERR_EXPIRED.
+ */
+static void
+test_hydrate_refuses_fenced_client(void)
+{
+    struct nfs4_client_table       table;
+    struct nfs4_drc_session_record srec;
+    struct nfs4_session           *session;
+    uint8_t                        sessionid[NFS4_SESSIONID_SIZE];
+    struct nfs4_sessionid         *ids;
+    uint32_t                       nids;
+    static const uint8_t           owner[] = "co_owner_fenced";
+
+    nfs4_client_table_init(&table,1);
+    session = make_persistent_session(&table,owner,sizeof(owner) - 1,&srec);
+    memcpy(sessionid,session->nfs4_session_id,NFS4_SESSIONID_SIZE);
+    nfs4_session_put(session);
+
+    cancel_and_fence(&table,srec.clientid);
+
+    /* The session left memory, and its KV records are queued for deletion. */
+    CHECK(nfs4_session_lookup(&table,sessionid) == NULL);
+    evpl_mutex_lock(&table.nfs4_ct_lock);
+    nids = nfs4_client_take_forgets_locked(&table,&ids);
+    evpl_mutex_unlock(&table.nfs4_ct_lock);
+    CHECK(nids == 1);
+    CHECK(memcmp(ids[0].id,sessionid,NFS4_SESSIONID_SIZE) == 0);
+    free(ids);
+
+    /* The decisive check: a hydrate that races the deletion is refused. */
+    CHECK(nfs4_drc_reconstruct_session(&table,sessionid,&srec,
+                                       0x9999ULL) == NULL);
+    CHECK(nfs4_session_lookup(&table,sessionid) == NULL);
+    CHECK(HASH_CNT(nfs4_client_hh_by_id,table.nfs4_ct_clients_by_id) == 1);
+    CHECK(HASH_CNT(nfs4_client_hh_by_owner,
+                   table.nfs4_ct_clients_by_owner) == 0);
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    printf("ok: hydrate_refuses_fenced_client\n");
+} /* test_hydrate_refuses_fenced_client */
+
+/*
+ * Once the tombstone is retired, or a reboot superseded the record, the old
+ * clientid is unknown here while a newer record holds the owner.  Rebuilding
+ * the old session would add a second record under that owner.
+ */
+static void
+test_hydrate_refuses_held_owner(void)
+{
+    struct nfs4_client_table       table;
+    struct nfs4_drc_session_record srec;
+    struct nfs4_client            *c;
+    uint8_t                        sessionid[NFS4_SESSIONID_SIZE];
+    static const uint8_t           owner[] = "co_owner_held";
+    uint64_t                       holder_id;
+
+    nfs4_client_table_init(&table,1);
+    holder_id = nfs4_client_register(&table,owner,(int) sizeof(owner) - 1,
+                                     0x8888ULL,41,NULL,NULL);
+
+    memset(sessionid,0x3C,NFS4_SESSIONID_SIZE);
+    memset(&srec,0,sizeof(srec));
+    srec.clientid              = nfs4_make_clientid(1,4242);
+    srec.verifier              = 0x7777ULL;
+    srec.princ_flavor          = 1;
+    srec.replay_max_slots      = 8;
+    srec.replay_maxresp_cached = 4096;
+    srec.owner_len             = sizeof(owner) - 1;
+    memcpy(srec.owner,owner,srec.owner_len);
+
+    CHECK(nfs4_drc_reconstruct_session(&table,sessionid,&srec,
+                                       0x9999ULL) == NULL);
+    CHECK(nfs4_session_lookup(&table,sessionid) == NULL);
+    CHECK(HASH_CNT(nfs4_client_hh_by_id,table.nfs4_ct_clients_by_id) == 1);
+    HASH_FIND(nfs4_client_hh_by_owner,table.nfs4_ct_clients_by_owner,
+              owner,sizeof(owner) - 1,c);
+    CHECK(c != NULL);
+    CHECK(c->nfs4_client_id == holder_id);
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    printf("ok: hydrate_refuses_held_owner\n");
+} /* test_hydrate_refuses_held_owner */
+
+/*
+ * The sweep retires a tombstone one lease after the fence and frees its client,
+ * while a request may still be running on a session that names it and read
+ * the client after the table lock is dropped (RENEW does this through the
+ * implicit v4.0 session, a 4.1 compound through its own).  The session's
+ * reference must keep the client readable, and the client must read as
+ * cancelled.  ASan reports a
+ * use-after-free here if it does not.
+ */
+static void
+test_retired_client_outlives_session(void)
+{
+    struct nfs4_client_table       table;
+    struct nfs4_drc_session_record srec;
+    struct nfs4_session           *session;
+    struct nfs4_client            *c;
+    struct nfs_client             *uc;
+    static const uint8_t           owner[] = "co_owner_retired";
+
+    nfs4_client_table_init(&table,1);
+    session = make_persistent_session(&table,owner,sizeof(owner) - 1,&srec);
+
+    c = cancel_and_fence(&table,srec.clientid);
+
+    evpl_mutex_lock(&table.nfs4_ct_lock);
+    uc = nfs4_client_retire_locked(&table,c);
+    evpl_mutex_unlock(&table.nfs4_ct_lock);
+    CHECK(uc == session->client_unified);
+    nfs_client_destroy(uc,NULL,NULL,true);
+
+    /* The decisive check: still readable through the in-flight request's
+     * session reference, and cancelled. */
+    CHECK(session->client_unified->client_id == srec.clientid);
+    CHECK(nfs_client_lease_cancelled(session->client_unified));
+
+    nfs4_session_put(session);
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    printf("ok: retired_client_outlives_session\n");
+} /* test_retired_client_outlives_session */
 
 /*
  * A cold-start loader that forced the grace window open before its async KV
@@ -1630,6 +1830,9 @@ main(void)
     test_cross_reboot_reclaim_complete();
     test_reclaim_complete_not_granted_to_new_clients();
     test_hydrated_client_leaves_owner_table();
+    test_hydrate_refuses_fenced_client();
+    test_hydrate_refuses_held_owner();
+    test_retired_client_outlives_session();
     test_grace_survives_sweep_during_load();
     test_grace_survives_reclaim_complete_during_load();
     test_cold_start_without_store_is_ready();

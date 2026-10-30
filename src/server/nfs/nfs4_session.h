@@ -226,6 +226,10 @@ struct nfs4_client {
     uint32_t              nfs4_client_scid_cb_addr_len;
     char                  nfs4_client_scid_cb_netid[8];
     char                  nfs4_client_scid_cb_addr[64];
+    /* Nonzero once the record's lease was cancelled and it was fenced (see
+     * nfs4_client_fence_locked): monotonic ns the tombstone's hold started.
+     * A fenced record is out of the by-owner table for good. */
+    uint64_t              nfs4_client_fenced_ns;
     /* Unified state hierarchy.  Created when this nfs4_client is first
      * registered; freed when the nfs4_client is unregistered or the table
      * is torn down.  See nfs4_state.h. */
@@ -250,10 +254,11 @@ struct nfs4_exchange_id_result {
 struct nfs4_session {
     /* magic MUST be the first member -- see NFS4_SESSION_MAGIC comment. */
     uint32_t                          magic;
-    /* Cached pointer to the owning client's unified state hierarchy.  Set
-     * at session creation; cleared at table teardown (when the unified
-     * client is destroyed).  Borrowed reference: lifetime matches the
-     * nfs4_client this session belongs to. */
+    /* Cached pointer to the owning client's unified state hierarchy, set at
+     * session creation.  The session holds a reference on it (nfs_client_get),
+     * dropped when the session is freed, so it stays readable after the
+     * client's record is retired or superseded; by then the client reads as
+     * cancelled (nfs_client_destroy marks it expired). */
     struct nfs_client                *client_unified;
     _Atomic uint32_t                  refcount;
     _Atomic bool                      destroyed;
@@ -294,18 +299,30 @@ struct nfs4_session {
     struct UT_hash_handle             nfs4_session_hh;
 };
 
+/* A sessionid by value, for lists of them. */
+struct nfs4_sessionid {
+    uint8_t id[NFS4_SESSIONID_SIZE];
+};
+
 struct nfs4_client_table {
-    struct nfs4_client  *nfs4_ct_clients_by_owner;
-    struct nfs4_client  *nfs4_ct_clients_by_id;
-    struct nfs4_session *nfs4_ct_sessions;
+    struct nfs4_client    *nfs4_ct_clients_by_owner;
+    struct nfs4_client    *nfs4_ct_clients_by_id;
+    struct nfs4_session   *nfs4_ct_sessions;
     /* Low 48 bits of the next clientid; the high 16 are this instance's node_id
      * (see nfs4_make_clientid) so peers sharing one store never collide. */
-    uint64_t             nfs4_ct_next_client_id;
-    uint16_t             nfs4_ct_node_id;
+    uint64_t               nfs4_ct_next_client_id;
+    uint16_t               nfs4_ct_node_id;
     /* Monotonic source for SETCLIENTID setclientid_confirm verifiers; every
      * value handed out is unique for the life of the table. */
-    uint64_t             nfs4_ct_next_confirm;
-    evpl_mutex_t         nfs4_ct_lock;
+    uint64_t               nfs4_ct_next_confirm;
+    /* Persistent sessions taken out of the table along with their client
+     * (fence, supersede) whose KV records are still to be deleted, so a later
+     * hydrate cannot rebuild them.  The lease sweep drains this outside the
+     * lock (nfs4_client_take_forgets_locked). */
+    struct nfs4_sessionid *nfs4_ct_forget;
+    uint32_t               nfs4_ct_forget_count;
+    uint32_t               nfs4_ct_forget_capacity;
+    evpl_mutex_t           nfs4_ct_lock;
 };
 
 /* A clientid carries the minting instance's node_id in its high 16 bits and a
@@ -528,6 +545,37 @@ nfs4_client_confirm(
     uint64_t                  client_id,
     struct nfs_client       **destroy_unified);
 
+/* Has this confirmed record's lease been cancelled?  Such a client must
+ * establish a new clientid (RFC 7530 §9.6.3.2), so the record is to be fenced
+ * (nfs4_client_fence_locked) and no longer matches its owner at SETCLIENTID /
+ * EXCHANGE_ID.  True before the fence has run; nfs4_client_fenced_ns says
+ * whether it has. */
+bool
+nfs4_client_needs_fence(
+    const struct nfs4_client *c);
+
+/* Caller holds the table lock.  Fence a record whose lease was cancelled:
+ * idempotent; see the definition for what it does. */
+void
+nfs4_client_fence_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c);
+
+/* Caller holds the table lock.  Hand over the sessionids queued for their KV
+ * records to be deleted (nfs4_drc_forget_session) and empty the queue.  Returns
+ * the count; the caller frees *ids. */
+uint32_t
+nfs4_client_take_forgets_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_sessionid   **ids);
+
+/* Caller holds the table lock.  Retire a fenced record's tombstone and return
+ * its state hierarchy for nfs_client_destroy once the lock is dropped. */
+struct nfs_client *
+nfs4_client_retire_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c);
+
 /* Unregister a client and tear down its unified state hierarchy.
  *
  * `state_table` and `vfs_thread` may be NULL only when the caller has
@@ -550,7 +598,8 @@ nfs4_create_session(
     uint32_t                     replay_maxresp_cached,
     const struct channel_attrs4 *fore_attrs,
     const struct channel_attrs4 *back_attrs,
-    const uint8_t               *restore_sessionid);
+    const uint8_t               *restore_sessionid,
+    bool                         persist);
 
 /* SEQUENCE replay slot state machine.  See plan in
  * /root/.claude/plans/lets-plan-out-the-steady-steele.md for the full
