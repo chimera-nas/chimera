@@ -399,6 +399,12 @@ struct nfs_lock_state {
      * lock_state_cleanup drains the remainder. */
     struct nfs4_range_lease        *range_leases;
 
+    /* LOCKs whose range claim is dispatched and not yet completed
+     * (nfs_lock_state_lock_begin/_end).  Protected by lock_owner->lock.
+     * While nonzero, FREE_STATEID answers NFS4ERR_DELAY rather than destroy
+     * a state a LOCK is about to link a range onto. */
+    uint32_t                        locks_inflight;
+
     /* utlist LL chains.  *_in_open is rooted on open_state->locks (CLOSE
      * cascade); *_in_owner is rooted on lock_owner->states (RELEASE_LOCKOWNER
      * cascade, wired up in Phase 4). */
@@ -1102,6 +1108,32 @@ nfs_lock_state_create(
 SYMBOL_EXPORT void
 nfs_lock_state_destroy(
     struct nfs_lock_state     *state,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread);
+
+/* Pin `state` for a LOCK whose range claim is about to be dispatched, so a
+ * concurrent FREE_STATEID cannot destroy it before the LOCK completes.
+ * Returns false, and takes no pin, if the state is already being torn down.
+ * Every successful begin is paired with one nfs_lock_state_lock_end. */
+SYMBOL_EXPORT bool
+nfs_lock_state_lock_begin(
+    struct nfs_lock_state *state);
+
+SYMBOL_EXPORT void
+nfs_lock_state_lock_end(
+    struct nfs_lock_state *state);
+
+/* FREE_STATEID of a lock stateid presented with `sid_seqid` (RFC 8881
+ * 18.38).  Decided under lock_owner->lock, in this order: a state already
+ * being torn down is NFS4ERR_BAD_STATEID; a superseded or never-issued seqid
+ * is NFS4ERR_OLD_STATEID / NFS4ERR_BAD_STATEID (8.2.2, 0 means current); a
+ * LOCK in flight is NFS4ERR_DELAY; held ranges are NFS4ERR_LOCKS_HELD.
+ * Otherwise the state is destroyed and NFS4_OK returned.  The caller holds
+ * an acquire ref on `state` and drops it afterwards. */
+SYMBOL_EXPORT nfsstat4
+nfs_lock_state_free(
+    struct nfs_lock_state     *state,
+    uint32_t                   sid_seqid,
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
 

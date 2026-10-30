@@ -1821,6 +1821,85 @@ nfs_lock_state_destroy(
     }
 } /* nfs_lock_state_destroy */
 
+bool
+nfs_lock_state_lock_begin(struct nfs_lock_state *state)
+{
+    struct nfs_lock_owner *lock_owner = state->lock_owner;
+    bool                   pinned     = false;
+
+    /* Off the owner list means a FREE_STATEID committed (or a CLOSE /
+     * expiry / RELEASE_LOCKOWNER teardown unlinked it): too late to pin. */
+    evpl_mutex_lock(&lock_owner->lock);
+    if (state->on_owner_list &&
+        !atomic_load_explicit(&state->destroyed, memory_order_acquire)) {
+        state->locks_inflight++;
+        pinned = true;
+    }
+    evpl_mutex_unlock(&lock_owner->lock);
+
+    return pinned;
+} /* nfs_lock_state_lock_begin */
+
+void
+nfs_lock_state_lock_end(struct nfs_lock_state *state)
+{
+    struct nfs_lock_owner *lock_owner = state->lock_owner;
+
+    /* The LOCK wrote range_leases and seqid before this, outside
+     * lock_owner->lock; this unlock publishes them to the FREE_STATEID that
+     * can only get past its in-flight check after it. */
+    evpl_mutex_lock(&lock_owner->lock);
+    chimera_nfs_abort_if(state->locks_inflight == 0,
+                         "lock_state lock_end without lock_begin");
+    state->locks_inflight--;
+    evpl_mutex_unlock(&lock_owner->lock);
+} /* nfs_lock_state_lock_end */
+
+nfsstat4
+nfs_lock_state_free(
+    struct nfs_lock_state     *state,
+    uint32_t                   sid_seqid,
+    struct nfs_state_table    *table,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    struct nfs_lock_owner *lock_owner = state->lock_owner;
+    nfsstat4               status;
+
+    evpl_mutex_lock(&lock_owner->lock);
+
+    if (!state->on_owner_list ||
+        atomic_load_explicit(&state->destroyed, memory_order_acquire)) {
+        /* Someone else is already tearing it down. */
+        status = NFS4ERR_BAD_STATEID;
+    } else {
+        /* RFC 8881 8.2.2: the seqid is judged before the locks, as knfsd
+         * does.  A FREE that crossed a LOCK reusing this stateid (Linux
+         * reuses lock-owner ids, nconnect reorders) is OLD_STATEID. */
+        status = nfs4_stateid_check_seqid(state->seqid, sid_seqid);
+        if (status == NFS4_OK && state->locks_inflight) {
+            status = NFS4ERR_DELAY;
+        } else if (status == NFS4_OK && state->range_leases) {
+            status = NFS4ERR_LOCKS_HELD;
+        }
+    }
+
+    if (status != NFS4_OK) {
+        evpl_mutex_unlock(&lock_owner->lock);
+        return status;
+    }
+
+    /* Commit point: off the owner list, nfs_lock_state_lock_begin refuses,
+     * so no LOCK can start on the state from here on.  The owner unlink in
+     * nfs_lock_state_destroy is flag-guarded and skips. */
+    LL_DELETE2(lock_owner->states, state, next_in_owner);
+    state->on_owner_list = 0;
+    evpl_mutex_unlock(&lock_owner->lock);
+
+    /* The caller's acquire ref keeps `state` valid until it releases. */
+    nfs_lock_state_destroy(state, table, vfs_thread);
+    return NFS4_OK;
+} /* nfs_lock_state_free */
+
 /* ---------------------------------------------------------------------- *
 *  Lifecycle: delegations
 * ---------------------------------------------------------------------- */
