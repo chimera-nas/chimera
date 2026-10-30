@@ -367,6 +367,76 @@ test_stateid_seqid_wrap(void)
     printf("ok: stateid_seqid_wrap\n");
 } /* test_stateid_seqid_wrap */
 
+/* FREE_STATEID vs LOCK on one lock stateid.  LOCK/LOCKU effects on
+ * range_leases and seqid are simulated directly: there is no VFS here. */
+static void
+test_lock_state_free_interlock(void)
+{
+    struct nfs_state_table  table;
+    struct nfs_client      *client;
+    struct nfs_open_owner  *oo;
+    struct nfs_open_state  *os;
+    struct nfs_lock_owner  *lo;
+    struct nfs_lock_state  *ls;
+    struct nfs4_range_lease held;
+    struct stateid4         sid, lock_sid;
+    void                   *acquired;
+    uint8_t                 acquired_type;
+    bool                    created;
+    uint8_t                 fh[4] = { 0x0F, 0x5E, 0xED, 0x01 };
+
+    nfs_state_table_init(&table, 1);
+    client = nfs_client_alloc(7, "client-free", 11, 0x7922, /*minor*/ 1);
+    oo     = nfs_open_owner_find_or_create(client, "owner-F", 7, &created);
+    os     = nfs_open_state_create(oo, 0, NULL, 0, fh, sizeof(fh),
+                                   OPEN4_SHARE_ACCESS_BOTH,
+                                   OPEN4_SHARE_DENY_NONE,
+                                   /*handle_dup*/ NULL, &table, &sid);
+    lo = nfs_lock_owner_find_or_create(client, "lockowner-F", 11, &created);
+    ls = nfs_lock_state_create(lo, os, NULL, &table, &lock_sid);
+    CHECK(ls != NULL && ls->seqid == 1);
+
+    /* A LOCK is dispatched on the state: FREE_STATEID must wait for it. */
+    CHECK(nfs_lock_state_lock_begin(ls));
+    CHECK(nfs_lock_state_free(ls, 1, &table, NULL) == NFS4ERR_DELAY);
+
+    /* ...and granted: range linked, seqid advanced, pin dropped. */
+    memset(&held, 0, sizeof(held));
+    ls->range_leases = &held;
+    ls->seqid        = 2;
+    nfs_lock_state_lock_end(ls);
+
+    /* Seqid is judged before locks (RFC 8881 8.2.2, knfsd order). */
+    CHECK(nfs_lock_state_free(ls, 1, &table, NULL) == NFS4ERR_OLD_STATEID);
+    CHECK(nfs_lock_state_free(ls, 3, &table, NULL) == NFS4ERR_BAD_STATEID);
+    CHECK(nfs_lock_state_free(ls, 2, &table, NULL) == NFS4ERR_LOCKS_HELD);
+
+    /* LOCKU of the last range. */
+    ls->range_leases = NULL;
+    ls->seqid        = 3;
+    CHECK(nfs_lock_state_free(ls, 2, &table, NULL) == NFS4ERR_OLD_STATEID);
+
+    /* The FREE_STATEID handler holds an acquire ref across the free. */
+    CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
+                                  &acquired, &acquired_type) == NFS4_OK);
+    CHECK(acquired == ls);
+    CHECK(nfs_lock_state_free(ls, 3, &table, NULL) == NFS4_OK);
+
+    /* Torn down: a racing LOCK cannot pin it; a second FREE is BAD_STATEID. */
+    CHECK(!nfs_lock_state_lock_begin(ls));
+    CHECK(nfs_lock_state_free(ls, 3, &table, NULL) == NFS4ERR_BAD_STATEID);
+    nfs_state_table_release(&table, ls, NFS4_SLOT_TYPE_LOCK, NULL);
+    CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
+                                  &acquired, &acquired_type) != NFS4_OK);
+
+    nfs_open_state_destroy(os, &table, NULL);
+    nfs_lock_owner_put(lo);
+    nfs_open_owner_put(oo);
+    nfs_client_destroy(client, &table, NULL, true);
+    nfs_state_table_free(&table, NULL);
+    printf("ok: lock_state_free_interlock\n");
+} /* test_lock_state_free_interlock */
+
 int
 main(
     int   argc,
@@ -381,6 +451,7 @@ main(
     test_share_mode_conflict();
     test_acquire_status_translation();
     test_stateid_seqid_wrap();
+    test_lock_state_free_interlock();
     printf("PASS: all state table tests\n");
     return 0;
 } /* main */
