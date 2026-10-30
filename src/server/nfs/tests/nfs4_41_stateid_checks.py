@@ -44,6 +44,8 @@ Cases (one minorversion=1 session, each case on its own fresh file):
   free_stateid_seqid : the Linux owner-reuse sequence; a FREE_STATEID
                       presenting a superseded lock seqid is OLD_STATEID,
                       locked or not, and frees nothing.
+  free_after_denied_lock : a re-establishing LOCK refused DENIED leaves the
+                      stateid freeable at its LOCKU seqid.
 
 Needs pynfs (nfs4.1 tree) and root (AUTH_SYS uid 0 against a root-owned
 export root).  Driven by scripts/nfs4_41_stateid_checks_test_wrapper.sh.
@@ -61,7 +63,7 @@ import nfs4client                                       # noqa: E402
 import nfs_ops                                          # noqa: E402
 import rpc                                              # noqa: E402
 from xdrdef.nfs4_const import (                         # noqa: E402
-    CLAIM_NULL, GUARDED4, NFS4_OK, NFS4ERR_BAD_STATEID,
+    CLAIM_NULL, GUARDED4, NFS4_OK, NFS4ERR_BAD_STATEID, NFS4ERR_DENIED,
     NFS4ERR_LOCKS_HELD, NFS4ERR_OLD_STATEID, OPEN4_CREATE, OPEN4_NOCREATE,
     OPEN4_SHARE_ACCESS_BOTH,
     OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
@@ -355,6 +357,33 @@ def case_free_stateid_seqid(h):
     h.close(fh, open_sid)
 
 
+def case_free_after_denied_lock(h):
+    case = "free_after_denied_lock"
+    fh, open_sid = h.open_file(case, b"owner_fdl_%s" % RUN,
+                               b"f_fdl_%s" % RUN, OPEN4_SHARE_ACCESS_BOTH,
+                               create=True)
+    lo_x = b"lo_fdl_x_%s" % RUN
+    lo_y = b"lo_fdl_y_%s" % RUN
+    res = h.lock_new_owner(fh, open_sid, lo_x)
+    expect(case, "LOCK lock-owner X", res.status, NFS4_OK)
+    res = h.locku(fh, res.resarray[-1].lock_stateid)
+    expect(case, "LOCKU X", res.status, NFS4_OK)
+    x_sid = res.resarray[-1].lock_stateid
+    res = h.lock_new_owner(fh, open_sid, lo_y)
+    expect(case, "LOCK lock-owner Y", res.status, NFS4_OK)
+    y_sid = res.resarray[-1].lock_stateid
+    expect(case, "LOCK X again over Y's range",
+           h.lock_new_owner(fh, open_sid, lo_x).status, NFS4ERR_DENIED)
+    # DENIED left X's stateid as LOCKU did, with no LOCK still pinning it.
+    expect(case, "FREE_STATEID X at its LOCKU seqid",
+           h.free_stateid(x_sid), NFS4_OK)
+    res = h.locku(fh, y_sid)
+    expect(case, "LOCKU Y", res.status, NFS4_OK)
+    expect(case, "FREE_STATEID Y",
+           h.free_stateid(res.resarray[-1].lock_stateid), NFS4_OK)
+    h.close(fh, open_sid)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--host", default="127.0.0.1")
@@ -372,6 +401,7 @@ def main():
     case_stale_epoch_class(h)
     case_livelock_lock(h)
     case_free_stateid_seqid(h)
+    case_free_after_denied_lock(h)
 
     print("PASS: nfs4.1 stateid seqid enforcement and error class")
     return 0
