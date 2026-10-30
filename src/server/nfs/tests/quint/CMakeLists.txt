@@ -140,6 +140,13 @@ target_link_libraries(nfs4_owner_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs4_owner_probe)
 
+add_executable(nfs4_excl_create_probe nfs4_excl_create_probe.c)
+target_include_directories(nfs4_excl_create_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_excl_create_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_excl_create_probe)
+
 add_executable(nfs4_lock_relock_probe nfs4_lock_relock_probe.c)
 target_include_directories(nfs4_lock_relock_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
@@ -363,6 +370,26 @@ foreach(backend memfs linux)
     set_tests_properties(chimera/server/nfs/mbt4/setattr_stateid_probe_${backend}_deleg
         PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_setattr_stateid_probe_${backend}_deleg"
+        LABELS "quint;nfs4_mbt;multiproto;${backend}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 90)
+endforeach()
+# Exclusive-create probe: an EXCLUSIVE4 or EXCLUSIVE4_1 OPEN stores its
+# verifier in time_access/time_modify, so its reply's attrset must name both --
+# on the create and on a same-verifier retry -- or the client never sets them
+# and the file keeps the verifier as its timestamps.  chimera's own NFSv4
+# client creates with GUARDED4 only, so nothing else in the tree sends an
+# exclusive OPEN.  Runs on a passthrough backend too, where the verifier lives
+# in the host file's timestamps.  Needs no corpus.
+foreach(backend memfs linux)
+    if(backend STREQUAL "linux" AND NOT CHIMERA_LINUX)
+        continue()
+    endif()
+    add_test(NAME chimera/server/nfs/mbt4/excl_create_probe_${backend}
+        COMMAND $<TARGET_FILE:nfs4_excl_create_probe> ${backend})
+    set_tests_properties(chimera/server/nfs/mbt4/excl_create_probe_${backend}
+        PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_excl_create_probe_${backend}"
         LABELS "quint;nfs4_mbt;multiproto;${backend}"
         SKIP_RETURN_CODE 77
         TIMEOUT 90)
