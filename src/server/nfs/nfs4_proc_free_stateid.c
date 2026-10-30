@@ -12,6 +12,13 @@
  * still held (an open, an active delegation, or a lock stateid that still owns
  * locks), the stateid cannot be freed and the server returns
  * NFS4ERR_LOCKS_HELD.  4.1+ only.
+ *
+ * A lock stateid presented with a superseded seqid is NFS4ERR_OLD_STATEID and
+ * one with a never-issued seqid NFS4ERR_BAD_STATEID, both checked before the
+ * locks (RFC 8881 §8.2.2).  A lock stateid a LOCK is still establishing is
+ * NFS4ERR_DELAY.  Both matter because the Linux client reuses the lock-owner
+ * as soon as it sends FREE_STATEID, and under nconnect that FREE can land
+ * after the owner's next LOCK has re-established the same stateid.
  */
 
 #include "nfs4_procs.h"
@@ -103,22 +110,14 @@ chimera_nfs4_free_stateid(
 
     lock_state = state_void;
 
-    /* A lock stateid that still owns byte-range locks cannot be freed. */
-    if (lock_state->range_leases != NULL) {
-        nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                thread->vfs_thread);
-        res->fsr_status = NFS4ERR_LOCKS_HELD;
-        chimera_nfs4_compound_complete(req, res->fsr_status);
-        return;
-    }
-
-    /* No locks remain: free the lock stateid.  destroy drops the lifetime
-     * ref and marks the slot freed; the release below drops our acquire ref,
+    /* Seqid, LOCK in flight and held ranges are judged together under the
+     * lock-owner's lock; on NFS4_OK the state is destroyed (lifetime ref
+     * dropped, slot freed) and the release below drops our acquire ref,
      * which then runs cleanup. */
-    nfs_lock_state_destroy(lock_state, table, thread->vfs_thread);
+    res->fsr_status = nfs_lock_state_free(lock_state, args->fsa_stateid.seqid,
+                                          table, thread->vfs_thread);
     nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                             thread->vfs_thread);
 
-    res->fsr_status = NFS4_OK;
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_compound_complete(req, res->fsr_status);
 } /* chimera_nfs4_free_stateid */

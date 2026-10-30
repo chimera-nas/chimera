@@ -41,6 +41,9 @@ Cases (one minorversion=1 session, each case on its own fresh file):
   livelock_lock     : the degenerate recovery LOCK captured on the wire
                       (open_stateid seqid=0xffffffff, other=all-zero) is
                       BAD_STATEID, so the recovery loop can converge.
+  free_stateid_seqid : the Linux owner-reuse sequence; a FREE_STATEID
+                      presenting a superseded lock seqid is OLD_STATEID,
+                      locked or not, and frees nothing.
 
 Needs pynfs (nfs4.1 tree) and root (AUTH_SYS uid 0 against a root-owned
 export root).  Driven by scripts/nfs4_41_stateid_checks_test_wrapper.sh.
@@ -58,8 +61,9 @@ import nfs4client                                       # noqa: E402
 import nfs_ops                                          # noqa: E402
 import rpc                                              # noqa: E402
 from xdrdef.nfs4_const import (                         # noqa: E402
-    CLAIM_NULL, GUARDED4, NFS4_OK, NFS4ERR_BAD_STATEID, NFS4ERR_OLD_STATEID,
-    OPEN4_CREATE, OPEN4_NOCREATE, OPEN4_SHARE_ACCESS_BOTH,
+    CLAIM_NULL, GUARDED4, NFS4_OK, NFS4ERR_BAD_STATEID,
+    NFS4ERR_LOCKS_HELD, NFS4ERR_OLD_STATEID, OPEN4_CREATE, OPEN4_NOCREATE,
+    OPEN4_SHARE_ACCESS_BOTH,
     OPEN4_SHARE_ACCESS_READ, OPEN4_SHARE_ACCESS_WANT_NO_DELEG,
     OPEN4_SHARE_DENY_NONE, FATTR4_MODE, WRITE_LT, UNSTABLE4)
 from xdrdef.nfs4_type import (                          # noqa: E402
@@ -146,6 +150,21 @@ class Harness(object):
     def write(self, fh, sid, data):
         return self.sess.compound([op.putfh(fh),
                                    op.write(sid, 0, UNSTABLE4, data)])
+
+    def locku(self, fh, sid, off=0, length=100):
+        return self.sess.compound([op.putfh(fh),
+                                   op.locku(WRITE_LT, 0, sid, off, length)])
+
+    def lock_existing(self, fh, sid, off=0, length=100):
+        return self.sess.compound([
+            op.putfh(fh),
+            op.lock(WRITE_LT, False, off, length,
+                    locker4(new_lock_owner=False,
+                            lock_owner=exist_lock_owner4(sid, 0))),
+        ])
+
+    def free_stateid(self, sid):
+        return self.sess.compound([op.free_stateid(sid)]).status
 
 
 def stale_epoch(sid):
@@ -284,6 +303,58 @@ def case_current_stateid_close(h):
            NFS4ERR_BAD_STATEID)
 
 
+def case_free_stateid_seqid(h):
+    # The Linux client reuses a lock-owner id as soon as it sends
+    # FREE_STATEID, so that owner's next LOCK re-establishes the emptied
+    # stateid (seqid 3) before the FREE of seqid 2 lands on the server.
+    case = "free_stateid_seqid"
+    fh, open_sid = h.open_file(case, b"owner_fss_%s" % RUN,
+                               b"f_fss_%s" % RUN, OPEN4_SHARE_ACCESS_BOTH,
+                               create=True)
+    lockowner = b"lo_fss_%s" % RUN
+    res = h.lock_new_owner(fh, open_sid, lockowner)
+    expect(case, "LOCK new lock-owner", res.status, NFS4_OK)
+    sid1 = res.resarray[-1].lock_stateid
+    res = h.locku(fh, sid1)
+    expect(case, "LOCKU seqid 1", res.status, NFS4_OK)
+    sid2 = res.resarray[-1].lock_stateid
+    res = h.lock_new_owner(fh, open_sid, lockowner)
+    expect(case, "LOCK same lock-owner again", res.status, NFS4_OK)
+    sid3 = res.resarray[-1].lock_stateid
+    if sid3.other != sid1.other or sid3.seqid != 3:
+        fatal(case, "re-LOCK did not re-establish the stateid (seqid %d)" %
+              sid3.seqid)
+    expect(case, "FREE_STATEID superseded seqid 2 while locked",
+           h.free_stateid(sid2), NFS4ERR_OLD_STATEID)
+    expect(case, "FREE_STATEID never-issued seqid 4 while locked",
+           h.free_stateid(stateid4(4, sid3.other)), NFS4ERR_BAD_STATEID)
+    expect(case, "FREE_STATEID current seqid 3 while locked",
+           h.free_stateid(sid3), NFS4ERR_LOCKS_HELD)
+    res = h.locku(fh, sid3)
+    expect(case, "LOCKU seqid 3", res.status, NFS4_OK)
+    sid4 = res.resarray[-1].lock_stateid
+    expect(case, "FREE_STATEID superseded seqid 2 after unlock",
+           h.free_stateid(sid2), NFS4ERR_OLD_STATEID)
+    # The stale FREE freed nothing: the stateid still takes a LOCK.
+    res = h.lock_existing(fh, sid4)
+    expect(case, "LOCK under the surviving stateid", res.status, NFS4_OK)
+    res = h.locku(fh, res.resarray[-1].lock_stateid)
+    expect(case, "LOCKU", res.status, NFS4_OK)
+    sid6 = res.resarray[-1].lock_stateid
+    expect(case, "FREE_STATEID current seqid", h.free_stateid(sid6), NFS4_OK)
+    expect(case, "FREE_STATEID again", h.free_stateid(sid6),
+           NFS4ERR_BAD_STATEID)
+    # Seqid 0 means "the current one" (RFC 8881 8.2.2).
+    res = h.lock_new_owner(fh, open_sid, b"lo_fss0_%s" % RUN)
+    expect(case, "LOCK second lock-owner", res.status, NFS4_OK)
+    res = h.locku(fh, res.resarray[-1].lock_stateid)
+    expect(case, "LOCKU second lock-owner", res.status, NFS4_OK)
+    expect(case, "FREE_STATEID seqid 0",
+           h.free_stateid(stateid4(0, res.resarray[-1].lock_stateid.other)),
+           NFS4_OK)
+    h.close(fh, open_sid)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--host", default="127.0.0.1")
@@ -300,6 +371,7 @@ def main():
     case_current_stateid_close(h)
     case_stale_epoch_class(h)
     case_livelock_lock(h)
+    case_free_stateid_seqid(h)
 
     print("PASS: nfs4.1 stateid seqid enforcement and error class")
     return 0
