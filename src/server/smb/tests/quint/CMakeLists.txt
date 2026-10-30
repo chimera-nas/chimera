@@ -140,6 +140,31 @@ set_tests_properties(chimera/server/smb/mbt/wire_probe_memfs PROPERTIES
     LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 180)
 
+# The signed profiles again as a domain user validated through winbind, against
+# the Samba AD DC that ad_test_wrapper.sh stands up.  Extended tier: it needs
+# root and a provisioned domain.  The wrapper sets up its own netns, so it
+# needs the same privilege as the netns wrapper, and it fails rather than
+# skips without samba-tool or kinit, so both gate the test.  Without
+# libwbclient the server has no winbind backend and every domain logon fails.
+# Two wrapper runs cannot overlap: each puts the same host address on its
+# veth, so the samba_ad lock serialises it with smbclient_winbind.
+if(CHIMERA_NETNS_TESTING AND WBCLIENT_FOUND)
+    find_program(SAMBA_TOOL samba-tool)
+    find_program(KINIT kinit)
+    if(SAMBA_TOOL AND KINIT)
+        add_test(NAME chimera/server/smb/mbt/wire_probe_winbind
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/ad_test_wrapper.sh
+                    $<TARGET_FILE:smb2_wire_probe> --winbind
+            CONFIGURATIONS extended)
+        set_tests_properties(chimera/server/smb/mbt/wire_probe_winbind PROPERTIES
+            ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_wire_probe_winbind"
+            LABELS "functional;probe;smb_mbt;memfs"
+            RESOURCE_LOCK samba_ad
+            SKIP_RETURN_CODE 77
+            TIMEOUT 300)
+    endif()
+endif()
+
 # FSCTL ground-truth probe: server-side copy, copy-offload tokens, block
 # cloning, reparse points and the sparse-file trio.  No trace in the corpus
 # emits an IOCTL, so this is the only test that reaches src/server/smb's
