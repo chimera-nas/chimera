@@ -61,8 +61,12 @@ if(CHIMERA_NETNS_TESTING)
     set_tests_properties(chimera/server/smb/smbclient_kerberos_ntlm_fallback PROPERTIES
         SKIP_RETURN_CODE 77)
 
+    # The domain logon goes through winbind, so without libwbclient the server
+    # has no backend to take it and the test can only fail.  ad_test_wrapper.sh
+    # fails rather than skips without samba-tool or kinit, so both gate it too.
     find_program(SAMBA_TOOL samba-tool)
-    if(SAMBA_TOOL)
+    find_program(KINIT kinit)
+    if(WBCLIENT_FOUND AND SAMBA_TOOL AND KINIT)
         add_test(NAME chimera/server/smb/smbclient_winbind
             COMMAND ${CMAKE_SOURCE_DIR}/scripts/ad_test_wrapper.sh
                     ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=winbind)
