@@ -824,6 +824,53 @@ chimera_nfs4_open_resume_after_probe(struct nfs_request *req)
     chimera_nfs4_open_complete(req, NFS4_OK);
 } /* chimera_nfs4_open_resume_after_probe */
 
+/* The attrset of a successful exclusive OPEN, the create and a
+ * same-verifier retry alike.  The create switch in
+ * chimera_nfs4_open_parent_complete keeps the verifier in time_access and
+ * time_modify, and the reply has to say so: "If EXCLUSIVE4_1 was used, the
+ * client determines the attributes used for the verifier by comparing
+ * attrset with cva_attrs.attrmask ... The client MUST immediately send a
+ * SETATTR to set attributes used to store the verifier" (RFC 8881 18.16.4;
+ * RFC 7530 16.16.5 for EXCLUSIVE4).  A Linux client sends that SETATTR only
+ * for the time attributes attrset names, so leaving them out keeps the
+ * verifier as the file's timestamps.
+ *
+ * EXCLUSIVE4_1 also names the cva_attrs it applied.  Those were checked
+ * against suppattr_exclcreat before the create, and a create that cannot
+ * apply them fails, so the reply names the requested mask -- as the Linux
+ * server and NFS-Ganesha do -- rather than what the backend reported back:
+ * a passthrough backend consumes the mode into openat() and never reports
+ * it.  A retry, which applies nothing, then answers what the create did. */
+static void
+chimera_nfs4_open_excl_attrset(
+    struct nfs_request *req,
+    struct OPEN4args   *args,
+    struct OPEN4res    *res)
+{
+    int rc;
+
+    rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, req->encoding->dbuf);
+    chimera_nfs_abort_if(rc, "Failed to allocate array");
+
+    res->resok4.attrset[0] = 0;
+    res->resok4.attrset[1] = 0;
+    if (args->openhow.how.mode == EXCLUSIVE4_1) {
+        const struct fattr4 *cva = &args->openhow.how.ch_createboth.cva_attrs;
+
+        if (cva->num_attrmask >= 1) {
+            res->resok4.attrset[0] = cva->attrmask[0] &
+                CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD0;
+        }
+        if (cva->num_attrmask >= 2) {
+            res->resok4.attrset[1] = cva->attrmask[1] &
+                CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD1;
+        }
+    }
+    res->resok4.attrset[1] |= (1U << (FATTR4_TIME_ACCESS - 32)) |
+        (1U << (FATTR4_TIME_MODIFY - 32));
+    res->resok4.num_attrset = 2;
+} /* chimera_nfs4_open_excl_attrset */
+
 static void
 chimera_nfs4_open_exclusive_verify(
     enum chimera_vfs_error          error_code,
@@ -913,7 +960,7 @@ chimera_nfs4_open_exclusive_verify(
          * longer depends on the backend having a lock passthrough. */
         res->resok4.rflags = install_rflags | OPEN4_RESULT_LOCKTYPE_POSIX;
     }
-    res->resok4.num_attrset = 0;
+    chimera_nfs4_open_excl_attrset(req, args, res);
 
     /* Release the parent handle before grant_delegation so the cb-probe
     * defer path (which returns without completing the OPEN) does not leak
@@ -1017,13 +1064,9 @@ chimera_nfs4_open_at_complete(
                                                          args->openhow.how.createattrs.attrmask,
                                                          res->resok4.attrset);
     } else if (args->openhow.opentype == OPEN4_CREATE &&
-               args->openhow.how.mode == EXCLUSIVE4_1) {
-        rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, req->encoding->dbuf);
-        chimera_nfs_abort_if(rc, "Failed to allocate array");
-        res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
-                                                         args->openhow.how.ch_createboth.cva_attrs.num_attrmask,
-                                                         args->openhow.how.ch_createboth.cva_attrs.attrmask,
-                                                         res->resok4.attrset);
+               (args->openhow.how.mode == EXCLUSIVE4 ||
+                args->openhow.how.mode == EXCLUSIVE4_1)) {
+        chimera_nfs4_open_excl_attrset(req, args, res);
     } else {
         res->resok4.num_attrset = 0;
     }
@@ -1399,7 +1442,9 @@ chimera_nfs4_open_parent_complete(
                  * once the VFS layer exposes setxattr/getxattr.  That would remove the
                  * restriction on clients setting time_access_set/time_modify_set in cva_attrs.
                  * For now encode the verifier in atime.tv_sec (bytes 0-3) and mtime.tv_sec
-                 * (bytes 4-7), which is the same strategy used by Linux nfsd. */
+                 * (bytes 4-7), which is the same strategy used by Linux nfsd; the reply's
+                 * attrset names both times (chimera_nfs4_open_excl_attrset) so the client
+                 * sets them to real values afterwards. */
                 attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
                 memcpy(&verf_part, args->openhow.how.ch_createboth.cva_verf, 4);
                 attr->va_atime.tv_sec  = verf_part;
@@ -1809,9 +1854,16 @@ chimera_nfs4_open(
 
         if (cls == NFS4_SEQID_REPLAY) {
             /* Return the cached reply.  Simplified replay (status, stateid
-             * and rflags); cinfo/attrset/delegation are reconstructed as
+             * and rflags); cinfo and delegation are reconstructed as
              * zero/none.  Linux clients tolerate that since they re-fetch
              * attrs via GETATTR after OPEN.
+             *
+             * attrset is not something a GETATTR can recover: after an
+             * exclusive create it tells the client which attributes hold the
+             * verifier and must be reset with a SETATTR.  The resent request
+             * is the original one, so rebuild it from the request exactly as
+             * the original reply built it -- a lost reply re-answered with an
+             * empty attrset leaves the file with the verifier as its times.
              *
              * rflags is replayed rather than zeroed: RFC 7530 §9.1.7 requires
              * the stored last response, and dropping OPEN4_RESULT_CONFIRM
@@ -1830,6 +1882,12 @@ chimera_nfs4_open(
             res->resok4.rflags                     = owner->replay.rflags;
             res->resok4.num_attrset                = 0;
             res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+            if (res->status == NFS4_OK &&
+                args->openhow.opentype == OPEN4_CREATE &&
+                (args->openhow.how.mode == EXCLUSIVE4 ||
+                 args->openhow.how.mode == EXCLUSIVE4_1)) {
+                chimera_nfs4_open_excl_attrset(req, args, res);
+            }
             evpl_mutex_unlock(&owner->lock);
             /* Early return before the borrow ref transfers to the request;
              * release it here. */
