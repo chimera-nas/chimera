@@ -2,6 +2,7 @@
   "family": "nfs4",
   "description": "the same server spoken to at NFSv4.1: sessions, the slot replay discipline and EXCHANGE_ID/CREATE_SESSION, with none of the 4.2 data operations -- the model gates every one of them on MINOR >= 2, so at 4.1 they are simply not part of the protocol.",
   "traceStem": "nfs4Memfs41",
+  "scenarios": [{"run": "exclusiveCreateAttrsetRegression", "flavor": "step"}],
 
   "features": {
     "pnfs": "unsupported",
