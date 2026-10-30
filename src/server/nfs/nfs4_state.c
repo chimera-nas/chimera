@@ -1862,8 +1862,8 @@ nfs_lock_state_lock_abandon(
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread)
 {
-    /* Destroy before release.  A refused pin means a FREE_STATEID, CLOSE or
-     * expiry teardown already started and may have dropped the lifetime ref,
+    /* Destroy before release.  A CLOSE or expiry teardown (or, behind a
+     * refused pin, a FREE_STATEID) may already have dropped the lifetime ref,
      * leaving this LOCK's acquire ref as the last: released first, it would
      * free the state under the destroy.  destroy is idempotent, and the
      * acquire ref keeps the state alive through it. */
