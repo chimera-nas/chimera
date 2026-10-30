@@ -1237,3 +1237,13 @@ nfs_client_touch(struct nfs_client *client)
     atomic_store_explicit((_Atomic uint64_t *) &client->last_touch_ns,
                           nfs_lease_now_ns(), memory_order_relaxed);
 } /* nfs_client_touch */
+
+/* The client's lease is gone for good: the sweep reaped it, or a conflicting
+ * acquirer reclaimed its courtesy state.  Neither flag is ever cleared, so the
+ * client can only go on under a new clientid (RFC 7530 §9.6.3.2). */
+static inline bool
+nfs_client_lease_cancelled(struct nfs_client *client)
+{
+    return client->expired ||
+           atomic_load_explicit(&client->reclaim_pending, memory_order_acquire);
+} /* nfs_client_lease_cancelled */

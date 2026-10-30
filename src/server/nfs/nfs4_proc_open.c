@@ -432,9 +432,11 @@ chimera_nfs4_open_install_state(
         chimera_vfs_release(req->thread->vfs_thread, handle);
         return NFS4ERR_STALE_CLIENTID;
     }
-    if (client->expired) {
-        client->expired = 0;
-        nfs_client_touch(client);
+    if (nfs_client_lease_cancelled(client)) {
+        /* The lease was cancelled while the VFS open was in flight: install
+         * nothing the client could never confirm or close. */
+        chimera_vfs_release(req->thread->vfs_thread, handle);
+        return NFS4ERR_EXPIRED;
     }
 
     /* Enforce the object's ACL against the requested share access before the
@@ -1793,9 +1795,15 @@ chimera_nfs4_open(
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
-        if (client->expired) {
-            client->expired = 0;
-            nfs_client_touch(client);
+        if (nfs_client_lease_cancelled(client)) {
+            /* RFC 7530 §9.6.3.2: the lease was cancelled, so the clientid
+             * answers NFS4ERR_EXPIRED until the client establishes a new
+             * one.  Reviving it here handed the client stateids that its
+             * OPEN_CONFIRM then found expired.  No owner state exists for a
+             * cancelled client, so there is no seqid to advance. */
+            res->status = NFS4ERR_EXPIRED;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
         }
 
         bool                   created;

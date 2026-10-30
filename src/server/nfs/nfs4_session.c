@@ -256,6 +256,22 @@ nfs4_client_mach_cred_ok(
     return nfs4_principal_matches(c, p);
 } /* nfs4_client_mach_cred_ok */
 
+/* Caller must hold table->nfs4_ct_lock.  Add a client to the by-owner table
+ * unless it is already there. */
+static inline void
+nfs4_client_hash_owner_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c)
+{
+    if (c->nfs4_client_in_owner_table) {
+        return;
+    }
+
+    HASH_ADD(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+             nfs4_client_owner, c->nfs4_client_owner_len, c);
+    c->nfs4_client_in_owner_table = 1;
+} /* nfs4_client_hash_owner_locked */
+
 /* Caller must hold table->nfs4_ct_lock.  Allocates a fresh (unconfirmed)
  * client record, brings up its unified state hierarchy, and inserts it into
  * both hash tables. */
@@ -301,15 +317,50 @@ nfs4_client_new_locked(
      * still-confirmed record holding the by-owner slot; it joins the
      * by-owner table when it is confirmed. */
     if (add_to_owner) {
-        HASH_ADD(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
-                 nfs4_client_owner, c->nfs4_client_owner_len, c);
-        c->nfs4_client_in_owner_table = 1;
+        nfs4_client_hash_owner_locked(table, c);
     }
     HASH_ADD(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
              nfs4_client_id, sizeof(c->nfs4_client_id), c);
 
     return c;
 } /* nfs4_client_new_locked */
+
+/* Caller must hold table->nfs4_ct_lock.  Returns true if the client was
+ * removed from the by-owner table. */
+static inline bool
+nfs4_client_unhash_owner_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c)
+{
+    if (!c->nfs4_client_in_owner_table) {
+        return false;
+    }
+
+    HASH_DELETE(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner, c);
+    c->nfs4_client_in_owner_table = 0;
+    return true;
+} /* nfs4_client_unhash_owner_locked */
+
+/* Caller must hold table->nfs4_ct_lock.  Clear the client's reference to its
+ * pending superseding registration and return that record, if it still
+ * exists. */
+static inline struct nfs4_client *
+nfs4_client_take_pending_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c)
+{
+    struct nfs4_client *pending    = NULL;
+    uint64_t            pending_id = c->nfs4_client_scid_pending_id;
+
+    if (!pending_id) {
+        return NULL;
+    }
+
+    c->nfs4_client_scid_pending_id = 0;
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &pending_id, sizeof(pending_id), pending);
+    return pending;
+} /* nfs4_client_take_pending_locked */
 
 /* Caller must hold table->nfs4_ct_lock.  Unhashes a record from the tables
  * it is actually a member of and frees the bookkeeping struct, returning its
@@ -323,11 +374,7 @@ nfs4_client_remove_locked(
 {
     struct nfs_client *unified = c->unified;
 
-    if (c->nfs4_client_in_owner_table) {
-        HASH_DELETE(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
-                    c);
-        c->nfs4_client_in_owner_table = 0;
-    } else {
+    if (!nfs4_client_unhash_owner_locked(table, c)) {
         /* If a confirmed record for this owner names us as its in-flight
          * superseding registration, clear the reference. */
         struct nfs4_client *owner_rec;
@@ -349,6 +396,30 @@ static struct nfs_client *
 nfs4_client_remove_byid_locked(
     struct nfs4_client_table *table,
     struct nfs4_client       *c);
+
+/* Caller must hold table->nfs4_ct_lock.  Remove the client's sessions, mark
+ * them destroyed, and drop the table's reference.  With include_implicit
+ * false, implicit v4.0 sessions stay. */
+static void
+nfs4_client_remove_sessions_locked(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    bool                      include_implicit)
+{
+    struct nfs4_session *s, *tmp;
+
+    HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, s, tmp)
+    {
+        if (s->nfs4_session_clientid != client_id ||
+            (!include_implicit && s->nfs4_session_implicit)) {
+            continue;
+        }
+
+        HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, s);
+        atomic_store_explicit(&s->destroyed, true, memory_order_release);
+        nfs4_session_put(s);
+    }
+} /* nfs4_client_remove_sessions_locked */
 
 /* Caller must hold table->nfs4_ct_lock. */
 static int
@@ -378,7 +449,7 @@ nfs4_client_exchange_id(
     uint8_t                             minorversion,
     struct nfs4_exchange_id_result     *out)
 {
-    struct nfs4_client *existing, *nc;
+    struct nfs4_client *existing, *nc, *pending;
 
     out->status           = NFS4_OK;
     out->clientid         = 0;
@@ -390,6 +461,14 @@ nfs4_client_exchange_id(
 
     HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
               owner, owner_len, existing);
+
+    if (existing && nfs4_client_fenced(existing)) {
+        /* A confirmed record whose lease was cancelled matches nothing: its
+         * state is gone, so case 2 must not hand its clientid back. */
+        nfs4_client_fence_locked(table, existing);
+        HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+                  owner, owner_len, existing);
+    }
 
     if (update) {
         /* EXCHGID4_FLAG_UPD_CONFIRMED_REC_A: an update targets an existing
@@ -445,17 +524,10 @@ nfs4_client_exchange_id(
          * unconfirmed record is by-id-only and the confirmed record (and
          * its sessions) stay live until CREATE_SESSION confirms the new
          * one. */
-        if (existing->nfs4_client_scid_pending_id) {
-            struct nfs4_client *pending;
-
-            HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
-                      &existing->nfs4_client_scid_pending_id,
-                      sizeof(existing->nfs4_client_scid_pending_id), pending);
-            existing->nfs4_client_scid_pending_id = 0;
-            if (pending) {
-                out->destroy_unified =
-                    nfs4_client_remove_byid_locked(table, pending);
-            }
+        pending = nfs4_client_take_pending_locked(table, existing);
+        if (pending) {
+            out->destroy_unified =
+                nfs4_client_remove_byid_locked(table, pending);
         }
         nc = nfs4_client_new_locked(table, owner, owner_len, verifier,
                                     principal, minorversion, false);
@@ -474,17 +546,10 @@ nfs4_client_exchange_id(
         goto out_unlock;
     }
 
-    if (existing->nfs4_client_scid_pending_id) {
-        struct nfs4_client *pending;
-
-        HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
-                  &existing->nfs4_client_scid_pending_id,
-                  sizeof(existing->nfs4_client_scid_pending_id), pending);
-        existing->nfs4_client_scid_pending_id = 0;
-        if (pending) {
-            out->destroy_unified2 =
-                nfs4_client_remove_byid_locked(table, pending);
-        }
+    pending = nfs4_client_take_pending_locked(table, existing);
+    if (pending) {
+        out->destroy_unified2 =
+            nfs4_client_remove_byid_locked(table, pending);
     }
     out->destroy_unified = nfs4_client_remove_locked(table, existing);
     nc                   = nfs4_client_new_locked(table, owner, owner_len,
@@ -550,6 +615,95 @@ nfs4_client_has_leased_state(const struct nfs4_client *c)
     return c->unified && nfs_client_has_leased_state(c->unified);
 } /* nfs4_client_has_leased_state */
 
+bool
+nfs4_client_fenced(const struct nfs4_client *c)
+{
+    return c->nfs4_client_confirmed && c->unified &&
+           nfs_client_lease_cancelled(c->unified);
+} /* nfs4_client_fenced */
+
+/* Caller holds the table lock.  RFC 7530 §9.6.3.2: once a client's lease is
+ * cancelled its clientid answers NFS4ERR_EXPIRED, and the client must use
+ * SETCLIENTID + SETCLIENTID_CONFIRM "in order to establish a new clientid";
+ * an NFSv4.1 client likewise starts over with EXCHANGE_ID + CREATE_SESSION.
+ * Leaving the record in the by-owner table handed the dead clientid back to a
+ * client that re-registered with the same verifier: v4.0 SETCLIENTID took the
+ * callback-update branch, v4.1 EXCHANGE_ID took case 2 and answered
+ * CONFIRMED_R ("no state was lost"), and CREATE_SESSION then revived the
+ * record.  Either way the client could never open again.  Fencing:
+ *
+ *   - unhashes the record from the by-owner table, so the next SETCLIENTID or
+ *     EXCHANGE_ID for the owner matches nothing and mints a fresh clientid;
+ *   - keeps it in the by-id table as a tombstone, so the old clientid still
+ *     answers NFS4ERR_EXPIRED until the lease sweep retires it;
+ *   - invalidates its confirm verifier, so a retransmitted
+ *     SETCLIENTID_CONFIRM that misses the reply cache cannot report success;
+ *   - hands the by-owner slot to a reboot registration that was waiting to
+ *     supersede this record, which otherwise would HASH_ADD itself next to a
+ *     newer record for the same owner when it is confirmed;
+ *   - destroys the record's v4.1 sessions, so the client's next SEQUENCE
+ *     fails with NFS4ERR_BADSESSION, and a CREATE_SESSION on the old
+ *     clientid is NFS4ERR_STALE_CLIENTID (nfs4_client_create_session_classify)
+ *     rather than a revival.  Implicit v4.0 sessions stay until the tombstone
+ *     is retired: they are how the old clientid still resolves.
+ *
+ * Idempotent: the lease sweep calls it when it reaps a confirmed client, and
+ * SETCLIENTID, SETCLIENTID_CONFIRM, EXCHANGE_ID and CREATE_SESSION call it
+ * when they find a confirmed record whose lease is already cancelled; the
+ * first of them does the work. */
+void
+nfs4_client_fence_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c)
+{
+    struct nfs4_client *pending, *holder;
+    uint64_t            now_ns;
+
+    if (c->nfs4_client_fenced_ns) {
+        return;
+    }
+
+    now_ns                   = nfs_lease_now_ns();
+    c->nfs4_client_fenced_ns = now_ns ? now_ns : 1;
+
+    nfs4_client_unhash_owner_locked(table, c);
+
+    c->nfs4_client_scid_confirm_valid = 0;
+    c->nfs4_client_scid_cb_valid      = 0;
+
+    pending = nfs4_client_take_pending_locked(table, c);
+    if (pending && pending->nfs4_client_supersedes_id == c->nfs4_client_id) {
+        pending->nfs4_client_supersedes_id = 0;
+
+        HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+                  pending->nfs4_client_owner,
+                  pending->nfs4_client_owner_len, holder);
+        if (!holder) {
+            nfs4_client_hash_owner_locked(table, pending);
+        }
+    }
+
+    nfs4_client_remove_sessions_locked(table, c->nfs4_client_id, false);
+
+    chimera_nfs_info("NFS4 Client %lu lease cancelled; it must register a new "
+                     "clientid", c->nfs4_client_id);
+} /* nfs4_client_fence_locked */
+
+/* Caller holds the table lock.  Drop a fenced record's tombstone once it has
+ * been held long enough: destroy the implicit sessions that still name it,
+ * then unhash and free the record.  From here on its clientid answers
+ * NFS4ERR_STALE_CLIENTID.  The state hierarchy is returned for
+ * nfs_client_destroy outside the lock. */
+struct nfs_client *
+nfs4_client_retire_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c)
+{
+    nfs4_client_remove_sessions_locked(table, c->nfs4_client_id, true);
+
+    return nfs4_client_remove_locked(table, c);
+} /* nfs4_client_retire_locked */
+
 void
 nfs4_client_setclientid(
     struct nfs4_client_table           *table,
@@ -571,6 +725,16 @@ nfs4_client_setclientid(
 
     HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
               owner, owner_len, existing);
+
+    if (existing && nfs4_client_fenced(existing)) {
+        /* The confirmed record's lease was cancelled: whatever the verifier,
+         * the client gets a new clientid (RFC 7530 §9.6.3.2).  Fencing frees
+         * the by-owner slot or hands it to a pending reboot registration;
+         * carry on with whatever now holds it. */
+        nfs4_client_fence_locked(table, existing);
+        HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+                  owner, owner_len, existing);
+    }
 
     if (!existing) {
         /* No record for this owner: create an unconfirmed one. */
@@ -608,15 +772,9 @@ nfs4_client_setclientid(
 
     /* A new SETCLIENTID supersedes any earlier in-flight unconfirmed record
      * for this owner (RFC 7530 §16.33.5 cases 4c/4d/4e). */
-    if (existing->nfs4_client_scid_pending_id) {
-        HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
-                  &existing->nfs4_client_scid_pending_id,
-                  sizeof(existing->nfs4_client_scid_pending_id), pending);
-        existing->nfs4_client_scid_pending_id = 0;
-        if (pending) {
-            out->destroy_unified = nfs4_client_remove_byid_locked(table,
-                                                                  pending);
-        }
+    pending = nfs4_client_take_pending_locked(table, existing);
+    if (pending) {
+        out->destroy_unified = nfs4_client_remove_byid_locked(table, pending);
     }
 
     if (nfs4_principal_matches(existing, principal) &&
@@ -670,6 +828,17 @@ nfs4_client_setclientid_confirm(
         goto out_unlock;
     }
 
+    if (r->unified && nfs_client_lease_cancelled(r->unified)) {
+        /* Nothing to confirm on a record whose lease is gone: neither a
+         * retransmitted confirm of a fenced client nor a late confirm of a
+         * reaped unconfirmed one may report success. */
+        if (r->nfs4_client_confirmed) {
+            nfs4_client_fence_locked(table, r);
+        }
+        status = NFS4ERR_STALE_CLIENTID;
+        goto out_unlock;
+    }
+
     if (!r->nfs4_client_scid_confirm_valid ||
         memcmp(confirm, r->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE) != 0) {
         /* The (clientid, verifier) pair does not name a record awaiting
@@ -703,24 +872,10 @@ nfs4_client_setclientid_confirm(
             HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
                       &oldid, sizeof(oldid), old);
             if (old) {
-                struct nfs4_session *s, *stmp;
-
-                HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, s, stmp)
-                {
-                    if (s->nfs4_session_clientid == oldid) {
-                        HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, s);
-                        atomic_store_explicit(&s->destroyed, true,
-                                              memory_order_release);
-                        nfs4_session_put(s);
-                    }
-                }
+                nfs4_client_remove_sessions_locked(table, oldid, true);
 
                 old->nfs4_client_scid_pending_id = 0;
-                if (old->nfs4_client_in_owner_table) {
-                    HASH_DELETE(nfs4_client_hh_by_owner,
-                                table->nfs4_ct_clients_by_owner, old);
-                    old->nfs4_client_in_owner_table = 0;
-                }
+                nfs4_client_unhash_owner_locked(table, old);
                 HASH_DELETE(nfs4_client_hh_by_id,
                             table->nfs4_ct_clients_by_id, old);
                 *destroy_unified = old->unified;
@@ -728,9 +883,7 @@ nfs4_client_setclientid_confirm(
                 free(old);
             }
 
-            HASH_ADD(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
-                     nfs4_client_owner, r->nfs4_client_owner_len, r);
-            r->nfs4_client_in_owner_table = 1;
+            nfs4_client_hash_owner_locked(table, r);
         }
         r->nfs4_client_confirmed = 1;
     }
@@ -770,16 +923,19 @@ nfs4_client_create_session_classify(
         goto out_unlock;
     }
 
+    if (c && nfs4_client_fenced(c)) {
+        /* A confirmed clientid whose lease was cancelled is not revived: its
+         * state is gone and the client must EXCHANGE_ID for a new one. */
+        nfs4_client_fence_locked(table, c);
+        out->action = NFS4_CS_ERROR;
+        out->status = NFS4ERR_STALE_CLIENTID;
+        goto out_unlock;
+    }
+
     if (c && c->unified) {
         /* CREATE_SESSION is client liveness on a clientid the server still
-         * holds.  If the lease sweep had marked the client courtesy-expired
-         * (e.g. its EXCHANGE_ID -> CREATE_SESSION handshake stalled past the
-         * lease under load), revive it rather than returning STALE_CLIENTID:
-         * the clientid is valid and the client is plainly alive.  Clear
-         * expired first so the renew (a no-op on an expired client) takes
-         * hold, then renew so the window to the client's first SEQUENCE cannot
-         * trip the sweep. */
-        c->unified->expired = 0;
+         * holds: renew so the window to the client's first SEQUENCE cannot
+         * trip the sweep, which also resumes a courtesy client. */
         nfs_client_touch(c->unified);
     }
 
@@ -983,29 +1139,15 @@ nfs4_client_confirm(
                   &oldid, sizeof(oldid), old);
 
         if (old) {
-            struct nfs4_session *s, *tmp;
-
             /* Tear down the superseded client's sessions so a stale-session
              * reference returns NFS4ERR_BADSESSION. */
-            HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, s, tmp)
-            {
-                if (s->nfs4_session_clientid == oldid) {
-                    HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, s);
-                    atomic_store_explicit(&s->destroyed, true,
-                                          memory_order_release);
-                    nfs4_session_put(s);
-                }
-            }
+            nfs4_client_remove_sessions_locked(table, oldid, true);
 
             /* The superseded confirmed record held the by-owner slot until
              * this confirmation; unhash it everywhere and hand its state
              * out for teardown. */
             old->nfs4_client_scid_pending_id = 0;
-            if (old->nfs4_client_in_owner_table) {
-                HASH_DELETE(nfs4_client_hh_by_owner,
-                            table->nfs4_ct_clients_by_owner, old);
-                old->nfs4_client_in_owner_table = 0;
-            }
+            nfs4_client_unhash_owner_locked(table, old);
             HASH_DELETE(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
                         old);
             *destroy_unified = old->unified;
@@ -1015,11 +1157,7 @@ nfs4_client_confirm(
     }
 
     /* A promoted superseding record takes over the by-owner slot. */
-    if (!c->nfs4_client_in_owner_table) {
-        HASH_ADD(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
-                 nfs4_client_owner, c->nfs4_client_owner_len, c);
-        c->nfs4_client_in_owner_table = 1;
-    }
+    nfs4_client_hash_owner_locked(table, c);
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
     return true;

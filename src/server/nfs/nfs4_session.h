@@ -226,6 +226,10 @@ struct nfs4_client {
     uint32_t              nfs4_client_scid_cb_addr_len;
     char                  nfs4_client_scid_cb_netid[8];
     char                  nfs4_client_scid_cb_addr[64];
+    /* Nonzero once the record's lease was cancelled and it was fenced (see
+     * nfs4_client_fence_locked): monotonic ns the tombstone's hold started.
+     * A fenced record is out of the by-owner table for good. */
+    uint64_t              nfs4_client_fenced_ns;
     /* Unified state hierarchy.  Created when this nfs4_client is first
      * registered; freed when the nfs4_client is unregistered or the table
      * is torn down.  See nfs4_state.h. */
@@ -527,6 +531,27 @@ nfs4_client_confirm(
     struct nfs4_client_table *table,
     uint64_t                  client_id,
     struct nfs_client       **destroy_unified);
+
+/* Has this confirmed record's lease been cancelled?  Such a client must
+ * establish a new clientid (RFC 7530 §9.6.3.2), so it no longer matches its
+ * owner at SETCLIENTID / EXCHANGE_ID. */
+bool
+nfs4_client_fenced(
+    const struct nfs4_client *c);
+
+/* Caller holds the table lock.  Fence a record whose lease was cancelled:
+ * idempotent; see the definition for what it does. */
+void
+nfs4_client_fence_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c);
+
+/* Caller holds the table lock.  Retire a fenced record's tombstone and return
+ * its state hierarchy for nfs_client_destroy once the lock is dropped. */
+struct nfs_client *
+nfs4_client_retire_locked(
+    struct nfs4_client_table *table,
+    struct nfs4_client       *c);
 
 /* Unregister a client and tear down its unified state hierarchy.
  *

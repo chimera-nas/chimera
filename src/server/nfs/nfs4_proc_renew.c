@@ -35,11 +35,9 @@ chimera_nfs4_renew(
     } else {
         struct nfs_client *client = session->client_unified;
 
-        if (client->expired ||
-            atomic_load_explicit(&client->reclaim_pending,
-                                 memory_order_acquire)) {
-            /* A reclaimed courtesy client has lost its lease to a conflicting
-             * acquirer (RFC 7530 §16.30). */
+        if (nfs_client_lease_cancelled(client)) {
+            /* The lease was reaped, or a conflicting acquirer reclaimed the
+             * courtesy client's state (RFC 7530 §16.30). */
             res->status = NFS4ERR_EXPIRED;
         } else {
             res->status = NFS4_OK;
