@@ -39,9 +39,10 @@ log() {
 cleanup() {
     log "Cleaning up..."
 
-    # Kill samba processes in namespace
-    ip netns exec "${NETNS_NAME}" pkill -9 samba 2>/dev/null || true
-    ip netns exec "${NETNS_NAME}" pkill -9 winbindd 2>/dev/null || true
+    # Kill the processes in the namespace, and only those: a network namespace
+    # does not scope the process table, so a pkill run inside it would also
+    # kill samba processes that other tests own.
+    ip netns pids "${NETNS_NAME}" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
     # Remove veth pair
     ip link delete "vad_${TEST_ID}" 2>/dev/null || true
