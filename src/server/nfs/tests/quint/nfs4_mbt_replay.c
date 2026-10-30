@@ -350,6 +350,8 @@ struct v4_res {
     int             has_sid;          /* OPEN/LOCK/LOCKU/... result stateid */
     struct stateid4 sid;
     uint32_t        rflags;           /* OPEN */
+    uint32_t        attrset[2];       /* OPEN: attrset words 0-1 */
+    uint32_t        num_attrset;
     uint32_t        deleg_type;
     struct stateid4 deleg_sid;
 
@@ -1757,6 +1759,12 @@ encode_op(
                 a->opopen.openhow.how.mode = EXCLUSIVE4;
                 pack_be64(s->verf, (uint64_t) jf_i64(hv, "verf"));
                 memcpy(a->opopen.openhow.how.createverf, s->verf, 8);
+            } else if (strcmp(htag, "HExclusive41") == 0) {
+                a->opopen.openhow.how.mode = EXCLUSIVE4_1;
+                pack_be64(s->verf, (uint64_t) jf_i64(hv, "verf"));
+                memcpy(a->opopen.openhow.how.ch_createboth.cva_verf, s->verf, 8);
+                pack_fattr(&a->opopen.openhow.how.ch_createboth.cva_attrs, s,
+                           (int) jf_i64(hv, "mode"), -1);
             } else {
                 fprintf(stderr, "unknown open how %s\n", htag);
                 exit(2);
@@ -2362,8 +2370,11 @@ decode_resop(
                 r->has_sid = 1;
                 r->sid     = ok->stateid;
                 copy_cinfo(r, &ok->cinfo, 0);
-                r->rflags     = ok->rflags;
-                r->deleg_type = ok->delegation.delegation_type;
+                r->rflags      = ok->rflags;
+                r->num_attrset = ok->num_attrset;
+                r->attrset[0]  = ok->num_attrset > 0 ? ok->attrset[0] : 0;
+                r->attrset[1]  = ok->num_attrset > 1 ? ok->attrset[1] : 0;
+                r->deleg_type  = ok->delegation.delegation_type;
                 if (r->deleg_type == OPEN_DELEGATE_READ) {
                     r->deleg_sid = ok->delegation.read.stateid;
                 } else if (r->deleg_type == OPEN_DELEGATE_WRITE) {
@@ -3028,8 +3039,10 @@ classify_status_mismatch(
     if (g_backend_passthrough && strcmp(tag, "SOpen") == 0 &&
         ast == NFS4ERR_EXIST &&
         (est == NFS4_OK || est == NFS4ERR_SHARE_DENIED) && req &&
-        strcmp(jf_tag(json_object_get(jf_val(req), "how")),
-               "HExclusive") == 0) {
+        (strcmp(jf_tag(json_object_get(jf_val(req), "how")),
+                "HExclusive") == 0 ||
+         strcmp(jf_tag(json_object_get(jf_val(req), "how")),
+                "HExclusive41") == 0)) {
         caps_mismatch(o, m, "hostExclusiveVerifier",
                       "EXCLUSIVE4 retry: host timestamps did not preserve "
                       "the verifier");
@@ -3037,6 +3050,26 @@ classify_status_mismatch(
     }
     mism_add(m, "%s: status: expected %u, got %u", tag, est, ast);
 } /* classify_status_mismatch */
+
+/* What an OPEN reply's attrset says about the two time attributes an
+ * exclusive create keeps its verifier in (the model's SOpen.attrsetTimes):
+ * 1 when it names both time_access and time_modify, 0 when it names neither,
+ * -1 when it names only one, which no model answer matches.  The attribute and
+ * its _set form count alike, as they do for a client deciding what to reset. */
+static int
+v4_attrset_times(const struct v4_res *r)
+{
+    uint32_t w1    = r->attrset[1];
+    int      atime = (w1 & ((1U << (FATTR4_TIME_ACCESS - 32)) |
+                            (1U << (FATTR4_TIME_ACCESS_SET - 32)))) != 0;
+    int      mtime = (w1 & ((1U << (FATTR4_TIME_MODIFY - 32)) |
+                            (1U << (FATTR4_TIME_MODIFY_SET - 32)))) != 0;
+
+    if (atime && mtime) {
+        return 1;
+    }
+    return (!atime && !mtime) ? 0 : -1;
+} /* v4_attrset_times */
 
 /* The tolerance rule, and there is only one of it.
  *
@@ -3323,6 +3356,11 @@ check_result(
                     r->cinfo_atomic, r->cinfo_before, r->cinfo_after, m,
                     "open.cinfo");
         check_deleg(o, json_object_get(v, "deleg"), r, m);
+        if (!v4_accept_bool(v, "attrsetTimes", v4_attrset_times(r))) {
+            mism_add(m, "open.attrset times: expected %d, got %d "
+                     "(word1 0x%08x)", jf_bool(v, "attrsetTimes"),
+                     v4_attrset_times(r), r->attrset[1]);
+        }
     } else if (strcmp(tag, "SOpenConfirm") == 0 ||
                strcmp(tag, "SOpenDowngrade") == 0 ||
                strcmp(tag, "SLocku") == 0) {
