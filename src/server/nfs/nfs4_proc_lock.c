@@ -366,14 +366,10 @@ chimera_nfs4_lock_complete(
     /* Tear down the freshly-allocated lock_state if this was a new
      * lock_owner request that created one; otherwise (existing stateid, or a
      * new_lock_owner that reused an emptied one) just drop the acquire ref. */
-    if (args->locker.new_lock_owner && !req->lock_reused) {
-        nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                req->thread->vfs_thread);
-        nfs_lock_state_destroy(lock_state, table, req->thread->vfs_thread);
-    } else {
-        nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                req->thread->vfs_thread);
-    }
+    nfs_lock_state_lock_abandon(lock_state,
+                                args->locker.new_lock_owner &&
+                                !req->lock_reused,
+                                table, req->thread->vfs_thread);
     req->nfs_state_ref = NULL;
 
     res->status        = NFS4ERR_DENIED;
@@ -878,14 +874,10 @@ chimera_nfs4_lock(
      * "to-EOF" sentinel, offset+length must not exceed UINT64_MAX. */
     if (args->length == 0 ||
         (args->length != UINT64_MAX && args->offset > UINT64_MAX - args->length)) {
-        if (args->locker.new_lock_owner && !req->lock_reused) {
-            nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                    thread->vfs_thread);
-            nfs_lock_state_destroy(lock_state, table, thread->vfs_thread);
-        } else {
-            nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                    thread->vfs_thread);
-        }
+        nfs_lock_state_lock_abandon(lock_state,
+                                    args->locker.new_lock_owner &&
+                                    !req->lock_reused,
+                                    table, thread->vfs_thread);
         req->nfs_state_ref = NULL;
         res->status        = NFS4ERR_INVAL;
         chimera_nfs4_lock_finish(req, res->status);
@@ -902,14 +894,10 @@ chimera_nfs4_lock(
 
         rl = calloc(1, sizeof(*rl));
         if (!rl) {
-            if (args->locker.new_lock_owner && !req->lock_reused) {
-                nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                        thread->vfs_thread);
-                nfs_lock_state_destroy(lock_state, table, thread->vfs_thread);
-            } else {
-                nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                        thread->vfs_thread);
-            }
+            nfs_lock_state_lock_abandon(lock_state,
+                                        args->locker.new_lock_owner &&
+                                        !req->lock_reused,
+                                        table, thread->vfs_thread);
             req->nfs_state_ref = NULL;
             res->status        = NFS4ERR_RESOURCE;
             chimera_nfs4_lock_finish(req, res->status);
@@ -921,14 +909,10 @@ chimera_nfs4_lock(
                                            handle->fh_hash, true);
         if (!file_state) {
             free(rl);
-            if (args->locker.new_lock_owner && !req->lock_reused) {
-                nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                        thread->vfs_thread);
-                nfs_lock_state_destroy(lock_state, table, thread->vfs_thread);
-            } else {
-                nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
-                                        thread->vfs_thread);
-            }
+            nfs_lock_state_lock_abandon(lock_state,
+                                        args->locker.new_lock_owner &&
+                                        !req->lock_reused,
+                                        table, thread->vfs_thread);
             req->nfs_state_ref = NULL;
             res->status        = NFS4ERR_RESOURCE;
             chimera_nfs4_lock_finish(req, res->status);
