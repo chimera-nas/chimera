@@ -364,8 +364,9 @@ chimera_nfs4_lock_complete(
     nfs_lock_state_lock_end(lock_state);
 
     /* Tear down the freshly-allocated lock_state if this was a new
-     * lock_owner request that created one; otherwise (existing stateid, or a
-     * new_lock_owner that reused an emptied one) just drop the acquire ref. */
+     * lock_owner request that created one and no other LOCK has reused it
+     * since; otherwise (existing stateid, or a new_lock_owner that reused an
+     * emptied one) just drop the acquire ref. */
     nfs_lock_state_lock_abandon(lock_state,
                                 args->locker.new_lock_owner &&
                                 !req->lock_reused,

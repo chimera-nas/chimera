@@ -485,6 +485,81 @@ test_lock_pin_refused_after_close(void)
     printf("ok: lock_pin_refused_after_close\n");
 } /* test_lock_pin_refused_after_close */
 
+/* Two new_lock_owner LOCKs by one lock-owner on one file: the first creates
+ * the lock state, the second reuses and pins it, and the first then fails
+ * (DENIED, INVAL, RESOURCE).  Abandoning its state must leave it to the
+ * second LOCK; with no other LOCK on it, abandoning still destroys it. */
+static void
+test_lock_abandon_keeps_reused_state(void)
+{
+    struct nfs_state_table  table;
+    struct nfs_client      *client;
+    struct nfs_open_owner  *oo;
+    struct nfs_open_state  *os;
+    struct nfs_lock_owner  *lo;
+    struct nfs_lock_state  *ls;
+    struct nfs4_range_lease held;
+    struct stateid4         sid, lock_sid;
+    void                   *acquired;
+    uint8_t                 acquired_type;
+    bool                    created;
+    uint8_t                 fh[4] = { 0x0F, 0x5E, 0xED, 0x03 };
+
+    nfs_state_table_init(&table, 1);
+    client = nfs_client_alloc(9, "client-reuse", 12, 0x7924, /*minor*/ 1);
+    oo     = nfs_open_owner_find_or_create(client, "owner-R", 7, &created);
+    os     = nfs_open_state_create(oo, 0, NULL, 0, fh, sizeof(fh),
+                                   OPEN4_SHARE_ACCESS_BOTH,
+                                   OPEN4_SHARE_DENY_NONE,
+                                   /*handle_dup*/ NULL, &table, &sid);
+    lo = nfs_lock_owner_find_or_create(client, "lockowner-R", 11, &created);
+    ls = nfs_lock_state_create(lo, os, NULL, &table, &lock_sid);
+    CHECK(ls != NULL);
+
+    /* The creating LOCK's acquire ref, then the reusing LOCK's ref and pin. */
+    CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
+                                  &acquired, &acquired_type) == NFS4_OK);
+    CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
+                                  &acquired, &acquired_type) == NFS4_OK);
+    CHECK(nfs_lock_state_lock_begin(ls));
+
+    /* The creating LOCK fails: its state stays, pinned by the other. */
+    nfs_lock_state_lock_abandon(ls, /*created*/ true, &table, NULL);
+    CHECK(ls->on_owner_list && atomic_load(&ls->destroyed) == 0);
+
+    /* The reusing LOCK is granted and completes. */
+    memset(&held, 0, sizeof(held));
+    ls->range_leases = &held;
+    ls->seqid        = 2;
+    nfs_lock_state_lock_end(ls);
+    nfs_state_table_release(&table, ls, NFS4_SLOT_TYPE_LOCK, NULL);
+    CHECK(nfs_lock_state_free(ls, 2, &table, NULL) == NFS4ERR_LOCKS_HELD);
+
+    /* LOCKU of that range, then FREE_STATEID of the stateid it returned. */
+    ls->range_leases = NULL;
+    ls->seqid        = 3;
+    CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
+                                  &acquired, &acquired_type) == NFS4_OK);
+    CHECK(nfs_lock_state_free(ls, 3, &table, NULL) == NFS4_OK);
+    nfs_state_table_release(&table, ls, NFS4_SLOT_TYPE_LOCK, NULL);
+
+    /* No other LOCK on it: abandoning a created state destroys it. */
+    ls = nfs_lock_state_create(lo, os, NULL, &table, &lock_sid);
+    CHECK(ls != NULL);
+    CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
+                                  &acquired, &acquired_type) == NFS4_OK);
+    nfs_lock_state_lock_abandon(ls, /*created*/ true, &table, NULL);
+    CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
+                                  &acquired, &acquired_type) != NFS4_OK);
+
+    nfs_open_state_destroy(os, &table, NULL);
+    nfs_lock_owner_put(lo);
+    nfs_open_owner_put(oo);
+    nfs_client_destroy(client, &table, NULL, true);
+    nfs_state_table_free(&table, NULL);
+    printf("ok: lock_abandon_keeps_reused_state\n");
+} /* test_lock_abandon_keeps_reused_state */
+
 int
 main(
     int   argc,
@@ -501,6 +576,7 @@ main(
     test_stateid_seqid_wrap();
     test_lock_state_free_interlock();
     test_lock_pin_refused_after_close();
+    test_lock_abandon_keeps_reused_state();
     printf("PASS: all state table tests\n");
     return 0;
 } /* main */
