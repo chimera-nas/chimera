@@ -308,6 +308,19 @@ struct chimera_smb_op_state {
      * Length 0 means no link was followed and the requested path stands. */
     int                               followed_pathlen;
     char                              followed_path[CHIMERA_SMB_PATH_MAX + 1];
+
+    /* Phase 1b: the parent-joined full mount-relative paths an op must evict on
+     * success.  remove/rename join their leaf against the core-resolved parent
+     * handle, so the interned id is the JOINED path, not the raw leaf.  remove
+     * must not reuse `followed_path` (the follow shim owns that slot).  The
+     * `*_len` fields are zeroed at op start so a failure path cannot evict a
+     * recycled plugin_data leftover. */
+    int                               remove_path_len;
+    char                              remove_path[CHIMERA_SMB_PATH_MAX + 1];
+    int                               rename_src_len;
+    char                              rename_src[CHIMERA_SMB_PATH_MAX + 1];
+    int                               rename_dst_len;
+    char                              rename_dst[CHIMERA_SMB_PATH_MAX + 1];
 };
 
 /* The continuation invoked when the reply for a specific message_id arrives.
@@ -848,8 +861,26 @@ void smb_apply_attrs(
     const struct smb_open_info       *info,
     uint64_t                          ino);
 
+/* Resolve a leaf `name` against an EXPLICIT parent fh into a full mount-relative
+ * path in `out` ("" parent -> just the name).  This is the general joiner: the
+ * rename destination joins against `rename_at.new_fh`, which is NOT request->fh
+ * (that is the source parent).  Returns the normalized length, or -1 (caller
+ * maps to ESTALE) when the fh's path id is not interned or the result overflows.
+ * Does NOT reject "."/".." -- that is the whole-path passthrough too; the leaf
+ * guard (smb_leaf_is_dot_or_dotdot) is applied by the caller before this. */
+int smb_fh_full_path(
+    struct chimera_smb_client_conn *conn,
+    const uint8_t                  *fh,
+    int                             fh_len,
+    const char                     *name,
+    int                             namelen,
+    char                           *out,
+    int                             out_max);
+
 /* Resolve a dirfd-relative leaf `name` against the parent handle `request->fh`
- * into a full mount-relative path in `out` ("" parent -> just the name). */
+ * into a full mount-relative path in `out` ("" parent -> just the name).
+ * One-line wrapper over smb_fh_full_path forwarding request->fh/fh_len, so the
+ * existing callers stay byte-identical. */
 int smb_at_full_path(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request,
@@ -857,6 +888,18 @@ int smb_at_full_path(
     int                             namelen,
     char                           *out,
     int                             out_max);
+
+/* A leaf of exactly "." or "..".  A joined leaf of ".." re-collapses under
+ * smb_path_normalize (it pops the parent), reconstructing the escape the Option
+ * C guard removed, so remove/rename reject such a leaf (EINVAL) BEFORE joining. */
+static inline int
+smb_leaf_is_dot_or_dotdot(
+    const char *name,
+    int         namelen)
+{
+    return (namelen == 1 && name[0] == '.') ||
+           (namelen == 2 && name[0] == '.' && name[1] == '.');
+} /* smb_leaf_is_dot_or_dotdot */
 
 /* Send an SMB2 CREATE on `path` (full mount-relative path; "" for the root). */
 void smb_send_create(
