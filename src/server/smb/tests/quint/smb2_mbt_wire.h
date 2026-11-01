@@ -469,11 +469,13 @@ smb2w_ntowfv2(
     }
 } /* smb2w_ntowfv2 */
 
-/* Build the NTLMSSP NEGOTIATE (type 1) message. */
+/* Build the NTLMSSP NEGOTIATE (type 1) message.  key_exch asks for key
+ * exchange; it has no effect on an anonymous one. */
 static inline int
 smb2w_ntlm_negotiate(
     uint8_t *o,
-    int      anonymous)
+    int      anonymous,
+    int      key_exch)
 {
     uint32_t flags = SMB2W_NTLMSSP_UNICODE | SMB2W_NTLMSSP_NTLM |
         SMB2W_NTLMSSP_REQ_TARGET;
@@ -482,8 +484,10 @@ smb2w_ntlm_negotiate(
         flags |= SMB2W_NTLMSSP_ANONYMOUS;
     } else {
         flags |= SMB2W_NTLMSSP_SIGN | SMB2W_NTLMSSP_ALWAYS_SIGN |
-            SMB2W_NTLMSSP_EXT_SESSEC | SMB2W_NTLMSSP_KEY_EXCH |
-            SMB2W_NTLMSSP_128;
+            SMB2W_NTLMSSP_EXT_SESSEC | SMB2W_NTLMSSP_128;
+        if (key_exch) {
+            flags |= SMB2W_NTLMSSP_KEY_EXCH;
+        }
     }
 
     memset(o, 0, 32);
@@ -518,9 +522,12 @@ smb2w_ntlm_auth_anon(uint8_t *o)
  * a client challenge and the server's own TargetInfo echoed back verbatim; the
  * server recomputes the proof over ServerChallenge || blob, so the blob's
  * contents matter only in that both sides must see the same bytes.  With
- * KEY_EXCH negotiated the real session key is a random value wrapped under the
- * key-exchange key, which is the path Windows clients take and therefore the
- * one worth exercising (MS-NLMP 3.1.5.1.2). */
+ * key_exch the real session key is a random value wrapped under the
+ * key-exchange key: what a client does once KEY_EXCH is negotiated, and what
+ * older kernel cifs clients such as 4.18 do regardless (MS-NLMP 3.1.5.1.2).
+ * Without it the AUTHENTICATE carries no EncryptedRandomSessionKey and the
+ * session key is the key-exchange key itself, which is what a client that
+ * follows a server not offering KEY_EXCH does. */
 static inline int
 smb2w_ntlm_auth_ntlmv2(
     const uint8_t *challenge,     /* the type 2 message */
@@ -528,6 +535,7 @@ smb2w_ntlm_auth_ntlmv2(
     const char    *user,
     const char    *password,
     const char    *domain,
+    int            key_exch,
     uint8_t       *o,
     uint8_t       *session_key16)
 {
@@ -587,7 +595,9 @@ smb2w_ntlm_auth_ntlmv2(
     if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, ntowf, 16, proof, 16, kxkey, 16)) {
         smb2w_die("HMAC-MD5 key-exchange key");
     }
-    if (chimera_crypto_random(session_key16, 16) != 1) {
+    if (!key_exch) {
+        memcpy(session_key16, kxkey, 16);
+    } else if (chimera_crypto_random(session_key16, 16) != 1) {
         smb2w_die("chimera_crypto_random");
     }
 
@@ -621,20 +631,21 @@ smb2w_ntlm_auth_ntlmv2(
     p16(o, 44, 0); p16(o, 46, 0); p32(o, 48, off);
 
     /* EncryptedRandomSessionKey = RC4(kxkey, session key) */
-    {
+    elen = 0;
+    if (key_exch) {
         /* Independent wire fixture for NTLM's negotiated key exchange. */
         if (!chimera_crypto_ntlm_key_exchange(kxkey, session_key16, o + off)) {
             smb2w_die("RC4 key exchange");
         }
+        elen = 16;
     }
-    elen = 16;
     p16(o, 52, (uint16_t) elen); p16(o, 54, (uint16_t) elen); p32(o, 56, off);
     off += elen;
 
     p32(o, 60, SMB2W_NTLMSSP_UNICODE | SMB2W_NTLMSSP_NTLM |
         SMB2W_NTLMSSP_REQ_TARGET | SMB2W_NTLMSSP_SIGN |
         SMB2W_NTLMSSP_ALWAYS_SIGN | SMB2W_NTLMSSP_EXT_SESSEC |
-        SMB2W_NTLMSSP_KEY_EXCH | SMB2W_NTLMSSP_128);
+        (key_exch ? SMB2W_NTLMSSP_KEY_EXCH : 0) | SMB2W_NTLMSSP_128);
 
     return off;
 } /* smb2w_ntlm_auth_ntlmv2 */
