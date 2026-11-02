@@ -281,58 +281,38 @@ chimera_pnfs_uaddr_from_human(
     return 0;
 } /* chimera_pnfs_uaddr_from_human */
 
-int
-main(
-    int    argc,
-    char **argv)
+/* Resolved REST HTTPS identity: the configured cert/key, or (POSIX) an
+ * auto-generated self-signed one. */
+struct chimera_rest_tls_config {
+    int         https_port;
+    const char *ssl_cert;
+    const char *ssl_key;
+};
+
+/* Parse command-line options.  Returns -1 to continue startup, or a process
+ * exit code (0 or 1) if main() should return immediately (e.g. -v, -h, or an
+ * unrecognized option).  Runs before chimera_log_init(), so it must not log
+ * through chimera_*() and reports problems on stdout/stderr directly. */
+static int
+parse_cli_args(
+    int          argc,
+    char       **argv,
+    const char **config_path,
+    const char **log_path)
 {
-    const char                          *config_path = CONFIG_PATH;
-    extern char                         *optarg;
-    int                                  opt;
-    const char                          *name;
-    const char                          *module;
-    const char                          *path;
-    json_t                              *config, *shares, *share, *server_params, *buckets, *bucket;
-    json_t                              *mounts, *mount, *exports, *export;
-    json_t                              *json_value;
-    int                                  int_value;
-    const char                          *str_value;
-    json_error_t                         error;
-    struct chimera_server               *server;
-    struct chimera_server_config        *server_config;
-    struct evpl_global_config           *evpl_global_config;
-    struct chimera_metrics              *metrics;
-    int                                  i;
-    struct chimera_server_config_smb_nic smb_nic_info[16];
-    const char                          *rest_ssl_cert   = NULL;
-    const char                          *rest_ssl_key    = NULL;
-    int                                  rest_https_port = 0;
+    extern char *optarg;
+    int          opt;
 
-#ifndef _WIN32
-    static char                          auto_cert_path[PATH_MAX];
-    static char                          auto_key_path[PATH_MAX];
-#endif /* ifndef _WIN32 */
-
-    chimera_log_init();
-
-#if CHIMERA_SANITIZE != 1
-    /* If we are not using address sanitizer, add a crash handler to
-     * print stack on signals.   Otherwise, let address sanitizer
-     * handle it.
-     */
-    chimera_enable_crash_handler();
- #endif /* ifndef CHIMERA_SANITIZE */
-
-    evpl_set_log_fn(chimera_vlog, chimera_log_flush);
-
-    /* Parse command line first to get config path */
-    while ((opt = getopt(argc, argv, "c:dvh")) != -1) {
+    while ((opt = getopt(argc, argv, "c:dl:vh")) != -1) {
         switch (opt) {
             case 'c':
-                config_path = optarg;
+                *config_path = optarg;
                 break;
             case 'd':
                 ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+                break;
+            case 'l':
+                *log_path = optarg;
                 break;
             case 'v':
                 printf("Version: %s\n", CHIMERA_VERSION);
@@ -342,6 +322,7 @@ main(
                 printf("Usage: chimera-daemon [options]\n"
                        "  -c <config file>   Specify configuration file (default: %s)\n"
                        "  -d                 Enable debug logging\n"
+                       "  -l <log file>      Append log messages to this file instead of stdout\n"
                        "  -v                 Print version information\n"
                        "  -h                 Show this help message\n",
                        CONFIG_PATH);
@@ -349,37 +330,122 @@ main(
         } /* switch */
     }
 
-    /* first we need to clear the umask to make sure file are created with porper mode.*/
-    umask(0);
+    return -1;
+} /* parse_cli_args */
+
+static json_t *
+load_config_file(const char *config_path)
+{
+    json_t      *config;
+    json_error_t error;
+
     /* Load config file early to get TLS settings before evpl_init */
     config = json_load_file(config_path, 0, &error);
 
     if (!config) {
         fprintf(stderr, "Failed to load configuration file: %s\n", error.text);
-        return 1;
     }
 
-    /* Check for HTTPS configuration before evpl_init */
-    server_params = json_object_get(config, "server");
+    return config;
+} /* load_config_file */
+
+#ifndef _WIN32
+/* Resolve the REST HTTPS certificate/key when none was configured: generate
+ * a self-signed one in the host temp directory.  Returns 0 on success, -1 on
+ * failure (error already logged). */
+static int
+configure_rest_tls_cert(struct chimera_rest_tls_config *tls)
+{
+    static char auto_cert_path[PATH_MAX];
+    static char auto_key_path[PATH_MAX];
+    char        temp_directory[PATH_MAX];
+
+    if (chimera_host_temp_directory(temp_directory, sizeof(temp_directory)) ||
+        snprintf(auto_cert_path, sizeof(auto_cert_path),
+                 "%schimera-rest-%d.crt", temp_directory, getpid()) >= sizeof(auto_cert_path) ||
+        snprintf(auto_key_path, sizeof(auto_key_path),
+                 "%schimera-rest-%d.key", temp_directory, getpid()) >= sizeof(auto_key_path)) {
+        fprintf(stderr, "Temporary certificate path is too long\n");
+        return -1;
+    }
+
+    if (generate_self_signed_cert(auto_cert_path, auto_key_path) != 0) {
+        fprintf(stderr, "Failed to generate self-signed certificate\n");
+        return -1;
+    }
+
+    tls->ssl_cert = auto_cert_path;
+    tls->ssl_key  = auto_key_path;
+
+    return 0;
+} /* configure_rest_tls_cert */
+#endif /* ifndef _WIN32 */
+
+/* Parse the REST HTTPS settings and, if HTTPS is enabled, configure TLS on
+ * evpl_global_config -- using the supplied certificate or, failing that, an
+ * auto-generated self-signed one.  Must run before evpl_init().  Returns 0
+ * on success, -1 on failure (error already logged). */
+static int
+configure_rest_tls(
+    json_t                         *server_params,
+    struct evpl_global_config      *evpl_global_config,
+    struct chimera_rest_tls_config *tls)
+{
+    memset(tls, 0, sizeof(*tls));
+
     if (server_params) {
         json_t *https_port_value = json_object_get(server_params, "rest_https_port");
         if (https_port_value && json_is_integer(https_port_value)) {
-            rest_https_port = json_integer_value(https_port_value);
+            tls->https_port = json_integer_value(https_port_value);
         }
 
         json_t *ssl_cert_value = json_object_get(server_params, "rest_ssl_cert");
         if (ssl_cert_value && json_is_string(ssl_cert_value)) {
-            rest_ssl_cert = json_string_value(ssl_cert_value);
+            tls->ssl_cert = json_string_value(ssl_cert_value);
         }
 
         json_t *ssl_key_value = json_object_get(server_params, "rest_ssl_key");
         if (ssl_key_value && json_is_string(ssl_key_value)) {
-            rest_ssl_key = json_string_value(ssl_key_value);
+            tls->ssl_key = json_string_value(ssl_key_value);
         }
     }
 
-    /* Initialize evpl global config */
-    evpl_global_config = evpl_global_config_init();
+    if (tls->https_port == 0) {
+        return 0;
+    }
+
+    if (tls->ssl_cert && tls->ssl_key) {
+        /* Use provided certificate */
+        evpl_global_config_set_tls_cert(evpl_global_config, tls->ssl_cert);
+        evpl_global_config_set_tls_key(evpl_global_config, tls->ssl_key);
+        return 0;
+    }
+
+#ifdef _WIN32
+    /* With no supplied identity, libevpl creates a self-signed certificate
+     * and CNG key for Schannel. No PEM files or OpenSSL are required. */
+    return 0;
+#else  /* ifdef _WIN32 */
+    if (configure_rest_tls_cert(tls) != 0) {
+        return -1;
+    }
+    evpl_global_config_set_tls_cert(evpl_global_config, tls->ssl_cert);
+    evpl_global_config_set_tls_key(evpl_global_config, tls->ssl_key);
+    return 0;
+#endif /* ifdef _WIN32 */
+} /* configure_rest_tls */
+
+/* Build and return the libevpl global config, including REST TLS (see
+ * configure_rest_tls()) and the shared "common" config section.  Returns
+ * NULL on failure (error already logged). */
+static struct evpl_global_config *
+build_evpl_global_config(
+    json_t                         *config,
+    json_t                         *server_params,
+    struct chimera_rest_tls_config *tls)
+{
+    struct evpl_global_config *evpl_global_config = evpl_global_config_init();
+
     evpl_global_config_set_rdmacm_datagram_size_override(evpl_global_config, 8192);
     evpl_global_config_set_buffer_size(evpl_global_config, 8 * 1024 * 1024);
 
@@ -410,70 +476,29 @@ main(
     /* XLIO enable/disable is derived from the common tcp_flavor and applied
      * by chimera_apply_common_config() below, before evpl_init(). */
 
-    /* Configure TLS if HTTPS is enabled */
-    if (rest_https_port != 0) {
-        if (rest_ssl_cert && rest_ssl_key) {
-            /* Use provided certificate */
-            evpl_global_config_set_tls_cert(evpl_global_config, rest_ssl_cert);
-            evpl_global_config_set_tls_key(evpl_global_config, rest_ssl_key);
-        } else {
-#ifdef _WIN32
-            /* With no supplied identity, libevpl creates a self-signed certificate
-             * and CNG key for Schannel. No PEM files or OpenSSL are required. */
-#else  /* ifdef _WIN32 */
-            /* Use the host temporary directory. */
-            char temp_directory[PATH_MAX];
-            if (chimera_host_temp_directory(temp_directory, sizeof(temp_directory)) ||
-                snprintf(auto_cert_path, sizeof(auto_cert_path),
-                         "%schimera-rest-%d.crt", temp_directory, getpid()) >= sizeof(auto_cert_path) ||
-                snprintf(auto_key_path, sizeof(auto_key_path),
-                         "%schimera-rest-%d.key", temp_directory, getpid()) >= sizeof(auto_key_path)) {
-                fprintf(stderr, "Temporary certificate path is too long\n");
-                json_decref(config);
-                return 1;
-            }
-
-            if (generate_self_signed_cert(auto_cert_path, auto_key_path) != 0) {
-                fprintf(stderr, "Failed to generate self-signed certificate\n");
-                json_decref(config);
-                return 1;
-            }
-
-            evpl_global_config_set_tls_cert(evpl_global_config, auto_cert_path);
-            evpl_global_config_set_tls_key(evpl_global_config, auto_key_path);
-            rest_ssl_cert = auto_cert_path;
-            rest_ssl_key  = auto_key_path;
-#endif /* ifdef _WIN32 */
-        }
+    if (configure_rest_tls(server_params, evpl_global_config, tls) != 0) {
+        return NULL;
     }
 
     /* Apply the shared "common" config section (huge pages / slab size) parsed
      * from the same file, last, so it overrides the hardcoded defaults above. */
     chimera_apply_common_config(config, evpl_global_config);
 
-    evpl_init(evpl_global_config);
+    return evpl_global_config;
+} /* build_evpl_global_config */
 
-    /* Bring up OpenTelemetry span tracing if common.tracing.enabled (off by
-    * default).  Must run after evpl_init (the gRPC exporter spins up an evpl
-    * thread) and before the server's core threads start producing spans. */
-    chimera_tracing_init(config);
-
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-#ifdef _WIN32
-    signal(SIGBREAK, signal_handler);
-#else  /* ifdef _WIN32 */
-    /* Some supervisors stop the daemons they manage with SIGQUIT and expect an
-     * orderly shutdown.  Its default action would terminate with a core dump,
-     * so treat it like SIGTERM; a core is still available through SIGABRT. */
-    signal(SIGQUIT, signal_handler);
-#endif /* ifdef _WIN32 */
-
-    chimera_server_info("Initializing server...");
-
-    /* Metrics port (default 9000); configurable so multiple daemons can share
-     * a host (e.g. a pNFS MDS + data server). */
+/* Metrics port (default 9000); configurable so multiple daemons can share
+ * a host (e.g. a pNFS MDS + data server).  The scrape endpoint follows the
+ * same transport flavor as the rest of the server (common.tcp_flavor), read
+ * straight from the parsed config -- server_config does not exist yet at
+ * this point. */
+static struct chimera_metrics *
+init_metrics(
+    json_t *config,
+    json_t *server_params)
+{
     int metrics_port = 9000;
+
     if (server_params) {
         json_t *mp = json_object_get(server_params, "metrics_port");
         if (json_is_integer(mp)) {
@@ -481,13 +506,17 @@ main(
         }
     }
 
-    /* The scrape endpoint follows the same transport flavor as the rest of
-     * the server (common.tcp_flavor), read straight from the parsed config --
-     * server_config does not exist yet at this point. */
-    metrics = chimera_metrics_init(metrics_port,
-                                   chimera_common_tcp_flavor(config));
+    return chimera_metrics_init(metrics_port, chimera_common_tcp_flavor(config));
+} /* init_metrics */
 
-    server_config = chimera_server_config_init();
+static void
+apply_core_server_config(
+    json_t                       *server_params,
+    json_t                       *config,
+    struct chimera_server_config *server_config)
+{
+    json_t *json_value;
+    int     int_value;
 
     json_value = json_object_get(server_params, "threads");
     if (json_is_integer(json_value)) {
@@ -585,6 +614,16 @@ main(
      * EBUSY (common.umount_timeout_ms); shared with the client. */
     chimera_server_config_set_umount_timeout(server_config,
                                              chimera_common_umount_timeout_ms(config));
+} /* apply_core_server_config */
+
+/* Returns 0 on success, 1 if a value failed validation (matches main()'s
+ * historical behavior of returning 1 directly without startup_validation_fail()). */
+static int
+apply_smb_config(
+    json_t                       *server_params,
+    struct chimera_server_config *server_config)
+{
+    json_t *json_value;
 
     json_value = json_object_get(server_params, "smb_persistent_handles");
     if (json_is_boolean(json_value)) {
@@ -692,6 +731,18 @@ main(
     if (json_is_integer(json_value)) {
         chimera_server_config_set_smb_fs_sector_size_flags(server_config, (uint32_t) json_integer_value(json_value));
     }
+
+    return 0;
+} /* apply_smb_config */
+
+static void
+apply_nfs_config(
+    json_t                       *server_params,
+    struct chimera_server_config *server_config)
+{
+    json_t     *json_value;
+    int         int_value;
+    const char *str_value;
 
     json_value = json_object_get(server_params, "nfs4_session_slots");
     if (json_is_integer(json_value)) {
@@ -818,10 +869,37 @@ main(
         chimera_server_config_set_smb_port(server_config, int_value);
     }
 
-    /* Protocols are opt-in: nothing serves until the config enables it, so an
-     * instance brought up for one purpose never surprise-binds the other
-     * protocols' well-known ports.  The *_port settings above keep their
-     * customary defaults and matter only once the protocol is enabled. */
+    json_value = json_object_get(server_params, "state_dir");
+    if (json_is_string(json_value)) {
+        chimera_server_config_set_state_dir(server_config, json_string_value(json_value));
+    }
+
+    /* nfs_fh_sign: sign wire file handles (default true).  nfs_fh_key: optional
+     * 32-hex-char (128-bit) signing key, required when multiple nodes must mint
+     * interchangeable handles. */
+    json_value = json_object_get(server_params, "nfs_fh_sign");
+    if (json_value) {
+        chimera_server_config_set_nfs_fh_sign(server_config,
+                                              json_is_true(json_value) ? 1 : 0);
+    }
+    json_value = json_object_get(server_params, "nfs_fh_key");
+    if (json_is_string(json_value)) {
+        chimera_server_config_set_nfs_fh_key(server_config, json_string_value(json_value));
+    }
+} /* apply_nfs_config */
+
+/* Protocols are opt-in: nothing serves until the config enables it, so an
+ * instance brought up for one purpose never surprise-binds the other
+ * protocols' well-known ports.  The *_port settings in apply_nfs_config()
+ * keep their customary defaults and matter only once the protocol is
+ * enabled. */
+static void
+apply_protocol_enabled_config(
+    json_t                       *server_params,
+    struct chimera_server_config *server_config)
+{
+    json_t *json_value;
+
     json_value = json_object_get(server_params, "nfs_enabled");
     if (json_is_boolean(json_value)) {
         chimera_server_config_set_nfs_enabled(server_config, json_is_true(json_value));
@@ -862,111 +940,110 @@ main(
     if (json_is_true(json_value)) {
         chimera_server_config_set_nfs_data_server(server_config, 1);
     }
+} /* apply_protocol_enabled_config */
 
-    /* pNFS layout configuration (disabled unless "enabled": true). */
+/* pNFS layout configuration (disabled unless "enabled": true). */
+static void
+apply_pnfs_config(
+    json_t                       *server_params,
+    struct chimera_server_config *server_config)
+{
     json_t *pnfs = json_object_get(server_params, "pnfs");
-    if (pnfs && json_is_object(pnfs)) {
-        json_t *pnfs_enabled = json_object_get(pnfs, "enabled");
-        if (json_is_true(pnfs_enabled)) {
-            chimera_server_config_set_pnfs_enabled(server_config, 1);
-        }
 
-        json_t *data_servers = json_object_get(pnfs, "data_servers");
-        if (json_is_array(data_servers)) {
-            size_t  ds_i;
-            json_t *ds_entry;
-            json_array_foreach(data_servers, ds_i, ds_entry)
-            {
-                const char *tcp_str     = json_string_value(json_object_get(ds_entry, "tcp"));
-                const char *rdma_str    = json_string_value(json_object_get(ds_entry, "rdma"));
-                const char *backing_str = json_string_value(json_object_get(ds_entry, "backing_path"));
-                json_t     *version_val = json_object_get(ds_entry, "version");
-                char        wire_tcp[64];
-                char        wire_rdma[64];
-                char       *wire_rdma_p = NULL;
+    if (!(pnfs && json_is_object(pnfs))) {
+        return;
+    }
 
-                /* "tcp" (required): the DS's TCP address handed to clients,
-                 * given human-friendly as "host" or "host:port" (port defaults
-                 * to 2049) and advertised as the "tcp" netaddr.
-                 * "rdma" (optional): an additional RDMA address (port defaults
-                 * to 20049) advertised as a preferred "rdma" netaddr alongside
-                 * tcp, so RDMA-capable clients use RDMA and others fall back to
-                 * tcp.  backing_path: the chimera path where this DS export is
-                 * mounted via the nfs module, under which the MDS creates
-                 * backing files. */
-                if (!tcp_str || !backing_str) {
-                    chimera_server_error(
-                        "pNFS data_server[%zu] requires \"tcp\" and \"backing_path\"; skipping",
-                        ds_i);
-                    continue;
-                }
+    json_t *pnfs_enabled = json_object_get(pnfs, "enabled");
+    if (json_is_true(pnfs_enabled)) {
+        chimera_server_config_set_pnfs_enabled(server_config, 1);
+    }
 
-                /* "version": which NFS version the client uses to reach the DS,
-                 * advertised in ff_device_addr4.ffda_versions.  Accepts an
-                 * integer (3 / 4) or a string ("3", "4.0", "4.1").  NFSv4
-                 * defaults to minor version 1 (pNFS).  Default: NFSv3. */
-                int ds_version = 3, ds_minor = 0;
-                if (json_is_string(version_val)) {
-                    const char *vs  = json_string_value(version_val);
-                    const char *dot = strchr(vs, '.');
-                    ds_version = atoi(vs);
-                    ds_minor   = dot ? atoi(dot + 1) : (ds_version >= 4 ? 1 : 0);
-                } else if (json_is_integer(version_val)) {
-                    ds_version = (int) json_integer_value(version_val);
-                    ds_minor   = ds_version >= 4 ? 1 : 0;
-                }
+    json_t *data_servers = json_object_get(pnfs, "data_servers");
+    if (json_is_array(data_servers)) {
+        size_t  ds_i;
+        json_t *ds_entry;
+        json_array_foreach(data_servers, ds_i, ds_entry)
+        {
+            const char *tcp_str     = json_string_value(json_object_get(ds_entry, "tcp"));
+            const char *rdma_str    = json_string_value(json_object_get(ds_entry, "rdma"));
+            const char *backing_str = json_string_value(json_object_get(ds_entry, "backing_path"));
+            json_t     *version_val = json_object_get(ds_entry, "version");
+            char        wire_tcp[64];
+            char        wire_rdma[64];
+            char       *wire_rdma_p = NULL;
 
-                if (ds_version != 3 && ds_version != 4) {
-                    chimera_server_error(
-                        "pNFS data_server[%zu] version %d unsupported (use 3 or 4); skipping",
-                        ds_i, ds_version);
-                    continue;
-                }
-
-                if (chimera_pnfs_uaddr_from_human("tcp", tcp_str,
-                                                  wire_tcp, sizeof(wire_tcp)) != 0) {
-                    chimera_server_error(
-                        "pNFS data_server[%zu] invalid tcp address \"%s\"; skipping",
-                        ds_i, tcp_str);
-                    continue;
-                }
-
-                if (rdma_str) {
-                    if (chimera_pnfs_uaddr_from_human("rdma", rdma_str,
-                                                      wire_rdma, sizeof(wire_rdma)) != 0) {
-                        chimera_server_error(
-                            "pNFS data_server[%zu] invalid rdma address \"%s\"; skipping RDMA advert",
-                            ds_i, rdma_str);
-                    } else {
-                        wire_rdma_p = wire_rdma;
-                    }
-                }
-
-                chimera_server_config_add_pnfs_ds(server_config, "tcp", wire_tcp,
-                                                  wire_rdma_p, backing_str, ds_version, ds_minor);
+            /* "tcp" (required): the DS's TCP address handed to clients,
+             * given human-friendly as "host" or "host:port" (port defaults
+             * to 2049) and advertised as the "tcp" netaddr.
+             * "rdma" (optional): an additional RDMA address (port defaults
+             * to 20049) advertised as a preferred "rdma" netaddr alongside
+             * tcp, so RDMA-capable clients use RDMA and others fall back to
+             * tcp.  backing_path: the chimera path where this DS export is
+             * mounted via the nfs module, under which the MDS creates
+             * backing files. */
+            if (!tcp_str || !backing_str) {
+                chimera_server_error(
+                    "pNFS data_server[%zu] requires \"tcp\" and \"backing_path\"; skipping",
+                    ds_i);
+                continue;
             }
+
+            /* "version": which NFS version the client uses to reach the DS,
+             * advertised in ff_device_addr4.ffda_versions.  Accepts an
+             * integer (3 / 4) or a string ("3", "4.0", "4.1").  NFSv4
+             * defaults to minor version 1 (pNFS).  Default: NFSv3. */
+            int ds_version = 3, ds_minor = 0;
+            if (json_is_string(version_val)) {
+                const char *vs  = json_string_value(version_val);
+                const char *dot = strchr(vs, '.');
+                ds_version = atoi(vs);
+                ds_minor   = dot ? atoi(dot + 1) : (ds_version >= 4 ? 1 : 0);
+            } else if (json_is_integer(version_val)) {
+                ds_version = (int) json_integer_value(version_val);
+                ds_minor   = ds_version >= 4 ? 1 : 0;
+            }
+
+            if (ds_version != 3 && ds_version != 4) {
+                chimera_server_error(
+                    "pNFS data_server[%zu] version %d unsupported (use 3 or 4); skipping",
+                    ds_i, ds_version);
+                continue;
+            }
+
+            if (chimera_pnfs_uaddr_from_human("tcp", tcp_str,
+                                              wire_tcp, sizeof(wire_tcp)) != 0) {
+                chimera_server_error(
+                    "pNFS data_server[%zu] invalid tcp address \"%s\"; skipping",
+                    ds_i, tcp_str);
+                continue;
+            }
+
+            if (rdma_str) {
+                if (chimera_pnfs_uaddr_from_human("rdma", rdma_str,
+                                                  wire_rdma, sizeof(wire_rdma)) != 0) {
+                    chimera_server_error(
+                        "pNFS data_server[%zu] invalid rdma address \"%s\"; skipping RDMA advert",
+                        ds_i, rdma_str);
+                } else {
+                    wire_rdma_p = wire_rdma;
+                }
+            }
+
+            chimera_server_config_add_pnfs_ds(server_config, "tcp", wire_tcp,
+                                              wire_rdma_p, backing_str, ds_version, ds_minor);
         }
     }
+} /* apply_pnfs_config */
 
-    json_value = json_object_get(server_params, "state_dir");
-    if (json_is_string(json_value)) {
-        chimera_server_config_set_state_dir(server_config, json_string_value(json_value));
-    }
-
-    /* nfs_fh_sign: sign wire file handles (default true).  nfs_fh_key: optional
-     * 32-hex-char (128-bit) signing key, required when multiple nodes must mint
-     * interchangeable handles. */
-    json_value = json_object_get(server_params, "nfs_fh_sign");
-    if (json_value) {
-        chimera_server_config_set_nfs_fh_sign(server_config,
-                                              json_is_true(json_value) ? 1 : 0);
-    }
-    json_value = json_object_get(server_params, "nfs_fh_key");
-    if (json_is_string(json_value)) {
-        chimera_server_config_set_nfs_fh_key(server_config, json_string_value(json_value));
-    }
-
+static void
+apply_rest_config(
+    json_t                               *server_params,
+    struct chimera_server_config         *server_config,
+    const struct chimera_rest_tls_config *tls)
+{
     json_t *rest_http_port_value = json_object_get(server_params, "rest_http_port");
+
     if (rest_http_port_value && json_is_integer(rest_http_port_value)) {
         int rest_http_port = json_integer_value(rest_http_port_value);
         chimera_server_config_set_rest_http_port(server_config, rest_http_port);
@@ -988,25 +1065,40 @@ main(
                                                     json_is_true(rest_auth_enabled_value) ? 1 : 0);
     }
 
-    if (rest_https_port != 0) {
-        chimera_server_config_set_rest_https_port(server_config, rest_https_port);
-        if (rest_ssl_cert) {
-            chimera_server_config_set_rest_ssl_cert(server_config, rest_ssl_cert);
+    if (tls->https_port != 0) {
+        chimera_server_config_set_rest_https_port(server_config, tls->https_port);
+        if (tls->ssl_cert) {
+            chimera_server_config_set_rest_ssl_cert(server_config, tls->ssl_cert);
         }
-        if (rest_ssl_key) {
-            chimera_server_config_set_rest_ssl_key(server_config, rest_ssl_key);
+        if (tls->ssl_key) {
+            chimera_server_config_set_rest_ssl_key(server_config, tls->ssl_key);
         }
     }
+} /* apply_rest_config */
 
-    json_value = json_object_get(server_params, "soft_fail_bad_req");
+static void
+apply_misc_config(
+    json_t                       *config,
+    json_t                       *server_params,
+    struct chimera_server_config *server_config)
+{
+    json_t *json_value = json_object_get(server_params, "soft_fail_bad_req");
+
     if (json_is_true(json_value)) {
         chimera_server_config_set_soft_fail_bad_req(server_config, 1);
     }
 
     chimera_server_config_set_tcp_flavor(server_config, chimera_common_tcp_flavor(config));
+} /* apply_misc_config */
 
+static void
+apply_auth_config(
+    json_t                       *server_params,
+    struct chimera_server_config *server_config)
+{
     // Parse SMB auth configuration
     json_t *smb_auth = json_object_get(server_params, "smb_auth");
+
     if (smb_auth && json_is_object(smb_auth)) {
         json_t *winbind_enabled = json_object_get(smb_auth, "winbind_enabled");
         if (winbind_enabled && json_is_true(winbind_enabled)) {
@@ -1056,336 +1148,419 @@ main(
                                                           json_string_value(kerberos_keytab));
         }
     }
+} /* apply_auth_config */
 
+static void
+apply_smb_multichannel_config(
+    json_t                               *server_params,
+    struct chimera_server_config         *server_config,
+    struct chimera_server_config_smb_nic *smb_nic_info,
+    size_t                                smb_nic_info_max)
+{
     json_t *smb_multichannel = json_object_get(server_params, "smb_multichannel");
+    size_t  i;
+
     if (smb_multichannel && !json_is_array(smb_multichannel)) {
         chimera_server_error(
             "SMB Multichannel: smb_multichannel must be an array of interface objects");
         startup_validation_fail();
     }
-    if (json_is_array(smb_multichannel)) {
-        json_t      *smb_nic_info_json;
-        const size_t smb_nic_info_max = sizeof(smb_nic_info) / sizeof(smb_nic_info[0]);
 
-        if (json_array_size(smb_multichannel) > smb_nic_info_max) {
-            chimera_server_error("SMB Multichannel: at most %d interfaces are supported",
-                                 (int) smb_nic_info_max);
+    if (!json_is_array(smb_multichannel)) {
+        return;
+    }
+
+    json_t *smb_nic_info_json;
+
+    if (json_array_size(smb_multichannel) > smb_nic_info_max) {
+        chimera_server_error("SMB Multichannel: at most %d interfaces are supported",
+                             (int) smb_nic_info_max);
+        startup_validation_fail();
+    }
+
+    json_array_foreach(smb_multichannel, i, smb_nic_info_json)
+    {
+        const char *smb_nic_info_name;
+        json_t     *smb_nic_info_speed_json;
+        json_t     *smb_nic_info_rdma_json;
+        json_t     *smb_nic_info_rss_json;
+        json_int_t  smb_nic_info_speed;
+
+        if (!json_is_object(smb_nic_info_json)) {
+            chimera_server_error("SMB Multichannel: interface %d is not an object", (int) i);
             startup_validation_fail();
         }
 
-        json_array_foreach(smb_multichannel, i, smb_nic_info_json)
-        {
-            const char *smb_nic_info_name;
-            json_t     *smb_nic_info_speed_json;
-            json_t     *smb_nic_info_rdma_json;
-            json_t     *smb_nic_info_rss_json;
-            json_int_t  smb_nic_info_speed;
+        smb_nic_info_name       = json_string_value(json_object_get(smb_nic_info_json, "address"));
+        smb_nic_info_speed_json = json_object_get(smb_nic_info_json, "speed");
+        smb_nic_info_rdma_json  = json_object_get(smb_nic_info_json, "rdma");
+        smb_nic_info_rss_json   = json_object_get(smb_nic_info_json, "rss");
 
-            if (!json_is_object(smb_nic_info_json)) {
-                chimera_server_error("SMB Multichannel: interface %d is not an object", (int) i);
-                startup_validation_fail();
-            }
-
-            smb_nic_info_name       = json_string_value(json_object_get(smb_nic_info_json, "address"));
-            smb_nic_info_speed_json = json_object_get(smb_nic_info_json, "speed");
-            smb_nic_info_rdma_json  = json_object_get(smb_nic_info_json, "rdma");
-            smb_nic_info_rss_json   = json_object_get(smb_nic_info_json, "rss");
-
-            if (!smb_nic_info_name) {
-                chimera_server_error("SMB Multichannel: address on interface %d must be a string", (int) i);
-                startup_validation_fail();
-            }
-
-            /* speed is the link speed in Gbps; the SMB server scales it by
-             * 10^9 for the 64-bit LinkSpeed field.  1000000 is a sanity cap,
-             * far inside that field, that refuses a value typed in bps
-             * rather than advertising it. */
-            smb_nic_info_speed = json_is_integer(smb_nic_info_speed_json) ?
-                json_integer_value(smb_nic_info_speed_json) : 0;
-
-            if (smb_nic_info_speed < 1 || smb_nic_info_speed > 1000000) {
-                chimera_server_error(
-                    "SMB Multichannel: speed on interface %d must be an integer in Gbps, 1..1000000",
-                    (int) i);
-                startup_validation_fail();
-            }
-
-            /* The configuration reference used to give speed in Mbps
-             * (10000 for 10 GbE).  Such a value passes the cap above and
-             * advertises 1000 times the link rate, so flag it without
-             * refusing the configuration. */
-            if (smb_nic_info_speed > 1600) {
-                chimera_server_info(
-                    "SMB Multichannel: interface %d speed %lld Gbps is above any current link rate; speed is in Gbps, not Mbps",
-                    (int) i, (long long) smb_nic_info_speed);
-            }
-
-            if ((smb_nic_info_rdma_json && !json_is_boolean(smb_nic_info_rdma_json)) ||
-                (smb_nic_info_rss_json && !json_is_boolean(smb_nic_info_rss_json))) {
-                chimera_server_error("SMB Multichannel: rss and rdma on interface %d must be booleans", (int) i);
-                startup_validation_fail();
-            }
-
-            memset(&smb_nic_info[i], 0, sizeof(smb_nic_info[i]));
-            strncpy(smb_nic_info[i].address, smb_nic_info_name,
-                    sizeof(smb_nic_info[i].address) - 1);
-            smb_nic_info[i].speed = smb_nic_info_speed;
-            smb_nic_info[i].rdma  = json_is_true(smb_nic_info_rdma_json);
-            smb_nic_info[i].rss   = json_is_true(smb_nic_info_rss_json);
+        if (!smb_nic_info_name) {
+            chimera_server_error("SMB Multichannel: address on interface %d must be a string", (int) i);
+            startup_validation_fail();
         }
 
-        chimera_server_config_set_smb_nic_info(server_config, json_array_size(smb_multichannel), smb_nic_info);
-    }
+        /* speed is the link speed in Gbps; the SMB server scales it by
+         * 10^9 for the 64-bit LinkSpeed field.  1000000 is a sanity cap,
+         * far inside that field, that refuses a value typed in bps
+         * rather than advertising it. */
+        smb_nic_info_speed = json_is_integer(smb_nic_info_speed_json) ?
+            json_integer_value(smb_nic_info_speed_json) : 0;
 
-    json_t *vfs_modules = json_object_get(server_params, "vfs");
-    if (json_is_object(vfs_modules)) {
-        const char *module_name;
-        json_t     *module_cfg;
-        json_object_foreach(vfs_modules, module_name, module_cfg)
-        {
-            const char *mod_path   = json_string_value(json_object_get(module_cfg, "path"));
-            json_t     *config_obj = json_object_get(module_cfg, "config");
-            char       *config_str = NULL;
-
-            if (json_is_object(config_obj)) {
-                config_str = json_dumps(config_obj, JSON_COMPACT);
-            } else if (config_obj) {
-                chimera_server_error("VFS module config for module %s is not an object, skipping", module_name);
-            }
-
-            chimera_server_config_add_module(server_config, module_name, mod_path,
-                                             config_str ? config_str : "");
-            free(config_str);
+        if (smb_nic_info_speed < 1 || smb_nic_info_speed > 1000000) {
+            chimera_server_error(
+                "SMB Multichannel: speed on interface %d must be an integer in Gbps, 1..1000000",
+                (int) i);
+            startup_validation_fail();
         }
+
+        /* The configuration reference used to give speed in Mbps
+         * (10000 for 10 GbE).  Such a value passes the cap above and
+         * advertises 1000 times the link rate, so flag it without
+         * refusing the configuration. */
+        if (smb_nic_info_speed > 1600) {
+            chimera_server_info(
+                "SMB Multichannel: interface %d speed %lld Gbps is above any current link rate; speed is in Gbps, not Mbps",
+                (int) i, (long long) smb_nic_info_speed);
+        }
+
+        if ((smb_nic_info_rdma_json && !json_is_boolean(smb_nic_info_rdma_json)) ||
+            (smb_nic_info_rss_json && !json_is_boolean(smb_nic_info_rss_json))) {
+            chimera_server_error("SMB Multichannel: rss and rdma on interface %d must be booleans", (int) i);
+            startup_validation_fail();
+        }
+
+        memset(&smb_nic_info[i], 0, sizeof(smb_nic_info[i]));
+        strncpy(smb_nic_info[i].address, smb_nic_info_name,
+                sizeof(smb_nic_info[i].address) - 1);
+        smb_nic_info[i].speed = smb_nic_info_speed;
+        smb_nic_info[i].rdma  = json_is_true(smb_nic_info_rdma_json);
+        smb_nic_info[i].rss   = json_is_true(smb_nic_info_rss_json);
     }
 
+    chimera_server_config_set_smb_nic_info(server_config, json_array_size(smb_multichannel), smb_nic_info);
+} /* apply_smb_multichannel_config */
+
+static void
+apply_vfs_modules_config(
+    json_t                       *server_params,
+    struct chimera_server_config *server_config)
+{
+    json_t     *vfs_modules = json_object_get(server_params, "vfs");
+
+    if (!json_is_object(vfs_modules)) {
+        return;
+    }
+
+    const char *module_name;
+    json_t     *module_cfg;
+    json_object_foreach(vfs_modules, module_name, module_cfg)
+    {
+        const char *mod_path   = json_string_value(json_object_get(module_cfg, "path"));
+        json_t     *config_obj = json_object_get(module_cfg, "config");
+        char       *config_str = NULL;
+
+        if (json_is_object(config_obj)) {
+            config_str = json_dumps(config_obj, JSON_COMPACT);
+        } else if (config_obj) {
+            chimera_server_error("VFS module config for module %s is not an object, skipping", module_name);
+        }
+
+        chimera_server_config_add_module(server_config, module_name, mod_path,
+                                         config_str ? config_str : "");
+        free(config_str);
+    }
+} /* apply_vfs_modules_config */
+
+static void
+apply_s3_anon_config(
+    json_t                       *config,
+    struct chimera_server_config *server_config)
+{
     json_t *s3_anon = json_object_get(config, "s3_anon");
-    if (s3_anon && json_is_object(s3_anon)) {
-        json_t *anon_uid = json_object_get(s3_anon, "uid");
-        json_t *anon_gid = json_object_get(s3_anon, "gid");
 
-        chimera_server_config_set_s3_anon_ids(
-            server_config,
-            anon_uid ? (uint32_t) json_integer_value(anon_uid) : CHIMERA_S3_ANON_UID,
-            anon_gid ? (uint32_t) json_integer_value(anon_gid) : CHIMERA_S3_ANON_GID);
+    if (!(s3_anon && json_is_object(s3_anon))) {
+        return;
     }
 
-    server = chimera_server_init(server_config, chimera_metrics_get(metrics));
+    json_t *anon_uid = json_object_get(s3_anon, "uid");
+    json_t *anon_gid = json_object_get(s3_anon, "gid");
 
+    chimera_server_config_set_s3_anon_ids(
+        server_config,
+        anon_uid ? (uint32_t) json_integer_value(anon_uid) : CHIMERA_S3_ANON_UID,
+        anon_gid ? (uint32_t) json_integer_value(anon_gid) : CHIMERA_S3_ANON_GID);
+} /* apply_s3_anon_config */
+
+static void
+load_users(
+    json_t                *config,
+    struct chimera_server *server)
+{
     json_t *users = json_object_get(config, "users");
-    if (users && json_is_array(users)) {
-        json_t *user_entry;
-        size_t  user_idx;
 
-        json_array_foreach(users, user_idx, user_entry)
-        {
-            const char *username  = json_string_value(json_object_get(user_entry, "username"));
-            const char *password  = json_string_value(json_object_get(user_entry, "password"));
-            const char *smbpasswd = json_string_value(json_object_get(user_entry, "smbpasswd"));
-            int         uid       = json_integer_value(json_object_get(user_entry, "uid"));
-            int         gid       = json_integer_value(json_object_get(user_entry, "gid"));
-            uint32_t    user_gids[CHIMERA_VFS_CRED_MAX_GIDS];
-            uint32_t    ngids      = 0;
-            json_t     *gids_array = json_object_get(user_entry, "gids");
-
-            if (gids_array && json_is_array(gids_array)) {
-                json_t *gid_val;
-                size_t  gid_idx;
-                json_array_foreach(gids_array, gid_idx, gid_val)
-                {
-                    if (ngids < CHIMERA_VFS_CRED_MAX_GIDS) {
-                        user_gids[ngids++] = json_integer_value(gid_val);
-                    }
-                }
-            }
-
-            if (!username) {
-                chimera_server_error("User entry missing username, skipping");
-                continue;
-            }
-
-            chimera_server_info("Adding user %s (uid=%d, gid=%d)", username, uid, gid);
-            chimera_server_add_user(server, username,
-                                    password ? password : "",
-                                    smbpasswd ? smbpasswd : "",
-                                    NULL,  // SID - synthesized for builtin users
-                                    uid, gid, ngids, user_gids, 1);
-        }
+    if (!(users && json_is_array(users))) {
+        return;
     }
 
+    json_t *user_entry;
+    size_t  user_idx;
+
+    json_array_foreach(users, user_idx, user_entry)
+    {
+        const char *username  = json_string_value(json_object_get(user_entry, "username"));
+        const char *password  = json_string_value(json_object_get(user_entry, "password"));
+        const char *smbpasswd = json_string_value(json_object_get(user_entry, "smbpasswd"));
+        int         uid       = json_integer_value(json_object_get(user_entry, "uid"));
+        int         gid       = json_integer_value(json_object_get(user_entry, "gid"));
+        uint32_t    user_gids[CHIMERA_VFS_CRED_MAX_GIDS];
+        uint32_t    ngids      = 0;
+        json_t     *gids_array = json_object_get(user_entry, "gids");
+
+        if (gids_array && json_is_array(gids_array)) {
+            json_t *gid_val;
+            size_t  gid_idx;
+            json_array_foreach(gids_array, gid_idx, gid_val)
+            {
+                if (ngids < CHIMERA_VFS_CRED_MAX_GIDS) {
+                    user_gids[ngids++] = json_integer_value(gid_val);
+                }
+            }
+        }
+
+        if (!username) {
+            chimera_server_error("User entry missing username, skipping");
+            continue;
+        }
+
+        chimera_server_info("Adding user %s (uid=%d, gid=%d)", username, uid, gid);
+        chimera_server_add_user(server, username,
+                                password ? password : "",
+                                smbpasswd ? smbpasswd : "",
+                                NULL,  // SID - synthesized for builtin users
+                                uid, gid, ngids, user_gids, 1);
+    }
+} /* load_users */
+
+static void
+load_s3_access_keys(
+    json_t                *config,
+    struct chimera_server *server)
+{
     json_t *s3_access_keys = json_object_get(config, "s3_access_keys");
-    if (s3_access_keys && json_is_array(s3_access_keys)) {
-        json_t *key_entry;
-        size_t  key_idx;
 
-        json_array_foreach(s3_access_keys, key_idx, key_entry)
-        {
-            const char *access_key = json_string_value(json_object_get(key_entry, "access_key"));
-            const char *secret_key = json_string_value(json_object_get(key_entry, "secret_key"));
-            const char *key_user   = json_string_value(json_object_get(key_entry, "username"));
-            const char *key_canon  = json_string_value(json_object_get(key_entry, "user_id"));
-            const char *key_disp   = json_string_value(json_object_get(key_entry, "display_name"));
+    if (!(s3_access_keys && json_is_array(s3_access_keys))) {
+        return;
+    }
 
-            if (!access_key || !secret_key) {
-                chimera_server_error("S3 access key entry missing access_key or secret_key, skipping");
-                continue;
+    json_t *key_entry;
+    size_t  key_idx;
+
+    json_array_foreach(s3_access_keys, key_idx, key_entry)
+    {
+        const char *access_key = json_string_value(json_object_get(key_entry, "access_key"));
+        const char *secret_key = json_string_value(json_object_get(key_entry, "secret_key"));
+        const char *key_user   = json_string_value(json_object_get(key_entry, "username"));
+        const char *key_canon  = json_string_value(json_object_get(key_entry, "user_id"));
+        const char *key_disp   = json_string_value(json_object_get(key_entry, "display_name"));
+
+        if (!access_key || !secret_key) {
+            chimera_server_error("S3 access key entry missing access_key or secret_key, skipping");
+            continue;
+        }
+
+        chimera_server_info("Adding S3 access key %s (user %s)", access_key,
+                            key_user ? key_user : "<unbound>");
+        chimera_server_add_s3_cred(server, access_key, secret_key, key_user,
+                                   key_canon, key_disp, 1);
+    }
+} /* load_s3_access_keys */
+
+/* "filesystems": named filesystems to ensure exist inside CAP_MKFS modules
+ * before any mounts reference them.  Declarative: a filesystem that already
+ * exists (EEXIST, e.g. a persistent backend rebooting against the same
+ * store) is not an error. */
+static void
+create_filesystems(
+    json_t                *config,
+    struct chimera_server *server)
+{
+    json_t     *filesystems = json_object_get(config, "filesystems");
+
+    if (!filesystems) {
+        return;
+    }
+
+    const char *fsname;
+    json_t     *fs_entry;
+
+    json_object_foreach(filesystems, fsname, fs_entry)
+    {
+        const char *fs_module  = json_string_value(json_object_get(fs_entry, "module"));
+        const char *fs_options = json_string_value(json_object_get(fs_entry, "options"));
+        int         fs_rc;
+
+        if (!fs_module) {
+            chimera_server_error("Filesystem %s missing module", fsname);
+            startup_validation_fail();
+        }
+
+        chimera_server_info("Creating filesystem %s in module %s...", fsname, fs_module);
+
+        fs_rc = chimera_server_mkfs(server, fs_module, fsname, fs_options);
+
+        if (fs_rc == CHIMERA_VFS_EEXIST) {
+            chimera_server_info("Filesystem %s already exists in module %s", fsname, fs_module);
+        } else if (fs_rc != 0) {
+            chimera_server_error("Failed to create filesystem %s in module %s",
+                                 fsname, fs_module);
+            startup_validation_fail();
+        }
+    }
+} /* create_filesystems */
+
+/* Mounts are made in file order, as fstab's are: a mount point must exist
+ * when its mount is made, so a mount inside another comes after it, and a
+ * mount at "/" covers whatever the built-in root held.  Returns the
+ * "mounts" json object (borrowed reference) so the caller can derive the
+ * default S3 bucket root from it. */
+static json_t *
+apply_mounts(
+    json_t                *config,
+    struct chimera_server *server)
+{
+    json_t     *mounts = json_object_get(config, "mounts");
+    const char *name;
+    json_t     *mount;
+
+    if (!mounts) {
+        return mounts;
+    }
+
+    json_object_foreach(mounts, name, mount)
+    {
+        const char *module, *path, *mount_options;
+        int         mount_rc;
+
+        module        = json_string_value(json_object_get(mount, "module"));
+        path          = json_string_value(json_object_get(mount, "path"));
+        mount_options = json_string_value(json_object_get(mount, "options"));
+
+        if (!module || !path) {
+            chimera_server_error("Mount %s missing %s", name,
+                                 module ? "path" : "module");
+            startup_validation_fail();
+        }
+
+        /* "create": create the backend directory path (and any missing
+         * parents) before mounting, for backends initialized empty.  May be
+         * `true` (mode 0755) or an object `{ "mode": "0755" }` -- the mode
+         * is an octal string; created dirs are owned by the server identity. */
+        json_t  *create_val  = json_object_get(mount, "create");
+        int      do_create   = 0;
+        uint32_t create_mode = 0755;
+
+        if (json_is_true(create_val)) {
+            do_create = 1;
+        } else if (json_is_object(create_val)) {
+            json_t *mode_val = json_object_get(create_val, "mode");
+            do_create = 1;
+            if (json_is_string(mode_val)) {
+                create_mode = (uint32_t) strtol(json_string_value(mode_val), NULL, 8);
+            } else if (json_is_integer(mode_val)) {
+                create_mode = (uint32_t) json_integer_value(mode_val);
             }
+        }
 
-            chimera_server_info("Adding S3 access key %s (user %s)", access_key,
-                                key_user ? key_user : "<unbound>");
-            chimera_server_add_s3_cred(server, access_key, secret_key, key_user,
-                                       key_canon, key_disp, 1);
+        chimera_server_info("Mounting %s://%s to /%s%s%s%s...",
+                            module, path, name,
+                            mount_options ? " options=" : "",
+                            mount_options ? mount_options : "",
+                            do_create ? " (create)" : "");
+
+        if (do_create) {
+            if (chimera_server_mkpath(server, module, path, create_mode) != 0) {
+                /* Hard fail: the operator asked for the path to be created
+                 * and it could not be, so do not silently mount a missing
+                 * or wrong target. */
+                chimera_server_error("Failed to create mount path %s://%s for /%s",
+                                     module, path, name);
+                startup_validation_fail();
+            }
+        }
+
+        mount_rc = chimera_server_mount(server, name, module, path, mount_options);
+
+        if (mount_rc != 0) {
+            /* Hard fail, like the mkpath failure above: carrying on would
+             * add the shares/exports over a root that does not exist and
+             * report the server ready, leaving clients with confusing
+             * errors (e.g. NFS4ERR_NOENT on the export). */
+            chimera_server_error("Failed to mount %s://%s to /%s (vfs error %d)",
+                                 module, path, name, mount_rc);
+            startup_validation_fail();
         }
     }
 
-    /* "filesystems": named filesystems to ensure exist inside CAP_MKFS
-     * modules before any mounts reference them.  Declarative: a filesystem
-     * that already exists (EEXIST, e.g. a persistent backend rebooting
-     * against the same store) is not an error. */
-    json_t *filesystems = json_object_get(config, "filesystems");
+    return mounts;
+} /* apply_mounts */
 
-    if (filesystems) {
-        const char *fsname;
-        json_t     *fs_entry;
-        json_object_foreach(filesystems, fsname, fs_entry)
-        {
-            const char *fs_module  = json_string_value(json_object_get(fs_entry, "module"));
-            const char *fs_options = json_string_value(json_object_get(fs_entry, "options"));
-            int         fs_rc;
+/* A share/export/bucket section whose protocol is not enabled is a
+ * contradiction: nothing would ever serve it.  Fail hard like the
+ * malformed-export errors below rather than silently not serving. */
+static void
+create_smb_shares(
+    json_t                       *config,
+    struct chimera_server        *server,
+    struct chimera_server_config *server_config)
+{
+    json_t     *shares = json_object_get(config, "shares");
+    const char *name;
+    json_t     *share;
 
-            if (!fs_module) {
-                chimera_server_error("Filesystem %s missing module", fsname);
-                startup_validation_fail();
-            }
-
-            chimera_server_info("Creating filesystem %s in module %s...", fsname, fs_module);
-
-            fs_rc = chimera_server_mkfs(server, fs_module, fsname, fs_options);
-
-            if (fs_rc == CHIMERA_VFS_EEXIST) {
-                chimera_server_info("Filesystem %s already exists in module %s", fsname, fs_module);
-            } else if (fs_rc != 0) {
-                chimera_server_error("Failed to create filesystem %s in module %s",
-                                     fsname, fs_module);
-                startup_validation_fail();
-            }
-        }
-    }
-
-    mounts = json_object_get(config, "mounts");
-
-    if (mounts) {
-        /* Mounts are made in file order, as fstab's are: a mount point must
-         * exist when its mount is made, so a mount inside another comes after
-         * it, and a mount at "/" covers whatever the built-in root held. */
-        json_object_foreach(mounts, name, mount)
-        {
-            const char *mount_options;
-            int         mount_rc;
-
-            module        = json_string_value(json_object_get(mount, "module"));
-            path          = json_string_value(json_object_get(mount, "path"));
-            mount_options = json_string_value(json_object_get(mount, "options"));
-
-            if (!module || !path) {
-                chimera_server_error("Mount %s missing %s", name,
-                                     module ? "path" : "module");
-                startup_validation_fail();
-            }
-
-            /* "create": create the backend directory path (and any missing
-             * parents) before mounting, for backends initialized empty.  May be
-             * `true` (mode 0755) or an object `{ "mode": "0755" }` -- the mode
-             * is an octal string; created dirs are owned by the server identity. */
-            json_t  *create_val  = json_object_get(mount, "create");
-            int      do_create   = 0;
-            uint32_t create_mode = 0755;
-
-            if (json_is_true(create_val)) {
-                do_create = 1;
-            } else if (json_is_object(create_val)) {
-                json_t *mode_val = json_object_get(create_val, "mode");
-                do_create = 1;
-                if (json_is_string(mode_val)) {
-                    create_mode = (uint32_t) strtol(json_string_value(mode_val), NULL, 8);
-                } else if (json_is_integer(mode_val)) {
-                    create_mode = (uint32_t) json_integer_value(mode_val);
-                }
-            }
-
-            chimera_server_info("Mounting %s://%s to /%s%s%s%s...",
-                                module, path, name,
-                                mount_options ? " options=" : "",
-                                mount_options ? mount_options : "",
-                                do_create ? " (create)" : "");
-
-            if (do_create) {
-                if (chimera_server_mkpath(server, module, path, create_mode) != 0) {
-                    /* Hard fail: the operator asked for the path to be created
-                     * and it could not be, so do not silently mount a missing
-                     * or wrong target. */
-                    chimera_server_error("Failed to create mount path %s://%s for /%s",
-                                         module, path, name);
-                    startup_validation_fail();
-                }
-            }
-
-            mount_rc = chimera_server_mount(server, name, module, path, mount_options);
-
-            if (mount_rc != 0) {
-                /* Hard fail, like the mkpath failure above: carrying on would
-                 * add the shares/exports over a root that does not exist and
-                 * report the server ready, leaving clients with confusing
-                 * errors (e.g. NFS4ERR_NOENT on the export). */
-                chimera_server_error("Failed to mount %s://%s to /%s (vfs error %d)",
-                                     module, path, name, mount_rc);
-                startup_validation_fail();
-            }
-        }
-    }
-
-    /* Now that the nfs-module backing mounts exist, resolve each pNFS data
-     * server's backing root so the MDS can create backing files on it. */
-    chimera_server_pnfs_resolve(server);
-
-    shares = json_object_get(config, "shares");
-
-    /* A share/export/bucket section whose protocol is not enabled is a
-     * contradiction: nothing would ever serve it.  Fail hard like the
-     * malformed-export errors below rather than silently not serving. */
     if (shares && json_object_size(shares) > 0 &&
         !chimera_server_config_get_smb_enabled(server_config)) {
         chimera_server_error("Config declares SMB shares but smb_enabled is false");
         startup_validation_fail();
     }
 
-    if (shares) {
-        json_object_foreach(shares, name, share)
-        {
-            json_t *ca  = json_object_get(share, "continuous_availability");
-            json_t *enc = json_object_get(share, "encrypt_data");
-            json_t *fl2 = json_object_get(share, "force_level2_oplock");
-
-            path = json_string_value(json_object_get(share, "path"));
-            chimera_server_info("Adding SMB share %s -> %s", name, path);
-            chimera_server_create_share(server, name, path,
-                                        json_is_true(ca) ? 1 : 0);
-
-            if (json_is_true(enc)) {
-                chimera_server_share_set_encrypt_data(server, name);
-            }
-
-            if (json_is_true(fl2)) {
-                chimera_server_share_set_force_level2_oplock(server, name);
-            }
-        }
+    if (!shares) {
+        return;
     }
 
-    /* Test-harness aid: seed the symbolic-link fixtures the WPTS MS-SMB2
-     * CreateClose symlink cases expect to pre-exist on the share.  Enabled only
-     * when CHIMERA_SMB_SEED_SYMLINKS names the backend module (e.g. "memfs"),
-     * since no SMB client can create a reparse-point symlink on an empty share. */
-    const char *seed_module = getenv("CHIMERA_SMB_SEED_SYMLINKS");
+    json_object_foreach(shares, name, share)
+    {
+        json_t     *ca   = json_object_get(share, "continuous_availability");
+        json_t     *enc  = json_object_get(share, "encrypt_data");
+        json_t     *fl2  = json_object_get(share, "force_level2_oplock");
+        const char *path = json_string_value(json_object_get(share, "path"));
+
+        chimera_server_info("Adding SMB share %s -> %s", name, path);
+        chimera_server_create_share(server, name, path,
+                                    json_is_true(ca) ? 1 : 0);
+
+        if (json_is_true(enc)) {
+            chimera_server_share_set_encrypt_data(server, name);
+        }
+
+        if (json_is_true(fl2)) {
+            chimera_server_share_set_force_level2_oplock(server, name);
+        }
+    }
+} /* create_smb_shares */
+
+/* Test-harness aid: seed the symbolic-link fixtures the WPTS MS-SMB2
+ * CreateClose symlink cases expect to pre-exist on the share, and the
+ * MS-FSA suite's fixtures (a directory + a regular file).  Enabled only
+ * when CHIMERA_SMB_SEED_SYMLINKS / CHIMERA_SMB_SEED_FSA name the backend
+ * module (e.g. "memfs"), since no SMB client can create a reparse-point
+ * symlink on an empty share. */
+static void
+seed_smb_test_fixtures(struct chimera_server *server)
+{
+    const char *seed_module     = getenv("CHIMERA_SMB_SEED_SYMLINKS");
+    const char *seed_fsa_module = getenv("CHIMERA_SMB_SEED_FSA");
 
     /* Where on the module the fixtures go.  "/" was the implicit filesystem
      * every backend used to have; a CAP_MKFS backend has none, so the harness
@@ -1405,10 +1580,6 @@ main(
         }
     }
 
-    /* Likewise seed the MS-FSA suite's fixtures (a directory + a regular file)
-     * when CHIMERA_SMB_SEED_FSA names the backend module. */
-    const char *seed_fsa_module = getenv("CHIMERA_SMB_SEED_FSA");
-
     if (seed_fsa_module && seed_fsa_module[0]) {
         if (chimera_server_seed_fsa(server, seed_fsa_module, seed_path) != 0) {
             chimera_server_error("Failed to seed FSA fixtures on module %s",
@@ -1417,8 +1588,21 @@ main(
             chimera_server_info("Seeded FSA fixtures on module %s", seed_fsa_module);
         }
     }
+} /* seed_smb_test_fixtures */
 
-    exports = json_object_get(config, "exports");
+/* Two passes over the exports object: entries pinning an explicit export_id
+ * are created first so auto-assignment for the remaining entries cannot
+ * take an id a later entry pins; with a single pass, whether startup
+ * succeeds would depend on key order in the config. */
+static void
+create_nfs_exports(
+    json_t                       *config,
+    struct chimera_server        *server,
+    struct chimera_server_config *server_config)
+{
+    json_t     *exports = json_object_get(config, "exports");
+    const char *name;
+    json_t     *export;
 
     if (exports && json_object_size(exports) > 0 &&
         !chimera_server_config_get_nfs_enabled(server_config)) {
@@ -1426,10 +1610,6 @@ main(
         startup_validation_fail();
     }
 
-    /* Two passes over the exports object: entries pinning an explicit
-     * export_id are created first so auto-assignment for the remaining
-     * entries cannot take an id a later entry pins; with a single pass,
-     * whether startup succeeds would depend on key order in the config. */
     for (int pass = 0; exports && pass < 2; pass++) {
         json_object_foreach(exports, name, export)
         {
@@ -1453,6 +1633,7 @@ main(
             uint32_t    squash    = CHIMERA_NFS_SQUASH_NONE;
             uint32_t    anonuid   = chimera_server_config_get_anonuid(server_config);
             uint32_t    anongid   = chimera_server_config_get_anongid(server_config);
+            const char *path;
 
             path = json_string_value(json_object_get(export, "path"));
 
@@ -1670,8 +1851,17 @@ main(
             }
         }
     }
+} /* create_nfs_exports */
 
-    buckets = json_object_get(config, "buckets");
+static void
+create_s3_buckets(
+    json_t                       *config,
+    struct chimera_server        *server,
+    struct chimera_server_config *server_config)
+{
+    json_t     *buckets = json_object_get(config, "buckets");
+    const char *name;
+    json_t     *bucket;
 
     if (buckets && json_object_size(buckets) > 0 &&
         !chimera_server_config_get_s3_enabled(server_config)) {
@@ -1679,94 +1869,133 @@ main(
         startup_validation_fail();
     }
 
-    if (buckets) {
-        json_object_foreach(buckets, name, bucket)
-        {
-            path = json_string_value(json_object_get(bucket, "path"));
-            chimera_server_info("Adding S3 bucket %s -> %s", name, path);
-            chimera_server_create_bucket(server, name, path);
-        }
+    if (!buckets) {
+        return;
     }
 
-    /* FUSE mountpoints: local kernel mounts of chimera namespace paths,
-     * keyed by mountpoint directory.  Linux-only; on other builds
-     * chimera_server_create_fuse_mount always rejects, which the
-     * contradiction check below reports at startup. */
+    json_object_foreach(buckets, name, bucket)
     {
-        json_t     *fuse_mounts = json_object_get(config, "fuse_mounts");
-        json_t     *fuse_mount;
-        const char *fuse_mountpoint;
+        const char *path = json_string_value(json_object_get(bucket, "path"));
 
-        if (fuse_mounts && json_object_size(fuse_mounts) > 0 &&
-            !chimera_server_config_get_fuse_enabled(server_config)) {
-            chimera_server_error("Config declares FUSE mounts but fuse_enabled is false");
+        chimera_server_info("Adding S3 bucket %s -> %s", name, path);
+        chimera_server_create_bucket(server, name, path);
+    }
+} /* create_s3_buckets */
+
+/* FUSE mountpoints: local kernel mounts of chimera namespace paths, keyed by
+ * mountpoint directory.  Linux-only; on other builds
+ * chimera_server_create_fuse_mount always rejects, which the
+ * contradiction check below reports at startup. */
+static void
+create_fuse_mounts(
+    json_t                       *config,
+    struct chimera_server        *server,
+    struct chimera_server_config *server_config)
+{
+    json_t     *fuse_mounts = json_object_get(config, "fuse_mounts");
+    json_t     *fuse_mount;
+    const char *fuse_mountpoint;
+
+    if (fuse_mounts && json_object_size(fuse_mounts) > 0 &&
+        !chimera_server_config_get_fuse_enabled(server_config)) {
+        chimera_server_error("Config declares FUSE mounts but fuse_enabled is false");
+        startup_validation_fail();
+    }
+
+    if (!fuse_mounts) {
+        return;
+    }
+
+    json_object_foreach(fuse_mounts, fuse_mountpoint, fuse_mount)
+    {
+        const char *path, *fuse_options;
+
+        path = json_string_value(json_object_get(fuse_mount, "path"));
+
+        if (!path) {
+            chimera_server_error("FUSE mount '%s': missing \"path\"",
+                                 fuse_mountpoint);
+            startup_validation_fail();
+            continue;
+        }
+
+        fuse_options = json_string_value(json_object_get(fuse_mount, "options"));
+
+        chimera_server_info("Adding FUSE mount %s -> %s", fuse_mountpoint, path);
+
+        if (chimera_server_create_fuse_mount(server, fuse_mountpoint,
+                                             path, fuse_options) != 0) {
+            chimera_server_error(
+                "FUSE mount '%s' rejected (non-Linux build, fuse disabled, or bad options)",
+                fuse_mountpoint);
             startup_validation_fail();
         }
+    }
+} /* create_fuse_mounts */
 
-        if (fuse_mounts) {
-            json_object_foreach(fuse_mounts, fuse_mountpoint, fuse_mount)
-            {
-                const char *fuse_options;
+/* The VFS path under which runtime CreateBucket requests materialize new
+ * bucket directories. Explicit "s3_bucket_root" wins; otherwise default to
+ * the first configured mount ("/<mount-name>"). Leave unset (runtime bucket
+ * creation disabled) if neither is available. */
+static void
+configure_s3_bucket_root(
+    json_t                *config,
+    struct chimera_server *server,
+    json_t                *mounts)
+{
+    const char *bucket_root = json_string_value(
+        json_object_get(config, "s3_bucket_root"));
+    char        default_root[256];
 
-                path = json_string_value(json_object_get(fuse_mount, "path"));
+    if (!bucket_root && mounts) {
+        const char *first_mount;
+        json_t     *mount_val;
 
-                if (!path) {
-                    chimera_server_error("FUSE mount '%s': missing \"path\"",
-                                         fuse_mountpoint);
-                    startup_validation_fail();
-                    continue;
-                }
-
-                fuse_options = json_string_value(json_object_get(fuse_mount, "options"));
-
-                chimera_server_info("Adding FUSE mount %s -> %s", fuse_mountpoint, path);
-
-                if (chimera_server_create_fuse_mount(server, fuse_mountpoint,
-                                                     path, fuse_options) != 0) {
-                    chimera_server_error(
-                        "FUSE mount '%s' rejected (non-Linux build, fuse disabled, or bad options)",
-                        fuse_mountpoint);
-                    startup_validation_fail();
-                }
-            }
+        json_object_foreach(mounts, first_mount, mount_val)
+        {
+            snprintf(default_root, sizeof(default_root), "/%s", first_mount);
+            bucket_root = default_root;
+            break;
         }
     }
 
-    /* The VFS path under which runtime CreateBucket requests materialize new
-     * bucket directories. Explicit "s3_bucket_root" wins; otherwise default to
-     * the first configured mount ("/<mount-name>"). Leave unset (runtime bucket
-     * creation disabled) if neither is available. */
-    {
-        const char *bucket_root = json_string_value(
-            json_object_get(config, "s3_bucket_root"));
-        char        default_root[256];
-
-        if (!bucket_root && mounts) {
-            const char *first_mount;
-            json_t     *mount_val;
-
-            json_object_foreach(mounts, first_mount, mount_val)
-            {
-                snprintf(default_root, sizeof(default_root), "/%s", first_mount);
-                bucket_root = default_root;
-                break;
-            }
-        }
-
-        if (bucket_root) {
-            chimera_server_info("S3 runtime bucket root: %s", bucket_root);
-            chimera_server_set_s3_bucket_root(server, bucket_root);
-        }
+    if (bucket_root) {
+        chimera_server_info("S3 runtime bucket root: %s", bucket_root);
+        chimera_server_set_s3_bucket_root(server, bucket_root);
     }
+} /* configure_s3_bucket_root */
 
-    chimera_server_start(server);
+static void
+install_signal_handlers(void)
+{
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+#ifdef _WIN32
+    signal(SIGBREAK, signal_handler);
+#else  /* ifdef _WIN32 */
+    /* Some supervisors stop the daemons they manage with SIGQUIT and expect an
+     * orderly shutdown.  Its default action would terminate with a core dump,
+     * so treat it like SIGTERM; a core is still available through SIGABRT. */
+    signal(SIGQUIT, signal_handler);
+#endif /* ifdef _WIN32 */
+} /* install_signal_handlers */
 
+static void
+run_server_until_signal(void)
+{
     while (!SigInt) {
         sleep(1);
     }
 
     chimera_server_info("Shutting down server (signal=%d)...", SigInt);
+} /* run_server_until_signal */
 
+static void
+shutdown_server(
+    struct chimera_server  *server,
+    json_t                 *config,
+    struct chimera_metrics *metrics)
+{
     chimera_server_destroy(server);
 
     /* Flush and close tracing exporters after the server's threads have drained
@@ -1791,8 +2020,135 @@ main(
 #endif /* ifdef _WIN32 */
 
     chimera_server_info("Server shutdown complete.");
+} /* shutdown_server */
+
+int
+main(
+    int    argc,
+    char **argv)
+{
+    const char                          *config_path = CONFIG_PATH;
+    json_t                              *config;
+    json_t                              *server_params;
+    json_t                              *mounts;
+    struct chimera_server               *server;
+    struct chimera_server_config        *server_config;
+    struct evpl_global_config           *evpl_global_config;
+    struct chimera_metrics              *metrics;
+    struct chimera_rest_tls_config       tls;
+    struct chimera_server_config_smb_nic smb_nic_info[16];
+    const char                          *log_path = NULL;
+    int                                  cli_rc;
+
+    /* Options come first: the log thread picks its output stream when
+     * chimera_log_init() starts it, so -l must be known by then. */
+    cli_rc = parse_cli_args(argc, argv, &config_path, &log_path);
+    if (cli_rc >= 0) {
+        return cli_rc;
+    }
+
+    if (log_path) {
+        /* Append mode: after logrotate's copytruncate empties the file, the
+         * next write lands at the new end instead of leaving a hole. */
+        FILE *log_file = fopen(log_path, "a");
+
+        if (!log_file) {
+            fprintf(stderr, "Failed to open log file %s: %s\n",
+                    log_path, strerror(errno));
+            return 1;
+        }
+
+        chimera_log_set_file(log_file);
+    }
+
+    chimera_log_init();
+
+#if CHIMERA_SANITIZE != 1
+    /* If we are not using address sanitizer, add a crash handler to
+     * print stack on signals.   Otherwise, let address sanitizer
+     * handle it.
+     */
+    chimera_enable_crash_handler();
+ #endif /* ifndef CHIMERA_SANITIZE */
+
+    evpl_set_log_fn(chimera_vlog, chimera_log_flush);
+
+    /* first we need to clear the umask to make sure file are created with porper mode.*/
+    umask(0);
+
+    config = load_config_file(config_path);
+    if (!config) {
+        return 1;
+    }
+
+    server_params = json_object_get(config, "server");
+
+    evpl_global_config = build_evpl_global_config(config, server_params, &tls);
+    if (!evpl_global_config) {
+        json_decref(config);
+        return 1;
+    }
+
+    evpl_init(evpl_global_config);
+
+    /* Bring up OpenTelemetry span tracing if common.tracing.enabled (off by
+    * default).  Must run after evpl_init (the gRPC exporter spins up an evpl
+    * thread) and before the server's core threads start producing spans. */
+    chimera_tracing_init(config);
+
+    install_signal_handlers();
+
+    chimera_server_info("Initializing server...");
+
+    metrics = init_metrics(config, server_params);
+
+    server_config = chimera_server_config_init();
+
+    apply_core_server_config(server_params, config, server_config);
+
+    if (apply_smb_config(server_params, server_config) != 0) {
+        json_decref(config);
+        return 1;
+    }
+
+    apply_nfs_config(server_params, server_config);
+    apply_protocol_enabled_config(server_params, server_config);
+    apply_pnfs_config(server_params, server_config);
+    apply_rest_config(server_params, server_config, &tls);
+    apply_misc_config(config, server_params, server_config);
+    apply_auth_config(server_params, server_config);
+    apply_smb_multichannel_config(server_params, server_config, smb_nic_info,
+                                  sizeof(smb_nic_info) / sizeof(smb_nic_info[0]));
+    apply_vfs_modules_config(server_params, server_config);
+    apply_s3_anon_config(config, server_config);
+
+    server = chimera_server_init(server_config, chimera_metrics_get(metrics));
+
+    load_users(config, server);
+    load_s3_access_keys(config, server);
+    create_filesystems(config, server);
+
+    mounts = apply_mounts(config, server);
+
+    /* Now that the nfs-module backing mounts exist, resolve each pNFS data
+     * server's backing root so the MDS can create backing files on it. */
+    chimera_server_pnfs_resolve(server);
+
+    create_smb_shares(config, server, server_config);
+    seed_smb_test_fixtures(server);
+    create_nfs_exports(config, server, server_config);
+    create_s3_buckets(config, server, server_config);
+    create_fuse_mounts(config, server, server_config);
+    configure_s3_bucket_root(config, server, mounts);
+
+    chimera_server_start(server);
+
+    run_server_until_signal();
+
+    shutdown_server(server, config, metrics);
 
     json_decref(config);
 
     return 0;
 } /* main */
+
