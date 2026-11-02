@@ -54,9 +54,22 @@
  * older Linux kernel cifs clients such as 4.18 do on every new session, whether
  * or not the server offers it) signs with the unwrapped key, so without that
  * step its first signed request fails verification.
+ *
+ * WB9, the counterpart of W9, logs on as that domain user with the wrong
+ * password and must be refused.
+ *
+ * Built as smb2_wire_probe_wbstub (SMB2W_WBSTUB), --winbind runs the same
+ * profiles against wbclient_stub.c instead of a domain controller.  That needs
+ * no root, netns or DC, so the winbind branch of the server's NTLM validation
+ * runs in the quick tier too.  Against the stub, whose SIDs are known, WB15
+ * also checks the identity the logon produced: a file the domain user creates
+ * is owned by the user's SID, with its primary group's SID as the group.
  */
 
 #include "smb2_mbt_common.h"
+#ifdef SMB2W_WBSTUB
+#include "wbclient_stub.h"
+#endif /* ifdef SMB2W_WBSTUB */
 
 static int failures = 0;
 
@@ -313,13 +326,134 @@ run_profiles(
     }
 } /* run_profiles */
 
+#ifdef SMB2W_WBSTUB
+/* The account the stub answers for. */
+#define WINBIND_USER        WBSTUB_USER
+#define WINBIND_PASSWORD    WBSTUB_PASSWORD
+#else /* ifdef SMB2W_WBSTUB */
 /* The domain user scripts/ad_test_wrapper.sh creates. */
-#define WINBIND_USER     "testuser1"
-#define WINBIND_PASSWORD "Password1!"
+#define WINBIND_USER        "testuser1"
+#define WINBIND_PASSWORD    "Password1!"
+#endif /* ifdef SMB2W_WBSTUB */
+
+/* STATUS_LOGON_FAILURE.  The server returns it for every logon winbind
+ * refuses, whatever the reason, so on its own it does not say the password
+ * was the reason.  The WB profiles that log on with the right password in the
+ * same run are what show that. */
+#define WB_ST_LOGON_FAILURE 0xc000006du
+
+/* The winbind counterpart of W9: the domain controller (or the stub playing
+ * one) must refuse a proof made with the wrong password, or the WB profiles
+ * passing would show nothing about the winbind branch's checks. */
+static void
+run_bad_winbind_password(const char *domain)
+{
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { 0 };
+    struct smb2_conn    *c;
+    uint32_t             st;
+
+    /* *INDENT-OFF* */
+    const struct smb2_wire_profile w = {
+        .name = "WB9 bad password through winbind",
+        .max_dialect = 0x0300, .ntlmv2 = 1, .winbind_domain = domain
+    };
+    /* *INDENT-ON* */
+
+    printf("# --- %s ---\n", w.name);
+
+    smb2_env_open_wire(&env, &opts, &w);
+    smb2_env_fs_setup(&env, "fs0");
+
+    c = smb2_conn_open(&env);
+
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS, "%s: NEGOTIATE -> 0x%08x", w.name, st);
+
+    st = smb2_session_setup_as(c, WINBIND_USER, "not-the-password");
+    CHECK(st == WB_ST_LOGON_FAILURE,
+          "%s: SESSION_SETUP is REFUSED as a logon failure (0x%08x)", w.name, st);
+
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_bad_winbind_password */
+
+#ifdef SMB2W_WBSTUB
+/* The identity half of the winbind logon.  A file the domain user creates must
+ * be owned by the user's SID, with the primary group's SID as its group.  The
+ * owner is the SID the logon returned.  The group comes back through the gid
+ * it mapped to, so a primary group that failed to map (the server then falls
+ * back to gid = uid) shows here as the uid's algorithmic SID. */
+static void
+run_winbind_identity(const char *domain)
+{
+    struct smb2_env        env;
+    struct smb2_env_opts   opts = { 0 };
+    struct smb2_conn      *c;
+    struct smb2_create_out co;
+    struct smb2_sd         sd;
+    uint8_t                buf[2048];
+    uint32_t               st, len = 0;
+
+    /* *INDENT-OFF* */
+    const struct smb2_wire_profile w = {
+        .name = "WB15 a new file is owned by the domain user",
+        .max_dialect = 0x0311, .ntlmv2 = 1, .sign = 1,
+        .signing_alg = SMB2W_SIGN_AES_GMAC, .winbind_domain = domain
+    };
+    /* *INDENT-ON* */
+
+    printf("# --- %s ---\n", w.name);
+
+    smb2_env_open_wire(&env, &opts, &w);
+    smb2_env_fs_setup(&env, "fs0");
+
+    c = smb2_conn_open(&env);
+
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS, "%s: NEGOTIATE -> 0x%08x", w.name, st);
+
+    st = smb2_session_setup_as(c, WINBIND_USER, WINBIND_PASSWORD);
+    CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", w.name, st);
+
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", w.name, st);
+
+    st = smb2_create(c, "owned.txt", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
+    CHECK(st == ST_SUCCESS, "%s: CREATE -> 0x%08x", w.name, st);
+
+    if (st == ST_SUCCESS) {
+        st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, co.file_id,
+                             SMB2_SEC_OWNER | SMB2_SEC_GROUP, buf, sizeof(buf), &len);
+        CHECK(st == ST_SUCCESS, "%s: QUERY_INFO security -> 0x%08x", w.name, st);
+
+        if (st == ST_SUCCESS && smb2_sd_parse(buf, len, &sd) == 0) {
+            CHECK(sd.have_owner && strcmp(sd.owner, WBSTUB_USER_SID) == 0,
+                  "%s: owner is the user's SID %s (got %s)", w.name,
+                  WBSTUB_USER_SID, sd.have_owner ? sd.owner : "none");
+            CHECK(sd.have_group && strcmp(sd.group, WBSTUB_GROUP_SID) == 0,
+                  "%s: group is the primary group's SID %s (got %s)", w.name,
+                  WBSTUB_GROUP_SID, sd.have_group ? sd.group : "none");
+        } else if (st == ST_SUCCESS) {
+            CHECK(0, "%s: security descriptor parses (%u bytes)", w.name, len);
+        }
+
+        st = smb2_close(c, co.file_id);
+        CHECK(st == ST_SUCCESS, "%s: CLOSE -> 0x%08x", w.name, st);
+    }
+
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_winbind_identity */
+#endif /* ifdef SMB2W_WBSTUB */
 
 static int
 run_winbind(void)
 {
+#ifdef SMB2W_WBSTUB
+    const char *domain = WBSTUB_DOMAIN;
+#else /* ifdef SMB2W_WBSTUB */
     const char *domain     = getenv("AD_DOMAIN");
     const char *socket_dir = getenv("WINBINDD_SOCKET_DIR");
 
@@ -328,6 +462,7 @@ run_winbind(void)
                "(run under scripts/ad_test_wrapper.sh)\n");
         return 77;
     }
+#endif /* ifdef SMB2W_WBSTUB */
 
     /* *INDENT-OFF* */
     const struct smb2_wire_profile wb_profiles[] = {
@@ -363,6 +498,16 @@ run_winbind(void)
                  WINBIND_USER, WINBIND_PASSWORD);
     run_bad_key_exchange(&no_key, WINBIND_USER, WINBIND_PASSWORD, 0, 0);
     run_bad_key_exchange(&short_key, WINBIND_USER, WINBIND_PASSWORD, 8, 0);
+    run_bad_winbind_password(domain);
+#ifdef SMB2W_WBSTUB
+    run_winbind_identity(domain);
+
+    /* Every check above can fail for one reason: the server's libwbclient
+     * calls bound to the real library, not the stub.  Name it. */
+    CHECK(wbstub_auth_calls > 0,
+          "the server's winbind logons reached the stub (%u calls)",
+          wbstub_auth_calls);
+#endif /* ifdef SMB2W_WBSTUB */
     return 0;
 } /* run_winbind */
 

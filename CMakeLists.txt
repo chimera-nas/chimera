@@ -106,6 +106,10 @@ option(REQUIRE_NETNS_TESTS "Fail configure if network namespace tests cannot be 
 # quint into a configure error instead of two silently absent ctests.
 option(REQUIRE_CTL_MBT "Fail configure if the control-plane MBT corpus cannot be generated" OFF)
 option(REQUIRE_FUSE_TESTS "Fail FUSE tests instead of skipping when FUSE mounts are unavailable" OFF)
+# Without libwbclient the server has no winbind branch, and the quick-tier test
+# of it (smb/mbt/wire_probe_wbstub) is not registered.  ON turns a missing
+# libwbclient into a configure error instead of one silently absent ctest.
+option(REQUIRE_WBCLIENT "Fail configure if libwbclient (winbind) is not found" OFF)
 option(EVPL_IOVEC_PROFILE "Enable libevpl retained-iovec stack profiling" OFF)
 
 # Build the product only: no test executables are compiled and no ctests are
@@ -886,6 +890,11 @@ if(PKG_CONFIG_FOUND)
     else()
         message(STATUS "libwbclient not found - Winbind integration disabled")
     endif()
+endif()
+if(REQUIRE_WBCLIENT AND NOT WBCLIENT_FOUND)
+    message(FATAL_ERROR
+        "REQUIRE_WBCLIENT=ON but libwbclient was not found through pkg-config. "
+        "Install the libwbclient development package, or omit -DREQUIRE_WBCLIENT=ON.")
 endif()
 
 add_definitions(-DXDR_CUSTOM_IOVEC=${CHIMERA_EXT_SRC}/libevpl/src/rpc2/xdr_iovec.h)

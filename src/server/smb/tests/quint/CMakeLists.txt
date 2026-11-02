@@ -140,6 +140,33 @@ set_tests_properties(chimera/server/smb/mbt/wire_probe_memfs PROPERTIES
     LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 180)
 
+# The winbind profiles again, against wbclient_stub.c instead of a domain
+# controller: the stub's definitions of the libwbclient calls are exported from
+# this executable, so the server binds to them rather than to the real library.
+# It needs no root, netns or DC, so it is the quick tier's only test that
+# reaches the winbind branch of NTLM validation, where a domain user's session
+# key comes from.  Without libwbclient the server has no winbind branch to
+# reach, and there are no headers to build the stub against.  The binding is
+# ELF symbol interposition: macOS's two-level namespace would bind the server
+# library straight to libwbclient.dylib, so the test is not built there.  CI
+# configures with REQUIRE_WBCLIENT=ON so the test cannot drop out of the merge
+# gate unnoticed.
+if(WBCLIENT_FOUND AND NOT APPLE)
+    add_executable(smb2_wire_probe_wbstub smb2_wire_probe.c wbclient_stub.c)
+    target_compile_definitions(smb2_wire_probe_wbstub PRIVATE SMB2W_WBSTUB=1)
+    target_include_directories(smb2_wire_probe_wbstub PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${WBCLIENT_INCLUDE_DIRS})
+    target_link_libraries(smb2_wire_probe_wbstub chimera_server chimera_metrics chimera_crypto)
+    set_target_properties(smb2_wire_probe_wbstub PROPERTIES ENABLE_EXPORTS ON)
+
+    add_test(NAME chimera/server/smb/mbt/wire_probe_wbstub
+        COMMAND $<TARGET_FILE:smb2_wire_probe_wbstub> --winbind)
+    set_tests_properties(chimera/server/smb/mbt/wire_probe_wbstub PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_wire_probe_wbstub"
+        LABELS "functional;probe;smb_mbt;memfs"
+        TIMEOUT 180)
+endif()
+
 # The signed profiles again as a domain user validated through winbind, against
 # the Samba AD DC that ad_test_wrapper.sh stands up.  Extended tier: it needs
 # root and a provisioned domain.  The wrapper sets up its own netns, so it
