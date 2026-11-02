@@ -38,4 +38,11 @@ if(NOT WIN32)
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/daemon_signal_test.py
                 $<TARGET_FILE:chimera>)
     set_tests_properties(chimera/daemon/sigquit_shutdown PROPERTIES TIMEOUT 120)
+
+    # -l sends logs to a file opened for append, so stdout stays free and
+    # logrotate's copytruncate leaves no hole.
+    add_test(NAME chimera/daemon/log_file
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/daemon_log_file_test.py
+                $<TARGET_FILE:chimera>)
+    set_tests_properties(chimera/daemon/log_file PROPERTIES TIMEOUT 120)
 endif()
