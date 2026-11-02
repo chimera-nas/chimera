@@ -264,7 +264,9 @@ jobs:
       #
       # Run the same default quick tier as the merge queue, without a label
       # filter: relabeling a supporting probe must not remove its coverage.
-      # REQUIRE_CTL_MBT guards against losing control-plane model registration.
+      # REQUIRE_CTL_MBT guards against losing control-plane model registration,
+      # REQUIRE_WBCLIENT against losing the winbind stub test (wire_probe_wbstub)
+      # to a missing libwbclient.
       - name: Build instrumented and run the quick tier
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -294,7 +296,7 @@ jobs:
               export LLVM_PROFDATA="$(command -v llvm-profdata || ls /usr/lib/llvm-*/bin/llvm-profdata | tail -n1)"
               export LLVM_COV="$(command -v llvm-cov || ls /usr/lib/llvm-*/bin/llvm-cov | tail -n1)"
               cmake -G Ninja -DCMAKE_BUILD_TYPE=Coverage -DCMAKE_C_COMPILER=clang \
-                    -DKVM_TESTING=OFF -DREQUIRE_CTL_MBT=ON /workspace
+                    -DKVM_TESTING=OFF -DREQUIRE_CTL_MBT=ON -DREQUIRE_WBCLIENT=ON /workspace
               ninja
               mkdir -p /build/coverage/profraw
               LLVM_PROFILE_FILE=/build/coverage/profraw/%m-%p.profraw \
