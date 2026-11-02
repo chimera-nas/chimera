@@ -107,6 +107,12 @@ provision_samba_ad() {
     realm = ${REALM}
     workgroup = ${DOMAIN}
     server role = active directory domain controller
+    # Accept NTLMv1 as well as NTLMv2 (Samba's default is ntlmv2-only), so the
+    # winbind NTLMv1 logon tests reach the DC.
+    ntlm auth = yes
+    # Log every authentication with the protocol it used ("with [NTLMv1]"), so
+    # a test can check which one a logon took (AD_LOG_DIR).
+    log level = 0 auth_audit:3
     dns forwarder = 8.8.8.8
     interfaces = lo ${DC_IP}/24
     bind interfaces only = yes
@@ -255,6 +261,7 @@ run_test() {
     export AD_DOMAIN="${DOMAIN}"
     export AD_ADMIN_PASS="${ADMIN_PASS}"
     export WINBINDD_SOCKET_DIR="${SAMBA_DIR}/var/lib/samba/winbindd_privileged"
+    export AD_LOG_DIR="${SAMBA_DIR}/var/log/samba"
 
     # Run the test command
     "$@"
@@ -275,6 +282,7 @@ main() {
         echo "  KRB5_CONFIG      - Path to krb5.conf"
         echo "  KRB5_KTNAME      - Path to keytab file"
         echo "  WINBINDD_SOCKET_DIR - Path to winbind socket"
+        echo "  AD_LOG_DIR       - The DC's log directory (auth audit included)"
         exit 1
     fi
 

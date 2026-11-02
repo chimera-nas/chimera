@@ -1277,6 +1277,104 @@ test_winbind_file_operations(void)
     return 0;
 } /* test_winbind_file_operations */
 
+/* smbclient options for an NTLMv1 logon.  With NTLMv2 off, Samba's client
+ * answers a CHALLENGE that offers extended session security (chimera's always
+ * does) with an NTLMv1 response computed over the ESS challenge
+ * (MS-NLMP 3.3.1).  Signing is required so the session key is checked: the
+ * logon only completes if the server derives the same key-exchange key as the
+ * client (MS-NLMP 3.4.5.1).  The DC must accept NTLMv1 (ntlm auth = yes in
+ * ad_test_wrapper.sh). */
+#define WINBIND_NTLMV1_OPTS \
+        "--option='client ntlmv2 auth = no' " \
+        "--option='client lanman auth = no' " \
+        "--option='client signing = required'"
+
+/* Whether the DC's auth audit log (ad_test_wrapper.sh exports AD_LOG_DIR) has a
+ * successful NTLMv1 logon by testuser1.  The NTLMv2 tests run before this one,
+ * so such a line can only come from the NTLMv1 logon.  Without it a client
+ * that quietly sent NTLMv2 instead (a Samba that dropped the deprecated
+ * "client ntlmv2 auth" option, say) would pass without reaching the NTLMv1
+ * path. */
+static int
+dc_logged_ntlmv1_logon(void)
+{
+    const char *log_dir = getenv("AD_LOG_DIR");
+    char        cmd[1024];
+    int         attempt;
+
+    if (!log_dir) {
+        fprintf(stderr, "    AD_LOG_DIR not set; run via scripts/ad_test_wrapper.sh\n");
+        return 0;
+    }
+
+    snprintf(cmd, sizeof(cmd),
+             "grep -rhF 'with [NTLMv1] status [NT_STATUS_OK]' '%s' 2>/dev/null | "
+             "grep -qF '\\[testuser1]'", log_dir);
+
+    /* The DC may write the audit line just after the reply reaches us. */
+    for (attempt = 0; attempt < 20; attempt++) {
+        if (system(cmd) == 0) {
+            return 1;
+        }
+        usleep(100 * 1000);
+    }
+
+    fprintf(stderr, "    no 'with [NTLMv1] status [NT_STATUS_OK]' line for testuser1 in %s\n",
+            log_dir);
+    return 0;
+} /* dc_logged_ntlmv1_logon */
+
+static int
+test_winbind_ntlmv1_ess_valid_credentials(void)
+{
+    const char *domain = getenv("AD_DOMAIN");
+    char        auth_args[512];
+    char        output[4096];
+    int         rc;
+
+    fprintf(stderr, "\n  Testing winbind NTLMv1 with extended session security...\n");
+
+    snprintf(auth_args, sizeof(auth_args),
+             WINBIND_NTLMV1_OPTS " -U %s\\\\testuser1%%Password1!", domain);
+    rc = run_smbclient_with_output(auth_args, "ls", output, sizeof(output));
+
+    if (rc != 0) {
+        fprintf(stderr, "    smbclient failed:\n%s\n", output);
+        test_fail("Winbind NTLMv1+ESS valid credentials, signed session");
+        return -1;
+    }
+
+    if (!dc_logged_ntlmv1_logon()) {
+        test_fail("Winbind NTLMv1+ESS valid credentials: the DC did not log an NTLMv1 logon");
+        return -1;
+    }
+
+    test_pass("Winbind NTLMv1+ESS valid credentials, signed session");
+    return 0;
+} /* test_winbind_ntlmv1_ess_valid_credentials */
+
+static int
+test_winbind_ntlmv1_ess_invalid_password(void)
+{
+    const char *domain = getenv("AD_DOMAIN");
+    char        auth_args[512];
+    int         rc;
+
+    fprintf(stderr, "\n  Testing winbind NTLMv1 with extended session security, invalid password...\n");
+
+    snprintf(auth_args, sizeof(auth_args),
+             WINBIND_NTLMV1_OPTS " -U %s\\\\testuser1%%WrongPassword", domain);
+    rc = run_smbclient(auth_args, "ls");
+
+    if (rc != 0) {
+        test_pass("Winbind NTLMv1+ESS invalid password rejected");
+        return 0;
+    } else {
+        test_fail("Winbind NTLMv1+ESS invalid password should be rejected");
+        return -1;
+    }
+} /* test_winbind_ntlmv1_ess_invalid_password */
+
 static int
 run_winbind_tests(struct test_env *env)
 {
@@ -1302,6 +1400,12 @@ run_winbind_tests(struct test_env *env)
         failures++;
     }
     if (test_winbind_file_operations() < 0) {
+        failures++;
+    }
+    if (test_winbind_ntlmv1_ess_valid_credentials() < 0) {
+        failures++;
+    }
+    if (test_winbind_ntlmv1_ess_invalid_password() < 0) {
         failures++;
     }
 
