@@ -35,7 +35,7 @@ Chimera has three ways to authenticate an SMB session, tried in this order:
 | Path | Credential source | When it applies |
 |---|---|---|
 | Built-in users | The `users` array in the chimera config (an `smbpasswd` NT hash) | Always tried first. NTLMv2 is verified in-process, with no external daemon. |
-| NTLM pass-through | `winbindd` | The account is not a built-in user and `winbind_enabled` is set. |
+| NTLM pass-through | `winbindd` | The account is not a built-in user and `winbind_enabled` is set. NTLMv2, and NTLMv1 with extended session security where the domain controller still accepts NTLMv1. |
 | Kerberos / GSSAPI | A keytab on the chimera host | The client selects Kerberos through SPNEGO and `kerberos_enabled` is set. |
 
 Chimera never speaks LDAP, and never joins a domain or maintains a netlogon
@@ -811,7 +811,7 @@ must fail with `NT_STATUS_LOGON_FAILURE` or `NT_STATUS_WRONG_PASSWORD`.
 | The join reports it cannot store the machine password, and `wbinfo --ping-dc` then fails | On samba 4.16 and newer, `net changesecretpw` can only upgrade an existing record. | Seed the two `secrets.tdb` records with `tdbtool` before joining. |
 | Kerberos works against the hostname but not `127.0.0.1` | The client derives the service principal from the name you gave it, and there is no `cifs/127.0.0.1` in the keytab. | Address the host by its real name. |
 | Kerberos is attempted even though `kerberos_enabled` is `false` | SPNEGO advertises Kerberos unconditionally. | Have clients select NTLM, e.g. `smbclient --use-kerberos=off`. |
-| `wbinfo -a` fails but `ntlm_auth` succeeds | `wbinfo -a` also tries an NTLMv1 challenge/response, which many domains disable. | Trust `ntlm_auth` and the `smbclient` tests; NTLMv2 is what chimera uses. |
+| `wbinfo -a` fails but `ntlm_auth` succeeds | `wbinfo -a` also tries an NTLMv1 challenge/response, which many domains disable. | Trust `ntlm_auth` and the `smbclient` tests. Clients normally log on with NTLMv2. A domain user's NTLMv1 logon (with extended session security) works only where the DC accepts NTLMv1: `ntlm auth = yes` on samba, a permissive LmCompatibilityLevel on Windows. |
 | Chimera fails to bind port 445 | `smbd` holds it. | `systemctl disable --now smbd nmbd` and `systemctl mask smbd nmbd`. |
 | `pdbedit` reports uid 4294967295 and `Failed to find a Unix account` | `ldapsam:trusted = yes` is missing. | Add it to `smb.conf` and restart winbind. |
 | Authenticated LDAP binds fail `Invalid credentials` after a `dpkg-reconfigure slapd` | The preseeded rootDN password was consumed and cleared by the earlier install. | Set `olcRootPW` with `ldapmodify` over `ldapi:///`. |

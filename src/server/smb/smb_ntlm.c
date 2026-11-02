@@ -941,13 +941,44 @@ validate_authenticate(
         smb_ntlm_debug("NTLM: User '%s' not found locally, trying winbind", username);
 
         if (smb_wbclient_available()) {
+            /* NTLMv1 with extended session security (both responses 24 bytes,
+             * as Samba's NTLMSSP server tests it): the client computed its
+             * response over MD5(ServerChallenge || ClientChallenge)[0..7],
+             * where ClientChallenge is LmChallengeResponse[0..7]
+             * (MS-NLMP 3.3.1).  winbind has no ESS input, so it is handed that
+             * challenge in place of the server's, and not the client's LM
+             * response, which under ESS carries only the client challenge.
+             * smb_wbclient_auth_ntlm sends the implied all-zero LM response in
+             * its place, as for any empty one. */
+            const uint8_t *wb_challenge = ctx->server_challenge;
+            const uint8_t *wb_lm        = lm_response;
+            size_t         wb_lm_len    = lm_response_len;
+            int            ntlmv1_ess   = nt_response_len == 24 && lm_response_len == 24 &&
+                (negotiate_flags & NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY);
+            uint8_t        ess_nonce[16]; /* ServerChallenge || ClientChallenge */
+            uint8_t        ess_digest[16];
+
+            if (ntlmv1_ess) {
+                memcpy(ess_nonce, ctx->server_challenge, 8);
+                memcpy(ess_nonce + 8, lm_response, 8);
+                if (!chimera_crypto_digest(CHIMERA_CRYPTO_MD5, ess_nonce, 16,
+                                           ess_digest, 16)) {
+                    smb_ntlm_error("NTLM: Failed to compute the NTLMv1 ESS challenge");
+                    result = -1;
+                    goto cleanup;
+                }
+                wb_challenge = ess_digest;
+                wb_lm        = NULL;
+                wb_lm_len    = 0;
+            }
+
             result = smb_wbclient_auth_ntlm(
                 username,
                 domain,
                 workstation,
-                ctx->server_challenge,
-                lm_response,
-                lm_response_len,
+                wb_challenge,
+                wb_lm,
+                wb_lm_len,
                 nt_response,
                 nt_response_len,
                 &ctx->uid,
@@ -957,6 +988,25 @@ validate_authenticate(
                 ctx->sid,
                 ctx->group_sid,
                 ctx->session_key);
+
+            /* winbind returns the SessionBaseKey.  For NTLMv1 with ESS the
+             * key-exchange key is HMAC_MD5(SessionBaseKey, ServerChallenge ||
+             * LmChallengeResponse[0..7]) (MS-NLMP 3.4.5.1), as Samba's
+             * ntlmssp_server_postauth derives it. */
+            if (result == 0 && ntlmv1_ess) {
+                uint8_t kxkey[16];
+
+                if (!chimera_crypto_hmac(CHIMERA_CRYPTO_HMAC_MD5, ctx->session_key, 16,
+                                         ess_nonce, 16, kxkey, 16)) {
+                    smb_ntlm_error("NTLM: Failed to derive the NTLMv1 ESS "
+                                   "key-exchange key; logon refused");
+                    chimera_crypto_clear(ctx->session_key, sizeof(ctx->session_key));
+                    result = -1;
+                    goto cleanup;
+                }
+                memcpy(ctx->session_key, kxkey, 16);
+                chimera_crypto_clear(kxkey, sizeof(kxkey));
+            }
 
             if (result == 0) {
                 // Winbind auth succeeded
@@ -981,12 +1031,13 @@ validate_authenticate(
     goto cleanup;
 
  exchange_key:
-    /* Either backend leaves the NTLMv2 session base key in ctx->session_key:
-     * the local path computes it, and winbind returns it as the user session
-     * key.  For NTLMv2 that is also the key-exchange key (MS-NLMP 3.4.5.1).
-     * Neither backend sees the EncryptedRandomSessionKey, so with KEY_EXCH the
-     * session key the client signs with is unwrapped here, once, for both
-     * (MS-NLMP 3.2.5.1.2). */
+    /* Either backend leaves the key-exchange key in ctx->session_key.  The
+     * local path computes the NTLMv2 session base key, which for NTLMv2 is
+     * also the key-exchange key (MS-NLMP 3.4.5.1); winbind returns the session
+     * base key, which the winbind branch above turns into the key-exchange key
+     * for NTLMv1 with ESS.  Neither backend sees the EncryptedRandomSessionKey,
+     * so with KEY_EXCH the session key the client signs with is unwrapped
+     * here, once, for both (MS-NLMP 3.2.5.1.2). */
     if (result == 0 && (negotiate_flags & NTLMSSP_NEGOTIATE_KEY_EXCH)) {
         uint8_t exported_key[16];
 
