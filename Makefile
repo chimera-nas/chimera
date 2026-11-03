@@ -27,6 +27,9 @@ CTEST_PARALLEL := $(shell n=$$(nproc 2>/dev/null || sysctl -n hw.ncpu); echo $$(
 # a label filter.
 CTEST_TIER ?=
 CTEST_ARGS := $(CTEST_TIER) --output-on-failure --timeout 30 -j $(CTEST_PARALLEL)
+# The Dev Container sets this to a sudo wrapper; other environments use ctest
+# directly so their existing privilege model is unchanged.
+CHIMERA_CTEST_COMMAND ?= ctest
 
 # Plain `make` produces a debug build only. Use `make debug`/`make release`
 # to also run the test suite, `make check` for the CI sweep over the quick test
@@ -47,11 +50,11 @@ build_debug:
 
 .PHONY: test_debug
 test_debug: build_debug
-	cd ${CHIMERA_BUILD_DIR}/Debug && ctest ${CTEST_ARGS}
+	cd ${CHIMERA_BUILD_DIR}/Debug && ${CHIMERA_CTEST_COMMAND} ${CTEST_ARGS}
 
 .PHONY: test_release
 test_release: build_release
-	cd ${CHIMERA_BUILD_DIR}/Release && ctest ${CTEST_ARGS}
+	cd ${CHIMERA_BUILD_DIR}/Release && ${CHIMERA_CTEST_COMMAND} ${CTEST_ARGS}
 
 .PHONY: build_coverage
 build_coverage:
@@ -69,7 +72,7 @@ test_coverage: build_coverage
 	@rm -rf ${COVERAGE_DIR}
 	@mkdir -p ${COVERAGE_DIR}/profraw
 	-cd ${CHIMERA_BUILD_DIR}/Coverage && \
-		LLVM_PROFILE_FILE=${COVERAGE_DIR}/profraw/%m-%p.profraw ctest ${CTEST_ARGS}
+		LLVM_PROFILE_FILE=${COVERAGE_DIR}/profraw/%m-%p.profraw ${CHIMERA_CTEST_COMMAND} ${CTEST_ARGS}
 	@bash etc/coverage-report.sh ${CHIMERA_BUILD_DIR}/Coverage
 
 .PHONY: debug

@@ -5,15 +5,16 @@
                 "args": {
                         "DOCKER_MIRROR": "${localEnv:DOCKER_MIRROR}",
                         "APT_MIRROR": "${localEnv:APT_MIRROR}",
-                        "USERNAME": "${localEnv:USER}"
+                        "USERNAME": "${localEnv:USER:chimera}"
                 }
         },
         "initializeCommand": "mkdir -p \"${localEnv:HOME}${localEnv:USERPROFILE}/.claude\"",
         "containerEnv": {
                 "CHIMERA_BUILD_DIR": "/build",
-                "CCACHE_DIR": "/build/ccache"
+                "CCACHE_DIR": "/build/ccache",
+                "CHIMERA_CTEST_COMMAND": "/chimera/scripts/ctest_sudo_wrapper.sh"
         },
-        "remoteUser": "${localEnv:USER}",
+        "remoteUser": "${localEnv:USER:chimera}",
         "updateRemoteUserUID": true,
         "postCreateCommand": "sudo chown -R \"$(id -un):$(id -gn)\" /build /worktrees \"$HOME/.quint\"",
         "customizations": {
@@ -32,7 +33,7 @@
         "mounts": [
                 "source=chimera-build,target=/build,type=volume",
                 "source=chimera-worktrees,target=/worktrees,type=volume",
-                "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/home/${localEnv:USER}/.claude,type=bind,consistency=cached"
+                "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/home/${localEnv:USER:chimera}/.claude,type=bind,consistency=cached"
         ],
         "appPort": [],
         "forwardPorts": [],
