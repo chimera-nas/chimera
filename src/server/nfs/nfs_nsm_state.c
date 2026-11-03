@@ -18,14 +18,15 @@
 void
 nsm_state_init(
     struct nsm_state   *state,
-    struct chimera_vfs *vfs)
+    struct chimera_vfs *vfs,
+    int                 persist)
 {
     const char *kvname = (vfs && vfs->kv_module) ? vfs->kv_module->name : "";
 
     evpl_mutex_init(&state->mutex, NULL);
     state->monitors             = NULL;
     state->state_number         = 1;  /* odd == up; refined by the cold-start load */
-    state->persistence_disabled = (strcmp(kvname, "memkv") == 0);
+    state->persistence_disabled = (!persist || strcmp(kvname, "memkv") == 0);
     atomic_store(&state->load_state, NSM_LOAD_IDLE);
     state->notify_thread = NULL;
     state->notify_queued = NULL;
@@ -38,7 +39,9 @@ nsm_state_init(
 
     chimera_nfs_debug("NSM state init: my_name='%s' persistence=%s",
                       state->my_name,
-                      state->persistence_disabled ? "disabled" : "enabled");
+                      !persist ? "disabled (nfs3_nsm_persist=false)" :
+                      state->persistence_disabled ? "disabled (kv_module is non-persistent)" :
+                      "enabled");
 } /* nsm_state_init */
 
 void
