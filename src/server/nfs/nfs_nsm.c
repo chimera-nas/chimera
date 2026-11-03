@@ -23,7 +23,7 @@
 * ------------------------------------------------------------------ */
 
 struct nsm_kv_ctx {
-    uint8_t  key[CHIMERA_KV_HDR_LEN + SM_MAXSTRLEN];
+    uint8_t  key[CHIMERA_KV_NSM_MONITOR_KEY_MAX];
     uint32_t key_len;
     uint8_t  value[NSM_MON_VALUE_MAX > NSM_STATE_VALUE_LEN ?
                    NSM_MON_VALUE_MAX : NSM_STATE_VALUE_LEN];
@@ -63,28 +63,46 @@ nsm_monitor(
     const char                       *host,
     const char                       *peer_addr)
 {
-    struct nsm_state  *nsm = &thread->shared->nsm_state;
-    struct nsm_kv_ctx *ctx;
-    size_t             host_len;
-    int                changed;
+    struct nsm_state   *nsm = &thread->shared->nsm_state;
+    struct nsm_monitor *mon;
+    struct nsm_kv_ctx  *ctx;
+    uint64_t            now_s = nsm_wall_now_s();
+    uint64_t            prev_stamp;
+    size_t              host_len;
+    int                 changed, renew;
 
     evpl_mutex_lock(&nsm->mutex);
-    changed = nsm_monitor_set(nsm, host, peer_addr);
+    HASH_FIND_STR(nsm->monitors, host, mon);
+    prev_stamp = mon ? mon->stamp_s : 0;
+    changed    = nsm_monitor_set(nsm, host, peer_addr, now_s);
+
+    /* Renewal: rewrite the record once its stamp is half the expiry old, so a
+     * client that keeps taking locks never ages out of the store.  A stamp in
+     * the future (the clock stepped back) is rewritten too. */
+    renew = prev_stamp > now_s ||
+        now_s - prev_stamp >= nsm->monitor_expiry_s / 2;
+
+    if (mon && !changed && !renew) {
+        /* Nothing is written, so the store keeps the record stamped
+        * prev_stamp: leave the entry on that stamp too, or the renewal would
+        * age from the last lock grant instead of the last write. */
+        mon->stamp_s = prev_stamp;
+    }
     evpl_mutex_unlock(&nsm->mutex);
 
-    /* Only persist on first sight or an address change, so a lock-heavy client
-     * does not hammer the KV store. */
-    if (!changed || nsm->persistence_disabled) {
+    /* Persist only on first sight, an address change or a renewal, so a
+     * lock-heavy client does not hammer the KV store. */
+    if ((!changed && !renew) || nsm->persistence_disabled) {
         return;
     }
 
     host_len = strnlen(host, SM_MAXSTRLEN);
 
     ctx          = malloc(sizeof(*ctx));
-    ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, (const uint8_t *) host,
-                                          host_len);
+    ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, nsm->node_id,
+                                          (const uint8_t *) host, host_len);
     ctx->value_len = nsm_monitor_value_serialize(ctx->value, sizeof(ctx->value),
-                                                 peer_addr);
+                                                 peer_addr, now_s);
     chimera_vfs_put_key(thread->vfs_thread, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nsm_kv_done, ctx);
 } /* nsm_monitor */
@@ -109,8 +127,8 @@ nsm_unmonitor(
 
     host_len     = strnlen(host, SM_MAXSTRLEN);
     ctx          = malloc(sizeof(*ctx));
-    ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, (const uint8_t *) host,
-                                          host_len);
+    ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, nsm->node_id,
+                                          (const uint8_t *) host, host_len);
     chimera_vfs_delete_key(thread->vfs_thread, ctx->key, ctx->key_len,
                            nsm_kv_done, ctx);
 } /* nsm_unmonitor */
@@ -157,10 +175,18 @@ nsm_spawn_notify(
 struct nsm_load_ctx {
     struct chimera_server_nfs_thread *thread;
     uint32_t                          state;
+    uint64_t                          now_s; /* expiry reference for the scan */
     /* Keys handed to the async KV layer must outlive the call -- keep them in
      * this heap ctx, not on the stack. */
     uint8_t                           skey[CHIMERA_KV_NSM_STATE_KEY_LEN];
-    uint8_t                           start[CHIMERA_KV_HDR_LEN];
+    uint8_t                           start[CHIMERA_KV_PREFIX_LEN];
+    /* Expired records found by the scan, deleted once it completes. */
+    struct {
+        uint8_t  key[CHIMERA_KV_NSM_MONITOR_KEY_MAX];
+        uint32_t key_len;
+    } *expired;
+    uint32_t                          nexpired;
+    uint32_t                          expired_cap;
 };
 
 static int
@@ -173,30 +199,43 @@ nsm_monitor_scan_cb(
 {
     struct nsm_load_ctx *ctx = private_data;
     struct nsm_state    *nsm = &ctx->thread->shared->nsm_state;
-    const uint8_t       *k   = key;
     char                 host[SM_MAXSTRLEN + 1];
     char                 addr[CHIMERA_NSM_ADDR_MAX];
-    uint32_t             host_len;
+    uint64_t             stamp;
 
-    /* Keys arrive in order; stop once we leave the monitor type band. */
-    if (key_len < CHIMERA_KV_HDR_LEN ||
-        memcmp(k, ctx->start, CHIMERA_KV_HDR_LEN) != 0) {
-        return 1;
-    }
+    switch (nsm_monitor_record_classify(key, key_len, value, value_len,
+                                        nsm->node_id, ctx->now_s,
+                                        nsm->monitor_expiry_s,
+                                        host, addr, &stamp)) {
+        case NSM_RECORD_END:
+            /* Keys arrive in order: this one is past this node's band. */
+            return 1;
+        case NSM_RECORD_SKIP:
+            return 0;  /* malformed, or written before stamps existed */
+        case NSM_RECORD_EXPIRED:
+            /* Not renewed within the expiry: the client is gone.  Deleting
+            * during the scan would mutate the band being iterated, so
+            * remember the key (at most CHIMERA_KV_NSM_MONITOR_KEY_MAX bytes
+            * for an EXPIRED record) and delete once the scan completes. */
+            if (ctx->nexpired == ctx->expired_cap) {
+                ctx->expired_cap = ctx->expired_cap ? ctx->expired_cap * 2 : 8;
+                ctx->expired     = realloc(ctx->expired,
+                                           ctx->expired_cap * sizeof(*ctx->expired));
+                chimera_nfs_abort_if(ctx->expired == NULL,
+                                     "NSM expired-monitor list realloc failed");
+            }
+            memcpy(ctx->expired[ctx->nexpired].key, key, key_len);
+            ctx->expired[ctx->nexpired].key_len = key_len;
+            ctx->nexpired++;
+            return 0;
+        case NSM_RECORD_LOAD:
+            break;
+    } /* switch */
 
-    host_len = key_len - CHIMERA_KV_HDR_LEN;
-    if (host_len == 0 || host_len > SM_MAXSTRLEN) {
-        return 0;  /* skip a malformed key */
-    }
-    memcpy(host, k + CHIMERA_KV_HDR_LEN, host_len);
-    host[host_len] = '\0';
-
-    if (nsm_monitor_value_parse(value, value_len, addr, sizeof(addr)) != 0) {
-        return 0;  /* skip a corrupt value */
-    }
-
+    /* Reload with the record's own stamp, so the renewal ages it from when it
+     * was last written. */
     evpl_mutex_lock(&nsm->mutex);
-    nsm_monitor_set(nsm, host, addr);
+    nsm_monitor_set(nsm, host, addr, stamp);
     evpl_mutex_unlock(&nsm->mutex);
     return 0;
 } /* nsm_monitor_scan_cb */
@@ -212,6 +251,22 @@ nsm_monitor_scan_complete(
     uint32_t                          count;
 
     (void) error_code;
+
+    /* The scan is over, so the band can be mutated: drop the expired records
+     * (fire-and-forget, heap ctx freed in nsm_kv_done). */
+    for (uint32_t i = 0; i < ctx->nexpired; i++) {
+        struct nsm_kv_ctx *kv = malloc(sizeof(*kv));
+
+        memcpy(kv->key, ctx->expired[i].key, ctx->expired[i].key_len);
+        kv->key_len = ctx->expired[i].key_len;
+        chimera_vfs_delete_key(thread->vfs_thread, kv->key, kv->key_len,
+                               nsm_kv_done, kv);
+    }
+    if (ctx->nexpired > 0) {
+        chimera_nfs_info("NSM cold-start: purged %u expired monitor record(s)",
+                         ctx->nexpired);
+    }
+    free(ctx->expired);
 
     evpl_mutex_lock(&nsm->mutex);
     count = HASH_COUNT(nsm->monitors);
@@ -265,11 +320,14 @@ nsm_state_load_cb(
 
     nsm_state_persist(thread->vfs_thread, newstate);
 
-    /* Open-ended scan of the monitor band; nsm_monitor_scan_cb stops when the
-     * 3-byte type header changes (the same pattern recovery/DRC use). */
-    nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NSM_MONITOR);
+    /* Open-ended scan from this node's monitor band; nsm_monitor_scan_cb stops
+     * at the first key past the 5-byte [type,node] prefix (the same pattern
+     * the NFSv4 recovery reload uses), so only the clients this node served
+     * are reloaded and notified. */
+    ctx->now_s = nsm_wall_now_s();
+    nfs_kv_node_prefix(ctx->start, CHIMERA_KV_TYPE_NSM_MONITOR, nsm->node_id);
     chimera_vfs_search_keys(thread->vfs_thread,
-                            ctx->start, CHIMERA_KV_HDR_LEN,
+                            ctx->start, CHIMERA_KV_PREFIX_LEN,
                             NULL, 0, 0,
                             nsm_monitor_scan_cb,
                             nsm_monitor_scan_complete, ctx);
@@ -297,10 +355,14 @@ chimera_nfs_nsm_kickoff(struct chimera_server_nfs_thread *thread)
     /* We own the load.  Read the persisted state number first; the rest of the
      * chain (bump+persist, monitor scan, notify) runs as async callbacks on
      * this thread's vfs_thread/evpl. */
-    ctx         = malloc(sizeof(*ctx));
-    ctx->thread = thread;
-    ctx->state  = 0;
-    klen        = nfs_kv_nsm_state_key(ctx->skey);
+    ctx              = malloc(sizeof(*ctx));
+    ctx->thread      = thread;
+    ctx->state       = 0;
+    ctx->now_s       = 0;
+    ctx->expired     = NULL;
+    ctx->nexpired    = 0;
+    ctx->expired_cap = 0;
+    klen             = nfs_kv_nsm_state_key(ctx->skey);
     chimera_vfs_get_key(thread->vfs_thread, ctx->skey, klen,
                         nsm_state_load_cb, ctx);
 } /* chimera_nfs_nsm_kickoff */

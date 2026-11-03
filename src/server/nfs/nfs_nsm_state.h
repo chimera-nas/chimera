@@ -38,6 +38,7 @@ enum nsm_load_state {
 struct nsm_monitor {
     char           host[SM_MAXSTRLEN + 1];
     char           addr[CHIMERA_NSM_ADDR_MAX];
+    uint64_t       stamp_s; /* stamp of this host's persisted record (0 = none) */
     UT_hash_handle hh;
 };
 
@@ -72,10 +73,29 @@ struct nsm_state {
 #define NSM_STATE_MAGIC              0x4E534D53u /* "NSMS" */
 #define NSM_MON_MAGIC                0x4E534D4Du /* "NSMM" */
 
+/* Monitor value flag: a stamp_s (LE64) follows the address. */
+#define NSM_MON_FLAG_STAMPED         0x1u
+
 /* state value: magic(4) version(4) state(4); monitor value: magic(4) flags(4)
- * addr_len(1) addr[addr_len]. */
+ * addr_len(1) addr[addr_len] [stamp_s(8) when NSM_MON_FLAG_STAMPED].  A value
+ * written before stamps existed has flags 0 and no stamp. */
 #define NSM_STATE_VALUE_LEN          12u
-#define NSM_MON_VALUE_MAX            (4u + 4u + 1u + CHIMERA_NSM_ADDR_MAX)
+#define NSM_MON_VALUE_MAX            (4u + 4u + 1u + CHIMERA_NSM_ADDR_MAX + 8u)
+
+/*
+ * A persisted monitor record stamped at stamp_s (CLOCK_REALTIME seconds) has
+ * expired at now_s when it is more than expiry_s old.  stamp_s 0 is a record
+ * from before stamps existed and never expires; a stamp in the future (the
+ * clock stepped back) is not expired either.
+ */
+static inline int
+nsm_monitor_expired(
+    uint64_t stamp_s,
+    uint64_t now_s,
+    uint32_t expiry_s)
+{
+    return stamp_s != 0 && now_s > stamp_s && now_s - stamp_s > expiry_s;
+} /* nsm_monitor_expired */
 
 /* A monitored peer copied out of the table for the (off-thread) notify loop. */
 struct nsm_notify_target {
@@ -111,15 +131,17 @@ nsm_next_state(uint32_t prev)
 } /* nsm_next_state */
 
 /*
- * Insert or refresh the monitor for `host` with reach-address `addr`.  Caller
- * MUST hold state->mutex.  Returns 1 when the entry was newly created or its
+ * Insert or refresh the monitor for `host` with reach-address `addr`, storing
+ * stamp_s on the entry (always, even when nothing else changed).  Caller MUST
+ * hold state->mutex.  Returns 1 when the entry was newly created or its
  * address changed (so the caller should persist it), 0 when unchanged.
  */
 int
 nsm_monitor_set(
     struct nsm_state *state,
     const char       *host,
-    const char       *addr);
+    const char       *addr,
+    uint64_t          stamp_s);
 
 /*
  * Remove the monitor for `host`.  Caller MUST hold state->mutex.  Returns 1 if
@@ -153,15 +175,54 @@ nsm_state_value_parse(
     uint32_t       len,
     uint32_t      *out_state);
 
+/* The monitor value is always written stamped with stamp_s.  parse accepts
+ * both shapes: a stamped value sets *stamp_out, an unstamped one (written
+ * before stamps existed) sets it to 0. */
 uint32_t
 nsm_monitor_value_serialize(
     uint8_t    *buf,
     uint32_t    buf_size,
-    const char *addr);
+    const char *addr,
+    uint64_t    stamp_s);
 
 int
 nsm_monitor_value_parse(
     const uint8_t *buf,
     uint32_t       len,
     char          *addr_out,
-    size_t         addr_out_size);
+    size_t         addr_out_size,
+    uint64_t      *stamp_out);
+
+/* Wall-clock (CLOCK_REALTIME) seconds: the monitor record stamp, comparable
+ * across a restart. */
+uint64_t
+nsm_wall_now_s(
+    void);
+
+/* What the cold-start scan does with one persisted monitor record. */
+enum nsm_record_verdict {
+    NSM_RECORD_END = 0,   /* key left this node's band: stop the scan   */
+    NSM_RECORD_SKIP,      /* malformed, or legacy (unstamped) record     */
+    NSM_RECORD_EXPIRED,   /* stamped and older than expiry: delete it    */
+    NSM_RECORD_LOAD,      /* reload into the monitor table               */
+};
+
+/*
+ * Classify one record returned by the scan of node_id's monitor band (keys
+ * arrive in byte order, so the first key outside the 5-byte node prefix ends
+ * the band).  For EXPIRED and LOAD, host_out (SM_MAXSTRLEN + 1 bytes),
+ * addr_out (CHIMERA_NSM_ADDR_MAX bytes) and *stamp_out are filled in, and the
+ * key is at most the prefix + SM_MAXSTRLEN bytes long.
+ */
+enum nsm_record_verdict
+nsm_monitor_record_classify(
+    const uint8_t *key,
+    uint32_t       key_len,
+    const uint8_t *value,
+    uint32_t       value_len,
+    uint16_t       node_id,
+    uint64_t       now_s,
+    uint32_t       expiry_s,
+    char          *host_out,
+    char          *addr_out,
+    uint64_t      *stamp_out);

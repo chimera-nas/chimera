@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "nfs4_xdr.h"
+#include "sm_inter_xdr.h"
 
 /*
  * Binary key encoding for chimera state persisted in the global VFS key-value
@@ -30,12 +31,15 @@
  * Within a type, the tail is keyed one of two ways, by what the record must
  * survive:
  *
- *   - NODE-scoped (recovery, epoch): the tail begins with the 2-byte minting
- *     node_id (big-endian, so keys sort by node) -- giving a 5-byte
- *     [magic,version,type,node] scan prefix.  These back a node's OWN reboot:
- *     each instance reloads only the records it minted (it never reconstructs a
- *     live peer's grace state), and the boot epoch is inherently per-node.  See
- *     nfs_kv_node_prefix and server.nfs4_node_id.
+ *   - NODE-scoped (recovery, epoch, NSM monitor): the tail begins with the
+ *     2-byte minting node_id (big-endian, so keys sort by node) -- giving a
+ *     5-byte [magic,version,type,node] scan prefix.  These back a node's OWN
+ *     reboot: each instance reloads only the records it minted (it never
+ *     reconstructs a live peer's grace state), and the boot epoch is
+ *     inherently per-node.  An NSM monitor record names a peer whose NLM locks
+ *     this node granted, so a restarting node reloads -- and sends SM_NOTIFY
+ *     to -- only the clients it served.  See nfs_kv_node_prefix and
+ *     server.nfs4_node_id.
  *
  *   - CLIENT-scoped (session, reply-4.1, NFSv3/NFSv4.0 DRC): the tail begins
  *     with the client's own stable identity -- the globally-unique sessionid
@@ -45,6 +49,9 @@
  *     the same key, and whichever node the client reconnects to hydrates that
  *     client's band lazily on first contact (see nfs4_drc_session_hydrate /
  *     nfs3_drc.c).  See nfs_kv_type_prefix.
+ *
+ * The NSM state-number singleton (nfs_kv_nsm_state_key) is neither: it carries
+ * no node_id and stays one cluster-wide record.
  *
  * Values are little-endian throughout (see the nfs_kv_put_le* / nfs_kv_le*
  * helpers) and each begins with a 4-byte record magic that the deserializer
@@ -65,7 +72,13 @@ enum chimera_kv_record_type {
     CHIMERA_KV_TYPE_NFS4_REPLY    = 0x04,  /* 4.1 reply slot entry (by sessionid)*/
     CHIMERA_KV_TYPE_NFS3_REPLY    = 0x05,  /* NFSv3 DRC reply entry (by client)  */
     CHIMERA_KV_TYPE_NSM_STATE     = 0x06,  /* singleton NSM/statd state number   */
-    CHIMERA_KV_TYPE_NSM_MONITOR   = 0x07,  /* per-host NSM monitor (nfs_nsm)     */
+    CHIMERA_KV_TYPE_NSM_MONITOR   = 0x07,  /* per-host NSM monitor (node)        */
+    /* 0x07 keys written before the monitor band gained its node_id are
+     * [hdr] + host with an unstamped value.  Like the 0x08 records below they
+     * are left behind unread: the per-node cold-start scan never loads them
+     * (one whose host happens to begin with this node's two id bytes falls
+     * inside the band, and is skipped by its unstamped value) and nothing
+     * deletes them. */
     /* 0x08 was the NFSv4.0 DRC reply band, written while that cache was keyed
      * by client address and persisted for failover.  The cache is now keyed per
      * connection (nfs4_v40_drc.{c,h}), which nothing can outlive, so there is
@@ -294,18 +307,24 @@ nfs_kv_nsm_state_key(uint8_t *buf)
 
 #define CHIMERA_KV_NSM_STATE_KEY_LEN (CHIMERA_KV_HDR_LEN + 1)
 
-/* NSM monitor key = header + host name bytes (the NLM caller_name / mon_name,
- * the same stable identity a peer's statd presents in SM_NOTIFY).  Value =
- * magic(LE32) + flags(LE32) + addr_len(1) + addr[addr_len] (the peer IP, no
- * port -- how we reach its statd on our reboot). */
+/* NSM monitor key = the 5-byte node prefix + host name bytes (the NLM
+ * caller_name / mon_name, the same stable identity a peer's statd presents in
+ * SM_NOTIFY).  NODE-scoped: node_id is the node that granted the peer's locks,
+ * so only that node reloads and notifies it.  Value = magic(LE32) +
+ * flags(LE32) + addr_len(1) + addr[addr_len] (the peer IP, no port -- how we
+ * reach its statd on our reboot) + stamp_s(LE64, CLOCK_REALTIME seconds of the
+ * last write; present when flags has NSM_MON_FLAG_STAMPED). */
 static inline uint32_t
 nfs_kv_nsm_monitor_key(
     uint8_t       *buf,
+    uint16_t       node_id,
     const uint8_t *host,
     uint32_t       host_len)
 {
-    uint32_t p = nfs_kv_type_prefix(buf, CHIMERA_KV_TYPE_NSM_MONITOR);
+    uint32_t p = nfs_kv_node_prefix(buf, CHIMERA_KV_TYPE_NSM_MONITOR, node_id);
 
     memcpy(buf + p, host, host_len);
     return p + host_len;
 } /* nfs_kv_nsm_monitor_key */
+
+#define CHIMERA_KV_NSM_MONITOR_KEY_MAX (CHIMERA_KV_PREFIX_LEN + SM_MAXSTRLEN)
