@@ -118,7 +118,7 @@ main(void)
         smb2_pump(&env);
         if (renamer->reply_ready || smb2c_now_ms() >= deadline) {
             fprintf(stderr, "rename did not reach the backend hold\n");
-            exit(1);
+            smb2c_exit(1);
         }
     }
 

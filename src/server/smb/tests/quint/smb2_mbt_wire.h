@@ -34,6 +34,8 @@
 
 #include "common/crypto.h"
 
+#include "smb2_mbt_exit.h"
+
 /* ---- little-endian field put/get ---------------------------------------- */
 
 static inline void
@@ -175,7 +177,7 @@ static inline void
 smb2w_die(const char *what)
 {
     fprintf(stderr, "smb2 wire: %s failed\n", what);
-    exit(6);
+    smb2c_exit(6);
 } /* smb2w_die */
 
 /* ---- SP800-108 counter-mode KDF (MS-SMB2 3.1.4.2) ----------------------- */
