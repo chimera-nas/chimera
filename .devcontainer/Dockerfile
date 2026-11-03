@@ -85,10 +85,10 @@ RUN if [ -n "$APT_MIRROR" ]; then \
     echo "deb $APT_MIRROR resolute-security main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
     rm -f /etc/apt/sources.list.d/ubuntu.sources; \
     elif [ "$UBUNTU_MIRROR" = azure ]; then \
-        sed -i -e 's|//archive\.ubuntu\.com|//azure.archive.ubuntu.com|g' \
-               -e 's|//security\.ubuntu\.com|//azure.archive.ubuntu.com|g' \
-               -e 's|//ports\.ubuntu\.com|//azure.ports.ubuntu.com|g' \
-            /etc/apt/sources.list.d/ubuntu.sources; \
+    sed -i -e 's|//archive\.ubuntu\.com|//azure.archive.ubuntu.com|g' \
+    -e 's|//security\.ubuntu\.com|//azure.archive.ubuntu.com|g' \
+    -e 's|//ports\.ubuntu\.com|//azure.ports.ubuntu.com|g' \
+    /etc/apt/sources.list.d/ubuntu.sources; \
     fi
 
 RUN apt-get -y update && \
@@ -165,7 +165,7 @@ RUN apt-get -y update && \
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
     chmod a+r /etc/apt/keyrings/docker.asc && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu resolute stable" \
-        > /etc/apt/sources.list.d/docker.list && \
+    > /etc/apt/sources.list.d/docker.list && \
     apt-get -y update && \
     apt-get -y --no-install-recommends install docker-ce docker-ce-cli containerd.io docker-buildx-plugin && \
     apt-get clean && \
@@ -232,6 +232,17 @@ RUN if [ "$ENABLE_WPTS" = "1" ] ; then \
 # rather than an npm install here.  That removes the second copy of the version
 # pin, and removes a layer whose invalidation used to turn a seconds-long
 # rebuild into a seven-minute one.
+ARG USERNAME=chimera
+RUN groupadd "${USERNAME}" && \
+    useradd --create-home --gid "${USERNAME}" --shell /bin/bash "${USERNAME}"
 COPY --from=quint /opt/quint   /opt/quint
-COPY --from=quint /quint-home  /root/.quint
+COPY --from=quint --chown=${USERNAME}:${USERNAME} /quint-home /home/${USERNAME}/.quint
 ENV PATH=/opt/quint/bin:${PATH}
+
+# VS Code connects as the host-named user (UID/GID synchronized to the host by
+# devcontainer.json). Keep root available for privileged tests via sudo.
+RUN apt-get -y update && \
+    apt-get -y --no-install-recommends install sudo && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    printf '%s\n' "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USERNAME}" && \
+    chmod 0440 "/etc/sudoers.d/${USERNAME}"
