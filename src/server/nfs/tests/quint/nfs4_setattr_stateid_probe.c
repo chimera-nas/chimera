@@ -36,6 +36,11 @@
  * stateid.  Either way the holder is coherent with its own size change, so
  * the server must not recall the holder's own delegation; the probe's back
  * channel counts CB_RECALLs to catch exactly that.
+ *
+ * The delegation matrix covers every operation the holder sends through its
+ * delegation stateid: READ, WRITE and SETATTR(size), plus an attribute-only
+ * SETATTR, READ_PLUS, WRITE_SAME, ALLOCATE, DEALLOCATE and COPY (see the
+ * deleg_cells comment).
  */
 
 #include <stdio.h>
@@ -159,10 +164,14 @@ struct prep {
     struct stateid4 lock_sid;         /* last LOCK stateid */
     int             lock_idx;         /* index of the last LOCK in st[] */
     int             meas_idx;         /* index of the measured op (SETATTR,
-                                       * WRITE or READ) in st[] */
-    int             eof;              /* last READ's eof */
+                                       * WRITE, READ, READ_PLUS, WRITE_SAME,
+                                       * ALLOCATE, DEALLOCATE or COPY) in
+                                       * st[] */
+    int             eof;              /* last READ / READ_PLUS's eof */
     int             has_size;         /* GETATTR returned FATTR4_SIZE */
     uint64_t        size;
+    int             has_mode;         /* GETATTR returned FATTR4_MODE */
+    uint32_t        mode;
     uint64_t        clientid;         /* EXCHANGE_ID */
     uint32_t        eir_seq;
     uint8_t         sessionid[16];    /* CREATE_SESSION */
@@ -179,6 +188,13 @@ unpack_be64(const uint8_t *p)
     }
     return v;
 } /* unpack_be64 */
+
+static uint32_t
+unpack_be32(const uint8_t *p)
+{
+    return ((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) |
+           ((uint32_t) p[2] << 8) | (uint32_t) p[3];
+} /* unpack_be32 */
 
 static void
 prep_cb(
@@ -276,10 +292,38 @@ prep_cb(
                         }
                     }
                     break;
+                case OP_READ_PLUS:
+                    p->st[i]    = r->opread_plus.rp_status;
+                    p->meas_idx = (int) i;
+                    if (p->st[i] == NFS4_OK) {
+                        /* The segments' data is a copying opaque: nothing
+                         * to release. */
+                        p->eof = r->opread_plus.rp_resok4.rpr_eof;
+                    }
+                    break;
+                case OP_WRITE_SAME:
+                    p->st[i]    = r->opwrite_same.wsr_status;
+                    p->meas_idx = (int) i;
+                    break;
+                case OP_ALLOCATE:
+                    p->st[i]    = r->opallocate.ar_status;
+                    p->meas_idx = (int) i;
+                    break;
+                case OP_DEALLOCATE:
+                    p->st[i]    = r->opdeallocate.dr_status;
+                    p->meas_idx = (int) i;
+                    break;
+                case OP_COPY:
+                    p->st[i]    = r->opcopy.cr_status;
+                    p->meas_idx = (int) i;
+                    break;
+                case OP_SAVEFH:
+                    p->st[i] = r->opsavefh.status;
+                    break;
                 case OP_GETATTR:
                     p->st[i] = r->opgetattr.status;
-                    /* Only FATTR4_SIZE is requested, so it is the sole value
-                     * in the blob. */
+                    /* Either FATTR4_SIZE or FATTR4_MODE alone is requested,
+                     * so the value is the sole one in the blob. */
                     if (p->st[i] == NFS4_OK &&
                         r->opgetattr.resok4.obj_attributes.num_attrmask >= 1 &&
                         (r->opgetattr.resok4.obj_attributes.attrmask[0] &
@@ -287,6 +331,14 @@ prep_cb(
                         r->opgetattr.resok4.obj_attributes.attr_vals.len >= 8) {
                         p->has_size = 1;
                         p->size     = unpack_be64(
+                            r->opgetattr.resok4.obj_attributes.attr_vals.data);
+                    } else if (p->st[i] == NFS4_OK &&
+                               r->opgetattr.resok4.obj_attributes.num_attrmask >= 2 &&
+                               (r->opgetattr.resok4.obj_attributes.attrmask[1] &
+                                (1U << (FATTR4_MODE - 32))) &&
+                               r->opgetattr.resok4.obj_attributes.attr_vals.len >= 4) {
+                        p->has_mode = 1;
+                        p->mode     = unpack_be32(
                             r->opgetattr.resok4.obj_attributes.attr_vals.data);
                     }
                     break;
@@ -312,6 +364,12 @@ prep_cb(
     }
     p->done = 1;
 } /* prep_cb */
+
+/* The minor version every compound is sent with: 1 for the open/lock
+ * matrix, 2 for the delegation matrix, which measures the RFC 7862 ops
+ * (READ_PLUS, WRITE_SAME, ALLOCATE, DEALLOCATE, COPY) a 4.2 client sends
+ * through its delegation stateid. */
+static uint32_t probe_minor = 1;
 
 static struct prep
 pc_compound(
@@ -342,7 +400,7 @@ pc_compound(
     for (i = 0; i < nops; i++) {
         argarray[base + i] = ops[i];
     }
-    args.minorversion = 1;
+    args.minorversion = probe_minor;
     args.argarray     = argarray;
     args.num_argarray = (uint32_t) (base + nops);
 
@@ -669,6 +727,156 @@ op_delegreturn(const struct stateid4 *sid)
     return a;
 } /* op_delegreturn */
 
+/* Attribute-only SETATTR: FATTR4_MODE through `sid`.  The stateid is not
+ * consulted for a mode change, but a Linux client sends its delegation
+ * stateid here all the same (nfs4_do_setattr copies it for every SETATTR
+ * under a write delegation). */
+static struct nfs_argop4
+op_setattr_mode(
+    const struct stateid4 *sid,
+    uint32_t               mode)
+{
+    static uint32_t   bitmap[2];
+    static uint8_t    blob[4];
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop = OP_SETATTR;
+
+    bitmap[0] = 0;
+    bitmap[1] = 1U << (FATTR4_MODE - 32);
+    pack_be32(blob, mode);
+
+    a.opsetattr.stateid                       = *sid;
+    a.opsetattr.obj_attributes.num_attrmask   = 2;
+    a.opsetattr.obj_attributes.attrmask       = bitmap;
+    a.opsetattr.obj_attributes.attr_vals.data = blob;
+    a.opsetattr.obj_attributes.attr_vals.len  = 4;
+    return a;
+} /* op_setattr_mode */
+
+static struct nfs_argop4
+op_getattr_mode(void)
+{
+    static uint32_t   bitmap[2];
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop                      = OP_GETATTR;
+    bitmap[0]                    = 0;
+    bitmap[1]                    = 1U << (FATTR4_MODE - 32);
+    a.opgetattr.num_attr_request = 2;
+    a.opgetattr.attr_request     = bitmap;
+    return a;
+} /* op_getattr_mode */
+
+/* READ_PLUS of `len` bytes at offset 0 through `sid`. */
+static struct nfs_argop4
+op_read_plus(
+    const struct stateid4 *sid,
+    uint32_t               len)
+{
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop                   = OP_READ_PLUS;
+    a.opread_plus.rpa_stateid = *sid;
+    a.opread_plus.rpa_offset  = 0;
+    a.opread_plus.rpa_count   = len;
+    return a;
+} /* op_read_plus */
+
+/* WRITE_SAME of TRUNC_SIZE bytes at offset 0 through `sid`: 4 KiB blocks, a
+ * 16-byte pattern at the start of each, no per-block-number stamping. */
+#define WS_BLOCK_SIZE 4096
+static struct nfs_argop4
+op_write_same(const struct stateid4 *sid)
+{
+    static uint8_t    pattern[16];
+    struct nfs_argop4 a;
+
+    memset(pattern, 0x42, sizeof(pattern));
+    memset(&a, 0, sizeof(a));
+    a.argop                                    = OP_WRITE_SAME;
+    a.opwrite_same.wsa_stateid                 = *sid;
+    a.opwrite_same.wsa_stable                  = FILE_SYNC4;
+    a.opwrite_same.wsa_adb.adb_offset          = 0;
+    a.opwrite_same.wsa_adb.adb_block_size      = WS_BLOCK_SIZE;
+    a.opwrite_same.wsa_adb.adb_block_count     = TRUNC_SIZE / WS_BLOCK_SIZE;
+    a.opwrite_same.wsa_adb.adb_reloff_blocknum = NFS4_UINT64_MAX;
+    a.opwrite_same.wsa_adb.adb_block_num       = 0;
+    a.opwrite_same.wsa_adb.adb_reloff_pattern  = 0;
+    a.opwrite_same.wsa_adb.adb_pattern.data    = pattern;
+    a.opwrite_same.wsa_adb.adb_pattern.len     = sizeof(pattern);
+    return a;
+} /* op_write_same */
+
+/* ALLOCATE of [0, len) through `sid`. */
+static struct nfs_argop4
+op_allocate(
+    const struct stateid4 *sid,
+    uint64_t               len)
+{
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop                 = OP_ALLOCATE;
+    a.opallocate.aa_stateid = *sid;
+    a.opallocate.aa_offset  = 0;
+    a.opallocate.aa_length  = len;
+    return a;
+} /* op_allocate */
+
+/* DEALLOCATE of [0, len) through `sid`. */
+static struct nfs_argop4
+op_deallocate(
+    const struct stateid4 *sid,
+    uint64_t               len)
+{
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop                   = OP_DEALLOCATE;
+    a.opdeallocate.da_stateid = *sid;
+    a.opdeallocate.da_offset  = 0;
+    a.opdeallocate.da_length  = len;
+    return a;
+} /* op_deallocate */
+
+static struct nfs_argop4
+op_savefh(void)
+{
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop = OP_SAVEFH;
+    return a;
+} /* op_savefh */
+
+/* Synchronous, consecutive COPY of `len` bytes from offset 0 of the saved
+ * filehandle (through `src_sid`) to offset 0 of the current one (through
+ * `dst_sid`). */
+static struct nfs_argop4
+op_copy(
+    const struct stateid4 *src_sid,
+    const struct stateid4 *dst_sid,
+    uint64_t               len)
+{
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop                       = OP_COPY;
+    a.opcopy.ca_src_stateid       = *src_sid;
+    a.opcopy.ca_dst_stateid       = *dst_sid;
+    a.opcopy.ca_src_offset        = 0;
+    a.opcopy.ca_dst_offset        = 0;
+    a.opcopy.ca_count             = len;
+    a.opcopy.ca_consecutive       = 1;
+    a.opcopy.ca_synchronous       = 1;
+    a.opcopy.num_ca_source_server = 0;
+    return a;
+} /* op_copy */
+
 /* ---- the matrix ----------------------------------------------------------- */
 
 /* locktype 0 truncates through the open stateid itself -- the path that has
@@ -874,44 +1082,131 @@ run_cell(
  * POSIX lock, or the client prefers the open stateid): those must not recall
  * the holder's own delegation either.
  *
- * The cells create the file empty and extend it, so the only size change
- * the file ever sees is the measured one.
+ * The same client sends the same stateid for everything else it does to the
+ * file while it holds the delegation: every SETATTR, not only a size change
+ * (nfs4_do_setattr copies the delegation stateid for a chmod or a utimes
+ * under a write delegation), READ_PLUS (its ordinary read at 4.2), and
+ * ALLOCATE, DEALLOCATE and COPY (fallocate, punch-hole and
+ * copy_file_range).  Each of those must answer what the delegation grants
+ * -- a read delegation refuses the writes with NFS4ERR_OPENMODE -- and none
+ * may recall the holder's own delegation; a server that answers
+ * NFS4ERR_BAD_STATEID while TEST_STATEID reports the stateid valid leaves
+ * the client resending forever (chimera-nas/chimera#1728).
  *
- * via: which stateid the SETATTR carries.  access is the share_access of
- * the open the delegation is granted on (BOTH -> write delegation, READ ->
- * read delegation).
+ * The cells create the file empty and extend it, so the only size change
+ * the file ever sees is the measured one; the reads and the hole punch
+ * fill it through the creating open first.
+ *
+ * via: which stateid the measured op carries.  access is the share_access
+ * of the open the delegation is granted on (BOTH -> write delegation, READ
+ * -> read delegation).  A COPY cell copies TRUNC_SIZE bytes from a second
+ * file, read through that file's own write delegation, into the target;
+ * `via` and `access` describe the destination stateid, and the
+ * other_file variant presents the source file's delegation as the
+ * destination stateid.
  * *INDENT-OFF* */
-enum via { VIA_DELEG, VIA_OPEN, VIA_LOCK };
-
+enum via { VIA_DELEG, VIA_OPEN, VIA_LOCK, VIA_ANON };
+enum meas {
+    M_SETATTR_SIZE, M_SETATTR_MODE, M_WRITE, M_READ, M_READ_PLUS,
+    M_WRITE_SAME, M_ALLOCATE, M_DEALLOCATE, M_COPY
+};
 static const struct {
     const char *label;
-    enum via    via;         /* the stateid the measured op carries */
-    uint32_t    op;          /* OP_SETATTR (size), OP_WRITE or OP_READ */
+    enum via    via;
+    enum meas   op;
     uint32_t    access;
     int         zero_seqid;
-    int         other_file;
+    int         other_file;  /* present another file's write delegation */
     int         recalled;    /* another client's conflicting OPEN first:
                               * the delegation is under recall when the
-                              * holder sends the measured op */
+                              * holder sends the measured op, and stays
+                              * the holder's until it returns it */
     uint32_t    expect;
 } deleg_cells[] = {
-    { "open-stateid-under-own-deleg",        VIA_OPEN,  OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
-    { "lock-stateid-under-own-deleg",        VIA_LOCK,  OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
-    { "write-open-stateid-under-own-deleg",  VIA_OPEN,  OP_WRITE,   OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
-    { "write-deleg-stateid",                 VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
-    { "write-deleg-stateid-seqid0",          VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 1, 0, 0, NFS4_OK             },
-    { "read-deleg-stateid",                  VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
-    { "deleg-stateid-of-other-file",         VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
-    { "write-deleg-stateid-under-recall",    VIA_DELEG, OP_SETATTR, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK             },
-    { "write-via-write-deleg-stateid",       VIA_DELEG, OP_WRITE,   OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
-    { "write-via-write-deleg-stateid-under-recall", VIA_DELEG, OP_WRITE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK },
-    { "write-via-read-deleg-stateid",        VIA_DELEG, OP_WRITE,   OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
-    { "write-via-deleg-stateid-of-other-file", VIA_DELEG, OP_WRITE, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
-    { "read-via-write-deleg-stateid",        VIA_DELEG, OP_READ,    OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
-    { "read-via-read-deleg-stateid",         VIA_DELEG, OP_READ,    OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK             },
-    { "read-via-deleg-stateid-of-other-file", VIA_DELEG, OP_READ,  OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "open-stateid-under-own-deleg",        VIA_OPEN,  M_SETATTR_SIZE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "lock-stateid-under-own-deleg",        VIA_LOCK,  M_SETATTR_SIZE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "write-open-stateid-under-own-deleg",  VIA_OPEN,  M_WRITE,        OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "write-deleg-stateid",                 VIA_DELEG, M_SETATTR_SIZE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "write-deleg-stateid-seqid0",          VIA_DELEG, M_SETATTR_SIZE, OPEN4_SHARE_ACCESS_BOTH, 1, 0, 0, NFS4_OK             },
+    { "read-deleg-stateid",                  VIA_DELEG, M_SETATTR_SIZE, OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
+    { "deleg-stateid-of-other-file",         VIA_DELEG, M_SETATTR_SIZE, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "write-deleg-stateid-under-recall",    VIA_DELEG, M_SETATTR_SIZE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK             },
+    { "write-via-write-deleg-stateid",       VIA_DELEG, M_WRITE,        OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "write-via-write-deleg-stateid-under-recall", VIA_DELEG, M_WRITE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK             },
+    { "write-via-read-deleg-stateid",        VIA_DELEG, M_WRITE,        OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
+    { "write-via-deleg-stateid-of-other-file", VIA_DELEG, M_WRITE,      OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "read-via-write-deleg-stateid",        VIA_DELEG, M_READ,         OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "read-via-read-deleg-stateid",         VIA_DELEG, M_READ,         OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK             },
+    { "read-via-deleg-stateid-of-other-file", VIA_DELEG, M_READ,        OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "setattr-mode-via-write-deleg-stateid", VIA_DELEG, M_SETATTR_MODE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK            },
+    { "setattr-mode-via-read-deleg-stateid", VIA_DELEG, M_SETATTR_MODE, OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK             },
+    { "setattr-mode-via-open-stateid-under-own-deleg", VIA_OPEN, M_SETATTR_MODE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK    },
+    { "setattr-mode-via-anon-stateid-under-own-deleg", VIA_ANON, M_SETATTR_MODE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK    },
+    { "setattr-mode-via-write-deleg-stateid-under-recall", VIA_DELEG, M_SETATTR_MODE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK },
+    { "read-plus-via-write-deleg-stateid",   VIA_DELEG, M_READ_PLUS,    OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "read-plus-via-read-deleg-stateid",    VIA_DELEG, M_READ_PLUS,    OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK             },
+    { "read-plus-via-deleg-stateid-of-other-file", VIA_DELEG, M_READ_PLUS, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "write-same-via-write-deleg-stateid",  VIA_DELEG, M_WRITE_SAME,   OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "write-same-via-read-deleg-stateid",   VIA_DELEG, M_WRITE_SAME,   OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
+    { "write-same-via-deleg-stateid-of-other-file", VIA_DELEG, M_WRITE_SAME, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "allocate-via-write-deleg-stateid",    VIA_DELEG, M_ALLOCATE,     OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "allocate-via-read-deleg-stateid",     VIA_DELEG, M_ALLOCATE,     OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
+    { "allocate-via-deleg-stateid-of-other-file", VIA_DELEG, M_ALLOCATE, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "deallocate-via-write-deleg-stateid",  VIA_DELEG, M_DEALLOCATE,   OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "deallocate-via-write-deleg-stateid-under-recall", VIA_DELEG, M_DEALLOCATE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK   },
+    { "deallocate-via-read-deleg-stateid",   VIA_DELEG, M_DEALLOCATE,   OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
+    { "copy-dst-via-write-deleg-stateid",    VIA_DELEG, M_COPY,         OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
+    { "copy-dst-via-read-deleg-stateid",     VIA_DELEG, M_COPY,         OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4ERR_OPENMODE    },
+    { "copy-dst-via-deleg-stateid-of-other-file", VIA_DELEG, M_COPY,    OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
 };
 /* *INDENT-ON* */
+
+static const char *
+meas_name(enum meas op)
+{
+    switch (op) {
+        case M_SETATTR_SIZE: return "SETATTR(size)";
+        case M_SETATTR_MODE: return "SETATTR(mode)";
+        case M_WRITE:        return "WRITE";
+        case M_READ:         return "READ";
+        case M_READ_PLUS:    return "READ_PLUS";
+        case M_WRITE_SAME:   return "WRITE_SAME";
+        case M_ALLOCATE:     return "ALLOCATE";
+        case M_DEALLOCATE:   return "DEALLOCATE";
+        case M_COPY:         return "COPY";
+        default:             return "?";
+    } /* switch */
+} /* meas_name */
+
+/* The ops that read the file, or punch a hole in it, need data to be
+ * there: the cell fills the target through its creating open first. */
+static int
+meas_needs_fill(enum meas op)
+{
+    return op == M_READ || op == M_READ_PLUS || op == M_DEALLOCATE;
+} /* meas_needs_fill */
+
+/* Only memfs implements READ_PLUS among the probe's backends; elsewhere the
+ * backend answers NFS4ERR_NOTSUPP once the stateid has been judged.  That is
+ * the gate passing, so an OK-expected cell takes it, skips the data check,
+ * and still requires that nothing was recalled.  WRITE_SAME needs no such
+ * allowance: the VFS expands the pattern into ordinary writes on a backend
+ * without it, and those writes must not recall the holder's delegation
+ * either. */
+static const char *probe_module = "memfs";
+
+static int
+meas_gate_passed(
+    enum meas op,
+    uint32_t  expect,
+    uint32_t  got)
+{
+    if (got == expect) {
+        return 1;
+    }
+    return expect == NFS4_OK && got == NFS4ERR_NOTSUPP &&
+           op == M_READ_PLUS && strcmp(probe_module, "memfs") != 0;
+} /* meas_gate_passed */
 
 static int
 recall_seen(
@@ -938,17 +1233,19 @@ run_deleg_cell(
     unsigned int         i)
 {
     const char       *label = deleg_cells[i].label;
+    enum meas         op    = deleg_cells[i].op;
     char              fname[32], oname[40];
     char              create_owner[40], open_owner[40], lock_owner[40];
     char              other_owner[40];
     char              buf[200];
-    struct nfs_argop4 ops[4];
+    struct nfs_argop4 ops[6];
     struct prep       p;
     struct mbt_fh     target_fh, other_fh;
     struct stateid4   target_open, target_deleg, other_deleg, lock_sid, sid;
     uint32_t          target_deleg_type, want_type, got;
-    const char       *opname;
+    const char       *opname = meas_name(op);
     int               has_open = 1, has_other = 0, has_lock = 0;
+    int               n;
 
     snprintf(fname, sizeof(fname), "d%u", i);
     snprintf(oname, sizeof(oname), "d%u-other", i);
@@ -982,10 +1279,11 @@ run_deleg_cell(
     sid       = target_deleg;
     want_type = OPEN_DELEGATE_WRITE;
 
-    /* A READ needs data: fill the file through the creating open, which
-     * the write-open-stateid-under-own-deleg cell shows is recall-free, and
-     * which is still the write-capable creating open at this point. */
-    if (deleg_cells[i].op == OP_READ) {
+    /* A read (or a hole punch) needs data: fill the file through the
+     * creating open, which the write-open-stateid-under-own-deleg cell shows
+     * is recall-free, and which is still the write-capable creating open at
+     * this point. */
+    if (meas_needs_fill(op)) {
         ops[0] = op_putfh(&target_fh);
         ops[1] = op_write_bytes(pc->env->evpl, &target_open, TRUNC_SIZE);
         p      = pc_compound(pc, ops, 2, 1);
@@ -997,22 +1295,26 @@ run_deleg_cell(
         }
     }
 
-
-    if (deleg_cells[i].other_file) {
-        /* The stateid presented is another file's write delegation. */
+    /* The second file: the stateid presented is its write delegation
+     * (other_file), or it is the COPY source, grown so there is something
+     * to copy, read through that same delegation. */
+    if (deleg_cells[i].other_file || op == M_COPY) {
         if (!create_file(pc, root, oname, create_owner, &other_fh,
-                         &other_deleg, &want_type, 0, buf, sizeof(buf))) {
+                         &other_deleg, &want_type, op == M_COPY, buf,
+                         sizeof(buf))) {
             expect(label, 0, buf);
             return;
         }
         has_other = 1;
-        sid       = other_deleg;
         if (want_type != OPEN_DELEGATE_WRITE) {
             snprintf(buf, sizeof(buf), "creating open of %s granted deleg type "
                      "%u, expected write", oname, want_type);
             expect(label, 0, buf);
             return;
         }
+    }
+    if (deleg_cells[i].other_file) {
+        sid = other_deleg;
     } else if (deleg_cells[i].via == VIA_DELEG &&
                deleg_cells[i].access == OPEN4_SHARE_ACCESS_READ) {
         /* Close the creating open, hand its write delegation back and
@@ -1043,6 +1345,8 @@ run_deleg_cell(
         want_type    = OPEN_DELEGATE_READ;
     } else if (deleg_cells[i].via == VIA_OPEN) {
         sid = target_open;
+    } else if (deleg_cells[i].via == VIA_ANON) {
+        memset(&sid, 0, sizeof(sid));
     } else if (deleg_cells[i].via == VIA_LOCK) {
         ops[0] = op_putfh(&target_fh);
         ops[1] = op_lock(pc->clientid, lock_owner, &target_open, WRITE_LT);
@@ -1085,27 +1389,49 @@ run_deleg_cell(
         }
     }
 
-    /* The measurement: SETATTR extends the empty target to TRUNC_SIZE,
-     * WRITE writes TRUNC_SIZE bytes into it, READ reads them back -- each
-     * through that stateid. */
+    /* The measurement, through that stateid: SETATTR extends the empty
+     * target to TRUNC_SIZE or sets its mode, WRITE / WRITE_SAME / ALLOCATE
+     * / COPY fill TRUNC_SIZE bytes into it, DEALLOCATE punches the filled
+     * bytes out again (the size stays), READ / READ_PLUS read them back. */
     pc->nrecalls = 0;
-    ops[0]       = op_putfh(&target_fh);
-    switch (deleg_cells[i].op) {
-        case OP_WRITE:
-            ops[1] = op_write_bytes(pc->env->evpl, &sid, TRUNC_SIZE);
+    n            = 0;
+    if (op == M_COPY) {
+        ops[n++] = op_putfh(&other_fh);
+        ops[n++] = op_savefh();
+    }
+    ops[n++] = op_putfh(&target_fh);
+    switch (op) {
+        case M_SETATTR_MODE:
+            ops[n++] = op_setattr_mode(&sid, 0600);
             break;
-        case OP_READ:
-            ops[1] = op_read_bytes(&sid, TRUNC_SIZE);
+        case M_WRITE:
+            ops[n++] = op_write_bytes(pc->env->evpl, &sid, TRUNC_SIZE);
+            break;
+        case M_READ:
+            ops[n++] = op_read_bytes(&sid, TRUNC_SIZE);
+            break;
+        case M_READ_PLUS:
+            ops[n++] = op_read_plus(&sid, TRUNC_SIZE);
+            break;
+        case M_WRITE_SAME:
+            ops[n++] = op_write_same(&sid);
+            break;
+        case M_ALLOCATE:
+            ops[n++] = op_allocate(&sid, TRUNC_SIZE);
+            break;
+        case M_DEALLOCATE:
+            ops[n++] = op_deallocate(&sid, TRUNC_SIZE);
+            break;
+        case M_COPY:
+            ops[n++] = op_copy(&other_deleg, &sid, TRUNC_SIZE);
             break;
         default:
-            ops[1] = op_setattr_size(&sid, TRUNC_SIZE);
+            ops[n++] = op_setattr_size(&sid, TRUNC_SIZE);
             break;
     } /* switch */
-    ops[2] = op_getattr_size();
-    p      = pc_compound(pc, ops, 3, 1);
+    ops[n++] = (op == M_SETATTR_MODE) ? op_getattr_mode() : op_getattr_size();
+    p        = pc_compound(pc, ops, n, 1);
 
-    opname = deleg_cells[i].op == OP_WRITE ? "WRITE" :
-        deleg_cells[i].op == OP_READ ? "READ" : "SETATTR(size)";
     if (p.meas_idx < 0) {
         snprintf(buf, sizeof(buf),
                  "compound returned %u without reaching %s", p.status, opname);
@@ -1117,17 +1443,24 @@ run_deleg_cell(
                  "delegation: expected %u, got %u",
                  opname,
                  deleg_cells[i].via == VIA_OPEN ? "open" :
-                 deleg_cells[i].via == VIA_LOCK ? "lock" : "delegation",
+                 deleg_cells[i].via == VIA_LOCK ? "lock" :
+                 deleg_cells[i].via == VIA_ANON ? "the anonymous" :
+                 "delegation",
                  sid.seqid,
                  want_type == OPEN_DELEGATE_WRITE ? "write" : "read",
                  deleg_cells[i].expect, got);
-        expect(label, got == deleg_cells[i].expect, buf);
+        expect(label, meas_gate_passed(op, deleg_cells[i].expect, got), buf);
 
         if (got == NFS4_OK && deleg_cells[i].expect == NFS4_OK) {
-            if (deleg_cells[i].op == OP_READ) {
-                snprintf(buf, sizeof(buf), "READ of %u bytes: eof=%d",
+            if (op == M_READ || op == M_READ_PLUS) {
+                snprintf(buf, sizeof(buf), "%s of %u bytes: eof=%d", opname,
                          TRUNC_SIZE, p.eof);
                 expect(label, p.eof, buf);
+            } else if (op == M_SETATTR_MODE) {
+                snprintf(buf, sizeof(buf), "mode after %s: expected 0%o, "
+                         "got 0%o%s", opname, 0600, p.mode,
+                         p.has_mode ? "" : " (no mode returned)");
+                expect(label, p.has_mode && p.mode == 0600, buf);
             } else {
                 snprintf(buf, sizeof(buf), "size after %s: expected %u, "
                          "got %llu%s", opname, TRUNC_SIZE,
@@ -1135,7 +1468,9 @@ run_deleg_cell(
                          p.has_size ? "" : " (no size returned)");
                 expect(label, p.has_size && p.size == TRUNC_SIZE, buf);
             }
-
+        }
+        if (meas_gate_passed(op, deleg_cells[i].expect, got) &&
+            deleg_cells[i].expect == NFS4_OK) {
             /* The holder is coherent with its own I/O: no recall. */
             snprintf(buf, sizeof(buf), "CB_RECALLs during the %s: %d "
                      "(own delegation recalled: %s)", opname, pc->nrecalls,
@@ -1196,7 +1531,7 @@ main(
     /* Passthrough backends create the export root on the host; keep its mode
      * the one the model expects, as the replayers do. */
     umask(0);
-    mbt_watchdog_arm(60);
+    mbt_watchdog_arm(120);
 
     /* Usage: nfs4_setattr_stateid_probe [<module>] [--deleg].  --deleg serves
      * delegations and runs the delegation cells instead of the open/lock
@@ -1210,6 +1545,8 @@ main(
             opts.module = argv[i];
         }
     }
+    probe_module = opts.module;
+    probe_minor  = deleg ? 2 : 1;
     mbt_env_start_opts(env, &opts);
     env->nfs_v4_cb.recv_call_CB_COMPOUND = ss_cb_compound;
 
@@ -1249,8 +1586,8 @@ main(
         pc_setup(&other, env, 2);
     }
 
-    printf("# --- NFSv4 SETATTR(size) %sstateid authorization (%s) ---\n",
-           deleg ? "delegation " : "", opts.module);
+    printf("# --- NFSv4 %s stateid authorization (%s) ---\n",
+           deleg ? "delegation holder" : "SETATTR(size)", opts.module);
 
     if (deleg) {
         for (i = 0; i < sizeof(deleg_cells) / sizeof(deleg_cells[0]); i++) {
