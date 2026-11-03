@@ -116,7 +116,7 @@ test_monitor_table(void)
     struct nsm_notify_target *snap;
     uint32_t                  n;
 
-    nsm_state_init(&st, NULL);
+    nsm_state_init(&st, NULL, 1);
 
     /* First sight => changed; re-set same addr => unchanged; new addr =>
      * changed. */
@@ -133,12 +133,27 @@ test_monitor_table(void)
     nsm_state_destroy(&st);
 
     /* Empty table snapshots to nothing. */
-    nsm_state_init(&st, NULL);
+    nsm_state_init(&st, NULL, 1);
     n = nsm_monitors_snapshot(&st, &snap);
     CHECK(n == 0);
     CHECK(snap == NULL);
     nsm_state_destroy(&st);
 } /* test_monitor_table */
+
+static void
+test_persist_switch_off(void)
+{
+    struct nsm_state st;
+
+    /* No vfs => kv name "" => persistent by name; the switch alone decides. */
+    nsm_state_init(&st, NULL, 1);
+    CHECK(st.persistence_disabled == 0);
+    nsm_state_destroy(&st);
+
+    nsm_state_init(&st, NULL, 0);
+    CHECK(st.persistence_disabled == 1);
+    nsm_state_destroy(&st);
+} /* test_persist_switch_off */
 
 int
 main(void)
@@ -148,6 +163,7 @@ main(void)
     test_keys();
     test_state_bump();
     test_monitor_table();
+    test_persist_switch_off();
     printf("test_nsm_persist: all checks passed\n");
     return 0;
 } /* main */

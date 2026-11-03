@@ -81,7 +81,8 @@ struct nsm_notify_target {
 void
 nsm_state_init(
     struct nsm_state   *state,
-    struct chimera_vfs *vfs);
+    struct chimera_vfs *vfs,
+    int                 persist);
 
 void
 nsm_state_destroy(

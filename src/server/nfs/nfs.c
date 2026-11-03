@@ -458,7 +458,8 @@ nfs_server_init(
     nlm_state_init(&shared->nlm_state,
                    chimera_server_config_get_state_dir(config));
 
-    nsm_state_init(&shared->nsm_state, shared->vfs);
+    nsm_state_init(&shared->nsm_state, shared->vfs,
+                   chimera_server_config_get_nfs3_nsm_persist(config));
 
     /* Every endpoint below goes through the flavor helper rather than
      * evpl_endpoint_create() directly, so that a run configured for the
@@ -543,9 +544,11 @@ nfs_server_init(
      * they held before this server (re)started.  Only meaningful when state is
      * persistent: on a non-persistent KV backend the NSM monitor list is lost
      * across a restart, so there is nothing to reclaim and no notifies are sent
-     * -- skip grace to avoid pointlessly blocking fresh locks for 90s.  Phase 2
-     * holds this window open until the cold-start monitor scan completes and
-     * ends it early when the scan finds no monitors. */
+     * -- skip grace to avoid pointlessly blocking fresh locks for 90s.  The
+     * nfs3_nsm_persist switch sets persistence_disabled the same way, so grace
+     * is skipped when NSM state is held in memory on a persistent store too.
+     * Phase 2 holds this window open until the cold-start monitor scan
+     * completes and ends it early when the scan finds no monitors. */
     if (!data_server && !shared->nsm_state.persistence_disabled) {
         nlm_state_begin_grace(&shared->nlm_state);
         chimera_nfs_info("NLM entering %d-second grace period for lock reclaim",

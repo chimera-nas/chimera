@@ -776,6 +776,11 @@ apply_nfs_config(
         chimera_server_config_set_nfs3_drc(server_config, json_is_true(json_value));
     }
 
+    json_value = json_object_get(server_params, "nfs3_nsm_persist");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_nfs3_nsm_persist(server_config, json_is_true(json_value));
+    }
+
     json_value = json_object_get(server_params, "nfs4_lease_time");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);
