@@ -19,13 +19,16 @@ struct nfs4_copy_state_refs {
     void                           *dst_state;
     uint8_t                         dst_type;
     /* Handles opened by COPY itself for a special stateid, which names no
-     * state-table entry; released with the refs. */
+     * state-table entry, or for a delegation stateid, which names the
+     * holder but carries no open handle; released with the refs. */
     struct chimera_vfs_open_handle *src_own;
     struct chimera_vfs_open_handle *dst_own;
     struct chimera_vfs_open_handle *src_handle;
     struct chimera_vfs_open_handle *dst_handle;
     uint8_t                         src_special;
     uint8_t                         dst_special;
+    uint8_t                         src_deleg;
+    uint8_t                         dst_deleg;
     uint64_t                        req_count; /* ca_count as sent; 0 means "to EOF" */
     struct nfs_request             *req;
     uint64_t                        src_offset;
@@ -38,23 +41,17 @@ struct nfs4_copy_state_refs {
     struct evpl_iovec               rw_iov[CHIMERA_NFS4_COPY_IOV_MAX];
 };
 
-/* The client that owns `state`, for attributing the copy's internal I/O.
- * Like nfs_state_io_handle, only the two state types that carry
- * an open handle carry an owning client. */
+/* The client that owns `state`, for attributing the copy's internal I/O:
+ * the open's or lock's client, or the delegation's holder.  The state ref
+ * is held for the whole copy, so the client is valid throughout. */
 static uint64_t
 chimera_nfs4_copy_state_client(
     void   *state,
     uint8_t state_type)
 {
-    switch (state_type) {
-        case NFS4_SLOT_TYPE_OPEN:
-            return ((struct nfs_open_state *) state)->owner->client->client_id;
-        case NFS4_SLOT_TYPE_LOCK:
-            return ((struct nfs_lock_state *) state)->open_state->owner->
-                   client->client_id;
-        default:
-            return 0;
-    } /* switch */
+    struct nfs_client *client = nfs_state_owner_client(state, state_type);
+
+    return client ? client->client_id : 0;
 } /* chimera_nfs4_copy_state_client */
 
 static void
@@ -522,7 +519,7 @@ chimera_nfs4_copy_src_open_complete(
 
     refs->src_own = handle;
 
-    if (refs->dst_special) {
+    if (refs->dst_special || refs->dst_deleg) {
         chimera_nfs4_copy_open_dst(refs);
     } else {
         chimera_nfs4_copy_begin(refs);
@@ -590,13 +587,37 @@ chimera_nfs4_copy(
             return;
         }
 
+        status = nfs_state_check_client(
+            refs->src_state, refs->src_type,
+            req->session ? req->session->client_unified : NULL);
+        if (status != NFS4_OK) {
+            chimera_nfs4_copy_fail(refs, status);
+            return;
+        }
+
         /* The source stateid must name a read-capable open of the saved
          * filehandle (RFC 7862 §15.2.3; the open-mode rule is RFC 8881
          * §9.1.2, the same one READ enforces).  Without it a read-denied
          * open -- or an open of some altogether different object -- could
-         * source the copy. */
-        status = nfs_state_check_read_for_fh(refs->src_state, refs->src_type,
-                                             req->saved_fh, req->saved_fhlen);
+         * source the copy.  A delegation stateid -- what a Linux
+         * copy_file_range sends for an endpoint the client holds a
+         * delegation on -- is judged as READ judges it (either type grants
+         * the read, the delegation must be on the saved filehandle); it
+         * carries no open handle, so the source is opened on the fly as
+         * for a special stateid, and the ref is kept so the read is
+         * attributed to the holder. */
+        if (refs->src_type == NFS4_SLOT_TYPE_DELEG) {
+            status = nfs_delegation_check_io_for_fh(refs->src_state,
+                                                    req->saved_fh,
+                                                    req->saved_fhlen,
+                                                    OPEN4_SHARE_ACCESS_READ);
+            refs->src_deleg = 1;
+        } else {
+            status = nfs_state_check_read_for_fh(refs->src_state,
+                                                 refs->src_type,
+                                                 req->saved_fh,
+                                                 req->saved_fhlen);
+        }
         if (status != NFS4_OK) {
             chimera_nfs4_copy_fail(refs, status);
             return;
@@ -612,19 +633,39 @@ chimera_nfs4_copy(
             return;
         }
 
+        status = nfs_state_check_client(
+            refs->dst_state, refs->dst_type,
+            req->session ? req->session->client_unified : NULL);
+        if (status != NFS4_OK) {
+            chimera_nfs4_copy_fail(refs, status);
+            return;
+        }
+
         /* The destination stateid must name a write-capable open of the
-        * current filehandle (the saved filehandle is the source -- RFC 7862
-        * §15.2).  Without this the write would target whatever handle the
-        * stateid carries, rather than the object the compound named. */
-        status = nfs_state_check_write_for_fh(refs->dst_state, refs->dst_type,
-                                              req->fh, req->fhlen);
+         * current filehandle (the saved filehandle is the source -- RFC 7862
+         * §15.2).  Without this the write would target whatever handle the
+         * stateid carries, rather than the object the compound named.  A
+         * delegation stateid is judged as WRITE judges it: a write
+         * delegation of the current filehandle authorizes the destination
+         * (opened on the fly, the holder attributed), a read delegation is
+         * NFS4ERR_OPENMODE, another file's NFS4ERR_BAD_STATEID. */
+        if (refs->dst_type == NFS4_SLOT_TYPE_DELEG) {
+            status = nfs_delegation_check_io_for_fh(refs->dst_state,
+                                                    req->fh, req->fhlen,
+                                                    OPEN4_SHARE_ACCESS_WRITE);
+            refs->dst_deleg = 1;
+        } else {
+            status = nfs_state_check_write_for_fh(refs->dst_state,
+                                                  refs->dst_type,
+                                                  req->fh, req->fhlen);
+        }
         if (status != NFS4_OK) {
             chimera_nfs4_copy_fail(refs, status);
             return;
         }
     }
 
-    if (refs->src_special) {
+    if (refs->src_special || refs->src_deleg) {
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->saved_fh,
                             req->saved_fhlen,
@@ -632,7 +673,7 @@ chimera_nfs4_copy(
                             CHIMERA_VFS_OPEN_READ_ONLY,
                             chimera_nfs4_copy_src_open_complete,
                             refs);
-    } else if (refs->dst_special) {
+    } else if (refs->dst_special || refs->dst_deleg) {
         chimera_nfs4_copy_open_dst(refs);
     } else {
         chimera_nfs4_copy_begin(refs);
