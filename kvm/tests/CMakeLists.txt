@@ -252,13 +252,22 @@ foreach(image_spec ${KVM_IMAGES})
 
         # NFSv3 lock reclaim across a restart: the guest holds an NLM lock, chimera
         # restarts against the same cairn store, SM_NOTIFY (carrying nfs_nsm_name)
-        # makes the guest reclaim, and the grace window closes early.
+        # makes the guest reclaim, and the grace window closes early.  The first
+        # stops chimera with SIGTERM (graceful shutdown), the _kill variant with
+        # SIGKILL (a crash); both make the same assertions.
         add_test(NAME chimera/kvm/${IMAGE_NAME}/reboot/nlm_reclaim_cairn_nfs3
             COMMAND bash ${NFS3_NLM_RECLAIM_WRAPPER}
                     ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                     ${CHIMERA_BINARY})
         set_tests_properties(chimera/kvm/${IMAGE_NAME}/reboot/nlm_reclaim_cairn_nfs3
             PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 300)
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/reboot/nlm_reclaim_cairn_nfs3_kill
+            COMMAND bash ${NFS3_NLM_RECLAIM_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY})
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/reboot/nlm_reclaim_cairn_nfs3_kill
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 300
+            ENVIRONMENT "RECLAIM_STOP_SIGNAL=KILL")
 
         # Shared-store multi-instance namespacing: two node_ids drive one cairn
         # store sequentially; data is shared, per-node records stay isolated.
