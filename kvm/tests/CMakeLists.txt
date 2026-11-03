@@ -7,6 +7,7 @@ set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
 set(NFS_KRB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_kerberos_test_wrapper.sh)
 set(NFS_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_reboot_test_wrapper.sh)
 set(NFS3_DRC_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs3_drc_reboot_test_wrapper.sh)
+set(NFS3_NLM_RECLAIM_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs3_nlm_reclaim_reboot_test_wrapper.sh)
 set(NFSTEST_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfstest_test_wrapper.sh)
 set(NFSTEST_2CLIENT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfstest_2client_test_wrapper.sh)
 set(NFS_MULTINODE_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_multinode_test_wrapper.sh)
@@ -248,6 +249,16 @@ foreach(image_spec ${KVM_IMAGES})
 
         # There is no NFSv4.0 equivalent: that cache is keyed per connection, so
         # it has nothing to persist across a reboot.
+
+        # NFSv3 lock reclaim across a restart: the guest holds an NLM lock, chimera
+        # restarts against the same cairn store, SM_NOTIFY (carrying nfs_nsm_name)
+        # makes the guest reclaim, and the grace window closes early.
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/reboot/nlm_reclaim_cairn_nfs3
+            COMMAND bash ${NFS3_NLM_RECLAIM_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY})
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/reboot/nlm_reclaim_cairn_nfs3
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 300)
 
         # Shared-store multi-instance namespacing: two node_ids drive one cairn
         # store sequentially; data is shared, per-node records stay isolated.
