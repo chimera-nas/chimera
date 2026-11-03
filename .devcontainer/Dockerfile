@@ -233,7 +233,9 @@ RUN if [ "$ENABLE_WPTS" = "1" ] ; then \
 # pin, and removes a layer whose invalidation used to turn a seconds-long
 # rebuild into a seven-minute one.
 ARG USERNAME=chimera
-RUN groupadd "${USERNAME}" && \
+RUN if getent passwd ubuntu >/dev/null; then userdel --remove ubuntu; fi && \
+    if getent group ubuntu >/dev/null; then groupdel ubuntu; fi && \
+    groupadd "${USERNAME}" && \
     useradd --create-home --gid "${USERNAME}" --shell /bin/bash "${USERNAME}"
 COPY --from=quint /opt/quint   /opt/quint
 COPY --from=quint --chown=${USERNAME}:${USERNAME} /quint-home /home/${USERNAME}/.quint
@@ -244,5 +246,6 @@ ENV PATH=/opt/quint/bin:${PATH}
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends install sudo && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
-    printf '%s\n' "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${USERNAME}" && \
-    chmod 0440 "/etc/sudoers.d/${USERNAME}"
+    printf '%s\n' "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/devcontainer && \
+    chmod 0440 /etc/sudoers.d/devcontainer && \
+    visudo -c -f /etc/sudoers.d/devcontainer

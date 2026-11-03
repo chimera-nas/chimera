@@ -105,6 +105,12 @@ suites, Clang static analysis (`scan-build`), the REUSE / SPDX license lint,
 and the copyright-year check. Passing `make check` locally is sufficient to
 clear the equivalent CI gates.
 
+Inside the Dev Container, the test targets use `sudo` for CTest because some
+tests need root privileges. Use `make test_debug`, `make test_release`, or
+`make check`; do not invoke bare `ctest`, since privileged tests will fail.
+The configured wrapper restores ownership of CTest's `Testing/` results to the
+container user so later non-root builds and `make clean` can use the build tree.
+
 ### Other targets
 
 ```bash
