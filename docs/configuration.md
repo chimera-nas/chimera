@@ -127,6 +127,9 @@ the canonical place to set them.
 | `fuse_enabled` | bool | `false` | Serve the `fuse_mounts` section as local kernel FUSE mounts. Linux only; the daemon must run as root to issue the mounts. |
 | `fuse_io_uring` | bool | `true` | Carry FUSE requests over io_uring (FUSE-over-io_uring) whenever the kernel offers it: Linux 6.14+ with the `fuse` module's `enable_uring` parameter set. Otherwise, or when `false`, mounts use plain `/dev/fuse` reads and writes. |
 | `kv_module` | string | - | Key-value module used to persist server state. |
+| `nfs3_drc` | bool | `false` | NFSv3 duplicate-request cache: replay the cached reply of a retransmitted non-idempotent op instead of re-executing it. |
+| `nfs3_nsm_persist` | bool | `true` | Persist NSM/statd state (state number and per-host monitor records) in `kv_module` so a restart notifies lock holders and opens the NLM grace window. `false` keeps it in memory even on a persistent store: no reboot notify, no NLM grace. Ignored on `memkv`. |
+| `nfs3_drc_persist` | bool | `true` | Write the NFSv3 reply cache (`nfs3_drc`) through to `kv_module`. `false` keeps the cache in memory only, which avoids one KV put per cacheable reply at the cost of replays across a restart. Ignored on `memkv`. |
 | `state_dir` | string | `<prefix>/share/state` | Directory for persisted NFS/SMB state. |
 | `smb_persistent_handles` | bool | `false` | Enable SMB durable/persistent handles (needed for Continuous Availability). |
 | `smb_named_streams` | bool | `false` | Enable SMB named streams (alternate data streams). Honored only on backends that support them, and advertised to clients as `FILE_NAMED_STREAMS` in `FileFsAttributeInformation` only when both hold. |
