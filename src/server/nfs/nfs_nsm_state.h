@@ -58,19 +58,24 @@ struct nsm_state {
     int                    persistence_disabled; /* 1 when kv_module is non-persistent */
     _Atomic int            load_state;       /* enum nsm_load_state */
     char                   my_name[SM_MAXSTRLEN + 1]; /* our identity in SM_NOTIFY */
+    uint16_t               node_id;          /* this server instance in a shared KV store */
+    uint32_t               monitor_expiry_s; /* drop persisted monitors idle this long */
     struct evpl_thread    *notify_thread;    /* short-lived reboot-notify worker */
     struct nsm_notify_job *notify_queued;    /* newest worker not yet notifying */
     _Atomic int            notify_stop;      /* set at shutdown: workers give up */
 };
 
+/* Default age after which an unrenewed persisted monitor is dropped. */
+#define NSM_MONITOR_EXPIRY_DEFAULT_S 86400u
+
 /* 4-byte record magics validated before trusting any persisted bytes. */
-#define NSM_STATE_MAGIC     0x4E534D53u /* "NSMS" */
-#define NSM_MON_MAGIC       0x4E534D4Du /* "NSMM" */
+#define NSM_STATE_MAGIC              0x4E534D53u /* "NSMS" */
+#define NSM_MON_MAGIC                0x4E534D4Du /* "NSMM" */
 
 /* state value: magic(4) version(4) state(4); monitor value: magic(4) flags(4)
  * addr_len(1) addr[addr_len]. */
-#define NSM_STATE_VALUE_LEN 12u
-#define NSM_MON_VALUE_MAX   (4u + 4u + 1u + CHIMERA_NSM_ADDR_MAX)
+#define NSM_STATE_VALUE_LEN          12u
+#define NSM_MON_VALUE_MAX            (4u + 4u + 1u + CHIMERA_NSM_ADDR_MAX)
 
 /* A monitored peer copied out of the table for the (off-thread) notify loop. */
 struct nsm_notify_target {
@@ -82,7 +87,10 @@ void
 nsm_state_init(
     struct nsm_state   *state,
     struct chimera_vfs *vfs,
-    int                 persist);
+    int                 persist,
+    const char         *name,
+    uint16_t            node_id,
+    uint32_t            expiry_s);
 
 void
 nsm_state_destroy(

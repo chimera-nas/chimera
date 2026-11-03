@@ -460,7 +460,10 @@ nfs_server_init(
                    chimera_server_config_get_state_dir(config));
 
     nsm_state_init(&shared->nsm_state, shared->vfs,
-                   chimera_server_config_get_nfs3_nsm_persist(config));
+                   chimera_server_config_get_nfs3_nsm_persist(config),
+                   chimera_server_config_get_nfs_nsm_name(config),
+                   shared->node_id,
+                   chimera_server_config_get_nfs3_nsm_monitor_expiry(config));
 
     /* Every endpoint below goes through the flavor helper rather than
      * evpl_endpoint_create() directly, so that a run configured for the

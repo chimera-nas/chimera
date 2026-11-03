@@ -15,6 +15,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else  /* ifdef _WIN32 */
+#include <unistd.h>
+#endif /* ifdef _WIN32 */
 
 #include "nfs_nsm_state.h"
 #include "nfs_kv_keys.h"
@@ -116,7 +121,7 @@ test_monitor_table(void)
     struct nsm_notify_target *snap;
     uint32_t                  n;
 
-    nsm_state_init(&st, NULL, 1);
+    nsm_state_init(&st, NULL, 1, NULL, 1, 86400);
 
     /* First sight => changed; re-set same addr => unchanged; new addr =>
      * changed. */
@@ -133,7 +138,7 @@ test_monitor_table(void)
     nsm_state_destroy(&st);
 
     /* Empty table snapshots to nothing. */
-    nsm_state_init(&st, NULL, 1);
+    nsm_state_init(&st, NULL, 1, NULL, 1, 86400);
     n = nsm_monitors_snapshot(&st, &snap);
     CHECK(n == 0);
     CHECK(snap == NULL);
@@ -146,14 +151,47 @@ test_persist_switch_off(void)
     struct nsm_state st;
 
     /* No vfs => kv name "" => persistent by name; the switch alone decides. */
-    nsm_state_init(&st, NULL, 1);
+    nsm_state_init(&st, NULL, 1, NULL, 1, 86400);
     CHECK(st.persistence_disabled == 0);
     nsm_state_destroy(&st);
 
-    nsm_state_init(&st, NULL, 0);
+    nsm_state_init(&st, NULL, 0, NULL, 1, 86400);
     CHECK(st.persistence_disabled == 1);
     nsm_state_destroy(&st);
 } /* test_persist_switch_off */
+
+static void
+test_name_config(void)
+{
+    struct nsm_state st;
+    char             expect[SM_MAXSTRLEN + 1];
+
+    nsm_state_init(&st, NULL, 1, "nas.example.test", 7, 60);
+    CHECK(strcmp(st.my_name, "nas.example.test") == 0);
+    CHECK(st.node_id == 7);
+    CHECK(st.monitor_expiry_s == 60);
+    nsm_state_destroy(&st);
+
+    /* Empty => the host name, as before. */
+    gethostname(expect, sizeof(expect));
+    expect[SM_MAXSTRLEN] = '\0';
+    nsm_state_init(&st, NULL, 1, "", 1, 60);
+    CHECK(strcmp(st.my_name, expect) == 0);
+    nsm_state_destroy(&st);
+} /* test_name_config */
+
+static void
+test_name_config_truncated(void)
+{
+    struct nsm_state st;
+    char             longname[SM_MAXSTRLEN + 40];
+
+    memset(longname, 'a', sizeof(longname) - 1);
+    longname[sizeof(longname) - 1] = '\0';
+    nsm_state_init(&st, NULL, 1, longname, 1, 60);
+    CHECK(strlen(st.my_name) == SM_MAXSTRLEN);
+    nsm_state_destroy(&st);
+} /* test_name_config_truncated */
 
 int
 main(void)
@@ -164,6 +202,8 @@ main(void)
     test_state_bump();
     test_monitor_table();
     test_persist_switch_off();
+    test_name_config();
+    test_name_config_truncated();
     printf("test_nsm_persist: all checks passed\n");
     return 0;
 } /* main */
