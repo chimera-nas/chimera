@@ -259,12 +259,12 @@ chimera_nfs4_write(
 
         if (req->fhlen == 0) {
             status = NFS4ERR_NOFILEHANDLE;
-        } else if (deleg->fh_len != req->fhlen ||
-                   memcmp(deleg->fh, req->fh, req->fhlen) != 0) {
-            status = NFS4ERR_BAD_STATEID;
-        } else if (deleg->type != OPEN_DELEGATE_WRITE) {
-            status = NFS4ERR_OPENMODE;
         } else {
+            status = nfs_delegation_check_io_for_fh(deleg, req->fh,
+                                                    req->fhlen,
+                                                    OPEN4_SHARE_ACCESS_WRITE);
+        }
+        if (status == NFS4_OK) {
             /* This write is the delegation holder's own: carry the holder
              * as the claim actor on the on-the-fly write so it does not
              * recall the client's own delegation.  The holder is the

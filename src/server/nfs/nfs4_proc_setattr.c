@@ -365,12 +365,10 @@ chimera_nfs4_setattr(
         if (state_type == NFS4_SLOT_TYPE_DELEG) {
             struct nfs_delegation *deleg = state_void;
 
-            if (deleg->fh_len != req->fhlen ||
-                memcmp(deleg->fh, req->fh, req->fhlen) != 0) {
-                status = NFS4ERR_BAD_STATEID;
-            } else if (deleg->type != OPEN_DELEGATE_WRITE) {
-                status = NFS4ERR_OPENMODE;
-            } else {
+            status = nfs_delegation_check_io_for_fh(deleg, req->fh,
+                                                    req->fhlen,
+                                                    OPEN4_SHARE_ACCESS_WRITE);
+            if (status == NFS4_OK) {
                 req->io_owner_valid     = true;
                 req->io_owner_client_id = deleg->client->client_id;
             }
