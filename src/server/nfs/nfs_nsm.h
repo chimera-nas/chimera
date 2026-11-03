@@ -43,10 +43,13 @@ nsm_unmonitor(
     const char                       *host);
 
 /*
- * Run-once cold-start load (atomic IDLE->RUNNING CAS), triggered from per-thread
- * init on a persistent backend: bump+persist the NSM state number, reload the
- * monitor list, and -- off the server threads -- send SM_NOTIFY to every
- * monitored host so they reclaim their NLM locks during the grace window.
+ * Run-once cold-start load (atomic IDLE->RUNNING CAS), called from the lease
+ * tick on every server thread on a persistent backend: bump+persist the NSM
+ * state number, reload the monitor list, and -- off the server threads -- send
+ * SM_NOTIFY to every monitored host so they reclaim their NLM locks during the
+ * grace window.  Returns without starting until the NFSv4 recovery cold start
+ * has read the previous instance's last-alive time, which the scan ages the
+ * monitor records against.
  */
 void
 chimera_nfs_nsm_kickoff(

@@ -1001,6 +1001,7 @@ test_cold_start_without_store_is_ready(void)
     nfs_recovery_cold_start(&rec);
     CHECK(!nfs_recovery_loading(&rec));
     CHECK(!rec.in_grace);
+    CHECK(nfs_recovery_prev_alive_s(&rec) == 0);   /* no epoch read: unknown */
     CHECK(nfs_recovery_open_check(&rec,&c,false) == NFS4_OK);
     CHECK(nfs_recovery_open_check(&rec,&c,true) == NFS4ERR_NO_GRACE);
     CHECK(nfs_recovery_io_check(&rec) == NFS4_OK);

@@ -241,6 +241,39 @@ test_scan_classify(void)
 } /* test_scan_classify */
 
 static void
+test_scan_classify_downtime(void)
+{
+    /* Stamped 1000, expiry 100, previous instance last alive at 1050: the
+     * record was 50 s old when the node went down and must be reloaded, even
+     * though the restart's wall clock (100000) is far past the expiry. */
+    uint8_t  key[CHIMERA_KV_NSM_MONITOR_KEY_MAX], val[NSM_MON_VALUE_MAX];
+    uint32_t klen, vlen;
+    char     host[SM_MAXSTRLEN + 1], addr[CHIMERA_NSM_ADDR_MAX];
+    uint64_t stamp, ref_s;
+
+    build_record(key, &klen, val, &vlen, 5, "client-d", 1000);
+
+    ref_s = nsm_scan_ref_s(1050, 100000);
+    CHECK(ref_s == 1050);
+    CHECK(nsm_monitor_record_classify(key, klen, val, vlen, 5, ref_s, 100,
+                                      host, addr, &stamp) == NSM_RECORD_LOAD);
+    CHECK(strcmp(host, "client-d") == 0 && stamp == 1000);
+
+    /* Against wall now the same record would have been purged. */
+    CHECK(nsm_monitor_record_classify(key, klen, val, vlen, 5, 100000, 100,
+                                      host, addr, &stamp) == NSM_RECORD_EXPIRED);
+
+    /* No heartbeat on record, or one in the future: age against now. */
+    CHECK(nsm_scan_ref_s(0, 100000) == 100000);
+    CHECK(nsm_scan_ref_s(200000, 100000) == 100000);
+
+    /* Expired before the node went down: still purged. */
+    CHECK(nsm_monitor_record_classify(key, klen, val, vlen, 5,
+                                      nsm_scan_ref_s(1101, 100000), 100,
+                                      host, addr, &stamp) == NSM_RECORD_EXPIRED);
+} /* test_scan_classify_downtime */
+
+static void
 test_scan_classify_legacy_skipped(void)
 {
     /* A pre-node-prefix key whose host starts with our node bytes, carrying
@@ -372,6 +405,7 @@ main(void)
     test_state_bump();
     test_monitor_table();
     test_scan_classify();
+    test_scan_classify_downtime();
     test_scan_classify_legacy_skipped();
     test_persist_switch_off();
     test_name_config();

@@ -275,6 +275,14 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
     /* Record that this instance was alive (see nfs_recovery_heartbeat). */
     nfs_recovery_heartbeat(&thread->shared->nfs4_recovery, thread->vfs_thread);
 
+    /* Run-once NSM cold start.  It waits for the NFSv4 recovery cold start in
+     * nfs_server_start, which runs after the server threads are up, so the
+     * first tick after that one starts it; every later call is a no-op.  Not
+     * in data-server mode, which runs no NSM service. */
+    if (thread->shared->nsm_server) {
+        chimera_nfs_nsm_kickoff(thread);
+    }
+
     /* Keep persisted NSM monitor records of live NLM clients fresh. */
     chimera_nfs_nsm_renew_sweep(thread);
 

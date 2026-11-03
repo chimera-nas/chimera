@@ -88,6 +88,11 @@ struct nfs_recovery {
     uint32_t                    stale_purged;        /* records skipped + deleted at cold start */
     uint32_t                    unreclaimed_purged;  /* records deleted at grace end, cumulative */
     uint32_t                    store_errors;        /* KV reads that failed during the cold start */
+    /* CLOCK_REALTIME ns of the previous instance's last epoch heartbeat, read
+     * by the cold start (0 = none on record).  Written before load_state turns
+     * READY, so a reader that saw READY sees it.  The NSM cold start ages its
+     * monitor records against it (nfs_recovery_prev_alive_s). */
+    uint64_t                    prev_alive_ns;
 };
 
 struct nfs_client;
@@ -147,6 +152,16 @@ nfs_recovery_note_store_error(
 bool
 nfs_recovery_loading(
     struct nfs_recovery *rec);
+
+/*
+ * The previous instance's last heartbeat in CLOCK_REALTIME seconds, as read by
+ * the cold start: the last time this node was known to be alive.  0 when it is
+ * unknown (no epoch record, a failed read, a non-persistent backend) or the
+ * cold start has not finished; check nfs_recovery_loading first.
+ */
+uint64_t
+nfs_recovery_prev_alive_s(
+    const struct nfs_recovery *rec);
 
 /*
  * Begin the grace window.  If to_reclaim is empty (the persistence stub

@@ -272,7 +272,7 @@ nsm_spawn_notify(
 struct nsm_load_ctx {
     struct chimera_server_nfs_thread *thread;
     uint32_t                          state;
-    uint64_t                          now_s; /* expiry reference for the scan */
+    uint64_t                          ref_s; /* expiry reference (nsm_scan_ref_s) */
     /* Keys handed to the async KV layer must outlive the call -- keep them in
      * this heap ctx, not on the stack. */
     uint8_t                           skey[CHIMERA_KV_NSM_STATE_KEY_LEN];
@@ -301,7 +301,7 @@ nsm_monitor_scan_cb(
     uint64_t             stamp;
 
     switch (nsm_monitor_record_classify(key, key_len, value, value_len,
-                                        nsm->node_id, ctx->now_s,
+                                        nsm->node_id, ctx->ref_s,
                                         nsm->monitor_expiry_s,
                                         host, addr, &stamp)) {
         case NSM_RECORD_END:
@@ -398,6 +398,7 @@ nsm_state_load_cb(
     struct nsm_state                 *nsm    = &thread->shared->nsm_state;
     uint32_t                          prev   = 0;
     uint32_t                          newstate;
+    uint64_t                          prev_alive_s, now_s;
 
     if (error_code == CHIMERA_VFS_OK && value &&
         nsm_state_value_parse(value, value_len, &prev) == 0) {
@@ -420,8 +421,15 @@ nsm_state_load_cb(
     /* Open-ended scan from this node's monitor band; nsm_monitor_scan_cb stops
      * at the first key past the 5-byte [type,node] prefix (the same pattern
      * the NFSv4 recovery reload uses), so only the clients this node served
-     * are reloaded and notified. */
-    ctx->now_s = nsm_wall_now_s();
+     * are reloaded and notified.  Records are aged against the time this
+     * node was last known alive (the NFSv4 recovery cold start, which the
+     * kickoff waited for, read it), so the downtime does not count. */
+    prev_alive_s = nfs_recovery_prev_alive_s(&thread->shared->nfs4_recovery);
+    now_s        = nsm_wall_now_s();
+    ctx->ref_s   = nsm_scan_ref_s(prev_alive_s, now_s);
+    chimera_nfs_info("NSM cold-start: ageing monitor records against %s (%llu)",
+                     ctx->ref_s == prev_alive_s ? "last-alive" : "now",
+                     (unsigned long long) ctx->ref_s);
     nfs_kv_node_prefix(ctx->start, CHIMERA_KV_TYPE_NSM_MONITOR, nsm->node_id);
     chimera_vfs_search_keys(thread->vfs_thread,
                             ctx->start, CHIMERA_KV_PREFIX_LEN,
@@ -444,6 +452,13 @@ chimera_nfs_nsm_kickoff(struct chimera_server_nfs_thread *thread)
     if (atomic_load(&nsm->load_state) != NSM_LOAD_IDLE) {
         return;
     }
+    /* The scan ages each record against the previous instance's last
+     * heartbeat, which the NFSv4 recovery cold start reads in nfs_server_start
+     * -- after the server threads are up.  Until that load is READY, leave the
+     * run to a later lease tick. */
+    if (nfs_recovery_loading(&thread->shared->nfs4_recovery)) {
+        return;
+    }
     if (!atomic_compare_exchange_strong(&nsm->load_state, &expected,
                                         NSM_LOAD_RUNNING)) {
         return;
@@ -455,7 +470,7 @@ chimera_nfs_nsm_kickoff(struct chimera_server_nfs_thread *thread)
     ctx              = malloc(sizeof(*ctx));
     ctx->thread      = thread;
     ctx->state       = 0;
-    ctx->now_s       = 0;
+    ctx->ref_s       = 0;
     ctx->expired     = NULL;
     ctx->nexpired    = 0;
     ctx->expired_cap = 0;
