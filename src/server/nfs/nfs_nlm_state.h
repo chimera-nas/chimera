@@ -25,6 +25,9 @@
 /* Grace period: time after server restart during which only reclaim locks
 * are accepted. This matches the grace period used by most NFS servers. */
 #define NLM_GRACE_PERIOD_SECS 90
+/* Grace left once every reloaded host answered the reboot notify: a Linux
+ * client's lockd reclaims within a few seconds of its statd acking SM_NOTIFY. */
+#define NLM_GRACE_SETTLE_SECS 10
 
 /* On-disk state file format */
 #define NLM_FILE_MAGIC        0x4E4C4D53U /* "NLMS" */
@@ -197,6 +200,27 @@ nlm_state_end_grace(struct nlm_state *state)
 {
     state->in_grace = 0;
 } /* nlm_state_end_grace */
+
+/*
+ * Grace has nothing left to wait for except in-flight reclaims: bring the
+ * deadline forward to now + settle_s, never later than it already is.
+ * No-op outside grace.  Caller MUST hold state->mutex.
+ */
+static inline void
+nlm_state_settle_grace(
+    struct nlm_state *state,
+    int               settle_s)
+{
+    time_t end;
+
+    if (!state->in_grace) {
+        return;
+    }
+    end = time(NULL) + settle_s;
+    if (end < state->grace_end) {
+        state->grace_end = end;
+    }
+} /* nlm_state_settle_grace */
 
 /*
  * Allocate and zero a new lock entry.

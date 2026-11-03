@@ -1282,6 +1282,9 @@ chimera_nfs_nlm4_do_lock(
         nlm_lock_entry_free(entry);
         free(ctx);
         return;
+    } else if (args->reclaim && nlm_state_in_grace(&shared->nlm_state)) {
+        chimera_nfs_info("NLM LOCK: reclaim from '%s' accepted during grace",
+                         safe_hostname);
     }
 
     /* Look up or create per-client state */
