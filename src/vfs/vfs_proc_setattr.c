@@ -776,6 +776,23 @@ chimera_vfs_fsetattr_owned(
                                callback, private_data, actor);
 } /* chimera_vfs_fsetattr_owned */
 
+SYMBOL_EXPORT void
+chimera_vfs_setattr_owned(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data,
+    const struct chimera_claim_actor *actor)
+{
+    chimera_vfs_setattr_common(thread, cred, handle, set_attr,
+                               pre_attr_mask, post_attr_mask, 0,
+                               callback, private_data, actor);
+} /* chimera_vfs_setattr_owned */
+
 /* Publish metadata for an already authorized data mutation.  The original
  * operation owns its MDS claim until this finishes: do not re-authorize an
  * explicit mtime as a client SETATTR, recall that claim, or truncate the DS. */

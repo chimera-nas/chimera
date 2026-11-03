@@ -418,6 +418,22 @@ chimera_vfs_fsetattr_owned(
     void                             *private_data,
     const struct chimera_claim_actor *actor);
 
+/* Path-rights setattr (chimera_vfs_setattr) with an explicit cache owner:
+ * the actor is copied before return and exempts that owner and its shared
+ * lease from the attribute recall, so a client's own chmod/chown/utimes does
+ * not recall that client's own delegation. */
+SYMBOL_EXPORT void
+chimera_vfs_setattr_owned(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data,
+    const struct chimera_claim_actor *actor);
+
 SYMBOL_EXPORT void
 chimera_vfs_readdir(
     struct chimera_vfs_thread      *thread,
