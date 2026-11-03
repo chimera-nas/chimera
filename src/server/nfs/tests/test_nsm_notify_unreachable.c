@@ -497,6 +497,196 @@ test_stop_cancels_notify(void)
     evpl_mutex_destroy(&nsm.mutex);
 } /* test_stop_cancels_notify */
 
+static _Atomic uint32_t done_answered;
+static _Atomic uint32_t done_count;
+static _Atomic int      done_calls;
+
+static void
+job_done(struct nsm_notify_job *job)
+{
+    atomic_store(&done_answered, job->answered);
+    atomic_store(&done_count, job->count);
+    atomic_fetch_add(&done_calls, 1);
+} /* job_done */
+
+static void
+done_reset(void)
+{
+    atomic_store(&done_answered, 0);
+    atomic_store(&done_count, 0);
+    atomic_store(&done_calls, 0);
+} /* done_reset */
+
+/* A host that cannot be reached is skipped, so the worker reports that none of
+ * its one monitored host answered, and still reports once. */
+static void
+test_done_reports_dead_host(void)
+{
+    struct nsm_state       nsm;
+    struct nsm_notify_job *job;
+
+    memset(&nsm, 0, sizeof(nsm));
+    evpl_mutex_init(&nsm.mutex, NULL);
+    test_portmap_port = closed_port();
+    done_reset();
+
+    job       = new_job(3, 1);
+    job->done = job_done;
+    nsm_notify_submit(&nsm, job);
+    evpl_thread_destroy(nsm.notify_thread);
+    CHECK(atomic_load(&done_calls) == 1);
+    CHECK(atomic_load(&done_answered) == 0);
+    CHECK(atomic_load(&done_count) == 1);
+    evpl_mutex_destroy(&nsm.mutex);
+} /* test_done_reports_dead_host */
+
+/* The reboot notify reports the hosts that answered:
+ * a live statd makes answered 1 of 1. */
+static void
+test_done_reports_live_host(struct evpl *evpl)
+{
+    struct nsm_state          nsm;
+    struct fixture            f;
+    struct nsm_notify_job    *job;
+    struct evpl_rpc2_program *pm_progs[1];
+    struct evpl_rpc2_program *sm_progs[1];
+    struct evpl_rpc2_server  *pm_server, *sm_server;
+    struct evpl_endpoint     *pm_ep, *sm_ep;
+    long                      t0;
+
+    memset(&nsm, 0, sizeof(nsm));
+    evpl_mutex_init(&nsm.mutex, NULL);
+    test_portmap_port = closed_port();
+    statd_port        = closed_port();
+    done_reset();
+    fixture_init(&f, evpl);
+
+    f.pm.recv_call_PMAPPROC_GETPORT = getport_received;
+    f.sm.recv_call_SM_NOTIFY        = notify_received;
+    pm_progs[0]                     = &f.pm.rpc2;
+    sm_progs[0]                     = &f.sm.rpc2;
+    pm_server                       = evpl_rpc2_server_init(pm_progs, 1);
+    sm_server                       = evpl_rpc2_server_init(sm_progs, 1);
+    pm_ep                           = evpl_endpoint_create("127.0.0.1", test_portmap_port);
+    sm_ep                           = evpl_endpoint_create("127.0.0.1", statd_port);
+    CHECK(evpl_rpc2_server_start(pm_server, EVPL_STREAM_SOCKET_TCP, pm_ep) == 0);
+    CHECK(evpl_rpc2_server_start(sm_server, EVPL_STREAM_SOCKET_TCP, sm_ep) == 0);
+    evpl_rpc2_server_attach(f.rpc2_thread, pm_server, &f.pm);
+    evpl_rpc2_server_attach(f.rpc2_thread, sm_server, &f.sm);
+
+    /* The servers belong to this thread's loop, so pump it until the worker
+     * has reported; then join the worker. */
+    job       = new_job(3, 1);
+    job->done = job_done;
+    t0        = now_ms();
+    nsm_notify_submit(&nsm, job);
+    while (atomic_load(&done_calls) == 0) {
+        CHECK(now_ms() - t0 < 5000);
+        evpl_continue(evpl);
+    }
+    evpl_thread_destroy(nsm.notify_thread);
+    CHECK(atomic_load(&done_calls) == 1);
+    CHECK(atomic_load(&done_answered) == 1);
+    CHECK(atomic_load(&done_count) == 1);
+    CHECK(notified == 1);
+
+    evpl_rpc2_server_stop(pm_server);
+    evpl_rpc2_server_stop(sm_server);
+    evpl_rpc2_server_detach(f.rpc2_thread, pm_server);
+    evpl_rpc2_server_detach(f.rpc2_thread, sm_server);
+    fixture_fini(&f);
+    evpl_rpc2_server_destroy(pm_server);
+    evpl_rpc2_server_destroy(sm_server);
+    evpl_mutex_destroy(&nsm.mutex);
+} /* test_done_reports_live_host */
+
+/* A notify cut short by shutdown has not told everyone, so it must not report
+ * as if it had. */
+static void
+test_done_skipped_on_stop(void)
+{
+    struct nsm_state       nsm;
+    struct nsm_notify_job *job;
+    chimera_socket_t       listener;
+    long                   t0;
+
+    memset(&nsm, 0, sizeof(nsm));
+    evpl_mutex_init(&nsm.mutex, NULL);
+    listener = listen_on(&test_portmap_port);
+    done_reset();
+
+    job       = new_job(3, 2);
+    job->done = job_done;
+    t0        = now_ms();
+    nsm_notify_submit(&nsm, job);
+    wait_taken(&nsm, t0);
+    chimera_thread_sleep_us(200000);
+
+    atomic_store(&nsm.notify_stop, 1);
+    evpl_thread_destroy(nsm.notify_thread);
+    CHECK(atomic_load(&done_calls) == 0);
+    chimera_socket_close(listener);
+    evpl_mutex_destroy(&nsm.mutex);
+} /* test_done_skipped_on_stop */
+
+/* Shutdown that lands while the last host is being waited on ends the loop
+ * with every index visited, but the notify is still cut short. */
+static void
+test_done_skipped_on_stop_last_host(void)
+{
+    struct nsm_state       nsm;
+    struct nsm_notify_job *job;
+    chimera_socket_t       listener;
+    long                   t0;
+
+    memset(&nsm, 0, sizeof(nsm));
+    evpl_mutex_init(&nsm.mutex, NULL);
+    listener = listen_on(&test_portmap_port);
+    done_reset();
+
+    job       = new_job(3, 1);
+    job->done = job_done;
+    t0        = now_ms();
+    nsm_notify_submit(&nsm, job);
+    wait_taken(&nsm, t0);
+    chimera_thread_sleep_us(200000);
+
+    atomic_store(&nsm.notify_stop, 1);
+    evpl_thread_destroy(nsm.notify_thread);
+    CHECK(atomic_load(&done_calls) == 0);
+    chimera_socket_close(listener);
+    evpl_mutex_destroy(&nsm.mutex);
+} /* test_done_skipped_on_stop_last_host */
+
+/* A submit folded into a waiting worker hands over its callback too, and the
+ * count covers only the run that happens. */
+static void
+test_done_follows_coalesce(void)
+{
+    struct nsm_state       nsm;
+    struct nsm_notify_job *job;
+    chimera_socket_t       listener;
+    long                   t0;
+
+    memset(&nsm, 0, sizeof(nsm));
+    evpl_mutex_init(&nsm.mutex, NULL);
+    listener = listen_on(&test_portmap_port);
+    done_reset();
+
+    t0 = now_ms();
+    nsm_notify_submit(&nsm, new_job(3, 1));
+    wait_taken(&nsm, t0);
+    nsm_notify_submit(&nsm, new_job(4, 1));      /* waits behind the first */
+    job       = new_job(5, 1);
+    job->done = job_done;
+    nsm_notify_submit(&nsm, job);                /* folds into the waiting one */
+    evpl_thread_destroy(nsm.notify_thread);
+    CHECK(atomic_load(&done_calls) == 1);
+    CHECK(atomic_load(&done_answered) == 0);
+    chimera_socket_close(listener);
+    evpl_mutex_destroy(&nsm.mutex);
+} /* test_done_follows_coalesce */
+
 int
 main(void)
 {
@@ -508,7 +698,7 @@ main(void)
     CHECK(WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
 #endif /* ifdef _WIN32 */
     evpl = evpl_create(NULL);
-    mbt_watchdog_arm(15);
+    mbt_watchdog_arm(30);
     test_portmap_refused(evpl);
     test_dead_host_skipped(evpl);
     test_live_host_told(evpl);
@@ -518,6 +708,11 @@ main(void)
     test_spawn_returns_at_once();
     test_submit_coalesces();
     test_stop_cancels_notify();
+    test_done_reports_dead_host();
+    test_done_reports_live_host(evpl);
+    test_done_skipped_on_stop();
+    test_done_skipped_on_stop_last_host();
+    test_done_follows_coalesce();
     mbt_watchdog_disarm();
     evpl_destroy(evpl);
     puts("PASS: NSM notify skips unreachable peers, spawns without waiting "
