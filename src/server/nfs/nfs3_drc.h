@@ -111,7 +111,8 @@ struct nfs3_drc {
  * init, after NFS_V3_init, only when nfs3_drc is enabled). */
 void
 nfs3_drc_install(
-    struct chimera_server_nfs_shared *shared);
+    struct chimera_server_nfs_shared *shared,
+    int                               persist);
 
 /* Initialize / tear down the in-memory cache.  kv_type picks the KV band. */
 void

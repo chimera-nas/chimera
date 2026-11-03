@@ -860,15 +860,20 @@ nfs3_drc_destroy(struct nfs3_drc *drc)
 } /* nfs3_drc_destroy */
 
 void
-nfs3_drc_install(struct chimera_server_nfs_shared *shared)
+nfs3_drc_install(
+    struct chimera_server_nfs_shared *shared,
+    int                               persist)
 {
     struct nfs3_drc *drc    = &shared->nfs3_drc;
     const char      *kvname = (shared->vfs && shared->vfs->kv_module) ?
         shared->vfs->kv_module->name : "";
 
-    drc->persistence_disabled = (strcmp(kvname, "memkv") == 0);
+    drc->persistence_disabled = (!persist || strcmp(kvname, "memkv") == 0);
 
-    if (drc->persistence_disabled) {
+    if (!persist) {
+        chimera_nfs_info(
+            "NFSv3 DRC: nfs3_drc_persist=false; replies are cached in memory only");
+    } else if (drc->persistence_disabled) {
         chimera_nfs_info(
             "NFSv3 DRC: KV backend '%s' is non-persistent; the duplicate-"
             "request cache will not survive a server restart", kvname);

@@ -95,6 +95,7 @@ struct chimera_server_config {
     int                                   nfs4_drc;
     int                                   nfs3_drc;
     int                                   nfs3_nsm_persist;
+    int                                   nfs3_drc_persist;
     int                                   nfs4_node_id;
     uint32_t                              nfs4_lease_time_s;
     uint32_t                              nfs4_grace_time_s;

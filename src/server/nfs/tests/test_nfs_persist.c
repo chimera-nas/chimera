@@ -1813,6 +1813,24 @@ test_two_node_key_isolation(void)
     printf("ok: two_node_key_isolation\n");
 } /* test_two_node_key_isolation */
 
+static void
+test_nfs3_drc_persist_switch(void)
+{
+    struct chimera_server_nfs_shared*shared = calloc(1,sizeof(*shared));
+
+    nfs3_drc_init(&shared->nfs3_drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+    nfs3_drc_install(shared,1);             /* vfs NULL => kv name "" */
+    CHECK(shared->nfs3_drc.persistence_disabled == 0);
+    CHECK(shared->nfs_v3.rpc2.recv_call_dispatch != NULL);   /* dispatcher wrapped */
+    nfs3_drc_destroy(&shared->nfs3_drc);
+
+    nfs3_drc_init(&shared->nfs3_drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+    nfs3_drc_install(shared,0);
+    CHECK(shared->nfs3_drc.persistence_disabled == 1);
+    nfs3_drc_destroy(&shared->nfs3_drc);
+    free(shared);
+} /* test_nfs3_drc_persist_switch */
+
 int
 main(void)
 {
@@ -1846,6 +1864,7 @@ main(void)
     test_nfs3_value_roundtrip();
     test_nfs3_cache_lookup();
     test_nfs3_cross_reboot();
+    test_nfs3_drc_persist_switch();
 
     test_nfs4_v40_peek_minorversion();
     test_nfs4_v40_compound_cacheable();
