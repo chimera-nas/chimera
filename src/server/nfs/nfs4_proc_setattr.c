@@ -48,7 +48,10 @@ chimera_nfs4_setattr_complete(
 /* Unmarshall the requested attributes and apply them to `handle`.  fd_rights
  * selects descriptor semantics (chimera_vfs_fsetattr): a size change through
  * an open stateid is authorized by the OPEN, exactly as ftruncate(2) is by
- * its descriptor, and must not be re-gated against the file's current mode. */
+ * its descriptor, and must not be re-gated against the file's current mode.
+ * With or without descriptor rights, a valid io_owner names the sending
+ * client as the claim actor so the attribute recall leaves that client's
+ * own delegation alone. */
 static void
 chimera_nfs4_setattr_apply(
     struct nfs_request             *req,
@@ -89,19 +92,21 @@ chimera_nfs4_setattr_apply(
         return;
     }
 
-    if (fd_rights && req->io_owner_valid) {
-        /* The size change is the stateid owner's own: carry that client's
+    if (req->io_owner_valid) {
+        /* The change is the sending client's own: carry that client's
          * claim actor -- the exact owner its delegation claim was created
          * with at OPEN, this client id and the file's hash
          * (chimera_vfs_hash of the unwrapped filehandle, which is what the
          * open cache stamps into handle->fh_hash) -- which
-         * chimera_vfs_claim_trigger_ns_full exempts from the size-change
-         * recall by owner identity.  Without it the recall
-         * exempts only a claim anchored to this very handle, and an NFSv4
-         * delegation claim has no handle anchor: the holder's own truncate
-         * would recall, and after the recall deadline revoke, its own
+         * chimera_vfs_claim_trigger_ns_full exempts from the recall by
+         * owner identity.  Without it the recall exempts only a claim
+         * anchored to this very handle, and an NFSv4 delegation claim has
+         * no handle anchor: the holder's own truncate -- or its own chmod,
+         * whose flush-only recall still breaks a delegation -- would
+         * recall, and after the recall deadline revoke, its own
          * delegation.  Other clients' conflicting claims are still
-         * recalled. */
+         * recalled (RFC 7530 16.32.5: a recall is for a delegation "held
+         * by a client other than the one doing the SETATTR"). */
         struct chimera_claim_actor io_owner = {
             .owner          = {
                 .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
@@ -111,15 +116,27 @@ chimera_nfs4_setattr_apply(
             },
         };
 
-        chimera_vfs_fsetattr_owned(req->thread->vfs_thread,
-                                   &req->cred,
-                                   handle,
-                                   attr,
-                                   0,
-                                   0,
-                                   chimera_nfs4_setattr_complete,
-                                   req,
-                                   &io_owner);
+        if (fd_rights) {
+            chimera_vfs_fsetattr_owned(req->thread->vfs_thread,
+                                       &req->cred,
+                                       handle,
+                                       attr,
+                                       0,
+                                       0,
+                                       chimera_nfs4_setattr_complete,
+                                       req,
+                                       &io_owner);
+        } else {
+            chimera_vfs_setattr_owned(req->thread->vfs_thread,
+                                      &req->cred,
+                                      handle,
+                                      attr,
+                                      0,
+                                      0,
+                                      chimera_nfs4_setattr_complete,
+                                      req,
+                                      &io_owner);
+        }
     } else if (fd_rights) {
         chimera_vfs_fsetattr(req->thread->vfs_thread,
                              &req->cred,
@@ -192,12 +209,15 @@ chimera_nfs4_setattr_deleg_open_callback(
  * on-the-fly open of the current filehandle when a delegation stateid
  * authorized the size change (it names the holder but carries no open
  * handle, exactly as for WRITE); otherwise via a fresh path-only open of
- * the target.  Invoked directly, or as the resume continuation once a
- * conflicting layout has been recalled. */
+ * the target -- which is also the path of an attribute-only SETATTR that
+ * carries an actor, since the target may be a directory or a symlink.
+ * Invoked directly, or as the resume continuation once a conflicting
+ * layout has been recalled. */
 static void
 nfs4_setattr_proceed(void *arg)
 {
-    struct nfs_request *req = arg;
+    struct nfs_request  *req  = arg;
+    struct SETATTR4args *args = &req->args_compound->argarray[req->index].opsetattr;
 
     if (req->handle) {
         struct chimera_vfs_open_handle *handle = req->handle;
@@ -207,7 +227,9 @@ nfs4_setattr_proceed(void *arg)
         return;
     }
 
-    if (req->io_owner_valid) {
+    if (req->io_owner_valid &&
+        args->obj_attributes.num_attrmask >= 1 &&
+        (args->obj_attributes.attrmask[0] & (1 << FATTR4_SIZE))) {
         chimera_vfs_open_fh(req->thread->vfs_thread,
                             &req->cred,
                             req->fh,
@@ -248,7 +270,7 @@ chimera_nfs4_setattr(
 
     /* nfs_request is pooled; nfs4_setattr_proceed keys off req->handle to
      * decide between the stateid-handle and path-open application paths,
-     * and the owner fields are set only by the stateid branch below. */
+     * and the owner fields are set only by the branches below. */
     req->handle             = NULL;
     req->io_owner_valid     = false;
     req->io_owner_client_id = 0;
@@ -413,6 +435,44 @@ chimera_nfs4_setattr(
 
             nfs_state_table_release(table, state_void, state_type,
                                     thread->vfs_thread);
+        }
+    }
+
+    /* An attribute-only SETATTR (chmod, chown, utimes, a DOS attribute, an
+     * ACL): the stateid is not consulted (RFC 7530 16.32 / RFC 8881 18.30
+     * use it only for a size change), but the VFS still recalls the
+     * write-caching holders of the file so the mtime bump is seen, and
+     * that flush-only recall breaks an NFSv4 delegation.  RFC 7530 16.32.5
+     * recalls only a delegation "held by a client other than the one doing
+     * the SETATTR", and a Linux client holding a write delegation sends
+     * every SETATTR -- not just a truncate -- through that delegation's
+     * stateid: name the sending client as the claim actor so its own
+     * delegation is left alone.  The client is the session's on 4.1+; on
+     * 4.0 a compound carries no identity of its own, so it is the owner of
+     * the stateid when a non-special one resolves.  Nothing here fails the
+     * op: a stateid that resolves to nothing just leaves the recall as it
+     * was. */
+    if (!(args->obj_attributes.num_attrmask >= 1 &&
+          (args->obj_attributes.attrmask[0] & (1 << FATTR4_SIZE)))) {
+        if (req->session) {
+            req->io_owner_valid     = true;
+            req->io_owner_client_id = req->session->client_unified->client_id;
+        } else if (!nfs4_stateid_is_special(&args->stateid)) {
+            struct nfs_state_table *table = &thread->shared->nfs4_state_table;
+            struct nfs_client      *client;
+            void                   *state_void;
+            uint8_t                 state_type;
+
+            if (nfs_state_table_acquire(table, &args->stateid, 0,
+                                        &state_void, &state_type) == NFS4_OK) {
+                client = nfs_state_owner_client(state_void, state_type);
+                if (client) {
+                    req->io_owner_valid     = true;
+                    req->io_owner_client_id = client->client_id;
+                }
+                nfs_state_table_release(table, state_void, state_type,
+                                        thread->vfs_thread);
+            }
         }
     }
 
