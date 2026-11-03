@@ -71,6 +71,38 @@ chimera_nfs4_write_same_issue(
 {
     struct WRITE_SAME4args *args = &req->args_compound->argarray[req->index].opwrite_same;
 
+    if (req->io_owner_valid) {
+        /* The WRITE_SAME is a client's own, authorized by its open, lock or
+         * delegation stateid: carry that client as the claim actor so the
+         * writes the VFS expands the pattern into (on a backend without
+         * native WRITE_SAME) do not recall the client's own delegation,
+         * exactly as WRITE does.  A special-stateid WRITE_SAME keeps the
+         * implicit claim and still recalls other clients' claims. */
+        struct chimera_claim_actor io_owner = {
+            .owner          = {
+                .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+                .client_key = req->io_owner_client_id,
+                .owner_lo   = handle->fh_hash,
+                .owner_hi   = 0,
+            },
+        };
+
+        chimera_vfs_write_same_owned(req->thread->vfs_thread, &req->cred,
+                                     handle,
+                                     args->wsa_adb.adb_offset,
+                                     (uint32_t) args->wsa_adb.adb_block_size,
+                                     args->wsa_adb.adb_block_count,
+                                     args->wsa_adb.adb_pattern.data,
+                                     args->wsa_adb.adb_pattern.len,
+                                     (uint32_t) args->wsa_adb.adb_reloff_pattern,
+                                     args->wsa_stable,
+                                     0, 0,
+                                     &io_owner,
+                                     chimera_nfs4_write_same_complete,
+                                     req);
+        return;
+    }
+
     chimera_vfs_write_same(req->thread->vfs_thread, &req->cred,
                            handle,
                            args->wsa_adb.adb_offset,
@@ -121,8 +153,10 @@ chimera_nfs4_write_same(
     struct nfs_open_state          *open_state;
     nfsstat4                        status;
 
-    req->nfs_state_ref = NULL;
-    req->handle        = NULL;
+    req->nfs_state_ref      = NULL;
+    req->handle             = NULL;
+    req->io_owner_valid     = false;
+    req->io_owner_client_id = 0;
 
     /* Reject per-block-number stamping (Phase 1): the union arm is unsupported. */
     if (adb->adb_reloff_blocknum != NFS4_UINT64_MAX) {
@@ -209,18 +243,42 @@ chimera_nfs4_write_same(
         return;
     }
 
-    /* A write-delegation stateid carries no open handle; open the FH on the fly. */
+    /* A delegation stateid authorizes the WRITE_SAME when it is a write
+    * delegation of the current filehandle: a read delegation grants no
+    * write (NFS4ERR_OPENMODE, as a read-only open), and a delegation on
+    * another file designates no state for this one -- exactly as for
+    * WRITE.  It carries no open handle; drop the ref and open the current
+    * FH on the fly (a delegation is only granted on a regular file). */
     if (state_type == NFS4_SLOT_TYPE_DELEG) {
+        struct nfs_delegation *deleg = state_void;
+
+        if (req->fhlen == 0) {
+            status = NFS4ERR_NOFILEHANDLE;
+        } else {
+            status = nfs_delegation_check_io_for_fh(deleg, req->fh,
+                                                    req->fhlen,
+                                                    OPEN4_SHARE_ACCESS_WRITE);
+        }
+        if (status == NFS4_OK) {
+            /* The holder's own WRITE_SAME: the actor keeps its delegation
+             * out of the recall the expanded writes would otherwise
+             * trigger.  The holder is the delegation's client, which a 4.0
+             * compound names through the stateid alone. */
+            req->io_owner_valid     = true;
+            req->io_owner_client_id = deleg->client->client_id;
+        }
         nfs_state_table_release(table, state_void, state_type,
                                 thread->vfs_thread);
-        if (req->fhlen == 0) {
-            res->wsr_status = NFS4ERR_NOFILEHANDLE;
+        if (status != NFS4_OK) {
+            res->wsr_status = status;
             chimera_nfs4_compound_complete(req, res->wsr_status);
             return;
         }
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh, req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED,
+                            CHIMERA_VFS_OPEN_INFERRED |
+                            CHIMERA_VFS_OPEN_NOFOLLOW |
+                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
                             chimera_nfs4_write_same_open_callback,
                             req);
         return;
@@ -264,6 +322,11 @@ chimera_nfs4_write_same(
 
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;
+
+    /* The open's own WRITE_SAME: attribute the expanded writes to the
+     * open's client, as WRITE attributes its own. */
+    req->io_owner_valid     = true;
+    req->io_owner_client_id = open_state->owner->client->client_id;
 
     chimera_nfs4_write_same_issue(req, state_handle);
 } /* chimera_nfs4_write_same */
