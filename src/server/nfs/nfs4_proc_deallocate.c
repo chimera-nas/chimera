@@ -212,6 +212,46 @@ chimera_nfs4_deallocate(
         return;
     }
 
+    status = nfs_state_check_client(
+        state_void, state_type,
+        req->session ? req->session->client_unified : NULL);
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->dr_status = status;
+        chimera_nfs4_compound_complete(req, res->dr_status);
+        return;
+    }
+
+    /* A delegation stateid: what a Linux FALLOC_FL_PUNCH_HOLE sends while
+     * the client holds a delegation on the file and no POSIX lock.  Judged
+     * exactly as ALLOCATE judges it (see nfs4_proc_allocate.c): a write
+     * delegation of the current filehandle authorizes the hole punch, a
+     * read delegation is NFS4ERR_OPENMODE, another file's delegation is
+     * NFS4ERR_BAD_STATEID, and the filehandle is opened on the fly.  No
+     * claim actor: chimera_vfs_allocate is not claim-mediated. */
+    if (state_type == NFS4_SLOT_TYPE_DELEG) {
+        status = nfs_delegation_check_io_for_fh(state_void, req->fh,
+                                                req->fhlen,
+                                                OPEN4_SHARE_ACCESS_WRITE);
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        if (status != NFS4_OK) {
+            res->dr_status = status;
+            chimera_nfs4_compound_complete(req, res->dr_status);
+            return;
+        }
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            req->fh,
+                            req->fhlen,
+                            CHIMERA_VFS_OPEN_INFERRED |
+                            CHIMERA_VFS_OPEN_NOFOLLOW |
+                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
+                            chimera_nfs4_deallocate_open_callback,
+                            req);
+        return;
+    }
+
     status = nfs_state_check_write_for_fh(state_void, state_type,
                                           req->fh, req->fhlen);
     if (status != NFS4_OK) {
