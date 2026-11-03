@@ -209,6 +209,7 @@ nfs_recovery_load(
     rec->stale_purged       = 0;
     rec->unreclaimed_purged = 0;
     rec->store_errors       = 0;
+    rec->prev_alive_ns      = 0;
     atomic_store(&rec->next_heartbeat_ns, 0);
     rec->nfs4_drc = nfs4_drc;
     atomic_store(&rec->load_state, NFS_REC_LOAD_IDLE);
@@ -721,6 +722,7 @@ nfs_recovery_epoch_cb(
         rec->current_boot_id = now;
         ctx->last_alive_ns   = 0; /* no heartbeat on record: keep everything */
     }
+    rec->prev_alive_ns = ctx->last_alive_ns;
 
     /* Write the new epoch so the next restart bumps again. */
     op               = malloc(sizeof(*op));
@@ -815,6 +817,12 @@ nfs_recovery_loading(struct nfs_recovery *rec)
     return atomic_load_explicit(&rec->load_state, memory_order_acquire) !=
            NFS_REC_LOAD_READY;
 } /* nfs_recovery_loading */
+
+uint64_t
+nfs_recovery_prev_alive_s(const struct nfs_recovery *rec)
+{
+    return rec->prev_alive_ns / 1000000000ULL;
+} /* nfs_recovery_prev_alive_s */
 
 nfsstat4
 nfs_recovery_open_check(

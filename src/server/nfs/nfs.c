@@ -999,14 +999,9 @@ nfs_server_thread_init(
     /* NLM deferred lock-acquire resume doorbell + queue. */
     chimera_nfs_nlm4_thread_init(thread);
 
-    /* Run-once cold-start: reload the persisted NSM state + monitor list and
-     * notify monitored hosts that we restarted (so they reclaim during the NLM
-     * grace window).  Idempotent across threads; no-op on a non-persistent
-     * backend or when NSM is not running (data-server mode). */
-    if (shared->nsm_server) {
-        chimera_nfs_nsm_kickoff(thread);
-    }
-
+    /* The run-once NSM cold start is not started here: it runs from the lease
+     * tick (nfs4_lease.c) once the NFSv4 recovery cold start in
+     * nfs_server_start has read the last-alive time it ages records against. */
     return thread;
 } /* nfs_server_thread_init */
 

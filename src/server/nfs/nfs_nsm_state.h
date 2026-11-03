@@ -99,6 +99,24 @@ nsm_monitor_expired(
 } /* nsm_monitor_expired */
 
 /*
+ * The time the cold-start scan ages monitor records against.  A live client's
+ * record is rewritten once it is half the expiry old, checked every quarter of
+ * the expiry, so at a crash it can already be three quarters of the expiry
+ * old: measured against the restart's wall clock, any downtime beyond a
+ * quarter of the expiry would purge it.  Age is therefore measured against the
+ * previous instance's last heartbeat (prev_alive_s) when it is known, and
+ * against now_s when it is not (0) or lies in the future (the clock stepped
+ * back).
+ */
+static inline uint64_t
+nsm_scan_ref_s(
+    uint64_t prev_alive_s,
+    uint64_t now_s)
+{
+    return (prev_alive_s != 0 && prev_alive_s <= now_s) ? prev_alive_s : now_s;
+} /* nsm_scan_ref_s */
+
+/*
  * A persisted record stamped at stamp_s is due for renewal at now_s once it is
  * half the expiry old.  stamp_s 0 (never written) is always due; a stamp in the
  * future (the clock stepped back) is not.  The one rule shared by the lock-grant
