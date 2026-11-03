@@ -241,6 +241,29 @@ test_scan_classify(void)
 } /* test_scan_classify */
 
 static void
+test_scan_classify_long_host(void)
+{
+    /* A host name one byte past SM_MAXSTRLEN cannot be one this server wrote
+     * and would overrun host_out: skip it, whatever the value says. */
+    uint8_t  key[CHIMERA_KV_PREFIX_LEN + SM_MAXSTRLEN + 1], val[NSM_MON_VALUE_MAX];
+    uint32_t klen = CHIMERA_KV_PREFIX_LEN + SM_MAXSTRLEN + 1;
+    uint32_t vlen;
+    char     host[SM_MAXSTRLEN + 1], addr[CHIMERA_NSM_ADDR_MAX];
+    uint64_t stamp;
+
+    nfs_kv_node_prefix(key, CHIMERA_KV_TYPE_NSM_MONITOR, 5);
+    memset(key + CHIMERA_KV_PREFIX_LEN, 'h', SM_MAXSTRLEN + 1);
+    vlen = nsm_monitor_value_serialize(val, NSM_MON_VALUE_MAX, "10.0.0.9", 1000);
+    CHECK(vlen > 0);
+    CHECK(nsm_monitor_record_classify(key, klen, val, vlen, 5, 1500, 86400,
+                                      host, addr, &stamp) == NSM_RECORD_SKIP);
+    /* The same key one byte shorter is a valid record. */
+    CHECK(nsm_monitor_record_classify(key, klen - 1, val, vlen, 5, 1500, 86400,
+                                      host, addr, &stamp) == NSM_RECORD_LOAD);
+    CHECK(strlen(host) == SM_MAXSTRLEN);
+} /* test_scan_classify_long_host */
+
+static void
 test_scan_classify_downtime(void)
 {
     /* Stamped 1000, expiry 100, previous instance last alive at 1050: the
@@ -405,6 +428,7 @@ main(void)
     test_state_bump();
     test_monitor_table();
     test_scan_classify();
+    test_scan_classify_long_host();
     test_scan_classify_downtime();
     test_scan_classify_legacy_skipped();
     test_persist_switch_off();
