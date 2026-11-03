@@ -48,6 +48,11 @@ struct chimera_vfs_write_same_fallback {
     struct evpl_iovec                 tmpl;
     struct evpl_iovec                 chunk_iov[CHIMERA_VFS_WS_FALLBACK_IOV];
     int                               chunk_niov;
+    /* The caller's claim actor, copied by value: the writes below run after
+     * the caller's frame is gone.  Carried onto every expanded write so the
+     * owner's own delegation is not recalled by its own WRITE_SAME. */
+    bool                              has_io_owner;
+    struct chimera_claim_actor        io_owner;
     chimera_vfs_write_same_callback_t callback;
     void                             *private_data;
 };
@@ -142,7 +147,7 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
     ctx->chunk_niov = (int) k;
     chunk           = (uint32_t) (k * ctx->block_size);
 
-    chimera_vfs_write(
+    chimera_vfs_write_owned(
         ctx->thread,
         &ctx->cred,
         ctx->handle,
@@ -153,6 +158,7 @@ chimera_vfs_write_same_fallback_step(struct chimera_vfs_write_same_fallback *ctx
         ctx->post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE,
         ctx->chunk_iov,
         ctx->chunk_niov,
+        ctx->has_io_owner ? &ctx->io_owner : NULL,
         chimera_vfs_write_same_fallback_write_cb,
         ctx);
 } /* chimera_vfs_write_same_fallback_step */
@@ -171,6 +177,7 @@ chimera_vfs_write_same_fallback(
     uint32_t                          sync,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
+    const struct chimera_claim_actor *io_owner,
     chimera_vfs_write_same_callback_t callback,
     void                             *private_data)
 {
@@ -216,6 +223,12 @@ chimera_vfs_write_same_fallback(
     ctx->post_attr_mask = post_attr_mask;
     ctx->callback       = callback;
     ctx->private_data   = private_data;
+    if (io_owner) {
+        ctx->has_io_owner = true;
+        ctx->io_owner     = *io_owner;
+    } else {
+        ctx->has_io_owner = false;
+    }
 
     ctx->r_pre_attr.va_req_mask  = pre_attr_mask;
     ctx->r_pre_attr.va_set_mask  = 0;
@@ -284,7 +297,7 @@ chimera_vfs_write_same_finish(struct chimera_vfs_request *request)
 } /* chimera_vfs_write_same_finish */
 
 SYMBOL_EXPORT void
-chimera_vfs_write_same(
+chimera_vfs_write_same_owned(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
     struct chimera_vfs_open_handle   *handle,
@@ -297,6 +310,7 @@ chimera_vfs_write_same(
     uint32_t                          sync,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
+    const struct chimera_claim_actor *io_owner,
     chimera_vfs_write_same_callback_t callback,
     void                             *private_data)
 {
@@ -316,9 +330,14 @@ chimera_vfs_write_same(
         chimera_vfs_write_same_fallback(thread, cred, handle, offset, block_size,
                                         block_count, pattern, pattern_len,
                                         reloff_pattern, sync, pre_attr_mask,
-                                        post_attr_mask, callback, private_data);
+                                        post_attr_mask, io_owner, callback,
+                                        private_data);
         return;
     }
+
+    /* The native path is not claim-mediated (see the ALLOCATE counterpart):
+     * the actor has nothing to exempt here. */
+    (void) io_owner;
 
     request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
@@ -347,4 +366,27 @@ chimera_vfs_write_same(
     request->proto_private_data                 = private_data;
 
     chimera_vfs_pnfs_dispatch(request, 1, CHIMERA_VFS_CAP_WRITE_SAME);
+} /* chimera_vfs_write_same_owned */
+
+SYMBOL_EXPORT void
+chimera_vfs_write_same(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          block_size,
+    uint64_t                          block_count,
+    const void                       *pattern,
+    uint32_t                          pattern_len,
+    uint32_t                          reloff_pattern,
+    uint32_t                          sync,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    chimera_vfs_write_same_callback_t callback,
+    void                             *private_data)
+{
+    chimera_vfs_write_same_owned(thread, cred, handle, offset, block_size,
+                                 block_count, pattern, pattern_len,
+                                 reloff_pattern, sync, pre_attr_mask,
+                                 post_attr_mask, NULL, callback, private_data);
 } /* chimera_vfs_write_same */

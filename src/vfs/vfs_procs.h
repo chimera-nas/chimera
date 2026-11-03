@@ -1115,6 +1115,30 @@ chimera_vfs_write_same(
     chimera_vfs_write_same_callback_t callback,
     void                             *private_data);
 
+/* As chimera_vfs_write_same(), but attributes the I/O to `io_owner` (a
+ * lease-holding client's owner).  A backend without native WRITE_SAME has
+ * the pattern expanded into ordinary writes, and those are mediated by the
+ * claim layer exactly as chimera_vfs_write_owned(): the owner's own
+ * delegation/oplock is not recalled by its own WRITE_SAME.  Pass NULL for
+ * the implicit, client-less claim. */
+SYMBOL_EXPORT void
+chimera_vfs_write_same_owned(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          block_size,
+    uint64_t                          block_count,
+    const void                       *pattern,
+    uint32_t                          pattern_len,
+    uint32_t                          reloff_pattern,
+    uint32_t                          sync,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_write_same_callback_t callback,
+    void                             *private_data);
+
 typedef void (*chimera_vfs_move_range_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *src_post_attr,

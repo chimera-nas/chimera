@@ -140,6 +140,34 @@ chimera_nfs4_read_plus_classify_complete(
         iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
         chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
+        if (req->io_owner_valid) {
+            /* A delegation-authorized read: present the delegation
+             * holder's own claim actor (same protocol/client/fh as the
+             * cache claim created at OPEN) so the VFS read path recognises
+             * the reader as the delegation holder and does not recall the
+             * client's own delegation, exactly as READ does.  An
+             * anonymous-stateid read keeps the implicit claim so it still
+             * recalls other clients' conflicting claims. */
+            struct chimera_claim_actor io_owner = {
+                .owner          = {
+                    .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+                    .client_key = req->io_owner_client_id,
+                    .owner_lo   = req->handle->fh_hash,
+                    .owner_hi   = 0,
+                },
+            };
+
+            chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
+                                   req->handle,
+                                   args->rpa_offset,
+                                   (uint32_t) length,
+                                   iov, 256, 0,
+                                   &io_owner,
+                                   chimera_nfs4_read_plus_data_complete,
+                                   req);
+            return;
+        }
+
         chimera_vfs_read(req->thread->vfs_thread, &req->cred,
                          req->handle,
                          args->rpa_offset,
@@ -284,8 +312,10 @@ chimera_nfs4_read_plus(
     struct nfs_open_state          *open_state;
     nfsstat4                        status;
 
-    req->nfs_state_ref = NULL;
-    req->handle        = NULL;
+    req->nfs_state_ref      = NULL;
+    req->handle             = NULL;
+    req->io_owner_valid     = false;
+    req->io_owner_client_id = 0;
 
     /* NFS4.1 current-stateid substitution (RFC 8881 16.2.3.1.2). */
     chimera_nfs4_resolve_current_stateid(req, &args->rpa_stateid);
@@ -348,20 +378,45 @@ chimera_nfs4_read_plus(
         return;
     }
 
-    /* A delegation stateid authorizes the READ but carries no open handle;
-     * drop the ref and open the current FH on the fly, as for READ. */
+    /* A delegation stateid authorizes the READ_PLUS when it is a delegation
+     * of the current filehandle (either type grants a read; a delegation on
+     * another file designates no state for this one), exactly as for READ.
+     * It carries no open handle; drop the ref and open the current FH on the
+     * fly.  A delegation is only ever granted on a regular file, so the
+     * special-stateid type check is not needed here. */
     if (state_type == NFS4_SLOT_TYPE_DELEG) {
+        struct nfs_delegation *deleg = state_void;
+
+        if (req->fhlen == 0) {
+            status = NFS4ERR_NOFILEHANDLE;
+        } else {
+            status = nfs_delegation_check_io_for_fh(deleg, req->fh,
+                                                    req->fhlen,
+                                                    OPEN4_SHARE_ACCESS_READ);
+        }
+        if (status == NFS4_OK) {
+            /* This read is the delegation holder's own: carry the holder as
+             * the claim actor on the data read so it does not recall the
+             * client's own delegation.  The holder is the delegation's
+             * client, which a 4.0 compound (no session) names through the
+             * stateid alone. */
+            req->io_owner_valid     = true;
+            req->io_owner_client_id = deleg->client->client_id;
+        }
         nfs_state_table_release(table, state_void, state_type,
                                 thread->vfs_thread);
-        if (req->fhlen == 0) {
-            res->rp_status = NFS4ERR_NOFILEHANDLE;
+        if (status != NFS4_OK) {
+            res->rp_status = status;
             chimera_nfs4_compound_complete(req, res->rp_status);
             return;
         }
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh, req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
-                            chimera_nfs4_read_plus_typecheck_open_callback,
+                            CHIMERA_VFS_OPEN_INFERRED |
+                            CHIMERA_VFS_OPEN_READ_ONLY |
+                            CHIMERA_VFS_OPEN_NOFOLLOW |
+                            CHIMERA_VFS_OPEN_REGULAR_ONLY,
+                            chimera_nfs4_read_plus_open_callback,
                             req);
         return;
     }
