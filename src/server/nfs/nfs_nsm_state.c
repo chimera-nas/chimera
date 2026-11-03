@@ -35,6 +35,7 @@ nsm_state_init(
     state->notify_thread = NULL;
     state->notify_queued = NULL;
     atomic_store(&state->notify_stop, 0);
+    atomic_store(&state->next_renew_s, 0);
 
     state->node_id          = node_id;
     state->monitor_expiry_s = expiry_s;
@@ -152,6 +153,41 @@ nsm_monitors_snapshot(
     *out = arr;
     return count;
 } /* nsm_monitors_snapshot */
+
+uint32_t
+nsm_monitors_renew_due(
+    struct nsm_state          *state,
+    uint64_t                   now_s,
+    struct nsm_notify_target **out)
+{
+    struct nsm_monitor       *mon, *tmp;
+    struct nsm_notify_target *arr;
+    uint32_t                  count = HASH_COUNT(state->monitors);
+    uint32_t                  i     = 0;
+
+    *out = NULL;
+    if (count == 0) {
+        return 0;
+    }
+
+    arr = calloc(count, sizeof(*arr));
+    HASH_ITER(hh, state->monitors, mon, tmp)
+    {
+        if (!nsm_monitor_renew_due(mon->stamp_s, now_s,
+                                   state->monitor_expiry_s)) {
+            continue;
+        }
+        snprintf(arr[i].host, sizeof(arr[i].host), "%s", mon->host);
+        snprintf(arr[i].addr, sizeof(arr[i].addr), "%s", mon->addr);
+        i++;
+    }
+    if (i == 0) {
+        free(arr);
+        return 0;
+    }
+    *out = arr;
+    return i;
+} /* nsm_monitors_renew_due */
 
 uint32_t
 nsm_state_value_serialize(
