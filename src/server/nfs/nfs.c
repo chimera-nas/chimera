@@ -215,6 +215,7 @@ nfs_server_init(
     shared = calloc(1, sizeof(*shared));
 
     shared->config = config;
+    atomic_init(&shared->stopping, 0);
 
     /* Concurrent-export count cap (distinct from the id space; see
      * exports_by_id commentary in nfs_common.h). */
@@ -654,6 +655,11 @@ nfs_server_stop(void *arg)
 {
     struct chimera_server_nfs_shared *shared = arg;
 
+    /* Before anything closes a connection: chimera_server_destroy calls this
+     * ahead of the thread-pool teardown that closes every accepted connection,
+     * and the DISCONNECTED path reads the flag to keep NSM monitor records. */
+    atomic_store(&shared->stopping, 1);
+
     if (shared->mount_server) {
         evpl_rpc2_server_stop(shared->mount_server);
     }
@@ -921,8 +927,15 @@ chimera_nfs_server_notify(
                 if (release_locks) {
                     nlm_state_remove_client_file(&shared->nlm_state,
                                                  nlm_cli->hostname);
-                    /* No locks remain for this host -- stop monitoring it. */
-                    nsm_unmonitor(thread, nlm_cli->hostname);
+                    /* No locks remain for this host -- stop monitoring it.
+                     * Not while the server stops: then every connection
+                     * closes, and the persisted monitor record is what the
+                     * next instance reloads to notify this host so it
+                     * reclaims.  Deleting it here would leave nobody to
+                     * notify after a graceful restart. */
+                    if (!atomic_load(&shared->stopping)) {
+                        nsm_unmonitor(thread, nlm_cli->hostname);
+                    }
                 }
             } else if (magic == NFS4_SESSION_MAGIC) {
                 nfs4_session_unbind_conn(conn);
