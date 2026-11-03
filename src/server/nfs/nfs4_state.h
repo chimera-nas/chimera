@@ -791,6 +791,46 @@ nfs_state_check_read_for_fh(
 } /* nfs_state_check_read_for_fh */
 
 /*
+ * Judge a delegation stateid presented for I/O on the filehandle `fh`.
+ *
+ * A delegation stateid is what a Linux client sends for READ, WRITE,
+ * SETATTR, READ_PLUS, ALLOCATE, DEALLOCATE and COPY while it holds a
+ * delegation on the file and no POSIX lock (nfs4_select_rw_stateid falls
+ * back to it before the open stateid; nfs4_do_setattr copies it for every
+ * SETATTR under a write delegation).  It carries no open handle, so the
+ * callers that accept it open the filehandle on the fly; this check is what
+ * they share.  It is deliberately separate from nfs_state_check_access_for_fh,
+ * which must keep answering NFS4ERR_BAD_STATEID for a delegation on behalf of
+ * the callers that cannot open on the fly (a delegation carries no
+ * open_state, and reading one as such was a type confusion).
+ *
+ * Returns NFS4ERR_BAD_STATEID when the delegation is on another file (it
+ * designates no state for this one), NFS4ERR_OPENMODE when `want_access`
+ * carries the WRITE bit and the delegation is a read delegation (it grants
+ * no write, exactly as a read-only open), and NFS4_OK otherwise.  Either
+ * delegation type grants a read.
+ */
+static inline nfsstat4
+nfs_delegation_check_io_for_fh(
+    const struct nfs_delegation *deleg,
+    const uint8_t               *fh,
+    uint32_t                     fh_len,
+    uint32_t                     want_access)
+{
+    if (deleg->fh_len != fh_len ||
+        memcmp(deleg->fh, fh, fh_len) != 0) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    if ((want_access & OPEN4_SHARE_ACCESS_WRITE) &&
+        deleg->type != OPEN_DELEGATE_WRITE) {
+        return NFS4ERR_OPENMODE;
+    }
+
+    return NFS4_OK;
+} /* nfs_delegation_check_io_for_fh */
+
+/*
  * Public API.
  */
 
