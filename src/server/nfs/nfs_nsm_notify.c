@@ -359,15 +359,24 @@ nsm_notify_thread_init(
      * completes here before the framework's own idle loop starts.  The
      * submitter does not wait for it (evpl_thread_create_async).  Shutdown
      * sets notify_stop before it joins: then no further host is started. */
+    job->answered = 0;
     for (i = 0; i < job->count; i++) {
         if (nsm_stopping(&job->nsm->notify_stop)) {
             chimera_nfs_info("NSM: shutting down; %u monitored host(s) not "
                              "notified", job->count - i);
             break;
         }
-        nsm_notify_one(evpl, rpc2_thread, &pm, &sm, &job->targets[i],
-                       job->my_name, job->state, &keep,
-                       &job->nsm->notify_stop);
+        job->answered += nsm_notify_one(evpl, rpc2_thread, &pm, &sm,
+                                        &job->targets[i], job->my_name,
+                                        job->state, &keep,
+                                        &job->nsm->notify_stop);
+    }
+
+    /* A notify cut short by shutdown has not told everyone: stay silent.
+     * A stop that lands during the last host leaves i == count, so test the
+     * flag as well as the index. */
+    if (i == job->count && job->done && !nsm_stopping(&job->nsm->notify_stop)) {
+        job->done(job);
     }
 
     evpl_rpc2_thread_destroy(rpc2_thread);
@@ -412,6 +421,8 @@ nsm_notify_submit(
             queued->state = job->state;
         }
         memcpy(queued->my_name, job->my_name, sizeof(queued->my_name));
+        queued->done     = job->done;
+        queued->done_arg = job->done_arg;
         free(job);
         evpl_mutex_unlock(&nsm->mutex);
         return;

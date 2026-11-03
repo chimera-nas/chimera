@@ -229,7 +229,7 @@ nsm_spawn_notify(
         return;
     }
 
-    job              = malloc(sizeof(*job));
+    job              = calloc(1, sizeof(*job));
     job->predecessor = NULL;
     job->nsm         = nsm;
     job->targets     = targets;

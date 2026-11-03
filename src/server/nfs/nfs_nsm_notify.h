@@ -16,6 +16,14 @@ struct nsm_notify_job {
     uint32_t                  count;
     uint32_t                  state;
     char                      my_name[SM_MAXSTRLEN + 1];
+    /* Set by the worker: how many hosts' statd acked SM_NOTIFY in this run. */
+    uint32_t                  answered;
+    /* Optional.  Runs on the worker thread once every host has been tried,
+     * before the worker tears down; reads answered and count.  Not run when
+     * shutdown cut the notify short. */
+    void                      (*done)(
+        struct nsm_notify_job *job);
+    void                     *done_arg;
     /* The previous worker, or NULL.  The new worker joins it before it starts
      * notifying, so the server thread never waits on a worker and notifies
      * run one at a time, in order. */
