@@ -12,7 +12,9 @@ struct chimera_server_nfs_thread;
  * Record `host` (an NLM caller_name) as a monitored peer reachable at
  * `peer_addr`, persisting it to the KV store when the backend is persistent.
  * Called from the NLM lock-grant success path; idempotent and cheap (only
- * writes KV on first sight or an address change).
+ * writes KV on first sight, an address change, or once the persisted record
+ * is half the monitor expiry old -- the renewal that keeps an active client
+ * from aging out of the store).
  */
 void
 nsm_monitor(

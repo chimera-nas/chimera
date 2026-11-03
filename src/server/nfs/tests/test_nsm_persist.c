@@ -59,30 +59,76 @@ test_monitor_value_roundtrip(void)
     uint8_t  buf[NSM_MON_VALUE_MAX];
     char     addr[CHIMERA_NSM_ADDR_MAX];
     uint32_t len;
+    uint64_t stamp;
 
-    len = nsm_monitor_value_serialize(buf, sizeof(buf), "192.168.1.50");
-    CHECK(len == 4 + 4 + 1 + 12);
-    CHECK(nsm_monitor_value_parse(buf, len, addr, sizeof(addr)) == 0);
+    len = nsm_monitor_value_serialize(buf, sizeof(buf), "192.168.1.50",
+                                      1700000000u);
+    CHECK(len == 4 + 4 + 1 + 12 + 8);
+    CHECK(buf[4] & NSM_MON_FLAG_STAMPED);
+    CHECK(nsm_monitor_value_parse(buf, len, addr, sizeof(addr), &stamp) == 0);
     CHECK(strcmp(addr, "192.168.1.50") == 0);
+    CHECK(stamp == 1700000000u);
 
     /* IPv6 literal. */
-    len = nsm_monitor_value_serialize(buf, sizeof(buf), "fe80::1");
-    CHECK(nsm_monitor_value_parse(buf, len, addr, sizeof(addr)) == 0);
+    len = nsm_monitor_value_serialize(buf, sizeof(buf), "fe80::1", 1700000000u);
+    CHECK(nsm_monitor_value_parse(buf, len, addr, sizeof(addr), &stamp) == 0);
     CHECK(strcmp(addr, "fe80::1") == 0);
+    CHECK(stamp == 1700000000u);
+
+    /* Overflow guard: a buffer one byte short of the stamp writes nothing. */
+    CHECK(nsm_monitor_value_serialize(buf, 4 + 4 + 1 + 8 + 7, "10.0.0.1",
+                                      1) == 0);
 
     /* Bad magic + truncated value are rejected. */
-    len     = nsm_monitor_value_serialize(buf, sizeof(buf), "10.0.0.1");
+    len     = nsm_monitor_value_serialize(buf, sizeof(buf), "10.0.0.1", 1);
     buf[0] ^= 0xff;
-    CHECK(nsm_monitor_value_parse(buf, len, addr, sizeof(addr)) == -1);
+    CHECK(nsm_monitor_value_parse(buf, len, addr, sizeof(addr), &stamp) == -1);
     buf[0] ^= 0xff;
-    CHECK(nsm_monitor_value_parse(buf, len - 1, addr, sizeof(addr)) == -1);
-    CHECK(nsm_monitor_value_parse(buf, 8, addr, sizeof(addr)) == -1);
+    CHECK(nsm_monitor_value_parse(buf, len - 1, addr, sizeof(addr), &stamp) == -1);
+    CHECK(nsm_monitor_value_parse(buf, 8, addr, sizeof(addr), &stamp) == -1);
 } /* test_monitor_value_roundtrip */
+
+static void
+test_monitor_value_legacy(void)
+{
+    /* A value written by the previous build: flags 0, no stamp. */
+    uint8_t  buf[NSM_MON_VALUE_MAX];
+    uint32_t p = 0;
+    char     addr[CHIMERA_NSM_ADDR_MAX];
+    uint64_t stamp = 99;
+
+    nfs_kv_put_le32(buf, &p, NSM_MON_MAGIC);
+    nfs_kv_put_le32(buf, &p, 0);
+    buf[p++] = 8;
+    memcpy(buf + p, "10.0.0.1", 8);
+    p += 8;
+    CHECK(nsm_monitor_value_parse(buf, p, addr, sizeof(addr), &stamp) == 0);
+    CHECK(strcmp(addr, "10.0.0.1") == 0);
+    CHECK(stamp == 0);
+
+    /* STAMPED flag but the stamp bytes are missing => corrupt. */
+    buf[4] = NSM_MON_FLAG_STAMPED;
+    CHECK(nsm_monitor_value_parse(buf, p, addr, sizeof(addr), &stamp) == -1);
+} /* test_monitor_value_legacy */
+
+static void
+test_monitor_expired(void)
+{
+    CHECK(nsm_monitor_expired(1000, 1000 + 86400, 86400) == 0);  /* exactly the bound: fresh */
+    CHECK(nsm_monitor_expired(1000, 1000 + 86401, 86400) == 1);
+    CHECK(nsm_monitor_expired(0, 5000000, 86400) == 0);           /* legacy: never */
+} /* test_monitor_expired */
+
+static void
+test_monitor_expired_future_stamp(void)
+{
+    CHECK(nsm_monitor_expired(2000, 1000, 60) == 0);
+} /* test_monitor_expired_future_stamp */
 
 static void
 test_keys(void)
 {
-    uint8_t  buf[CHIMERA_KV_HDR_LEN + SM_MAXSTRLEN];
+    uint8_t  buf[CHIMERA_KV_NSM_MONITOR_KEY_MAX];
     uint32_t len;
 
     /* Every NSM key carries the shared 3-byte band header. */
@@ -92,10 +138,13 @@ test_keys(void)
     CHECK(buf[1] == CHIMERA_KV_VERSION);
     CHECK(buf[2] == CHIMERA_KV_TYPE_NSM_STATE);
 
-    len = nfs_kv_nsm_monitor_key(buf, (const uint8_t *) "host-a", 6);
-    CHECK(len == CHIMERA_KV_HDR_LEN + 6);
+    /* Monitor keys are NODE-scoped: the 2-byte node id (big-endian) follows
+     * the header, ahead of the host name. */
+    len = nfs_kv_nsm_monitor_key(buf, 0x1234, (const uint8_t *) "host-a", 6);
+    CHECK(len == CHIMERA_KV_PREFIX_LEN + 6);
     CHECK(buf[2] == CHIMERA_KV_TYPE_NSM_MONITOR);
-    CHECK(memcmp(buf + CHIMERA_KV_HDR_LEN, "host-a", 6) == 0);
+    CHECK(buf[3] == 0x12 && buf[4] == 0x34);
+    CHECK(memcmp(buf + CHIMERA_KV_PREFIX_LEN, "host-a", 6) == 0);
 
     /* The two record types occupy distinct, adjacent bands so a search over
      * [type .. type+1) scans exactly one type. */
@@ -119,16 +168,21 @@ test_monitor_table(void)
 {
     struct nsm_state          st;
     struct nsm_notify_target *snap;
+    struct nsm_monitor       *mon;
     uint32_t                  n;
 
     nsm_state_init(&st, NULL, 1, NULL, 1, 86400);
 
-    /* First sight => changed; re-set same addr => unchanged; new addr =>
-     * changed. */
-    CHECK(nsm_monitor_set(&st, "client1", "10.0.0.1") == 1);
-    CHECK(nsm_monitor_set(&st, "client1", "10.0.0.1") == 0);
-    CHECK(nsm_monitor_set(&st, "client1", "10.0.0.2") == 1);
-    CHECK(nsm_monitor_set(&st, "client2", "10.0.0.3") == 1);
+    /* First sight => changed; re-set same addr => unchanged (but the stamp
+     * is still updated); new addr => changed. */
+    CHECK(nsm_monitor_set(&st, "client1", "10.0.0.1", 1) == 1);
+    CHECK(nsm_monitor_set(&st, "client1", "10.0.0.1", 5) == 0);
+    HASH_FIND_STR(st.monitors, "client1", mon);
+    CHECK(mon != NULL);
+    CHECK(mon->stamp_s == 5);
+    CHECK(nsm_monitor_set(&st, "client1", "10.0.0.2", 6) == 1);
+    CHECK(mon->stamp_s == 6);
+    CHECK(nsm_monitor_set(&st, "client2", "10.0.0.3", 7) == 1);
 
     n = nsm_monitors_snapshot(&st, &snap);
     CHECK(n == 2);
@@ -144,6 +198,68 @@ test_monitor_table(void)
     CHECK(snap == NULL);
     nsm_state_destroy(&st);
 } /* test_monitor_table */
+
+static void
+build_record(
+    uint8_t    *key,
+    uint32_t   *klen,
+    uint8_t    *val,
+    uint32_t   *vlen,
+    uint16_t    node,
+    const char *host,
+    uint64_t    stamp)
+{
+    *klen = nfs_kv_nsm_monitor_key(key, node, (const uint8_t *) host, strlen(host));
+    *vlen = nsm_monitor_value_serialize(val, NSM_MON_VALUE_MAX, "10.0.0.9", stamp);
+} /* build_record */
+
+static void
+test_scan_classify(void)
+{
+    uint8_t  key[CHIMERA_KV_NSM_MONITOR_KEY_MAX], val[NSM_MON_VALUE_MAX];
+    uint32_t klen, vlen;
+    char     host[SM_MAXSTRLEN + 1], addr[CHIMERA_NSM_ADDR_MAX];
+    uint64_t stamp;
+
+    build_record(key, &klen, val, &vlen, 5, "client-a", 1000);
+    CHECK(nsm_monitor_record_classify(key, klen, val, vlen, 5, 1500, 86400,
+                                      host, addr, &stamp) == NSM_RECORD_LOAD);
+    CHECK(strcmp(host, "client-a") == 0 && strcmp(addr, "10.0.0.9") == 0 && stamp == 1000);
+
+    /* Another node's record ends the scan. */
+    CHECK(nsm_monitor_record_classify(key, klen, val, vlen, 6, 1500, 86400,
+                                      host, addr, &stamp) == NSM_RECORD_END);
+
+    /* Older than the bound: purge. */
+    CHECK(nsm_monitor_record_classify(key, klen, val, vlen, 5, 1000 + 86401, 86400,
+                                      host, addr, &stamp) == NSM_RECORD_EXPIRED);
+
+    /* Empty host / short key: skip. */
+    CHECK(nsm_monitor_record_classify(key, CHIMERA_KV_PREFIX_LEN, val, vlen, 5, 1500,
+                                      86400, host, addr, &stamp) == NSM_RECORD_SKIP);
+} /* test_scan_classify */
+
+static void
+test_scan_classify_legacy_skipped(void)
+{
+    /* A pre-node-prefix key whose host starts with our node bytes, carrying
+     * an unstamped value: must be skipped, never loaded or purged. */
+    uint8_t  key[CHIMERA_KV_NSM_MONITOR_KEY_MAX], val[NSM_MON_VALUE_MAX];
+    uint32_t klen = nfs_kv_type_prefix(key, CHIMERA_KV_TYPE_NSM_MONITOR);
+    uint32_t vlen = 0;
+    char     host[SM_MAXSTRLEN + 1], addr[CHIMERA_NSM_ADDR_MAX];
+    uint64_t stamp;
+
+    memcpy(key + klen, "ABhost", 6);
+    klen += 6;
+    nfs_kv_put_le32(val, &vlen, NSM_MON_MAGIC);
+    nfs_kv_put_le32(val, &vlen, 0);
+    val[vlen++] = 8;
+    memcpy(val + vlen, "10.0.0.1", 8);
+    vlen += 8;
+    CHECK(nsm_monitor_record_classify(key, klen, val, vlen, 0x4142, 1500, 86400,
+                                      host, addr, &stamp) == NSM_RECORD_SKIP);
+} /* test_scan_classify_legacy_skipped */
 
 static void
 test_persist_switch_off(void)
@@ -198,9 +314,14 @@ main(void)
 {
     test_state_value_roundtrip();
     test_monitor_value_roundtrip();
+    test_monitor_value_legacy();
+    test_monitor_expired();
+    test_monitor_expired_future_stamp();
     test_keys();
     test_state_bump();
     test_monitor_table();
+    test_scan_classify();
+    test_scan_classify_legacy_skipped();
     test_persist_switch_off();
     test_name_config();
     test_name_config_truncated();

@@ -5,6 +5,7 @@
 #include "common/thread.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef _WIN32
 #include "common/platform.h"
 #else  /* ifdef _WIN32 */
@@ -87,12 +88,14 @@ int
 nsm_monitor_set(
     struct nsm_state *state,
     const char       *host,
-    const char       *addr)
+    const char       *addr,
+    uint64_t          stamp_s)
 {
     struct nsm_monitor *mon;
 
     HASH_FIND_STR(state->monitors, host, mon);
     if (mon) {
+        mon->stamp_s = stamp_s;
         if (strncmp(mon->addr, addr, sizeof(mon->addr)) == 0) {
             return 0;  /* unchanged */
         }
@@ -103,6 +106,7 @@ nsm_monitor_set(
     mon = calloc(1, sizeof(*mon));
     snprintf(mon->host, sizeof(mon->host), "%s", host);
     snprintf(mon->addr, sizeof(mon->addr), "%s", addr);
+    mon->stamp_s = stamp_s;
     HASH_ADD_STR(state->monitors, host, mon);
     return 1;
 } /* nsm_monitor_set */
@@ -183,7 +187,8 @@ uint32_t
 nsm_monitor_value_serialize(
     uint8_t    *buf,
     uint32_t    buf_size,
-    const char *addr)
+    const char *addr,
+    uint64_t    stamp_s)
 {
     uint32_t p        = 0;
     size_t   addr_len = strlen(addr);
@@ -191,14 +196,16 @@ nsm_monitor_value_serialize(
     if (addr_len > CHIMERA_NSM_ADDR_MAX) {
         addr_len = CHIMERA_NSM_ADDR_MAX;
     }
-    if (buf_size < 4 + 4 + 1 + addr_len) {
+    if (buf_size < 4 + 4 + 1 + addr_len + 8) {
         return 0;
     }
     nfs_kv_put_le32(buf, &p, NSM_MON_MAGIC);
-    nfs_kv_put_le32(buf, &p, 0 /* flags */);
+    nfs_kv_put_le32(buf, &p, NSM_MON_FLAG_STAMPED);
     buf[p++] = (uint8_t) addr_len;
     memcpy(buf + p, addr, addr_len);
-    return p + addr_len;
+    p += addr_len;
+    nfs_kv_put_le64(buf, &p, stamp_s);
+    return p;
 } /* nsm_monitor_value_serialize */
 
 int
@@ -206,19 +213,89 @@ nsm_monitor_value_parse(
     const uint8_t *buf,
     uint32_t       len,
     char          *addr_out,
-    size_t         addr_out_size)
+    size_t         addr_out_size,
+    uint64_t      *stamp_out)
 {
-    uint8_t addr_len;
+    uint32_t flags;
+    uint8_t  addr_len;
 
     if (len < 9 || nfs_kv_le32(buf) != NSM_MON_MAGIC) {
         return -1;
     }
+    flags    = nfs_kv_le32(buf + 4);
     addr_len = buf[8];
     if (addr_len > CHIMERA_NSM_ADDR_MAX || (uint32_t) 9 + addr_len > len ||
         addr_len + 1u > addr_out_size) {
         return -1;
     }
+    if (flags & NSM_MON_FLAG_STAMPED) {
+        if ((uint32_t) 9 + addr_len + 8 > len) {
+            return -1;
+        }
+        *stamp_out = nfs_kv_le64(buf + 9 + addr_len);
+    } else {
+        *stamp_out = 0;  /* written before stamps existed */
+    }
     memcpy(addr_out, buf + 9, addr_len);
     addr_out[addr_len] = '\0';
     return 0;
 } /* nsm_monitor_value_parse */
+
+uint64_t
+nsm_wall_now_s(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t) ts.tv_sec;
+} /* nsm_wall_now_s */
+
+enum nsm_record_verdict
+nsm_monitor_record_classify(
+    const uint8_t *key,
+    uint32_t       key_len,
+    const uint8_t *value,
+    uint32_t       value_len,
+    uint16_t       node_id,
+    uint64_t       now_s,
+    uint32_t       expiry_s,
+    char          *host_out,
+    char          *addr_out,
+    uint64_t      *stamp_out)
+{
+    uint8_t prefix[CHIMERA_KV_PREFIX_LEN];
+    uint32_t host_len;
+
+    /* Keys arrive in byte order: the first one outside this node's 5-byte
+     * [magic,version,type,node] prefix means the band is exhausted. */
+    nfs_kv_node_prefix(prefix, CHIMERA_KV_TYPE_NSM_MONITOR, node_id);
+    if (key_len < CHIMERA_KV_PREFIX_LEN ||
+        memcmp(key, prefix, CHIMERA_KV_PREFIX_LEN) != 0) {
+        return NSM_RECORD_END;
+    }
+
+    host_len = key_len - CHIMERA_KV_PREFIX_LEN;
+    if (host_len == 0 || host_len > SM_MAXSTRLEN) {
+        return NSM_RECORD_SKIP;  /* malformed key */
+    }
+
+    if (nsm_monitor_value_parse(value, value_len, addr_out,
+                                CHIMERA_NSM_ADDR_MAX, stamp_out) != 0) {
+        return NSM_RECORD_SKIP;  /* corrupt value */
+    }
+
+    /* An unstamped value predates node-scoped keys: whichever node wrote it,
+     * this key only looks like ours because the host name happens to begin
+     * with our node id bytes.  Leave it alone. */
+    if (*stamp_out == 0) {
+        return NSM_RECORD_SKIP;
+    }
+
+    memcpy(host_out, key + CHIMERA_KV_PREFIX_LEN, host_len);
+    host_out[host_len] = '\0';
+
+    if (nsm_monitor_expired(*stamp_out, now_s, expiry_s)) {
+        return NSM_RECORD_EXPIRED;
+    }
+    return NSM_RECORD_LOAD;
+} /* nsm_monitor_record_classify */
