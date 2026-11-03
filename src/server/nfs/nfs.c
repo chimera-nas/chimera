@@ -824,7 +824,6 @@ nfs_server_destroy(void *data)
     nlm_granter_destroy(shared->nlm_granter);
     shared->nlm_granter = NULL;
 
-    nlm_state_destroy(&shared->nlm_state);
     /* Join the newest reboot-notify worker, and through it the one before it,
      * before tearing down NSM state.  Left alone, a host costs a worker at
      * most two 3 s reachability probes plus four 5 s RPC waits, hosts are
@@ -832,12 +831,15 @@ nfs_server_destroy(void *data)
      * waiting) can be pending: two passes over N hosts.  Setting
      * notify_stop first makes them give up instead: a wait ends at its next
      * 100 ms tick and no further host is started, so the join waits at most
-     * for a probe already in progress (3 s). */
+     * for a probe already in progress (3 s).  This precedes
+     * nlm_state_destroy: a cold-start worker's done callback settles the NLM
+     * grace under nlm_state.mutex, so the worker must be gone first. */
     atomic_store(&shared->nsm_state.notify_stop, 1);
     if (shared->nsm_state.notify_thread) {
         evpl_thread_destroy(shared->nsm_state.notify_thread);
         shared->nsm_state.notify_thread = NULL;
     }
+    nlm_state_destroy(&shared->nlm_state);
     nsm_state_destroy(&shared->nsm_state);
     nfs4_v40_drc_destroy(&shared->v40_drc);
     nfs3_drc_destroy(&shared->nfs3_drc);

@@ -23,6 +23,7 @@
 
 #include "nfs_nsm_state.h"
 #include "nfs_kv_keys.h"
+#include "nfs_nlm_state.h"
 
 #define CHECK(cond) do { \
             if (!(cond)) { \
@@ -339,6 +340,26 @@ test_renew_due_rule(void)
     CHECK(nsm_monitor_renew_due(2000, 1000, 100) == 0);
 } /* test_renew_due_rule */
 
+static void
+test_grace_settle(void)
+{
+    struct nlm_state nlm;
+    time_t           now;
+
+    memset(&nlm, 0, sizeof(nlm));
+    nlm_state_settle_grace(&nlm, 10);          /* not in grace: no-op */
+    CHECK(nlm.in_grace == 0 && nlm.grace_end == 0);
+
+    nlm_state_begin_grace(&nlm);
+    now = time(NULL);
+    CHECK(nlm.grace_end >= now + NLM_GRACE_PERIOD_SECS - 1);
+    nlm_state_settle_grace(&nlm, 10);
+    CHECK(nlm.in_grace == 1);
+    CHECK(nlm.grace_end <= now + 11 && nlm.grace_end >= now + 9);
+    nlm_state_settle_grace(&nlm, 200);         /* never pushes the deadline out */
+    CHECK(nlm.grace_end <= now + 11);
+} /* test_grace_settle */
+
 int
 main(void)
 {
@@ -357,6 +378,7 @@ main(void)
     test_name_config_truncated();
     test_renew_due();
     test_renew_due_rule();
+    test_grace_settle();
     printf("test_nsm_persist: all checks passed\n");
     return 0;
 } /* main */

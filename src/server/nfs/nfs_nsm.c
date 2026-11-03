@@ -205,6 +205,26 @@ nsm_unmonitor(
                            nsm_kv_done, ctx);
 } /* nsm_unmonitor */
 
+/* Cold-start notify finished: end NLM grace early if every host answered. */
+static void
+nsm_cold_notify_done(struct nsm_notify_job *job)
+{
+    struct chimera_server_nfs_shared *shared = job->done_arg;
+
+    if (job->answered == job->count) {
+        evpl_mutex_lock(&shared->nlm_state.mutex);
+        nlm_state_settle_grace(&shared->nlm_state, NLM_GRACE_SETTLE_SECS);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
+        chimera_nfs_info("NSM cold-start: all %u monitored host(s) answered; "
+                         "NLM grace ends in %d s",
+                         job->count, NLM_GRACE_SETTLE_SECS);
+    } else {
+        chimera_nfs_info("NSM cold-start: %u of %u monitored host(s) answered; "
+                         "holding NLM grace for the full window",
+                         job->answered, job->count);
+    }
+} /* nsm_cold_notify_done */
+
 /* Snapshot the monitor list and, if non-empty, spawn the reboot-notify worker.
  * The worker is not waited for here.  At most one worker notifies and one
  * waits behind it (it joins the notifying one before it starts): a snapshot
@@ -214,7 +234,8 @@ nsm_unmonitor(
 static void
 nsm_spawn_notify(
     struct chimera_server_nfs_thread *thread,
-    uint32_t                          state)
+    uint32_t                          state,
+    int                               cold_start)
 {
     struct nsm_state         *nsm = &thread->shared->nsm_state;
     struct nsm_notify_job    *job;
@@ -236,6 +257,10 @@ nsm_spawn_notify(
     job->count       = count;
     job->state       = state;
     snprintf(job->my_name, sizeof(job->my_name), "%s", nsm->my_name);
+    if (cold_start) {
+        job->done     = nsm_cold_notify_done;
+        job->done_arg = thread->shared;
+    }
 
     nsm_notify_submit(nsm, job);
 } /* nsm_spawn_notify */
@@ -354,7 +379,7 @@ nsm_monitor_scan_complete(
     } else {
         chimera_nfs_info("NSM cold-start: %u monitored host(s); notifying and "
                          "holding NLM grace", count);
-        nsm_spawn_notify(thread, ctx->state);
+        nsm_spawn_notify(thread, ctx->state, 1);
     }
 
     atomic_store(&nsm->load_state, NSM_LOAD_READY);
@@ -626,7 +651,7 @@ chimera_nfs_sm_simu_crash(
     if (!nsm->persistence_disabled) {
         nsm_state_persist(thread->vfs_thread, newstate);
     }
-    nsm_spawn_notify(thread, newstate);
+    nsm_spawn_notify(thread, newstate, 0);
 
     rc = shared->nsm_v1.send_reply_SM_SIMU_CRASH(evpl, NULL, encoding);
     chimera_nfs_abort_if(rc, "Failed to send NSM SIMU_CRASH reply");
