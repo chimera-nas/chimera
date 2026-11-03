@@ -159,7 +159,13 @@ evpl_mutex_t         ChimeraLogBufLock  = EVPL_MUTEX_INITIALIZER;
  * deliberately prints outside it. */
 evpl_mutex_t         ChimeraLogFlushLock = EVPL_MUTEX_INITIALIZER;
 evpl_native_thread_t ChimeraLogThread;
-evpl_once_t          ChimeraLogOnce = EVPL_ONCE_INIT;
+/* Set once chimera_log_thread_init has created ChimeraLogThread.  Until then
+ * there is no thread to join: ChimeraLogRun starts at 1, and joining a thread
+ * handle that was never created crashes (glibc dereferences it), so a flush or
+ * exit before chimera_log_init() -- a harness rejecting its arguments, say --
+ * must not join. */
+static int           ChimeraLogThreadStarted = 0;
+evpl_once_t          ChimeraLogOnce          = EVPL_ONCE_INIT;
 
 static void *
 chimera_log_thread(void *arg)
@@ -214,7 +220,7 @@ chimera_log_thread(void *arg)
 static void
 chimera_log_thread_exit(void)
 {
-    if (ChimeraLogRun) {
+    if (ChimeraLogRun && ChimeraLogThreadStarted) {
         ChimeraLogRun = 0;
         evpl_native_thread_join(ChimeraLogThread, NULL);
     }
@@ -223,7 +229,7 @@ chimera_log_thread_exit(void)
 SYMBOL_EXPORT void
 chimera_log_flush(void)
 {
-    if (ChimeraLogRun) {
+    if (ChimeraLogRun && ChimeraLogThreadStarted) {
         ChimeraLogRun = 0;
         evpl_native_thread_join(ChimeraLogThread, NULL);
     }
@@ -325,6 +331,7 @@ chimera_log_thread_init(void)
                 strerror(rc));
         abort();
     }
+    ChimeraLogThreadStarted = 1;
 
     atexit(chimera_log_thread_exit);
 
