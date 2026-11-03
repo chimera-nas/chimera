@@ -308,6 +308,10 @@ chimera_server_config_init(void)
      * even on a persistent store, which skips records, the cold-start notify
      * and the NLM grace window. */
     config->nfs3_nsm_persist = 1;
+    /* Keep NFSv3 duplicate-request-cache replies in the KV store.  Only matters
+     * with a persistent kv_module (memkv never persists); set to 0 to cache
+     * replies in memory only even on a persistent store. */
+    config->nfs3_drc_persist = 1;
     /* 0 = auto-derive a stable node_id from the machine name; operators sharing
      * one KV store across instances should set distinct values explicitly. */
     config->nfs4_node_id         = 0;
@@ -790,6 +794,20 @@ chimera_server_config_get_nfs3_nsm_persist(const struct chimera_server_config *c
 {
     return config->nfs3_nsm_persist;
 } /* chimera_server_config_get_nfs3_nsm_persist */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs3_drc_persist(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->nfs3_drc_persist = enable;
+} /* chimera_server_config_set_nfs3_drc_persist */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs3_drc_persist(const struct chimera_server_config *config)
+{
+    return config->nfs3_drc_persist;
+} /* chimera_server_config_get_nfs3_drc_persist */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_lease_time(

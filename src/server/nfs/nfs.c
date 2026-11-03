@@ -427,7 +427,8 @@ nfs_server_init(
      * install the wrapper when enabled so a disabled server keeps the direct
      * (zero-overhead) path. */
     if (chimera_server_config_get_nfs3_drc(config)) {
-        nfs3_drc_install(shared);
+        nfs3_drc_install(shared,
+                         chimera_server_config_get_nfs3_drc_persist(config));
     }
     /* The NFSv4.0 reply cache is always installed.  It is keyed per connection,
      * so it is bounded by the connections that are open and there is nothing to
