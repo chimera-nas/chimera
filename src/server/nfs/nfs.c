@@ -553,7 +553,10 @@ nfs_server_init(
      * nfs3_nsm_persist switch sets persistence_disabled the same way, so grace
      * is skipped when NSM state is held in memory on a persistent store too.
      * Phase 2 holds this window open until the cold-start monitor scan
-     * completes and ends it early when the scan finds no monitors. */
+     * completes and ends it early when the scan finds no monitors.  It also
+     * ends NLM_GRACE_SETTLE_SECS after every reloaded host answered the
+     * reboot notify (nsm_cold_notify_done); otherwise it runs its full
+     * length. */
     if (!data_server && !shared->nsm_state.persistence_disabled) {
         nlm_state_begin_grace(&shared->nlm_state);
         chimera_nfs_info("NLM entering %d-second grace period for lock reclaim",

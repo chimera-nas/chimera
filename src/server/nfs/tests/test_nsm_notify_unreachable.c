@@ -683,6 +683,7 @@ test_done_follows_coalesce(void)
     evpl_thread_destroy(nsm.notify_thread);
     CHECK(atomic_load(&done_calls) == 1);
     CHECK(atomic_load(&done_answered) == 0);
+    CHECK(atomic_load(&done_count) == 1);
     chimera_socket_close(listener);
     evpl_mutex_destroy(&nsm.mutex);
 } /* test_done_follows_coalesce */
@@ -698,7 +699,9 @@ main(void)
     CHECK(WSAStartup(MAKEWORD(2, 2), &wsa) == 0);
 #endif /* ifdef _WIN32 */
     evpl = evpl_create(NULL);
-    mbt_watchdog_arm(30);
+    /* The run takes about 6.5 s; stay below the ctest TIMEOUT (30 s) so a hang
+     * gets the watchdog's diagnostic instead of a bare ctest kill. */
+    mbt_watchdog_arm(20);
     test_portmap_refused(evpl);
     test_dead_host_skipped(evpl);
     test_live_host_told(evpl);

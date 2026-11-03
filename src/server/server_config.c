@@ -311,9 +311,8 @@ chimera_server_config_init(void)
     /* Name sent as mon_name in SM_NOTIFY; empty means use gethostname(). */
     config->nfs_nsm_name[0] = '\0';
     /* A persisted NSM monitor not renewed for this long is dropped at the next
-     * restart instead of notified. */
-    /* Keep equal to NSM_MONITOR_EXPIRY_DEFAULT_S (nfs_nsm_state.h, which this
-     * target cannot include). */
+     * restart instead of notified.  Keep equal to NSM_MONITOR_EXPIRY_DEFAULT_S
+     * (nfs_nsm_state.h, which this target cannot include). */
     config->nfs3_nsm_monitor_expiry_s = 86400u;
     /* Keep NFSv3 duplicate-request-cache replies in the KV store.  Only matters
      * with a persistent kv_module (memkv never persists); set to 0 to cache
@@ -821,6 +820,9 @@ chimera_server_config_set_nfs_nsm_name(
     struct chimera_server_config *config,
     const char                   *name)
 {
+    if (!name) {
+        name = "";  /* NULL means unset: fall back to gethostname() */
+    }
     strncpy(config->nfs_nsm_name, name, sizeof(config->nfs_nsm_name) - 1);
     config->nfs_nsm_name[sizeof(config->nfs_nsm_name) - 1] = '\0';
 } /* chimera_server_config_set_nfs_nsm_name */

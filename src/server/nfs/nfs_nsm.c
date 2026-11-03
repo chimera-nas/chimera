@@ -314,6 +314,9 @@ nsm_monitor_scan_cb(
             * during the scan would mutate the band being iterated, so
             * remember the key (at most CHIMERA_KV_NSM_MONITOR_KEY_MAX bytes
             * for an EXPIRED record) and delete once the scan completes. */
+            if (key_len > sizeof(ctx->expired[0].key)) {
+                return 0;  /* cannot happen (see classify); never overrun */
+            }
             if (ctx->nexpired == ctx->expired_cap) {
                 ctx->expired_cap = ctx->expired_cap ? ctx->expired_cap * 2 : 8;
                 ctx->expired     = realloc(ctx->expired,
@@ -346,8 +349,15 @@ nsm_monitor_scan_complete(
     struct chimera_server_nfs_thread *thread = ctx->thread;
     struct nsm_state                 *nsm    = &thread->shared->nsm_state;
     uint32_t                          count;
+    int                               scan_ok = error_code == CHIMERA_VFS_OK;
 
-    (void) error_code;
+    /* A failed scan may have stopped part-way, so the monitor table can be
+     * missing hosts that are owed a notify: the grace window must not be
+     * ended or shortened on its account. */
+    if (!scan_ok) {
+        chimera_nfs_error("NSM cold-start: monitor scan failed (error %d); "
+                          "holding NLM grace for the full window", error_code);
+    }
 
     /* The scan is over, so the band can be mutated: drop the expired records
      * (fire-and-forget, heap ctx freed in nsm_kv_done). */
@@ -369,17 +379,19 @@ nsm_monitor_scan_complete(
     count = HASH_COUNT(nsm->monitors);
     evpl_mutex_unlock(&nsm->mutex);
 
-    if (count == 0) {
+    if (count == 0 && scan_ok) {
         /* Nothing to reclaim -- end the forced grace window early so fresh
          * locks are accepted immediately (matches the no-clients case). */
         evpl_mutex_lock(&thread->shared->nlm_state.mutex);
         nlm_state_end_grace(&thread->shared->nlm_state);
         evpl_mutex_unlock(&thread->shared->nlm_state.mutex);
         chimera_nfs_info("NSM cold-start: no monitored hosts; NLM grace ended early");
-    } else {
+    } else if (count > 0) {
+        /* The hosts that were loaded are owed the notify either way; only a
+         * complete scan may settle the grace once they all answered. */
         chimera_nfs_info("NSM cold-start: %u monitored host(s); notifying and "
                          "holding NLM grace", count);
-        nsm_spawn_notify(thread, ctx->state, 1);
+        nsm_spawn_notify(thread, ctx->state, scan_ok);
     }
 
     atomic_store(&nsm->load_state, NSM_LOAD_READY);

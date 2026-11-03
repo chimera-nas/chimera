@@ -421,6 +421,9 @@ nsm_notify_submit(
             queued->state = job->state;
         }
         memcpy(queued->my_name, job->my_name, sizeof(queued->my_name));
+        /* The newer job's callback replaces the queued one's, NULL included:
+         * an SM_SIMU_CRASH folded into a queued cold-start job drops the
+         * grace settle, so the full NLM grace window is kept. */
         queued->done     = job->done;
         queued->done_arg = job->done_arg;
         free(job);
