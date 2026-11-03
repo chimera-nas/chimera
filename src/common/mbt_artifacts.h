@@ -32,6 +32,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include "common/platform.h"
+#else // ifdef _WIN32
+#include <unistd.h>
+#endif // ifdef _WIN32
 
 #include "common/logging.h"
 #include "metrics/metrics.h"
@@ -101,7 +106,12 @@ mbt_debug_log_start(void)
 /* Call at teardown, while the registry is still alive.  Environments that
  * cycle within one process rewrite the file each time; the final cycle's
  * scrape is the artifact.  A failed dump fails the test -- the scrape is
- * part of what the harness exists to exercise. */
+ * part of what the harness exists to exercise.
+ *
+ * The server's evpl contexts are still alive here, so exit() would run
+ * libevpl's atexit cleanup, which aborts on them and turns the status into a
+ * SIGABRT.  Flush the log, stdout and stderr and leave without atexit
+ * handlers, as chimera_fatal() does. */
 static inline void
 mbt_metrics_dump(struct prometheus_metrics *metrics)
 {
@@ -111,7 +121,13 @@ mbt_metrics_dump(struct prometheus_metrics *metrics)
 
     if (chimera_metrics_dump_file(metrics, path) != 0) {
         fprintf(stderr, "mbt_artifacts: metrics dump to %s failed\n", path);
-        exit(1);
+        chimera_log_flush();
+        fflush(stdout);
+        fflush(stderr);
+#ifdef _WIN32
+        TerminateProcess(GetCurrentProcess(), 1);
+#endif /* ifdef _WIN32 */
+        _exit(1);
     }
 } /* mbt_metrics_dump */
 

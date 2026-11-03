@@ -578,14 +578,14 @@ main(
                                 CREATOR_PASSWORD, CREATOR_SID,
                                 CREATOR_UID, CREATOR_GID, 2, cgids, 1) != 0) {
         fprintf(stderr, "failed to register %s\n", CREATOR_USER);
-        exit(1);
+        smb2c_exit(1);
     }
 
     if (chimera_server_add_user(env.server, OTHER_USER, OTHER_PASSWORD,
                                 OTHER_PASSWORD, OTHER_SID,
                                 OTHER_UID, OTHER_GID, 1, ogids, 1) != 0) {
         fprintf(stderr, "failed to register %s\n", OTHER_USER);
-        exit(1);
+        smb2c_exit(1);
     }
 
     /* The groups carry real SIDs the same way, so a gid -> SID probe hits
@@ -593,13 +593,13 @@ main(
     if (chimera_server_add_group(env.server, CREATOR_GROUP, CREATOR_GROUP_SID,
                                  CREATOR_GID, 1) != 0) {
         fprintf(stderr, "failed to register %s\n", CREATOR_GROUP);
-        exit(1);
+        smb2c_exit(1);
     }
 
     if (chimera_server_add_group(env.server, OTHER_GROUP, OTHER_GROUP_SID,
                                  OTHER_GID, 1) != 0) {
         fprintf(stderr, "failed to register %s\n", OTHER_GROUP);
-        exit(1);
+        smb2c_exit(1);
     }
 
     smb2_env_fs_setup(&env, "fs0");

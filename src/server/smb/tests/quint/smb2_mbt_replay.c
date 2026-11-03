@@ -352,7 +352,7 @@ slot_overflow(
             strcmp(what, "session") == 0 ? "SESS"
             : strcmp(what, "tree") == 0 ? "TREE" : "FID",
             g_trace ? g_trace : "?");
-    exit(3);
+    smb2c_exit(3);
 } /* slot_overflow */
 
 /* The live connection a model session is bound to.
