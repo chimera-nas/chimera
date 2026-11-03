@@ -14,6 +14,7 @@
 #include "nfs4_state.h"
 #include "nfs_common.h"
 #include "nfs_internal.h"
+#include "nfs_nsm.h"
 #include "common/misc.h"
 #include "evpl/evpl.h"
 
@@ -273,6 +274,9 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
 
     /* Record that this instance was alive (see nfs_recovery_heartbeat). */
     nfs_recovery_heartbeat(&thread->shared->nfs4_recovery, thread->vfs_thread);
+
+    /* Keep persisted NSM monitor records of live NLM clients fresh. */
+    chimera_nfs_nsm_renew_sweep(thread);
 
     /* Phase 5: piggyback grace-window expiry on the lease tick. */
     nfs_recovery_sweep_once(&thread->shared->nfs4_recovery, thread->vfs_thread);

@@ -23,6 +23,16 @@ nsm_monitor(
     const char                       *peer_addr);
 
 /*
+ * Rewrite the persisted record of every monitored host that is due for renewal
+ * and still has NLM locks or connections.  Called from the lease tick on every
+ * server thread; one thread per expiry/4 does the work.  No-op when NSM
+ * persistence is off.
+ */
+void
+chimera_nfs_nsm_renew_sweep(
+    struct chimera_server_nfs_thread *thread);
+
+/*
  * Stop monitoring `host` and drop its persisted record.  Called when all of a
  * client's NLM locks are released at once (FREE_ALL, last-connection
  * disconnect, or SM_NOTIFY), so we no longer need to notify it on our reboot.

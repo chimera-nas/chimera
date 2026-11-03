@@ -119,6 +119,7 @@ add_executable(test_replay_slot
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_state.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/nsm_renew_stub.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
@@ -143,6 +144,7 @@ add_executable(test_nfs_persist
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_state.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/nsm_renew_stub.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs3_drc.c

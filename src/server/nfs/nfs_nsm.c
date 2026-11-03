@@ -80,7 +80,7 @@ nsm_monitor(
      * client that keeps taking locks never ages out of the store.  A stamp in
      * the future (the clock stepped back) is rewritten too. */
     renew = prev_stamp > now_s ||
-        now_s - prev_stamp >= nsm->monitor_expiry_s / 2;
+        nsm_monitor_renew_due(prev_stamp, now_s, nsm->monitor_expiry_s);
 
     if (mon && !changed && !renew) {
         /* Nothing is written, so the store keeps the record stamped
@@ -106,6 +106,78 @@ nsm_monitor(
     chimera_vfs_put_key(thread->vfs_thread, ctx->key, ctx->key_len,
                         ctx->value, ctx->value_len, nsm_kv_done, ctx);
 } /* nsm_monitor */
+
+void
+chimera_nfs_nsm_renew_sweep(struct chimera_server_nfs_thread *thread)
+{
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct nsm_state                 *nsm    = &shared->nsm_state;
+    struct nsm_notify_target         *due    = NULL;
+    uint64_t                          now_s  = nsm_wall_now_s();
+    uint64_t                          next;
+    uint32_t                          interval_s, n, i;
+
+    if (nsm->persistence_disabled) {
+        return;
+    }
+
+    /* One thread per interval claims the sweep; the lease tick fires on every
+     * server thread. */
+    interval_s = nsm->monitor_expiry_s / 4;
+    if (interval_s < 1) {
+        interval_s = 1;
+    }
+    next = atomic_load_explicit(&nsm->next_renew_s, memory_order_relaxed);
+    if (now_s < next ||
+        !atomic_compare_exchange_strong(&nsm->next_renew_s, &next,
+                                        now_s + interval_s)) {
+        return;
+    }
+
+    evpl_mutex_lock(&nsm->mutex);
+    n = nsm_monitors_renew_due(nsm, now_s, &due);
+    evpl_mutex_unlock(&nsm->mutex);
+
+    for (i = 0; i < n; i++) {
+        struct nsm_notify_target *t = &due[i];
+        struct nlm_client        *client;
+        struct nsm_monitor       *mon;
+        struct nsm_kv_ctx        *ctx;
+        char                      addr[CHIMERA_NSM_ADDR_MAX];
+        int                       alive;
+
+        /* nsm_state.mutex is not held here: nsm before nlm, never both. */
+        evpl_mutex_lock(&shared->nlm_state.mutex);
+        HASH_FIND_STR(shared->nlm_state.clients, t->host, client);
+        alive = client && (client->locks != NULL || client->conn_count > 0);
+        evpl_mutex_unlock(&shared->nlm_state.mutex);
+
+        if (!alive) {
+            continue;
+        }
+
+        evpl_mutex_lock(&nsm->mutex);
+        HASH_FIND_STR(nsm->monitors, t->host, mon);
+        if (!mon) {
+            evpl_mutex_unlock(&nsm->mutex);
+            continue;
+        }
+        mon->stamp_s = now_s;
+        snprintf(addr, sizeof(addr), "%s", mon->addr);
+        evpl_mutex_unlock(&nsm->mutex);
+
+        ctx          = malloc(sizeof(*ctx));
+        ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, nsm->node_id,
+                                              (const uint8_t *) t->host,
+                                              strnlen(t->host, SM_MAXSTRLEN));
+        ctx->value_len = nsm_monitor_value_serialize(ctx->value,
+                                                     sizeof(ctx->value),
+                                                     addr, now_s);
+        chimera_vfs_put_key(thread->vfs_thread, ctx->key, ctx->key_len,
+                            ctx->value, ctx->value_len, nsm_kv_done, ctx);
+    }
+    free(due);
+} /* chimera_nfs_nsm_renew_sweep */
 
 void
 nsm_unmonitor(

@@ -64,6 +64,7 @@ struct nsm_state {
     struct evpl_thread    *notify_thread;    /* short-lived reboot-notify worker */
     struct nsm_notify_job *notify_queued;    /* newest worker not yet notifying */
     _Atomic int            notify_stop;      /* set at shutdown: workers give up */
+    _Atomic uint64_t       next_renew_s;     /* wall second the next renewal sweep may start */
 };
 
 /* Default age after which an unrenewed persisted monitor is dropped. */
@@ -96,6 +97,21 @@ nsm_monitor_expired(
 {
     return stamp_s != 0 && now_s > stamp_s && now_s - stamp_s > expiry_s;
 } /* nsm_monitor_expired */
+
+/*
+ * A persisted record stamped at stamp_s is due for renewal at now_s once it is
+ * half the expiry old.  stamp_s 0 (never written) is always due; a stamp in the
+ * future (the clock stepped back) is not.  The one rule shared by the lock-grant
+ * path and the periodic sweep.
+ */
+static inline int
+nsm_monitor_renew_due(
+    uint64_t stamp_s,
+    uint64_t now_s,
+    uint32_t expiry_s)
+{
+    return stamp_s == 0 || (now_s >= stamp_s && now_s - stamp_s >= expiry_s / 2);
+} /* nsm_monitor_renew_due */
 
 /* A monitored peer copied out of the table for the (off-thread) notify loop. */
 struct nsm_notify_target {
@@ -159,6 +175,17 @@ nsm_monitor_remove(
 uint32_t
 nsm_monitors_snapshot(
     struct nsm_state          *state,
+    struct nsm_notify_target **out);
+
+/*
+ * Snapshot the hosts whose record is due for renewal at now_s (see
+ * nsm_monitor_renew_due) into a freshly malloc'd array (caller frees).
+ * Caller MUST hold state->mutex.  Returns the count (0 => *out is NULL).
+ */
+uint32_t
+nsm_monitors_renew_due(
+    struct nsm_state          *state,
+    uint64_t                   now_s,
     struct nsm_notify_target **out);
 
 /* KV value (de)serialization (little-endian).  serialize returns bytes written

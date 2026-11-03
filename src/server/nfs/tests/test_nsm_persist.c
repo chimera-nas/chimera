@@ -309,6 +309,36 @@ test_name_config_truncated(void)
     nsm_state_destroy(&st);
 } /* test_name_config_truncated */
 
+static void
+test_renew_due(void)
+{
+    struct nsm_state          st;
+    struct nsm_notify_target *due;
+    uint32_t                  n;
+
+    nsm_state_init(&st, NULL, 1, NULL, 1, 100);
+    nsm_monitor_set(&st, "fresh", "10.0.0.1", 1000);
+    nsm_monitor_set(&st, "stale", "10.0.0.2", 900);
+    nsm_monitor_set(&st, "never", "10.0.0.3", 0);
+
+    n = nsm_monitors_renew_due(&st, 1000 + 50, &due);
+    CHECK(n == 3);
+    free(due);
+    n = nsm_monitors_renew_due(&st, 1000 + 49, &due);
+    CHECK(n == 2);
+    free(due);
+    nsm_state_destroy(&st);
+} /* test_renew_due */
+
+static void
+test_renew_due_rule(void)
+{
+    CHECK(nsm_monitor_renew_due(0, 12345, 100) == 1);
+    CHECK(nsm_monitor_renew_due(1000, 1050, 100) == 1);
+    CHECK(nsm_monitor_renew_due(1000, 1049, 100) == 0);
+    CHECK(nsm_monitor_renew_due(2000, 1000, 100) == 0);
+} /* test_renew_due_rule */
+
 int
 main(void)
 {
@@ -325,6 +355,8 @@ main(void)
     test_persist_switch_off();
     test_name_config();
     test_name_config_truncated();
+    test_renew_due();
+    test_renew_due_rule();
     printf("test_nsm_persist: all checks passed\n");
     return 0;
 } /* main */
