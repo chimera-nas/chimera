@@ -786,6 +786,19 @@ apply_nfs_config(
         chimera_server_config_set_nfs3_drc_persist(server_config, json_is_true(json_value));
     }
 
+    json_value = json_object_get(server_params, "nfs_nsm_name");
+    if (json_is_string(json_value)) {
+        chimera_server_config_set_nfs_nsm_name(server_config, json_string_value(json_value));
+    }
+
+    json_value = json_object_get(server_params, "nfs3_nsm_monitor_expiry");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        if (int_value > 0) {
+            chimera_server_config_set_nfs3_nsm_monitor_expiry(server_config, (uint32_t) int_value);
+        }
+    }
+
     json_value = json_object_get(server_params, "nfs4_lease_time");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);

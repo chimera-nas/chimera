@@ -327,6 +327,24 @@ chimera_server_config_get_nfs3_drc_persist(
     const struct chimera_server_config *config);
 
 SYMBOL_EXPORT void
+chimera_server_config_set_nfs_nsm_name(
+    struct chimera_server_config *config,
+    const char                   *name);
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_nfs_nsm_name(
+    const struct chimera_server_config *config);
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs3_nsm_monitor_expiry(
+    struct chimera_server_config *config,
+    uint32_t                      seconds);
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_nfs3_nsm_monitor_expiry(
+    const struct chimera_server_config *config);
+
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_lease_time(
     struct chimera_server_config *config,
     uint32_t                      seconds);

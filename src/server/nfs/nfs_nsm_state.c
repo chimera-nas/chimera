@@ -19,7 +19,10 @@ void
 nsm_state_init(
     struct nsm_state   *state,
     struct chimera_vfs *vfs,
-    int                 persist)
+    int                 persist,
+    const char         *name,
+    uint16_t            node_id,
+    uint32_t            expiry_s)
 {
     const char *kvname = (vfs && vfs->kv_module) ? vfs->kv_module->name : "";
 
@@ -32,7 +35,12 @@ nsm_state_init(
     state->notify_queued = NULL;
     atomic_store(&state->notify_stop, 0);
 
-    if (gethostname(state->my_name, sizeof(state->my_name)) != 0) {
+    state->node_id          = node_id;
+    state->monitor_expiry_s = expiry_s;
+
+    if (name && *name) {
+        snprintf(state->my_name, sizeof(state->my_name), "%s", name);
+    } else if (gethostname(state->my_name, sizeof(state->my_name)) != 0) {
         snprintf(state->my_name, sizeof(state->my_name), "localhost");
     }
     state->my_name[sizeof(state->my_name) - 1] = '\0';
