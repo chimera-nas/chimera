@@ -1289,6 +1289,62 @@ probe_security(struct smb2_conn *c)
               "SET SECURITY with the descriptor just read -> 0x%08x", st);
     }
 
+    /* MS-FSA 2.1.5.13 / MS-SMB2 3.3.5.20.3: reading the owner, group or DACL
+     * needs READ_CONTROL on the open.  A FILE_READ_ATTRIBUTES-only open is
+     * refused each one with STATUS_ACCESS_DENIED, yet a query that selects
+     * nothing still succeeds with the bare header (smb2.sdread).  A
+     * READ_CONTROL-only open reads all three. */
+    {
+        static const struct {
+            const char *name;
+            uint32_t    bits;
+        }
+        /* *INDENT-OFF* */
+        parts[] = {
+            { "owner", SEC_OWNER },
+            { "group", SEC_GROUP },
+            { "dacl",  SEC_DACL  },
+        };
+        /* *INDENT-ON* */
+        struct smb2_create_out ra;
+        unsigned int           i;
+
+        st = smb2_create(c, "sec.bin", MBT_FILE_OPEN,
+                         MBT_FILE_READ_ATTRIBUTES, MBT_FILE_SHARE_RWD, NULL,
+                         &ra);
+        CHECK(st == ST_SUCCESS,
+              "open sec.bin with FILE_READ_ATTRIBUTES only -> 0x%08x", st);
+        if (st == ST_SUCCESS) {
+            for (i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+                st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, ra.file_id,
+                                     parts[i].bits, sd, sizeof(sd), &len);
+                CHECK(st == ST_ACCESS_DENIED,
+                      "  ... QUERY SECURITY(%s) without READ_CONTROL -> "
+                      "0x%08x (want ACCESS_DENIED)", parts[i].name, st);
+            }
+            st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, ra.file_id, 0,
+                                 sd, sizeof(sd), &len);
+            CHECK(st == ST_SUCCESS && len == 20,
+                  "  ... QUERY SECURITY(nothing) without READ_CONTROL is a "
+                  "bare header (0x%08x, %u bytes)", st, len);
+            smb2_close(c, ra.file_id);
+        }
+
+        st = smb2_create(c, "sec.bin", MBT_FILE_OPEN, MBT_READ_CONTROL,
+                         MBT_FILE_SHARE_RWD, NULL, &ra);
+        CHECK(st == ST_SUCCESS,
+              "open sec.bin with READ_CONTROL only -> 0x%08x", st);
+        if (st == ST_SUCCESS) {
+            st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, ra.file_id,
+                                 SEC_OWNER | SEC_GROUP | SEC_DACL, sd,
+                                 sizeof(sd), &len);
+            CHECK(st == ST_SUCCESS && len >= 20,
+                  "  ... QUERY SECURITY(owner|group|dacl) with READ_CONTROL "
+                  "-> 0x%08x (%u bytes)", st, len);
+            smb2_close(c, ra.file_id);
+        }
+    }
+
     smb2_close(c, co.file_id);
 } /* probe_security */
 
