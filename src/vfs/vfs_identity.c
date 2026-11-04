@@ -314,6 +314,12 @@ chimera_vfs_identity_worker(void *arg)
             }
         }
 
+        if (req->status == CHIMERA_VFS_IDENTITY_NOT_FOUND) {
+            chimera_vfs_user_cache_add_negative(
+                identity->vfs->vfs_user_cache, req->key, req->id, req->name,
+                CHIMERA_VFS_IDENTITY_NEGATIVE_TTL);
+        }
+
         /* Hand the completed job back to the originating evpl thread.
          *
          * Read the origin out of the job FIRST.  Appending it publishes it:
@@ -570,6 +576,7 @@ chimera_vfs_identity_resolve(
     struct chimera_vfs_identity         *identity = thread->vfs->identity;
     struct chimera_vfs_identity_result   hit;
     struct chimera_vfs_identity_request *req;
+    int                                  neg;
 
     memset(&hit, 0, sizeof(hit));
 
@@ -577,6 +584,16 @@ chimera_vfs_identity_resolve(
     if (chimera_vfs_identity_cache_probe(thread->vfs->vfs_user_cache,
                                          key, id, name, &hit)) {
         callback(CHIMERA_VFS_IDENTITY_OK, &hit, private_data);
+        return;
+    }
+
+    /* A cached authoritative miss completes inline too, never queued. */
+    chimera_rcu_read_lock(&thread->vfs->vfs_user_cache->rcu);
+    neg = chimera_vfs_user_cache_lookup_negative(thread->vfs->vfs_user_cache,
+                                                 key, id, name);
+    chimera_rcu_read_unlock(&thread->vfs->vfs_user_cache->rcu);
+    if (neg) {
+        callback(CHIMERA_VFS_IDENTITY_NOT_FOUND, NULL, private_data);
         return;
     }
 
