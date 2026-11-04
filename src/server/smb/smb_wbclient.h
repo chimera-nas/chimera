@@ -111,7 +111,7 @@ int smb_wbclient_netbios_identity(
 // record (gid/name/real SID), and BY_SID to whichever of the two the SID names.
 // Registered with the VFS identity authority at SMB server init when winbind is
 // enabled.  Matches the chimera_vfs_identity_handler signature.
-int smb_wbclient_identity_handler(
+enum chimera_vfs_identity_status smb_wbclient_identity_handler(
     enum chimera_vfs_identity_key       key,
     uint32_t                            id,
     const char                         *name,
