@@ -83,7 +83,11 @@ struct chimera_vfs_find_result {
 };
 
 /* mount->attrs.flags bits */
-#define CHIMERA_VFS_MOUNT_ATTR_READONLY (1ULL << 0)
+#define CHIMERA_VFS_MOUNT_ATTR_READONLY    (1ULL << 0)
+
+/* Windows-identity ACL behaviour: the module declares
+ * CHIMERA_VFS_CAP_ACL_WINDOWS or the mount carries the "windows_acl" option. */
+#define CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL (1ULL << 1)
 
 struct chimera_vfs_mount_attrs {
     uint64_t flags;
