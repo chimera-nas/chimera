@@ -197,6 +197,35 @@ chimera_vfs_mount_fail(
     chimera_vfs_mount_ctx_free(ctx);
 } /* chimera_vfs_mount_fail */
 
+/* The mount options are a comma-separated token list; windows_acl turns on
+ * the windows-identity ACL behaviour for any ACL-native module. */
+static int
+chimera_vfs_mount_option_windows_acl(const struct chimera_vfs_mount_options *options)
+{
+    for (int i = 0; i < options->num_options; i++) {
+        const char *key = options->options[i].key;
+
+        if (key && strcmp(key, "windows_acl") == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+} /* chimera_vfs_mount_option_windows_acl */
+
+/* The effective windows-ACL setting: the module declares the capability or
+ * the option asks for it.  Either way the module must be ACL-native; the
+ * option on a mode-only module is a configuration error, and a module that
+ * declares WINDOWS without NATIVE is a module bug. */
+static int
+chimera_vfs_mount_wants_windows_acl(
+    const struct chimera_vfs_module        *module,
+    const struct chimera_vfs_mount_options *options)
+{
+    return (module->capabilities & CHIMERA_VFS_CAP_ACL_WINDOWS) ||
+           chimera_vfs_mount_option_windows_acl(options);
+} /* chimera_vfs_mount_wants_windows_acl */
+
 static void
 chimera_vfs_mount_complete(struct chimera_vfs_request *request)
 {
@@ -232,6 +261,10 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
         if (key && (strcmp(key, "ro") == 0 || strcmp(key, "readonly") == 0)) {
             mount->attrs.flags |= CHIMERA_VFS_MOUNT_ATTR_READONLY;
         }
+    }
+
+    if (chimera_vfs_mount_wants_windows_acl(mount->module, &request->mount.options)) {
+        mount->attrs.flags |= CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL;
     }
 
     /* Store the root FH (first 16 bytes is the mount_id) */
@@ -299,6 +332,16 @@ chimera_vfs_mount_dispatch(struct chimera_vfs_mount_ctx *ctx)
     if (rc) {
         chimera_vfs_error("chimera_vfs_mount: invalid mount options: %s",
                           ctx->options ? ctx->options : "(null)");
+        chimera_vfs_request_free(thread, request);
+        chimera_vfs_mount_fail(ctx, CHIMERA_VFS_EINVAL);
+        return;
+    }
+
+    if (chimera_vfs_mount_wants_windows_acl(module, &request->mount.options) &&
+        !(module->capabilities & CHIMERA_VFS_CAP_ACL_NATIVE)) {
+        chimera_vfs_error("chimera_vfs_mount: module %s is not ACL-native, "
+                          "so it cannot run with windows-identity ACLs",
+                          module->name);
         chimera_vfs_request_free(thread, request);
         chimera_vfs_mount_fail(ctx, CHIMERA_VFS_EINVAL);
         return;
