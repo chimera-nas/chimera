@@ -165,6 +165,32 @@ nsm_next_state(uint32_t prev)
 } /* nsm_next_state */
 
 /*
+ * The state number a cold start announces.  have_prev: the stored number was
+ * read and parsed (the normal restart).  enoent: there was no stored number
+ * at all (a genuine first boot).  Anything else -- a store read error or a
+ * corrupt record -- must not restart the count at 1: a peer's statd that
+ * recorded that very number from an earlier run would take the SM_NOTIFY as
+ * stale and never tell lockd to reclaim.  The wall clock forced odd stands in
+ * instead: strictly greater than any count this band has announced, so every
+ * peer sees a new state, and the count simply continues from it.
+ */
+static inline uint32_t
+nsm_boot_state_number(
+    int      have_prev,
+    uint32_t prev,
+    int      enoent,
+    uint64_t now_s)
+{
+    if (have_prev) {
+        return nsm_next_state(prev);
+    }
+    if (enoent) {
+        return 1;
+    }
+    return ((uint32_t) now_s) | 1u;
+} /* nsm_boot_state_number */
+
+/*
  * Insert or refresh the monitor for `host` with reach-address `addr`, storing
  * stamp_s on the entry (always, even when nothing else changed).  Caller MUST
  * hold state->mutex.  Returns 1 when the entry was newly created or its

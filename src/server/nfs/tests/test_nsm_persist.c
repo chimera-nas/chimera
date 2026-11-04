@@ -165,6 +165,24 @@ test_state_bump(void)
 } /* test_state_bump */
 
 static void
+test_boot_state_number(void)
+{
+    /* A parsed stored number bumps as usual. */
+    CHECK(nsm_boot_state_number(1, 7, 0, 1762300000) == 9);
+    CHECK(nsm_boot_state_number(1, 6, 0, 1762300000) == 7);
+
+    /* No stored number at all: a genuine first boot starts at 1. */
+    CHECK(nsm_boot_state_number(0, 0, 1, 1762300000) == 1);
+
+    /* A read error or corrupt record must NOT restart the count at 1 (a
+     * peer's statd that recorded 1 would ignore the SM_NOTIFY): the wall
+     * clock, forced odd, stands in. */
+    CHECK(nsm_boot_state_number(0, 0, 0, 1762300000) == 1762300001);
+    CHECK(nsm_boot_state_number(0, 0, 0, 1762300001) == 1762300001);
+    CHECK((nsm_boot_state_number(0, 0, 0, 1762300000) & 1) == 1);
+} /* test_boot_state_number */
+
+static void
 test_monitor_table(void)
 {
     struct nsm_state          st;
@@ -426,6 +444,7 @@ main(void)
     test_monitor_expired_future_stamp();
     test_keys();
     test_state_bump();
+    test_boot_state_number();
     test_monitor_table();
     test_scan_classify();
     test_scan_classify_long_host();
