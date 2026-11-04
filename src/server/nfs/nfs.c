@@ -445,6 +445,10 @@ nfs_server_init(
     shared->nfs_grace_time_s    = chimera_server_config_get_nfs4_grace_time(config);
     shared->nfs_courtesy_time_s = chimera_server_config_get_nfs4_courtesy_time(config);
 
+    /* A held NFSv3 retransmit may wait out an NFSv4 delegation recall, which
+     * lasts up to a lease (nfs3_drc.c). */
+    nfs3_drc_set_lease_time(&shared->nfs3_drc, shared->nfs_lease_time_s);
+
     /* Server-reboot recovery / grace window.  Records the VFS, lease and
      * grace times for the cold-start load, which nfs_server_start runs
      * synchronously before the listeners are bound (nfs_recovery_cold_start). */
@@ -873,6 +877,10 @@ chimera_nfs_server_notify(
              * cannot be recycled while its entries still exist. */
             nfs4_v40_drc_conn_close(&shared->v40_drc, conn);
 
+            /* Likewise release any NFSv3 retransmits held for this connection:
+             * once rpc2 frees it they could be neither answered nor freed. */
+            nfs3_drc_conn_close(thread, conn);
+
             priv = evpl_rpc2_conn_get_private_data(conn);
             if (!priv) {
                 break;
@@ -977,6 +985,9 @@ nfs_server_thread_init(
     /* NLM deferred lock-acquire resume doorbell + queue. */
     chimera_nfs_nlm4_thread_init(thread);
 
+    /* NFSv3 DRC held-retransmit mailbox + hold-deadline timer. */
+    nfs3_drc_thread_init(thread);
+
     /* Run-once cold-start: reload the persisted NSM state + monitor list and
      * notify monitored hosts that we restarted (so they reclaim during the NLM
      * grace window).  Idempotent across threads; no-op on a non-persistent
@@ -1023,6 +1034,11 @@ nfs_server_thread_destroy(void *data)
     while (thread->active_requests > 0) {
         evpl_continue(thread->evpl);
     }
+
+    /* Held NFSv3 retransmits are rpc2 requests too, but not nfs_requests, so
+     * the drain above does not wait for them: answer or release them before
+     * their rpc2 thread goes. */
+    nfs3_drc_thread_destroy(thread);
 
     evpl_rpc2_thread_destroy(thread->rpc2_thread);
 

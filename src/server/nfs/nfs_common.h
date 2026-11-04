@@ -525,6 +525,19 @@ struct chimera_server_nfs_thread {
     evpl_mutex_t                      nlm_resume_lock;
     struct nlm_lock_resume           *nlm_resume_queue;
     uint8_t                           nlm_doorbell_armed;
+
+    /* NFSv3 DRC retransmits held while their original executes.  The original
+     * may complete on any thread, but a held request can only be answered or
+     * released on the thread that owns its connection.  Completion moves the
+     * waiter to this thread's mailbox (under drc_mbox_lock) and rings
+     * drc_doorbell; drc_held lists every waiter this thread owns, for the
+     * hold-deadline timer and for disconnect.  See nfs3_drc.c. */
+    struct evpl_doorbell              drc_doorbell;
+    struct evpl_timer                 drc_timer;
+    evpl_mutex_t                      drc_mbox_lock;
+    struct nfs3_drc_waiter           *drc_mbox;  /* via waiter->qnext */
+    struct nfs3_drc_waiter           *drc_held;  /* via waiter->tprev/tnext */
+    uint8_t                           drc_armed;
 };
 
 static inline struct nfs_request *

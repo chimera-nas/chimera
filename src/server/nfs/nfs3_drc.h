@@ -64,12 +64,68 @@ struct nfs3_drc_keybuf {
     uint64_t cksum;
 };
 
+/* Ceilings on the two kinds of state a request in progress pins.  An INPROG
+ * entry holds no reply bytes, so the byte budget above does not bound them;
+ * a held waiter pins a whole request (its dbuf and decoded arguments). */
+#define NFS3_DRC_MAX_INPROG   16384u
+#define NFS3_DRC_MAX_HELD     4096u
+
+/* How long past the NFSv4 lease time a retransmit may be held.  An NFSv3
+ * REMOVE can wait out an NFSv4 delegation recall, which lasts up to a lease,
+ * and one held retransmit should normally cover all of it. */
+#define NFS3_DRC_HOLD_SLACK_S 10u
+
+enum nfs3_drc_state {
+    /* The reply is cached; a retransmit replays it. */
+    NFS3_DRC_DONE   = 0,
+    /* The original is still executing.  No reply exists yet, and a
+     * retransmit must neither re-execute it nor be answered from nothing:
+     * it is held as a waiter, or dropped for the client to send again. */
+    NFS3_DRC_INPROG = 1,
+};
+
+struct nfs3_drc_waiter;
+
 struct nfs3_drc_entry {
-    struct nfs3_drc_keybuf key;
-    uint8_t               *buf;     /* cached procedure-result body */
-    uint32_t               len;
-    uint64_t               ts;      /* capture time (monotonic ticks), diag */
-    UT_hash_handle         hh;
+    struct nfs3_drc_keybuf  key;
+    uint8_t                *buf;     /* cached procedure-result body; NULL while INPROG */
+    uint32_t                len;
+    uint64_t                ts;      /* INPROG: start time; DONE: capture time (ns) */
+    enum nfs3_drc_state state;
+    struct nfs3_drc_waiter *waiters; /* INPROG only: held retransmits, one per connection */
+    UT_hash_handle          hh;
+};
+
+enum nfs3_drc_waiter_state {
+    /* Linked on its entry, waiting for the original's reply. */
+    NFS3_DRC_WAITER_HELD   = 0,
+    /* Detached from its entry and queued to its own thread's mailbox, with a
+     * reply to send or (reply == NULL) to be discarded. */
+    NFS3_DRC_WAITER_QUEUED = 1,
+};
+
+/*
+ * A retransmit held while its original executes.
+ *
+ * Bump-allocated from the held request's own dbuf, so it lives exactly as long
+ * as the request: it ends when its thread replies or discards the request, and
+ * must not be touched after that.  Only the thread that received the request
+ * (the owner of its connection) ever answers, discards or frees it; another
+ * thread completing the original only moves it, under the cache lock, from its
+ * entry to the owner's mailbox and rings the owner's doorbell.
+ */
+struct nfs3_drc_waiter {
+    struct chimera_server_nfs_thread *thread;
+    struct evpl_rpc2_conn            *conn;     /* identity only once queued */
+    struct evpl_rpc2_encoding        *encoding;
+    struct nfs3_drc_entry            *entry;    /* HELD only */
+    uint8_t                          *reply;    /* QUEUED: malloc'd copy, or NULL */
+    uint32_t                          reply_len;
+    uint64_t                          deadline; /* ns, nfs_lease_now_ns() clock */
+    enum nfs3_drc_waiter_state state;
+    struct nfs3_drc_waiter           *prev, *next;   /* entry->waiters */
+    struct nfs3_drc_waiter           *tprev, *tnext; /* thread->drc_held */
+    struct nfs3_drc_waiter           *qnext;         /* thread->drc_mbox */
 };
 
 /* One per client address this instance has hydrated from the KV store (loaded
@@ -91,6 +147,14 @@ struct nfs3_drc {
     struct nfs3_drc_entry *table;            /* uthash, FIFO eviction order */
     struct nfs3_drc_hydra *hydrated;         /* uthash: addrs hydrated from KV  */
     uint64_t               bytes;
+    uint32_t               inprog;           /* entries in NFS3_DRC_INPROG       */
+    uint32_t               held;             /* waiters in NFS3_DRC_WAITER_HELD  */
+    uint64_t               hold_ns;          /* how long a waiter may be held    */
+    uint64_t               last_stuck_report; /* ns; rate-limits the stuck log   */
+    /* Test only (CHIMERA_NFS3_DRC_TEST_DELAY_MS): hold every reserved request
+     * this long before executing it, so a retransmit can be made to land while
+     * its original is deterministically still in progress. */
+    uint32_t               test_delay_ms;
     uint8_t                kv_type;          /* CHIMERA_KV_TYPE_NFS3_REPLY         */
     int                    persistence_disabled;
     /* The generated dispatcher we wrap; NULL until installed. */
@@ -113,6 +177,14 @@ void
 nfs3_drc_install(
     struct chimera_server_nfs_shared *shared);
 
+/* How long a retransmit may be held: the NFSv4 lease time plus
+ * NFS3_DRC_HOLD_SLACK_S.  Call once the lease time is known, before the
+ * server threads start. */
+void
+nfs3_drc_set_lease_time(
+    struct nfs3_drc *drc,
+    uint32_t         lease_time_s);
+
 /* Initialize / tear down the in-memory cache.  kv_type picks the KV band. */
 void
 nfs3_drc_init(
@@ -122,6 +194,27 @@ nfs3_drc_init(
 void
 nfs3_drc_destroy(
     struct nfs3_drc *drc);
+
+/* Per-thread waiter machinery: the mailbox doorbell other threads ring when an
+ * original this thread's waiters are held on completes, and the timer that
+ * drops waiters held past their deadline.  A no-op unless the cache is
+ * installed.  destroy discards every waiter the thread still holds. */
+void
+nfs3_drc_thread_init(
+    struct chimera_server_nfs_thread *thread);
+
+void
+nfs3_drc_thread_destroy(
+    struct chimera_server_nfs_thread *thread);
+
+/* Discard every waiter held for `conn`.  Called from the rpc2 DISCONNECTED
+ * notification on the connection's own thread, before rpc2 frees the
+ * connection -- after that a held request could no longer be answered or
+ * released safely. */
+void
+nfs3_drc_conn_close(
+    struct chimera_server_nfs_thread *thread,
+    struct evpl_rpc2_conn            *conn);
 
 /* ----------------------------------------------------------------------- *
 *  Connectionless-DRC core.  Some of this (the checksum in particular) is   *
@@ -205,6 +298,10 @@ nfs3_drc_value_parse(
     uint32_t       *out_body_len);
 
 /* In-memory cache primitives (lock taken internally). */
+
+/* Insert a completed reply, as the cold-start KV reload does.  An entry that
+ * already exists -- cached or in progress -- is kept: the first reply for an
+ * identity is the one every retransmit gets. */
 void
 nfs3_drc_cache_insert(
     struct nfs3_drc              *drc,
@@ -213,10 +310,69 @@ nfs3_drc_cache_insert(
     uint32_t                      body_len,
     uint64_t                      ts);
 
-/* Returns 1 and fills out_buf (malloc'd, caller frees) + out_len on a hit. */
+/* Returns 1 and fills out_buf (malloc'd, caller frees) + out_len on a hit.
+ * An entry still in progress is not a hit. */
 int
 nfs3_drc_cache_lookup(
     struct nfs3_drc              *drc,
     const struct nfs3_drc_keybuf *key,
     uint8_t                     **out_buf,
     uint32_t                     *out_len);
+
+enum nfs3_drc_reserve_result {
+    /* No entry: one was created in progress for the caller, who must now
+     * execute the request and end it with _complete or _abandon. */
+    NFS3_DRC_RESERVED  = 0,
+    /* No entry, and none created (too many in progress): execute untracked. */
+    NFS3_DRC_UNTRACKED = 1,
+    /* Cached: out_buf/out_len hold a malloc'd copy of the reply to replay. */
+    NFS3_DRC_HIT       = 2,
+    /* In progress, and the caller's waiter is now held on it. */
+    NFS3_DRC_HELD      = 3,
+    /* In progress, and the request must go unanswered: no waiter was given,
+     * the connection already has one held, or the held ceiling is reached. */
+    NFS3_DRC_DROP      = 4,
+};
+
+/*
+ * Look up `key` and, in the same critical section, act on what is there:
+ * reserve it, replay it, or hold `waiter` on it.  Doing all three under one
+ * lock is what closes the window #1375 describes -- a lookup that missed and
+ * an insert after the handler ran left a retransmit nothing to find.
+ *
+ * `waiter` (may be NULL, which turns HELD into DROP) must have its thread,
+ * conn and encoding filled in; the cache fills the rest.
+ */
+enum nfs3_drc_reserve_result
+nfs3_drc_cache_reserve(
+    struct nfs3_drc              *drc,
+    const struct nfs3_drc_keybuf *key,
+    struct nfs3_drc_waiter       *waiter,
+    uint8_t                     **out_buf,
+    uint32_t                     *out_len);
+
+/* The original's reply was captured.  Fill its in-progress entry and hand the
+ * reply to every held waiter; a cached entry is left alone (the first reply
+ * wins).  Returns 1 if the reply was stored -- and so should be persisted --
+ * and 0 if an earlier one is kept.  Evicted keys are reported as by the KV
+ * write-through. */
+int
+nfs3_drc_cache_complete(
+    struct nfs3_drc              *drc,
+    const struct nfs3_drc_keybuf *key,
+    const void                   *body,
+    uint32_t                      body_len,
+    uint64_t                      ts,
+    struct nfs3_drc_keybuf       *evicted,
+    int                           max_evicted,
+    int                          *nevicted);
+
+/* The original ended without a reply that can be cached (it was rejected
+ * before its handler ran, or the reply could not be captured).  Drop its
+ * in-progress entry and release every waiter held on it unanswered: they were
+ * never going to receive a cached reply, and executing one of them instead
+ * could repeat a change the original already made. */
+void
+nfs3_drc_cache_abandon(
+    struct nfs3_drc              *drc,
+    const struct nfs3_drc_keybuf *key);
