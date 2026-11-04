@@ -168,6 +168,13 @@ target_link_libraries(nfs_drc_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs_drc_probe)
 
+add_executable(nfs_drc_inprog_probe nfs_drc_inprog_probe.c)
+target_include_directories(nfs_drc_inprog_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs_drc_inprog_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs_drc_inprog_probe)
+
 add_executable(nfs_aux_mbt_replay nfs_aux_mbt_replay.c)
 target_include_directories(nfs_aux_mbt_replay PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
@@ -308,6 +315,27 @@ foreach(dback memfs diskfs cairn linux io_uring)
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_probe_${dback}_reclaim_race;CHIMERA_CLOSE_SWEEP_MIN_AGE_MS=0;CHIMERA_CLOSE_SWEEP_INTERVAL_MS=10"
         LABELS "functional;probe;nfsdrc_mbt;${dback}"
         SKIP_RETURN_CODE 77
+        TIMEOUT 120)
+endforeach()
+
+# A retransmit that arrives while its original is still executing (#1375).  The
+# server holds each request that reserves a cache identity for a fixed delay,
+# so retransmits can be sent inside that window on other connections: held and
+# answered with the original's reply (default), or dropped once held past a
+# deliberately short deadline (--hold-expiry).  Needs no corpus.
+add_test(NAME chimera/server/nfs/mbtdrc/inprog_probe_memfs
+    COMMAND $<TARGET_FILE:nfs_drc_inprog_probe>)
+set_tests_properties(chimera/server/nfs/mbtdrc/inprog_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_inprog_probe_memfs"
+    LABELS "functional;probe;nfsdrc_mbt;memfs"
+    TIMEOUT 120)
+foreach(_ipmode hold_expiry shutdown rdma)
+    string(REPLACE "_" "-" _ipflag "--${_ipmode}")
+    add_test(NAME chimera/server/nfs/mbtdrc/inprog_probe_memfs_${_ipmode}
+        COMMAND $<TARGET_FILE:nfs_drc_inprog_probe> ${_ipflag})
+    set_tests_properties(chimera/server/nfs/mbtdrc/inprog_probe_memfs_${_ipmode} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_inprog_probe_memfs_${_ipmode}"
+        LABELS "functional;probe;nfsdrc_mbt;memfs"
         TIMEOUT 120)
 endforeach()
 

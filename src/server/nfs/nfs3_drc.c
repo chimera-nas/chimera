@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "nfs3_drc.h"
+#include "prometheus-c.h"
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs_kv_keys.h"
@@ -28,6 +29,15 @@
  * evicted keys one insert reports back for KV cleanup (any beyond it leak in
  * the KV store until the next cold-start reload re-bounds it). */
 #define NFS3_DRC_EVICT_MAX   32
+
+/* Unlink an element from one of this file's doubly linked lists.  utlist's
+ * DL_DELETE2 asserts the list is not empty, but assert() is compiled out of
+ * release builds; this keeps the invariant checked -- and visible to the
+ * static analyzer -- in both. */
+#define NFS3_DRC_DL_UNLINK(head, el, prev, next) do {                        \
+            chimera_nfs_abort_if(!(head), "NFSv3 DRC: unlink from an empty list"); \
+            DL_DELETE2(head, el, prev, next);                                 \
+} while (0)
 
 /* Standard NFSv3 procedure numbers (the generated dispatcher keys on these). */
 enum {
@@ -269,71 +279,131 @@ nfs3_drc_value_parse(
 *  in-memory cache                                                   *
 * ------------------------------------------------------------------ */
 
-/* Caller holds drc->lock.  Returns the number of evicted entries whose keys
- * were copied into evicted[] (for the caller to drop from the KV store). */
-static int
-nfs3_drc_cache_insert_locked(
-    struct nfs3_drc              *drc,
-    const struct nfs3_drc_keybuf *key,
-    const void                   *body,
-    uint32_t                      body_len,
-    uint64_t                      ts,
-    struct nfs3_drc_keybuf       *evicted,
-    int                           max_evicted)
+struct nfs3_drc_reply *
+nfs3_drc_reply_alloc(
+    const void *body,
+    uint32_t    body_len)
 {
-    struct nfs3_drc_entry *e;
+    struct nfs3_drc_reply *reply = malloc(sizeof(*reply) + body_len);
+
+    if (!reply) {
+        return NULL;
+    }
+    atomic_init(&reply->refs, 1);
+    reply->len = body_len;
+    memcpy(reply->data, body, body_len);
+    return reply;
+} /* nfs3_drc_reply_alloc */
+
+void
+nfs3_drc_reply_put(struct nfs3_drc_reply *reply)
+{
+    if (reply && atomic_fetch_sub_explicit(&reply->refs, 1,
+                                           memory_order_acq_rel) == 1) {
+        free(reply);
+    }
+} /* nfs3_drc_reply_put */
+
+static inline struct nfs3_drc_reply *
+nfs3_drc_reply_get(struct nfs3_drc_reply *reply)
+{
+    atomic_fetch_add_explicit(&reply->refs, 1, memory_order_relaxed);
+    return reply;
+} /* nfs3_drc_reply_get */
+
+/* Caller holds drc->lock. */
+static inline void
+nfs3_drc_count_locked(
+    struct nfs3_drc    *drc,
+    enum nfs3_drc_event ev)
+{
+    drc->events[ev]++;
+    if (drc->metrics.events[ev]) {
+        prometheus_counter_increment(drc->metrics.events[ev]);
+    }
+} /* nfs3_drc_count_locked */
+
+/* Caller holds drc->lock.  Publish the in-progress and held totals. */
+static inline void
+nfs3_drc_gauges_locked(struct nfs3_drc *drc)
+{
+    if (drc->metrics.inprog) {
+        prometheus_gauge_set(drc->metrics.inprog, drc->inprog);
+    }
+    if (drc->metrics.held) {
+        prometheus_gauge_set(drc->metrics.held, drc->held);
+    }
+} /* nfs3_drc_gauges_locked */
+
+/* Caller holds drc->lock.  Evict cached entries, oldest first, until body_len
+ * more bytes fit the budget.  Entries in progress are skipped: they hold no
+ * bytes, and evicting one would reopen the window it exists to close.  Returns
+ * the number of evicted keys copied into evicted[] (for the caller to drop
+ * from the KV store). */
+static int
+nfs3_drc_evict_locked(
+    struct nfs3_drc        *drc,
+    uint32_t                body_len,
+    struct nfs3_drc_keybuf *evicted,
+    int                     max_evicted)
+{
+    struct nfs3_drc_entry *old, *next;
     int                    nev = 0;
 
-    HASH_FIND(hh, drc->table, key, sizeof(*key), e);
-    if (e) {
-        /* Last-writer-wins refresh of an existing identity. */
-        drc->bytes -= e->len;
-        free(e->buf);
-        e->buf = malloc(body_len);
-        if (!e->buf) {
-            /* OOM: drop the now-empty entry rather than caching a NULL buf. */
-            HASH_DELETE(hh, drc->table, e);
-            free(e);
-            return 0;
+    /* FIFO: drc->table iterates oldest-inserted first. */
+    for (old = drc->table;
+         old && drc->bytes + body_len > NFS3_DRC_MAX_BYTES;
+         old = next) {
+        next = old->hh.next;
+        if (old->state != NFS3_DRC_DONE) {
+            continue;
         }
-        memcpy(e->buf, body, body_len);
-        e->len      = body_len;
-        e->ts       = ts;
-        drc->bytes += body_len;
-        return 0;
-    }
-
-    /* FIFO eviction: drc->table is the oldest-inserted entry. */
-    while (drc->bytes + body_len > NFS3_DRC_MAX_BYTES && drc->table) {
-        struct nfs3_drc_entry *old = drc->table;
-
         if (evicted && nev < max_evicted) {
             evicted[nev++] = old->key;
         }
         HASH_DELETE(hh, drc->table, old);
-        drc->bytes -= old->len;
-        free(old->buf);
+        drc->bytes -= old->reply->len;
+        nfs3_drc_reply_put(old->reply);
         free(old);
     }
-
-    e = calloc(1, sizeof(*e));
-    if (!e) {
-        return nev;
-    }
-    e->key = *key;
-    e->buf = malloc(body_len);
-    if (!e->buf) {
-        free(e);
-        return nev;
-    }
-    memcpy(e->buf, body, body_len);
-    e->len = body_len;
-    e->ts  = ts;
-    HASH_ADD(hh, drc->table, key, sizeof(e->key), e);
-    drc->bytes += body_len;
-
     return nev;
-} /* nfs3_drc_cache_insert_locked */
+} /* nfs3_drc_evict_locked */
+
+/* Caller holds drc->lock.  Detach every waiter held on `e` and queue it to its
+ * own thread's mailbox, carrying a reference to `reply` to send -- or NULL, to
+ * be released unanswered and counted as `ev`.  The doorbell is rung rather
+ * than the reply sent here: this runs on whichever thread completed the
+ * original (from inside that request's own send_reply, at that), and a held
+ * request may only be answered by the thread that owns its connection.
+ * Nothing here allocates. */
+static void
+nfs3_drc_release_waiters_locked(
+    struct nfs3_drc       *drc,
+    struct nfs3_drc_entry *e,
+    struct nfs3_drc_reply *reply,
+    enum nfs3_drc_event    ev)
+{
+    struct nfs3_drc_waiter           *w, *tmp;
+    struct chimera_server_nfs_thread *owner;
+
+    DL_FOREACH_SAFE2(e->waiters, w, tmp, next)
+    {
+        NFS3_DRC_DL_UNLINK(e->waiters, w, prev, next);
+        drc->held--;
+
+        w->entry = NULL;
+        w->reply = reply ? nfs3_drc_reply_get(reply) : NULL;
+        w->state = NFS3_DRC_WAITER_QUEUED;
+        nfs3_drc_count_locked(drc, reply ? NFS3_DRC_EV_ANSWERED : ev);
+
+        owner = w->thread;
+        evpl_mutex_lock(&owner->drc_mbox_lock);
+        LL_PREPEND2(owner->drc_mbox, w, qnext);
+        evpl_mutex_unlock(&owner->drc_mbox_lock);
+        evpl_ring_doorbell(&owner->drc_doorbell);
+    }
+    nfs3_drc_gauges_locked(drc);
+} /* nfs3_drc_release_waiters_locked */
 
 void
 nfs3_drc_cache_insert(
@@ -343,9 +413,37 @@ nfs3_drc_cache_insert(
     uint32_t                      body_len,
     uint64_t                      ts)
 {
+    struct nfs3_drc_entry *e, *fresh;
+    struct nfs3_drc_reply *reply;
+
+    /* Allocated before the lock, freed below if the key is already taken. */
+    reply = nfs3_drc_reply_alloc(body, body_len);
+    fresh = calloc(1, sizeof(*fresh));
+    if (!reply || !fresh) {
+        nfs3_drc_reply_put(reply);
+        free(fresh);
+        return;
+    }
+
     evpl_mutex_lock(&drc->lock);
-    nfs3_drc_cache_insert_locked(drc, key, body, body_len, ts, NULL, 0);
+    HASH_FIND(hh, drc->table, key, sizeof(*key), e);
+    if (!e) {
+        /* Eviction from a reload has nothing to clean up in the KV store: the
+         * entries evicted are ones this same scan (or capture) just wrote. */
+        (void) nfs3_drc_evict_locked(drc, body_len, NULL, 0);
+        fresh->key   = *key;
+        fresh->reply = reply;
+        fresh->ts    = ts;
+        fresh->state = NFS3_DRC_DONE;
+        HASH_ADD(hh, drc->table, key, sizeof(fresh->key), fresh);
+        drc->bytes += body_len;
+        reply       = NULL;
+        fresh       = NULL;
+    }
     evpl_mutex_unlock(&drc->lock);
+
+    nfs3_drc_reply_put(reply);
+    free(fresh);
 } /* nfs3_drc_cache_insert */
 
 int
@@ -356,27 +454,213 @@ nfs3_drc_cache_lookup(
     uint32_t                     *out_len)
 {
     struct nfs3_drc_entry *e;
-    uint8_t               *buf = NULL;
-    uint32_t               len = 0;
+    struct nfs3_drc_reply *reply = NULL;
+    uint8_t               *buf;
 
     evpl_mutex_lock(&drc->lock);
     HASH_FIND(hh, drc->table, key, sizeof(*key), e);
-    if (e) {
-        len = e->len;
-        buf = malloc(len);
-        if (buf) {
-            memcpy(buf, e->buf, len);
+    if (e && e->state == NFS3_DRC_DONE) {
+        reply = nfs3_drc_reply_get(e->reply);
+    }
+    evpl_mutex_unlock(&drc->lock);
+
+    if (!reply) {
+        return 0;
+    }
+    buf = malloc(reply->len);
+    if (buf) {
+        memcpy(buf, reply->data, reply->len);
+        *out_buf = buf;
+        *out_len = reply->len;
+    }
+    nfs3_drc_reply_put(reply);
+    return buf ? 1 : 0;
+} /* nfs3_drc_cache_lookup */
+
+enum nfs3_drc_reserve_result
+nfs3_drc_cache_reserve(
+    struct nfs3_drc              *drc,
+    const struct nfs3_drc_keybuf *key,
+    const void                   *conn,
+    struct nfs3_drc_waiter       *waiter,
+    struct nfs3_drc_reply       **out_reply)
+{
+    struct nfs3_drc_entry       *e, *fresh;
+    struct nfs3_drc_waiter      *w;
+    enum nfs3_drc_reserve_result rc;
+    uint64_t now      = nfs_lease_now_ns();
+    uint64_t stuck_ns = 0;
+
+    /* Allocated before the lock; freed below unless this request reserves. */
+    fresh = calloc(1, sizeof(*fresh));
+
+    evpl_mutex_lock(&drc->lock);
+    HASH_FIND(hh, drc->table, key, sizeof(*key), e);
+
+    if (!e) {
+        if (fresh && drc->inprog < NFS3_DRC_MAX_INPROG) {
+            fresh->key         = *key;
+            fresh->ts          = now;
+            fresh->state       = NFS3_DRC_INPROG;
+            fresh->origin_conn = conn;
+            HASH_ADD(hh, drc->table, key, sizeof(fresh->key), fresh);
+            fresh = NULL;
+            drc->inprog++;
+            nfs3_drc_count_locked(drc, NFS3_DRC_EV_RESERVED);
+            nfs3_drc_gauges_locked(drc);
+            rc = NFS3_DRC_RESERVED;
+        } else {
+            nfs3_drc_count_locked(drc, NFS3_DRC_EV_UNTRACKED);
+            rc = NFS3_DRC_UNTRACKED;
+        }
+    } else if (e->state == NFS3_DRC_DONE) {
+        *out_reply = nfs3_drc_reply_get(e->reply);
+        nfs3_drc_count_locked(drc, NFS3_DRC_EV_REPLAYED);
+        rc = NFS3_DRC_HIT;
+    } else {
+        /* In progress: never executed again.  Hold the retransmit unless
+         * that adds nothing or cannot be afforded. */
+        rc = NFS3_DRC_DROP;
+        if (conn == e->origin_conn) {
+            /* The original's own reply goes to this very connection. */
+            nfs3_drc_count_locked(drc, NFS3_DRC_EV_DROP_ORIGIN_CONN);
+        } else if (!waiter) {
+            nfs3_drc_count_locked(drc, NFS3_DRC_EV_DROP_NO_WAITER);
+        } else {
+            /* One reply under this XID on the connection the client is
+             * listening on answers it; a second waiter there adds nothing. */
+            DL_FOREACH2(e->waiters, w, next)
+            {
+                if (w->conn == waiter->conn) {
+                    break;
+                }
+            }
+            if (w) {
+                nfs3_drc_count_locked(drc, NFS3_DRC_EV_DROP_ALREADY_WAITING);
+            } else if (drc->held >= NFS3_DRC_MAX_HELD) {
+                nfs3_drc_count_locked(drc, NFS3_DRC_EV_DROP_CEILING);
+            } else {
+                waiter->entry    = e;
+                waiter->reply    = NULL;
+                waiter->deadline = now + drc->hold_ns;
+                waiter->state    = NFS3_DRC_WAITER_HELD;
+                waiter->qnext    = NULL;
+                DL_APPEND2(e->waiters, waiter, prev, next);
+                drc->held++;
+                nfs3_drc_count_locked(drc, NFS3_DRC_EV_HELD);
+                nfs3_drc_gauges_locked(drc);
+                rc = NFS3_DRC_HELD;
+            }
+        }
+
+        /* An original that is still running long after a client gave up on
+         * it is wedged somewhere below.  Make that visible, rate-limited. */
+        if (now - e->ts >= 5000000000ULL &&
+            now - drc->last_stuck_report >= 10000000000ULL) {
+            drc->last_stuck_report = now;
+            stuck_ns               = now - e->ts;
         }
     }
     evpl_mutex_unlock(&drc->lock);
 
-    if (!buf) {
-        return 0;
+    free(fresh);
+
+    if (stuck_ns) {
+        chimera_nfs_error("NFSv3 DRC: a retransmit found its original (proc %u "
+                          "xid %u) still in progress after %llu ms",
+                          key->proc, key->xid,
+                          (unsigned long long) (stuck_ns / 1000000ULL));
     }
-    *out_buf = buf;
-    *out_len = len;
-    return 1;
-} /* nfs3_drc_cache_lookup */
+    return rc;
+} /* nfs3_drc_cache_reserve */
+
+int
+nfs3_drc_cache_complete(
+    struct nfs3_drc              *drc,
+    const struct nfs3_drc_keybuf *key,
+    struct nfs3_drc_reply        *reply,
+    uint64_t                      ts,
+    struct nfs3_drc_keybuf       *evicted,
+    int                           max_evicted,
+    int                          *nevicted)
+{
+    struct nfs3_drc_entry *e, *fresh;
+    int                    stored = 0;
+
+    *nevicted = 0;
+
+    /* For the untracked case below; allocated before the lock. */
+    fresh = calloc(1, sizeof(*fresh));
+
+    evpl_mutex_lock(&drc->lock);
+    HASH_FIND(hh, drc->table, key, sizeof(*key), e);
+
+    if (!e) {
+        /* Executed untracked (the in-progress ceiling was reached when it
+         * arrived): cache it now. */
+        if (fresh) {
+            *nevicted = nfs3_drc_evict_locked(drc, reply->len, evicted,
+                                              max_evicted);
+            fresh->key   = *key;
+            fresh->reply = nfs3_drc_reply_get(reply);
+            fresh->ts    = ts;
+            fresh->state = NFS3_DRC_DONE;
+            HASH_ADD(hh, drc->table, key, sizeof(fresh->key), fresh);
+            drc->bytes += reply->len;
+            fresh       = NULL;
+            stored      = 1;
+        }
+    } else if (e->state == NFS3_DRC_INPROG) {
+        /* Room first; the eviction pass skips this entry, which is still in
+         * progress while it runs. */
+        *nevicted = nfs3_drc_evict_locked(drc, reply->len, evicted,
+                                          max_evicted);
+        e->reply       = nfs3_drc_reply_get(reply);
+        e->ts          = ts;
+        e->state       = NFS3_DRC_DONE;
+        e->origin_conn = NULL;
+        /* Eviction is oldest-inserted first, and the entry was inserted when
+         * it was reserved: a slow original would complete as the oldest
+         * reply in the cache and be the next one evicted, leaving its
+         * retransmit to execute again.  Requeue it at the tail, so replies
+         * age from when they were produced. */
+        HASH_DELETE(hh, drc->table, e);
+        HASH_ADD(hh, drc->table, key, sizeof(e->key), e);
+        drc->bytes += reply->len;
+        drc->inprog--;
+        stored = 1;
+        nfs3_drc_release_waiters_locked(drc, e, reply, NFS3_DRC_EV_ANSWERED);
+    }
+    /* else: already cached.  The first reply for an identity is the one the
+     * client may already have seen, so a later one -- from an execution that
+     * should never have happened -- must not replace it. */
+
+    evpl_mutex_unlock(&drc->lock);
+
+    free(fresh);
+    return stored;
+} /* nfs3_drc_cache_complete */
+
+void
+nfs3_drc_cache_abandon(
+    struct nfs3_drc              *drc,
+    const struct nfs3_drc_keybuf *key)
+{
+    struct nfs3_drc_entry *e;
+
+    evpl_mutex_lock(&drc->lock);
+    HASH_FIND(hh, drc->table, key, sizeof(*key), e);
+    if (e && e->state == NFS3_DRC_INPROG) {
+        nfs3_drc_release_waiters_locked(drc, e, NULL,
+                                        NFS3_DRC_EV_DROP_ABANDONED);
+        HASH_DELETE(hh, drc->table, e);
+        drc->inprog--;
+        nfs3_drc_count_locked(drc, NFS3_DRC_EV_ABANDONED);
+        nfs3_drc_gauges_locked(drc);
+        free(e);
+    }
+    evpl_mutex_unlock(&drc->lock);
+} /* nfs3_drc_cache_abandon */
 
 /* ------------------------------------------------------------------ *
 *  KV write-through                                                  *
@@ -443,15 +727,25 @@ nfs3_drc_kv_delete(
 } /* nfs3_drc_kv_delete */
 
 /* ------------------------------------------------------------------ *
-*  reply capture (fires from inside send_reply)                      *
+*  reply capture and request end                                     *
 * ------------------------------------------------------------------ */
 
+/* Armed on every request the cache executes, in the request's dbuf. */
 struct nfs3_drc_capture_ctx {
     struct chimera_server_nfs_thread *thread;
     struct nfs3_drc                  *drc;
     struct nfs3_drc_keybuf            key;
+    /* This request created the key's in-progress entry. */
+    int                               reserved;
+    /* Its reply was captured and handed to the cache. */
+    int                               completed;
 };
 
+/* Fires from inside send_reply, for an accepted SUCCESS reply only -- which
+ * includes an NFS error status such as NFS3ERR_NOENT, a reply like any other.
+ * It also fires for a reply whose connection has closed: libevpl drops that
+ * reply after this, and a retransmit on the client's next connection is owed
+ * exactly this answer. */
 static void
 nfs3_drc_capture_reply(
     const struct evpl_iovec *iov,
@@ -464,11 +758,13 @@ nfs3_drc_capture_reply(
     struct chimera_server_nfs_thread *thread = ctx->thread;
     struct nfs3_drc                  *drc    = ctx->drc;
     struct nfs3_drc_keybuf            evicted[NFS3_DRC_EVICT_MAX];
-    uint8_t                          *buf;
+    struct nfs3_drc_reply            *reply;
     uint32_t                          rpc_len;
     uint64_t                          ts;
-    int                               i, nev;
+    int                               i, nev, stored;
 
+    /* Too large to keep, or no memory for it: not completed, so the
+     * request-end hook abandons the entry when the request is freed. */
     if (total_length <= (int) body_offset ||
         (uint32_t) total_length > NFS3_DRC_MAX_REPLY_SIZE) {
         return;
@@ -476,33 +772,52 @@ nfs3_drc_capture_reply(
 
     rpc_len = (uint32_t) total_length - body_offset;
 
-    buf = malloc(rpc_len);
-    if (!buf) {
-        return;  /* OOM: skip caching this reply (degrade to a cache miss) */
+    reply = malloc(sizeof(*reply) + rpc_len);
+    if (!reply) {
+        return;
     }
+    atomic_init(&reply->refs, 1);
+    reply->len = rpc_len;
 
-    if (nfs_drc_copy_rpc_reply(iov, niov, body_offset, buf, rpc_len) != rpc_len) {
-        free(buf);
+    if (nfs_drc_copy_rpc_reply(iov, niov, body_offset, reply->data,
+                               rpc_len) != rpc_len) {
+        nfs3_drc_reply_put(reply);
         return;
     }
 
     ts = nfs_lease_now_ns();
 
-    evpl_mutex_lock(&drc->lock);
-    nev = nfs3_drc_cache_insert_locked(drc, &ctx->key, buf, rpc_len, ts,
-                                       evicted, NFS3_DRC_EVICT_MAX);
-    evpl_mutex_unlock(&drc->lock);
+    stored = nfs3_drc_cache_complete(drc, &ctx->key, reply, ts,
+                                     evicted, NFS3_DRC_EVICT_MAX, &nev);
+    ctx->completed = 1;
 
     if (!drc->persistence_disabled) {
-        nfs3_drc_kv_put(thread->vfs_thread, drc->kv_type, &ctx->key, buf,
-                        rpc_len, ts);
+        if (stored) {
+            nfs3_drc_kv_put(thread->vfs_thread, drc->kv_type, &ctx->key,
+                            reply->data, reply->len, ts);
+        }
         for (i = 0; i < nev; i++) {
             nfs3_drc_kv_delete(thread->vfs_thread, drc->kv_type, &evicted[i]);
         }
     }
 
-    free(buf);
+    nfs3_drc_reply_put(reply);
 } /* nfs3_drc_capture_reply */
+
+/* Fires exactly once when the request ends, however it ends (libevpl's
+ * request-end hook): replied to, rejected before its handler ran, its reply
+ * dropped with a closed connection, or discarded.  An in-progress entry whose
+ * original ends without a captured reply is abandoned here -- the one place no
+ * path can bypass, so such an entry can never outlive its original. */
+static void
+nfs3_drc_request_end(void *private_data)
+{
+    struct nfs3_drc_capture_ctx *ctx = private_data;
+
+    if (ctx->reserved && !ctx->completed) {
+        nfs3_drc_cache_abandon(ctx->drc, &ctx->key);
+    }
+} /* nfs3_drc_request_end */
 
 /* ------------------------------------------------------------------ *
 *  lazy per-client hydrate                                           *
@@ -561,14 +876,104 @@ nfs3_drc_addr_mark_hydrated(
     evpl_mutex_unlock(&drc->lock);
 } /* nfs3_drc_addr_mark_hydrated */
 
-/* In-memory lookup, then either replay (hit) or arm-capture + run the real
- * handler (miss).  Used directly on the hydrated path and again to resume a
- * deferred op once its client's band has loaded. */
+/* ------------------------------------------------------------------ *
+*  execution                                                         *
+* ------------------------------------------------------------------ */
+
+/* Test only: a request parked for drc->test_delay_ms before it runs.  Kept on
+ * its thread's drc_parked list, so a disconnect or a thread shutdown cancels
+ * it like any other request still waiting on this cache. */
+struct nfs3_drc_delay_ctx {
+    struct evpl_timer                 timer;
+    struct chimera_server_nfs_thread *thread;
+    struct nfs3_drc                  *drc;
+    struct evpl                      *evpl;
+    struct evpl_rpc2_conn            *conn;
+    struct evpl_rpc2_encoding        *encoding;
+    uint32_t                          proc;
+    void                             *program_data;
+    struct evpl_rpc2_cred             cred;   /* shallow copy; ptrs into dbuf */
+    int                               has_cred;
+    xdr_iovec                        *iov;
+    int                               niov;
+    int                               length;
+    void                             *private_data;
+    struct nfs3_drc_delay_ctx        *prev, *next;  /* thread->drc_parked */
+};
+
+/* Run the real handler.  `deferred` says the dispatch that delivered the
+ * request has already returned, so a rejection can no longer be handed back
+ * to rpc2 to answer and the request is released instead.  Either way the
+ * request-end hook then abandons an entry the request reserved. */
+static int
+nfs3_drc_execute(
+    struct nfs3_drc           *drc,
+    int                        deferred,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_encoding *encoding,
+    uint32_t                   proc,
+    void                      *program_data,
+    struct evpl_rpc2_cred     *cred,
+    xdr_iovec                 *iov,
+    int                        niov,
+    int                        length,
+    void                      *private_data)
+{
+    int rc;
+
+    rc = drc->orig_dispatch(evpl, conn, encoding, proc, program_data,
+                            cred, iov, niov, length, private_data);
+    if (rc != 0 && deferred) {
+        evpl_rpc2_discard_request(evpl, encoding);
+        rc = 0;
+    }
+    return rc;
+} /* nfs3_drc_execute */
+
+static void
+nfs3_drc_delay_fire(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct nfs3_drc_delay_ctx *dc = container_of(timer, struct nfs3_drc_delay_ctx,
+                                                 timer);
+
+    (void) evpl;
+
+    NFS3_DRC_DL_UNLINK(dc->thread->drc_parked, dc, prev, next);
+    nfs3_drc_execute(dc->drc, 1, dc->evpl, dc->conn, dc->encoding, dc->proc,
+                     dc->program_data, dc->has_cred ? &dc->cred : NULL,
+                     dc->iov, dc->niov, dc->length, dc->private_data);
+    free(dc);
+} /* nfs3_drc_delay_fire */
+
+/* Release a parked request unrun.  Its request-end hook abandons the entry it
+ * reserved. */
+static void
+nfs3_drc_delay_cancel(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs3_drc_delay_ctx        *dc)
+{
+    evpl_remove_timer(thread->evpl, &dc->timer);
+    NFS3_DRC_DL_UNLINK(thread->drc_parked, dc, prev, next);
+    evpl_rpc2_discard_request(thread->evpl, dc->encoding);
+    free(dc);
+} /* nfs3_drc_delay_cancel */
+
+static void
+nfs3_drc_timer_arm(
+    struct chimera_server_nfs_thread *thread);
+
+/* Answer, hold, drop or execute one cacheable request.  Used directly on the
+ * hydrated path and again (deferred) to resume a request once its client's
+ * band has loaded. */
 static int
 nfs3_drc_lookup_or_forward(
     struct nfs3_drc                  *drc,
     struct chimera_server_nfs_thread *thread,
     const struct nfs3_drc_keybuf     *key,
+    int                               deferred,
     struct evpl                      *evpl,
     struct evpl_rpc2_conn            *conn,
     struct evpl_rpc2_encoding        *encoding,
@@ -580,32 +985,104 @@ nfs3_drc_lookup_or_forward(
     int                               length,
     void                             *private_data)
 {
+    struct nfs3_drc_waiter      *w     = NULL;
+    struct nfs3_drc_reply       *reply = NULL;
     struct nfs3_drc_capture_ctx *cctx;
-    uint8_t                     *cached;
-    uint32_t                     cached_len;
+    struct nfs3_drc_delay_ctx   *dc;
+    enum nfs3_drc_reserve_result res;
 
-    if (nfs3_drc_cache_lookup(drc, key, &cached, &cached_len)) {
-        int rc = nfs_drc_send_cached_reply(thread, encoding, cached, cached_len);
-
-        free(cached);
-        if (rc == 0) {
-            return 0;  /* retransmit replayed from cache */
+    /* A waiter lives in the request's own dbuf (a bump allocation, no malloc);
+     * without one (exhausted dbuf, or a thread without the waiter machinery)
+     * a retransmit that finds its original in progress is dropped. */
+    if (thread->drc_armed) {
+        w = xdr_dbuf_alloc_space(sizeof(*w), encoding->dbuf);
+        if (w) {
+            memset(w, 0, sizeof(*w));
+            w->thread   = thread;
+            w->conn     = conn;
+            w->encoding = encoding;
         }
-        /* Unparseable cached reply (should not happen for a TCP MSG_ACCEPTED
-         * reply): fall through and re-execute. */
     }
 
+    res = nfs3_drc_cache_reserve(drc, key, conn, w, &reply);
+
+    switch (res) {
+        case NFS3_DRC_HIT:
+            if (nfs_drc_send_cached_reply(thread, encoding, reply->data,
+                                          reply->len) != 0) {
+                /* Could not build the replay.  Never re-execute a request
+                 * that has a cached reply: let the client retransmit. */
+                evpl_rpc2_discard_request(evpl, encoding);
+            }
+            nfs3_drc_reply_put(reply);
+            return 0;
+
+        case NFS3_DRC_HELD:
+            /* Answered later, by this thread, from the original's reply.
+             * The cache only holds a waiter it was given. */
+            chimera_nfs_abort_if(!w, "NFSv3 DRC: request held without a waiter");
+            DL_APPEND2(thread->drc_held, w, tprev, tnext);
+            nfs3_drc_timer_arm(thread);
+            return 0;
+
+        case NFS3_DRC_DROP:
+            evpl_rpc2_discard_request(evpl, encoding);
+            return 0;
+
+        case NFS3_DRC_RESERVED:
+        case NFS3_DRC_UNTRACKED:
+        default:
+            break;
+    } /* switch */
+
+    /* Executed by this request.  Arm the capture (its reply becomes the
+     * cached one) and the request-end hook (an entry it reserved is abandoned
+     * if it ends with no reply captured) before anything can end it. */
     cctx = xdr_dbuf_alloc_space(sizeof(*cctx), encoding->dbuf);
     if (cctx) {
         cctx->thread                    = thread;
         cctx->drc                       = drc;
         cctx->key                       = *key;
+        cctx->reserved                  = (res == NFS3_DRC_RESERVED);
+        cctx->completed                 = 0;
         encoding->reply_capture_cb      = nfs3_drc_capture_reply;
         encoding->reply_capture_private = cctx;
+        encoding->request_end_cb        = nfs3_drc_request_end;
+        encoding->request_end_private   = cctx;
+    } else if (res == NFS3_DRC_RESERVED) {
+        /* Nothing could ever end the entry: run untracked, as an exhausted
+         * dbuf always has. */
+        nfs3_drc_cache_abandon(drc, key);
     }
 
-    return drc->orig_dispatch(evpl, conn, encoding, proc, program_data,
-                              cred, iov, niov, length, private_data);
+    if (drc->test_delay_ms && !deferred) {
+        dc = calloc(1, sizeof(*dc));
+        if (dc) {
+            dc->thread       = thread;
+            dc->drc          = drc;
+            dc->evpl         = evpl;
+            dc->conn         = conn;
+            dc->encoding     = encoding;
+            dc->proc         = proc;
+            dc->program_data = program_data;
+            if (cred) {
+                dc->cred     = *cred;
+                dc->has_cred = 1;
+            }
+            dc->iov          = iov;
+            dc->niov         = niov;
+            dc->length       = length;
+            dc->private_data = private_data;
+            DL_APPEND2(thread->drc_parked, dc, prev, next);
+            evpl_add_oneshot_timer(evpl, &dc->timer, nfs3_drc_delay_fire,
+                                   (uint64_t) drc->test_delay_ms * 1000);
+            return 0;
+        }
+    }
+
+    return nfs3_drc_execute(drc, deferred, evpl, conn, encoding, proc,
+                            program_data, cred, iov, niov, length,
+                            private_data);
 } /* nfs3_drc_lookup_or_forward */
 
 /* A deferred request + the in-flight scan that loads its client's band.  The
@@ -693,12 +1170,259 @@ nfs3_drc_hydrate_complete(
                          "for a returning client", drc->kv_type, hc->loaded);
     }
 
-    nfs3_drc_lookup_or_forward(drc, hc->thread, &hc->key, hc->evpl, hc->conn,
+    nfs3_drc_lookup_or_forward(drc, hc->thread, &hc->key, 1, hc->evpl, hc->conn,
                                hc->encoding, hc->proc, hc->program_data,
                                hc->has_cred ? &hc->cred : NULL,
                                hc->iov, hc->niov, hc->length, hc->private_data);
     free(hc);
 } /* nfs3_drc_hydrate_complete */
+
+/* ------------------------------------------------------------------ *
+*  held retransmits                                                  *
+*                                                                    *
+*  Everything here runs on the waiter's own thread, the one that owns *
+*  its connection: only that thread may answer or release the held   *
+*  request.  Other threads only ever move a waiter from its entry to  *
+*  this thread's mailbox (nfs3_drc_release_waiters_locked).           *
+* ------------------------------------------------------------------ */
+
+/* Answer (with its reply) or release one waiter this thread owns and has
+ * already unlinked from its entry, its mailbox and its held list. */
+static void
+nfs3_drc_waiter_finish(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs3_drc_waiter           *w)
+{
+    struct evpl_rpc2_encoding *encoding = w->encoding;
+    struct nfs3_drc_reply     *reply    = w->reply;
+
+    /* w lives in the request's dbuf: nothing below may touch it. */
+    if (!reply || nfs_drc_send_cached_reply(thread, encoding, reply->data,
+                                            reply->len) != 0) {
+        evpl_rpc2_discard_request(thread->evpl, encoding);
+    }
+    nfs3_drc_reply_put(reply);
+} /* nfs3_drc_waiter_finish */
+
+static void
+nfs3_drc_doorbell(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct chimera_server_nfs_thread *thread = container_of(doorbell,
+                                                            struct chimera_server_nfs_thread,
+                                                            drc_doorbell);
+    struct nfs3_drc_waiter           *q, *w;
+
+    (void) evpl;
+
+    evpl_mutex_lock(&thread->drc_mbox_lock);
+    q                = thread->drc_mbox;
+    thread->drc_mbox = NULL;
+    evpl_mutex_unlock(&thread->drc_mbox_lock);
+
+    while (q) {
+        w = q;
+        q = w->qnext;
+        NFS3_DRC_DL_UNLINK(thread->drc_held, w, tprev, tnext);
+        nfs3_drc_waiter_finish(thread, w);
+    }
+} /* nfs3_drc_doorbell */
+
+/* Unlink one owned waiter from wherever the cache has it -- its entry if still
+ * held, this thread's mailbox if already queued -- and from the held list,
+ * then release it unanswered, counted as `ev`.  With only_if_held, a waiter
+ * already queued for an answer is left for the doorbell instead, and 0 is
+ * returned. */
+static int
+nfs3_drc_waiter_drop(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs3_drc_waiter           *w,
+    int                               only_if_held,
+    enum nfs3_drc_event               ev)
+{
+    struct nfs3_drc *drc = &thread->shared->nfs3_drc;
+
+    evpl_mutex_lock(&drc->lock);
+    if (w->state == NFS3_DRC_WAITER_HELD) {
+        NFS3_DRC_DL_UNLINK(w->entry->waiters, w, prev, next);
+        w->entry = NULL;
+        drc->held--;
+        nfs3_drc_count_locked(drc, ev);
+        nfs3_drc_gauges_locked(drc);
+    } else if (only_if_held) {
+        evpl_mutex_unlock(&drc->lock);
+        return 0;
+    } else {
+        /* Queued: pushed under drc->lock, so it is in the mailbox now (the
+         * mailbox is only ever drained on this thread, which is here). */
+        evpl_mutex_lock(&thread->drc_mbox_lock);
+        LL_DELETE2(thread->drc_mbox, w, qnext);
+        evpl_mutex_unlock(&thread->drc_mbox_lock);
+    }
+    evpl_mutex_unlock(&drc->lock);
+
+    NFS3_DRC_DL_UNLINK(thread->drc_held, w, tprev, tnext);
+    nfs3_drc_reply_put(w->reply);
+    w->reply = NULL;
+    nfs3_drc_waiter_finish(thread, w);
+    return 1;
+} /* nfs3_drc_waiter_drop */
+
+static void
+nfs3_drc_timer(
+    struct evpl       *evpl,
+    struct evpl_timer *timer);
+
+/* Arm the deadline check if this thread holds waiters and it is not armed.
+ * It runs only while something is held: an idle server has no timer. */
+static void
+nfs3_drc_timer_arm(struct chimera_server_nfs_thread *thread)
+{
+    uint64_t tick_us;
+
+    if (thread->drc_timer_armed || !thread->drc_held) {
+        return;
+    }
+
+    /* A few checks per hold period, and at least one a second. */
+    tick_us = thread->shared->nfs3_drc.hold_ns / 4000;
+    if (tick_us < 1000) {
+        tick_us = 1000;
+    } else if (tick_us > 1000000) {
+        tick_us = 1000000;
+    }
+    evpl_add_oneshot_timer(thread->evpl, &thread->drc_timer, nfs3_drc_timer,
+                           tick_us);
+    thread->drc_timer_armed = 1;
+} /* nfs3_drc_timer_arm */
+
+/* Drop waiters held past their deadline.  Their entry stays in progress, so
+ * the client's next retransmit is held again -- or, if the original has
+ * finished by then, answered from the cache. */
+static void
+nfs3_drc_timer(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_server_nfs_thread *thread = container_of(timer,
+                                                            struct chimera_server_nfs_thread,
+                                                            drc_timer);
+    struct nfs3_drc_waiter           *w, *tmp;
+    uint64_t                          now = nfs_lease_now_ns();
+
+    (void) evpl;
+
+    thread->drc_timer_armed = 0;   /* one-shot: already removed */
+
+    /* The deadline is fixed before a waiter joins this list, by this thread;
+     * whether it is still held is decided under the lock. */
+    DL_FOREACH_SAFE2(thread->drc_held, w, tmp, tnext)
+    {
+        if (now >= w->deadline) {
+            (void) nfs3_drc_waiter_drop(thread, w, 1, NFS3_DRC_EV_DROP_DEADLINE);
+        }
+    }
+
+    nfs3_drc_timer_arm(thread);
+} /* nfs3_drc_timer */
+
+void
+nfs3_drc_conn_close(
+    struct chimera_server_nfs_thread *thread,
+    struct evpl_rpc2_conn            *conn)
+{
+    struct nfs3_drc_waiter    *w, *tmp;
+    struct nfs3_drc_delay_ctx *dc, *dtmp;
+
+    if (!thread->drc_armed) {
+        return;
+    }
+
+    DL_FOREACH_SAFE2(thread->drc_held, w, tmp, tnext)
+    {
+        if (w->conn == conn) {
+            (void) nfs3_drc_waiter_drop(thread, w, 0,
+                                        NFS3_DRC_EV_DROP_DISCONNECT);
+        }
+    }
+    DL_FOREACH_SAFE2(thread->drc_parked, dc, dtmp, next)
+    {
+        if (dc->conn == conn) {
+            nfs3_drc_delay_cancel(thread, dc);
+        }
+    }
+} /* nfs3_drc_conn_close */
+
+void
+nfs3_drc_thread_init(struct chimera_server_nfs_thread *thread)
+{
+    struct nfs3_drc *drc = &thread->shared->nfs3_drc;
+
+    thread->drc_mbox        = NULL;
+    thread->drc_held        = NULL;
+    thread->drc_parked      = NULL;
+    thread->drc_armed       = 0;
+    thread->drc_timer_armed = 0;
+
+    if (!drc->orig_dispatch) {
+        return;  /* the cache is not installed */
+    }
+
+    evpl_mutex_init(&thread->drc_mbox_lock, NULL);
+    evpl_add_doorbell(thread->evpl, &thread->drc_doorbell, nfs3_drc_doorbell);
+    thread->drc_armed = 1;
+} /* nfs3_drc_thread_init */
+
+void
+nfs3_drc_thread_destroy(struct chimera_server_nfs_thread *thread)
+{
+    struct nfs3_drc           *drc = &thread->shared->nfs3_drc;
+    struct nfs3_drc_waiter    *w, *tmp;
+    struct nfs3_drc_delay_ctx *dc, *dtmp;
+
+    if (!thread->drc_armed) {
+        return;
+    }
+
+    /* Server stop closes every connection before its threads are torn down,
+     * so nfs3_drc_conn_close has normally released everything here already
+     * and this finds nothing.  It stays as the guarantee should that order
+     * ever change: a request left parked or held at this point could never be
+     * answered or freed.
+     *
+     * Parked requests first: releasing one abandons its entry, which queues
+     * that entry's waiters -- possibly this thread's -- for the drain below. */
+    DL_FOREACH_SAFE2(thread->drc_parked, dc, dtmp, next)
+    {
+        nfs3_drc_delay_cancel(thread, dc);
+    }
+
+    /* Answer what has already been answered, release the rest. */
+    nfs3_drc_doorbell(thread->evpl, &thread->drc_doorbell);
+    DL_FOREACH_SAFE2(thread->drc_held, w, tmp, tnext)
+    {
+        (void) nfs3_drc_waiter_drop(thread, w, 0, NFS3_DRC_EV_DROP_SHUTDOWN);
+    }
+
+    if (thread->drc_timer_armed) {
+        evpl_remove_timer(thread->evpl, &thread->drc_timer);
+        thread->drc_timer_armed = 0;
+    }
+
+    /* A completion on another thread queues a waiter of ours and then rings
+     * our doorbell, under drc->lock throughout but outside our mailbox lock:
+     * the drain above can take that waiter between the two, leaving nothing
+     * here to wait on, and the ring would then land on a removed doorbell.
+     * Retire it under drc->lock, which waits out a ring in progress.  With
+     * every waiter of ours already drained or dropped, no later completion
+     * can target this thread. */
+    evpl_mutex_lock(&drc->lock);
+    evpl_remove_doorbell(thread->evpl, &thread->drc_doorbell);
+    evpl_mutex_unlock(&drc->lock);
+    evpl_mutex_destroy(&thread->drc_mbox_lock);
+    thread->drc_armed = 0;
+} /* nfs3_drc_thread_destroy */
 
 /* ------------------------------------------------------------------ *
 *  dispatch core                                                     *
@@ -727,7 +1451,7 @@ nfs3_drc_serve(
      * an in-memory miss is definitive.  Either way, serve from memory. */
     if (drc->persistence_disabled ||
         nfs3_drc_addr_hydrated(drc, key->addr, key->addr_len)) {
-        return nfs3_drc_lookup_or_forward(drc, thread, key, evpl, conn, encoding,
+        return nfs3_drc_lookup_or_forward(drc, thread, key, 0, evpl, conn, encoding,
                                           proc, program_data, cred, iov, niov,
                                           length, private_data);
     }
@@ -738,7 +1462,7 @@ nfs3_drc_serve(
      * because we do not reply -- and resume it when the scan completes. */
     hc = malloc(sizeof(*hc));
     if (!hc) {
-        return nfs3_drc_lookup_or_forward(drc, thread, key, evpl, conn, encoding,
+        return nfs3_drc_lookup_or_forward(drc, thread, key, 0, evpl, conn, encoding,
                                           proc, program_data, cred, iov, niov,
                                           length, private_data);
     }
@@ -826,13 +1550,99 @@ nfs3_drc_init(
     uint8_t          kv_type)
 {
     evpl_mutex_init(&drc->lock, NULL);
-    drc->table                = NULL;
-    drc->hydrated             = NULL;
-    drc->bytes                = 0;
+    drc->table    = NULL;
+    drc->hydrated = NULL;
+    drc->bytes    = 0;
+    drc->inprog   = 0;
+    drc->held     = 0;
+    drc->hold_ns  = (uint64_t) (NFS4_LEASE_TIME_DEFAULT_S +
+                                NFS3_DRC_HOLD_SLACK_S) * 1000000000ULL;
+    drc->last_stuck_report    = 0;
+    drc->test_delay_ms        = 0;
     drc->kv_type              = kv_type;
     drc->persistence_disabled = 0;
     drc->orig_dispatch        = NULL;
+    memset(drc->events, 0, sizeof(drc->events));
+    memset(&drc->metrics, 0, sizeof(drc->metrics));
 } /* nfs3_drc_init */
+
+/* The event label each counter series carries, by enum nfs3_drc_event. */
+static const char *const nfs3_drc_event_names[NFS3_DRC_EV_COUNT] = {
+    [NFS3_DRC_EV_RESERVED]             = "reserved",
+    [NFS3_DRC_EV_UNTRACKED]            = "untracked",
+    [NFS3_DRC_EV_REPLAYED]             = "replayed",
+    [NFS3_DRC_EV_HELD]                 = "held",
+    [NFS3_DRC_EV_ANSWERED]             = "answered",
+    [NFS3_DRC_EV_ABANDONED]            = "abandoned",
+    [NFS3_DRC_EV_DROP_ORIGIN_CONN]     = "drop_origin_conn",
+    [NFS3_DRC_EV_DROP_ALREADY_WAITING] = "drop_already_waiting",
+    [NFS3_DRC_EV_DROP_CEILING]         = "drop_ceiling",
+    [NFS3_DRC_EV_DROP_NO_WAITER]       = "drop_no_waiter",
+    [NFS3_DRC_EV_DROP_DEADLINE]        = "drop_deadline",
+    [NFS3_DRC_EV_DROP_DISCONNECT]      = "drop_disconnect",
+    [NFS3_DRC_EV_DROP_ABANDONED]       = "drop_abandoned",
+    [NFS3_DRC_EV_DROP_SHUTDOWN]        = "drop_shutdown",
+};
+
+/* chimera_nfs3_drc{event=...} counts what the cache did with each request;
+ * chimera_nfs3_drc_state{state="in_progress"|"held"} is how many entries are
+ * in progress and how many retransmits are held right now.  A growing
+ * in_progress with nothing completing is an original wedged below the
+ * cache. */
+static void
+nfs3_drc_metrics_init(
+    struct nfs3_drc           *drc,
+    struct prometheus_metrics *registry)
+{
+    struct nfs3_drc_metrics *m = &drc->metrics;
+    int                      i;
+
+    if (!registry) {
+        return;
+    }
+    m->registry = registry;
+    m->counter  = prometheus_metrics_create_counter(
+        registry, "chimera_nfs3_drc",
+        "NFSv3 duplicate-request cache: what was done with each request");
+    for (i = 0; i < NFS3_DRC_EV_COUNT; i++) {
+        m->series[i] = prometheus_counter_create_series(
+            m->counter, (const char *[]) { "event" },
+            (const char *[]) { nfs3_drc_event_names[i] }, 1);
+        m->events[i] = prometheus_counter_series_create_instance(m->series[i]);
+    }
+    m->gauge = prometheus_metrics_create_gauge(
+        registry, "chimera_nfs3_drc_state",
+        "NFSv3 duplicate-request cache: entries in progress and retransmits held");
+    m->inprog_series = prometheus_gauge_create_series(
+        m->gauge, (const char *[]) { "state" },
+        (const char *[]) { "in_progress" }, 1);
+    m->held_series = prometheus_gauge_create_series(
+        m->gauge, (const char *[]) { "state" }, (const char *[]) { "held" }, 1);
+    m->inprog = prometheus_gauge_series_create_instance(m->inprog_series);
+    m->held   = prometheus_gauge_series_create_instance(m->held_series);
+} /* nfs3_drc_metrics_init */
+
+static void
+nfs3_drc_metrics_destroy(struct nfs3_drc *drc)
+{
+    struct nfs3_drc_metrics *m = &drc->metrics;
+    int                      i;
+
+    if (!m->registry) {
+        return;
+    }
+    for (i = 0; i < NFS3_DRC_EV_COUNT; i++) {
+        prometheus_counter_series_destroy_instance(m->series[i], m->events[i]);
+        prometheus_counter_destroy_series(m->counter, m->series[i]);
+    }
+    prometheus_counter_destroy(m->registry, m->counter);
+    prometheus_gauge_series_destroy_instance(m->inprog_series, m->inprog);
+    prometheus_gauge_series_destroy_instance(m->held_series, m->held);
+    prometheus_gauge_destroy_series(m->gauge, m->inprog_series);
+    prometheus_gauge_destroy_series(m->gauge, m->held_series);
+    prometheus_gauge_destroy(m->registry, m->gauge);
+    memset(m, 0, sizeof(*m));
+} /* nfs3_drc_metrics_destroy */
 
 void
 nfs3_drc_destroy(struct nfs3_drc *drc)
@@ -847,7 +1657,7 @@ nfs3_drc_destroy(struct nfs3_drc *drc)
     HASH_ITER(hh, drc->table, e, tmp)
     {
         HASH_DELETE(hh, drc->table, e);
-        free(e->buf);
+        nfs3_drc_reply_put(e->reply);   /* NULL for an entry in progress */
         free(e);
     }
     HASH_ITER(hh, drc->hydrated, h, htmp)
@@ -856,6 +1666,7 @@ nfs3_drc_destroy(struct nfs3_drc *drc)
         free(h);
     }
 #endif /* ifndef __clang_analyzer__ */
+    nfs3_drc_metrics_destroy(drc);
     evpl_mutex_destroy(&drc->lock);
 } /* nfs3_drc_destroy */
 
@@ -879,7 +1690,35 @@ nfs3_drc_install(
             "request cache will not survive a server restart", kvname);
     }
 
+    nfs3_drc_metrics_init(drc, shared->metrics);
+
+    /* Test only: see struct nfs3_drc. */
+    {
+        const char *d = getenv("CHIMERA_NFS3_DRC_TEST_DELAY_MS");
+
+        if (d && atoi(d) > 0) {
+            drc->test_delay_ms = (uint32_t) atoi(d);
+        }
+    }
+
     /* Wrap the generated NFS_V3 call dispatcher. */
     drc->orig_dispatch                     = shared->nfs_v3.rpc2.recv_call_dispatch;
     shared->nfs_v3.rpc2.recv_call_dispatch = nfs3_drc_dispatch;
 } /* nfs3_drc_install */
+
+void
+nfs3_drc_set_lease_time(
+    struct nfs3_drc *drc,
+    uint32_t         lease_time_s)
+{
+    const char *h = getenv("CHIMERA_NFS3_DRC_TEST_HOLD_MS");
+
+    drc->hold_ns = (uint64_t) (lease_time_s + NFS3_DRC_HOLD_SLACK_S) *
+        1000000000ULL;
+
+    /* Test only: lets a test watch a held retransmit expire without waiting
+     * out a lease. */
+    if (h && atoi(h) > 0) {
+        drc->hold_ns = (uint64_t) atoi(h) * 1000000ULL;
+    }
+} /* nfs3_drc_set_lease_time */

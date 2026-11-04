@@ -2051,15 +2051,371 @@ test_nfs3_cache_lookup(void)
     /* A different xid (same client/proc) is a distinct identity -> miss. */
     CHECK(nfs3_drc_cache_lookup(&drc,&k2,&out,&out_len) == 0);
 
-    /* Re-insert under the same key replaces last-writer-wins. */
+    /* Re-insert under the same key keeps the first reply: it is the one a
+     * client may already have seen, and every retransmit must get it. */
     nfs3_drc_cache_insert(&drc,&k1,"NEW",3,2);
     CHECK(nfs3_drc_cache_lookup(&drc,&k1,&out,&out_len) == 1);
-    CHECK(out_len == 3 && memcmp(out,"NEW",3) == 0);
+    CHECK(out_len == sizeof(reply));
+    CHECK(memcmp(out,reply,sizeof(reply)) == 0);
     free(out);
 
     nfs3_drc_destroy(&drc);
     printf("ok: nfs3_cache_lookup\n");
 } /* test_nfs3_cache_lookup */
+
+/*
+ * chimera#1375: a retransmit that arrives while its original is still
+ * executing must find the request in progress -- not miss and execute it a
+ * second time -- and the reply it is eventually given must be the original's.
+ * These drive the cache's state machine directly; the held-and-replayed path
+ * end to end is nfs_drc_inprog_probe.
+ */
+
+/* Connection identities: compared by the cache, never dereferenced. */
+static int conn_a,conn_b,conn_c;
+
+/* Complete `k` with `body`, as the capture path does. */
+static int
+nfs3_complete_with(
+    struct nfs3_drc             *drc,
+    const struct nfs3_drc_keybuf*k,
+    const void                  *body,
+    uint32_t                     len,
+    uint64_t                     ts)
+{
+    struct nfs3_drc_reply *reply = nfs3_drc_reply_alloc(body,len);
+    struct nfs3_drc_keybuf ev[8];
+    int                    nev,stored;
+
+    CHECK(reply);
+    stored = nfs3_drc_cache_complete(drc,k,reply,ts,ev,8,&nev);
+    nfs3_drc_reply_put(reply);
+    return stored;
+} /* nfs3_complete_with */
+
+static void
+test_nfs3_inprog_state_machine(void)
+{
+    struct nfs3_drc        drc;
+    struct nfs3_drc_keybuf k = nfs3_make_key("192.168.0.9",12,9001,
+                                             "remove-args",11);
+    const uint8_t          ok[]  = "REMOVE3res-NFS3_OK";
+    const uint8_t          err[] = "REMOVE3res-NOENT";
+    struct nfs3_drc_reply *hit   = NULL;
+    uint8_t               *out   = NULL;
+    uint32_t               out_len;
+
+    nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+
+    /* First arrival reserves the identity. */
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_a,NULL,&hit) ==
+          NFS3_DRC_RESERVED);
+    CHECK(drc.inprog == 1);
+    CHECK(drc.events[NFS3_DRC_EV_RESERVED] == 1);
+
+    /* A retransmit while it runs is neither a miss nor a hit.  With no waiter
+     * to hold, it is dropped (the client sends it again). */
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_b,NULL,&hit) ==
+          NFS3_DRC_DROP);
+    CHECK(drc.events[NFS3_DRC_EV_DROP_NO_WAITER] == 1);
+
+    /* ...and an in-progress entry is not a lookup hit either. */
+    CHECK(nfs3_drc_cache_lookup(&drc,&k,&out,&out_len) == 0);
+
+    /* The original completes: its reply is stored. */
+    CHECK(nfs3_complete_with(&drc,&k,ok,sizeof(ok),1) == 1);
+    CHECK(drc.inprog == 0);
+
+    /* A second completion -- what a duplicate execution would produce -- does
+     * not replace it.  This is the overwrite #1375 reports. */
+    CHECK(nfs3_complete_with(&drc,&k,err,sizeof(err),2) == 0);
+
+    /* Every retransmit from now on replays the original's reply. */
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_b,NULL,&hit) == NFS3_DRC_HIT);
+    CHECK(hit && hit->len == sizeof(ok) && memcmp(hit->data,ok,sizeof(ok)) == 0);
+    nfs3_drc_reply_put(hit);
+    CHECK(drc.events[NFS3_DRC_EV_REPLAYED] == 1);
+
+    nfs3_drc_destroy(&drc);
+    printf("ok: nfs3_inprog_state_machine\n");
+} /* test_nfs3_inprog_state_machine */
+
+/*
+ * Eviction is oldest-first, and an entry is inserted when it is reserved.  A
+ * reply ages from when it was produced, though: an original that finishes late
+ * must not complete as the oldest reply in the cache, to be the next evicted
+ * and leave its retransmit to execute again.  A is reserved before B but
+ * completes after it, so when the cache is full B goes and A stays.
+ */
+static void
+test_nfs3_evicts_oldest_completed(void)
+{
+    struct nfs3_drc        drc;
+    struct nfs3_drc_keybuf a = nfs3_make_key("192.168.0.9",12,9101,
+                                             "remove-a",8);
+    struct nfs3_drc_keybuf b = nfs3_make_key("192.168.0.9",12,9102,
+                                             "remove-b",8);
+    struct nfs3_drc_keybuf k;
+    struct nfs3_drc_reply *hit = NULL;
+    /* Replies of the largest size the capture keeps; the budget holds
+     * exactly `fit` of them. */
+    const uint32_t         size = NFS3_DRC_MAX_REPLY_SIZE;
+    const uint32_t         fit  = NFS3_DRC_MAX_BYTES / NFS3_DRC_MAX_REPLY_SIZE;
+    uint8_t               *body = calloc(1,size);
+    uint8_t               *out  = NULL;
+    uint32_t               out_len,i;
+
+    CHECK(body != NULL);
+    nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+
+    CHECK(nfs3_drc_cache_reserve(&drc,&a,&conn_a,NULL,&hit) ==
+          NFS3_DRC_RESERVED);
+    CHECK(nfs3_drc_cache_reserve(&drc,&b,&conn_a,NULL,&hit) ==
+          NFS3_DRC_RESERVED);
+    CHECK(nfs3_complete_with(&drc,&b,body,size,1) == 1);
+    CHECK(nfs3_complete_with(&drc,&a,body,size,2) == 1);
+
+    /* Fill the rest of the budget, then one more: exactly one reply must go,
+     * and it is the one produced first. */
+    for (i = 0; i <= fit - 2; i++) {
+        k = nfs3_make_key("192.168.0.9",12,9200 + i,"remove-n",8);
+        CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_a,NULL,&hit) ==
+              NFS3_DRC_RESERVED);
+        CHECK(nfs3_complete_with(&drc,&k,body,size,3 + i) == 1);
+    }
+
+    CHECK(nfs3_drc_cache_lookup(&drc,&b,&out,&out_len) == 0);
+    CHECK(nfs3_drc_cache_lookup(&drc,&a,&out,&out_len) == 1);
+    free(out);
+
+    nfs3_drc_destroy(&drc);
+    free(body);
+    printf("ok: nfs3_evicts_oldest_completed\n");
+} /* test_nfs3_evicts_oldest_completed */
+
+/* An original that ends without a cacheable reply (rejected before its
+ * handler ran, its reply not captured, discarded) releases its identity: the
+ * next arrival is a fresh request again, as it was before the fix. */
+static void
+test_nfs3_inprog_abandon(void)
+{
+    struct nfs3_drc        drc;
+    struct nfs3_drc_keybuf k = nfs3_make_key("192.168.0.9",9,9101,
+                                             "mkdir-args",10);
+    struct nfs3_drc_reply *hit = NULL;
+    uint8_t               *out = NULL;
+    uint32_t               out_len;
+
+    nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_a,NULL,&hit) ==
+          NFS3_DRC_RESERVED);
+    nfs3_drc_cache_abandon(&drc,&k);
+    CHECK(drc.inprog == 0);
+    CHECK(drc.events[NFS3_DRC_EV_ABANDONED] == 1);
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_a,NULL,&hit) ==
+          NFS3_DRC_RESERVED);
+
+    /* Abandoning a completed entry is a no-op: its reply stays. */
+    CHECK(nfs3_complete_with(&drc,&k,"OK",2,1) == 1);
+    nfs3_drc_cache_abandon(&drc,&k);
+    CHECK(drc.events[NFS3_DRC_EV_ABANDONED] == 1);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k,&out,&out_len) == 1);
+    CHECK(out_len == 2 && memcmp(out,"OK",2) == 0);
+    free(out);
+
+    nfs3_drc_destroy(&drc);
+    printf("ok: nfs3_inprog_abandon\n");
+} /* test_nfs3_inprog_abandon */
+
+/* Eviction makes room from cached entries only.  An in-progress entry holds
+ * no bytes and must survive any amount of pressure, or a retransmit arriving
+ * after it was evicted would execute the request a second time. */
+static void
+test_nfs3_inprog_survives_eviction(void)
+{
+    struct nfs3_drc        drc;
+    struct nfs3_drc_keybuf busy = nfs3_make_key("192.168.0.9",14,9200,
+                                                "rename-args",11);
+    struct nfs3_drc_keybuf k;
+    static uint8_t         big[NFS3_DRC_MAX_REPLY_SIZE];
+    struct nfs3_drc_reply *hit = NULL;
+    uint8_t               *out = NULL;
+    uint32_t               i,out_len;
+
+    nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+
+    CHECK(nfs3_drc_cache_reserve(&drc,&busy,&conn_a,NULL,&hit) ==
+          NFS3_DRC_RESERVED);
+
+    /* Twice the byte budget in completed replies forces eviction. */
+    for (i = 0; i < 2 * (NFS3_DRC_MAX_BYTES / sizeof(big)); i++) {
+        k = nfs3_make_key("192.168.0.9",9,9300 + i,"mkdir",5);
+        CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_a,NULL,&hit) ==
+              NFS3_DRC_RESERVED);
+        nfs3_complete_with(&drc,&k,big,sizeof(big),i);
+    }
+    CHECK(drc.bytes <= NFS3_DRC_MAX_BYTES);
+    k = nfs3_make_key("192.168.0.9",9,9300,"mkdir",5);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k,&out,&out_len) == 0);  /* oldest went */
+
+    /* The in-progress entry is still there, still in progress. */
+    CHECK(nfs3_drc_cache_reserve(&drc,&busy,&conn_b,NULL,&hit) ==
+          NFS3_DRC_DROP);
+    CHECK(drc.inprog == 1);
+
+    nfs3_drc_destroy(&drc);
+    printf("ok: nfs3_inprog_survives_eviction\n");
+} /* test_nfs3_inprog_survives_eviction */
+
+/* The KV reload runs while requests are live: a persisted reply for an
+ * identity that is in progress right now must not turn it into a hit. */
+static void
+test_nfs3_reload_keeps_inprog(void)
+{
+    struct nfs3_drc        drc;
+    struct nfs3_drc_keybuf k = nfs3_make_key("192.168.0.9",8,9400,
+                                             "create-args",11);
+    struct nfs3_drc_reply *hit = NULL;
+    uint8_t               *out = NULL;
+    uint32_t               out_len;
+
+    nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_a,NULL,&hit) ==
+          NFS3_DRC_RESERVED);
+    nfs3_drc_cache_insert(&drc,&k,"STALE",5,1);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k,&out,&out_len) == 0);
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_b,NULL,&hit) ==
+          NFS3_DRC_DROP);
+
+    nfs3_drc_destroy(&drc);
+    printf("ok: nfs3_reload_keeps_inprog\n");
+} /* test_nfs3_reload_keeps_inprog */
+
+/* Count and empty a thread's mailbox, checking each waiter's reply. */
+static int
+nfs3_mbox_take(
+    struct chimera_server_nfs_thread*t,
+    const void                      *want,
+    uint32_t                         want_len)
+{
+    struct nfs3_drc_waiter*w;
+    int                    n = 0;
+
+    while ((w = t->drc_mbox)) {
+        t->drc_mbox = w->qnext;
+        CHECK(w->state == NFS3_DRC_WAITER_QUEUED && !w->entry);
+        if (want) {
+            CHECK(w->reply && w->reply->len == want_len &&
+                  memcmp(w->reply->data,want,want_len) == 0);
+        } else {
+            CHECK(!w->reply);
+        }
+        nfs3_drc_reply_put(w->reply);
+        n++;
+    }
+    return n;
+} /* nfs3_mbox_take */
+
+static void
+nfs3_doorbell_noop(
+    struct evpl         *evpl,
+    struct evpl_doorbell*doorbell)
+{
+    (void) evpl;
+    (void) doorbell;
+} /* nfs3_doorbell_noop */
+
+/* Which retransmits are held, which dropped, and what the held ones are
+ * given.  A real event loop and doorbell stand behind the mailbox the cache
+ * hands waiters to; the waiters themselves are plain structs here, never
+ * answered (the probe does that end to end). */
+static void
+test_nfs3_waiter_rules(void)
+{
+    struct chimera_server_nfs_thread thread;
+    struct nfs3_drc                  drc;
+    struct nfs3_drc_waiter           wb,wb2,wc,wd;
+    struct nfs3_drc_keybuf           k = nfs3_make_key("192.168.0.9",9,9500,
+                                                       "mkdir-a",7);
+    struct nfs3_drc_keybuf           k2 = nfs3_make_key("192.168.0.9",9,9501,
+                                                        "mkdir-b",7);
+    const uint8_t                    ok[] = "MKDIR3res-NFS3_OK";
+    struct nfs3_drc_reply           *hit  = NULL;
+    struct evpl                     *evpl;
+    uint32_t                         held_before;
+
+    evpl = evpl_create(NULL);
+    memset(&thread,0,sizeof(thread));
+    thread.evpl = evpl;
+    evpl_mutex_init(&thread.drc_mbox_lock,NULL);
+    evpl_add_doorbell(evpl,&thread.drc_doorbell,nfs3_doorbell_noop);
+
+    nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+    drc.hold_ns = 1000000000ULL;
+
+#define WAITER(w,c) do { memset(&(w),0,sizeof(w)); (w).thread = &thread; \
+                         (w).conn                             = (void*) (c); } while (0)
+
+    /* The original arrives on conn A. */
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_a,NULL,&hit) ==
+          NFS3_DRC_RESERVED);
+
+    /* A retransmit on the original's own connection is dropped: the
+     * original's reply goes there anyway. */
+    WAITER(wd,&conn_a);
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_a,&wd,&hit) == NFS3_DRC_DROP);
+    CHECK(drc.events[NFS3_DRC_EV_DROP_ORIGIN_CONN] == 1);
+
+    /* One on conn B is held; a second from conn B is dropped. */
+    WAITER(wb,&conn_b);
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_b,&wb,&hit) == NFS3_DRC_HELD);
+    CHECK(wb.state == NFS3_DRC_WAITER_HELD && wb.entry);
+    WAITER(wb2,&conn_b);
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_b,&wb2,&hit) == NFS3_DRC_DROP);
+    CHECK(drc.events[NFS3_DRC_EV_DROP_ALREADY_WAITING] == 1);
+
+    /* One on conn C is held too. */
+    WAITER(wc,&conn_c);
+    CHECK(nfs3_drc_cache_reserve(&drc,&k,&conn_c,&wc,&hit) == NFS3_DRC_HELD);
+    CHECK(drc.held == 2 && drc.events[NFS3_DRC_EV_HELD] == 2);
+
+    /* The original completes: both held retransmits are queued to their
+     * thread with the original's reply -- one shared reply, three
+     * references (the entry's and one per waiter). */
+    CHECK(nfs3_complete_with(&drc,&k,ok,sizeof(ok),1) == 1);
+    CHECK(drc.held == 0 && drc.events[NFS3_DRC_EV_ANSWERED] == 2);
+    CHECK(wb.reply && wb.reply == wc.reply);
+    CHECK(atomic_load(&wb.reply->refs) == 3);
+    CHECK(nfs3_mbox_take(&thread,ok,sizeof(ok)) == 2);
+
+    /* At the ceiling, a retransmit that would be held is dropped instead. */
+    CHECK(nfs3_drc_cache_reserve(&drc,&k2,&conn_a,NULL,&hit) ==
+          NFS3_DRC_RESERVED);
+    held_before = drc.held;
+    drc.held    = NFS3_DRC_MAX_HELD;
+    WAITER(wb,&conn_b);
+    CHECK(nfs3_drc_cache_reserve(&drc,&k2,&conn_b,&wb,&hit) == NFS3_DRC_DROP);
+    CHECK(drc.events[NFS3_DRC_EV_DROP_CEILING] == 1);
+    drc.held = held_before;
+
+    /* An abandoned original releases its waiters unanswered. */
+    WAITER(wb,&conn_b);
+    CHECK(nfs3_drc_cache_reserve(&drc,&k2,&conn_b,&wb,&hit) == NFS3_DRC_HELD);
+    nfs3_drc_cache_abandon(&drc,&k2);
+    CHECK(drc.held == 0 && drc.inprog == 0);
+    CHECK(drc.events[NFS3_DRC_EV_DROP_ABANDONED] == 1);
+    CHECK(nfs3_mbox_take(&thread,NULL,0) == 1);
+
+#undef WAITER
+
+    nfs3_drc_destroy(&drc);
+    evpl_remove_doorbell(evpl,&thread.drc_doorbell);
+    evpl_mutex_destroy(&thread.drc_mbox_lock);
+    evpl_destroy(evpl);
+    printf("ok: nfs3_waiter_rules\n");
+} /* test_nfs3_waiter_rules */
 
 /*
  * The decisive NFSv3 check: persist a reply exactly as the capture path does
@@ -2600,6 +2956,12 @@ main(void)
     test_nfs3_checksum_and_cacheable();
     test_nfs3_value_roundtrip();
     test_nfs3_cache_lookup();
+    test_nfs3_inprog_state_machine();
+    test_nfs3_evicts_oldest_completed();
+    test_nfs3_inprog_abandon();
+    test_nfs3_inprog_survives_eviction();
+    test_nfs3_reload_keeps_inprog();
+    test_nfs3_waiter_rules();
     test_nfs3_cross_reboot();
     test_nfs3_drc_persist_switch();
 
