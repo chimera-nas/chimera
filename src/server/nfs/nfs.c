@@ -466,6 +466,24 @@ nfs_server_init(
                    shared->node_id,
                    chimera_server_config_get_nfs3_nsm_monitor_expiry(config));
 
+    /* Monitor records are keyed by node_id, so the restarted instance finds
+     * them only if it derives the same id.  The derived id hashes the machine
+     * name -- hostname, chimera version and machine id -- and changes whenever
+     * any of them does (an upgrade, a container recreated without a fixed
+     * hostname): the restart then scans an empty band, notifies no lock holder
+     * and ends the NLM grace window at once. */
+    if (!shared->nsm_state.persistence_disabled) {
+        int cfg_node = chimera_server_config_get_nfs4_node_id(config);
+
+        if (cfg_node <= 0 || cfg_node >= 0xFFFF) {
+            chimera_nfs_info("NSM persistence is on with a derived node_id: "
+                             "NLM lock reclaim across a restart needs a stable "
+                             "id, so pin nfs4_node_id if the hostname, "
+                             "machine-id or chimera version can change between "
+                             "restarts (an upgrade changes the version)");
+        }
+    }
+
     /* Every endpoint below goes through the flavor helper rather than
      * evpl_endpoint_create() directly, so that a run configured for the
      * in-process transport names its services instead of binding ports.  The
