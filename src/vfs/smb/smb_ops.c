@@ -1670,9 +1670,17 @@ chimera_smb_client_lookup_at(
      * followed here -- POSIX always follows mid-path symlinks -- rather than
      * surfaced as ELOOP.  The follow shim does exactly that: REPARSE_POINT means
      * a final link never trips it, while a mid-path stop (UnparsedPathLength>0)
-     * is spliced and retried. */
+     * is spliced and retried.
+     *
+     * READ_CONTROL: the enrich chain reads the owner/group/DACL on this handle
+     * for the real uid/gid/mode, and a server refuses that query on an open
+     * without READ_CONTROL (MS-FSA "Server Requests a Query of Security
+     * Information", 2.1.5.14 in the v2025-09 numbering).  So a lookup, like
+     * the other metadata opens here, needs READ_CONTROL to be grantable:
+     * where the server's ACL grants FILE_READ_ATTRIBUTES but not READ_CONTROL,
+     * the open is refused and the lookup fails with EACCES. */
     smb_send_create_follow(conn, request, path, path_len,
-                           SMB2_FILE_READ_ATTRIBUTES,
+                           SMB2_FILE_READ_ATTRIBUTES | SMB2_READ_CONTROL,
                            SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                            SMB2_FILE_OPEN, SMB2_FILE_OPEN_REPARSE_POINT,
                            NULL, 0,
