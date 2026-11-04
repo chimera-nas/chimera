@@ -25,12 +25,10 @@ struct chimera_vfs;
 struct chimera_vfs_thread;
 struct chimera_vfs_identity;
 
-enum chimera_vfs_identity_key {
-    CHIMERA_VFS_IDENTITY_BY_UID,
-    CHIMERA_VFS_IDENTITY_BY_GID,
-    CHIMERA_VFS_IDENTITY_BY_NAME,
-    CHIMERA_VFS_IDENTITY_BY_SID,
-};
+/* enum chimera_vfs_identity_key lives in vfs_user_cache.h. */
+
+/* How long an authoritative miss is cached. */
+#define CHIMERA_VFS_IDENTITY_NEGATIVE_TTL 60 /* seconds */
 
 /*
  * A resolved identity.  An identity is either a user or a group, and the two

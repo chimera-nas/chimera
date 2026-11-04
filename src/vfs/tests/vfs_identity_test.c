@@ -111,9 +111,10 @@ sid_bearing_handler(
  * provisional answer.  `calls` counts how often it was consulted for its id.
  */
 struct scripted {
-    uint32_t uid;
+    uint32_t    uid;
+    const char *sid; /* when set, also answers BY_SID for this string */
     enum chimera_vfs_identity_status status;
-    int      calls;
+    int         calls;
 };
 
 static enum chimera_vfs_identity_status
@@ -126,7 +127,12 @@ scripted_handler(
 {
     struct scripted *sc = private_data;
 
-    (void) name;
+    if (key == CHIMERA_VFS_IDENTITY_BY_SID && sc->sid && name &&
+        strcmp(name, sc->sid) == 0) {
+        sc->calls++;
+        return sc->status == CHIMERA_VFS_IDENTITY_OK ?
+               CHIMERA_VFS_IDENTITY_NOT_FOUND : sc->status;
+    }
 
     if (key != CHIMERA_VFS_IDENTITY_BY_UID || id != sc->uid) {
         return CHIMERA_VFS_IDENTITY_PASS;
@@ -472,6 +478,75 @@ main(
     assert(p.done == 1 && p.status == CHIMERA_VFS_IDENTITY_OK);
     assert(sc_a.calls == 1 && sc_b.calls == 1);
     TEST_PASS("provisional answer stands over a not-found handler");
+
+    /* An authoritative NOT_FOUND is cached: the second resolve completes
+     * inline with NOT_FOUND and consults no handler. */
+    sc_a.uid    = sc_b.uid = 0x7ffffff5;
+    sc_a.status = sc_b.status = CHIMERA_VFS_IDENTITY_NOT_FOUND;
+    sc_a.calls  = sc_b.calls = 0;
+    memset(&p, 0, sizeof(p));
+    chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_UID,
+                                 0x7ffffff5, NULL, resolve_cb, &p);
+    while (!p.done) {
+        evpl_continue(evpl);
+    }
+    assert(p.status == CHIMERA_VFS_IDENTITY_NOT_FOUND && p.found == 0);
+    assert(sc_a.calls == 1 && sc_b.calls == 1);
+
+    memset(&p, 0, sizeof(p));
+    chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_UID,
+                                 0x7ffffff5, NULL, resolve_cb, &p);
+    assert(p.done == 1 && p.status == CHIMERA_VFS_IDENTITY_NOT_FOUND);
+    assert(p.found == 0);
+    assert(sc_a.calls == 1 && sc_b.calls == 1);
+    TEST_PASS("negative_cached");
+
+    /* The same through BY_SID, which keys the negative by the SID string. */
+    sc_a.sid    = sc_b.sid = "S-1-5-21-1-2-3-4242";
+    sc_a.uid    = sc_b.uid = 0;
+    sc_a.status = sc_b.status = CHIMERA_VFS_IDENTITY_NOT_FOUND;
+    sc_a.calls  = sc_b.calls = 0;
+    memset(&p, 0, sizeof(p));
+    chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_SID,
+                                 0, sc_a.sid, resolve_cb, &p);
+    while (!p.done) {
+        evpl_continue(evpl);
+    }
+    assert(p.status == CHIMERA_VFS_IDENTITY_NOT_FOUND && p.found == 0);
+    assert(sc_a.calls == 1 && sc_b.calls == 1);
+
+    memset(&p, 0, sizeof(p));
+    chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_SID,
+                                 0, sc_a.sid, resolve_cb, &p);
+    assert(p.done == 1 && p.status == CHIMERA_VFS_IDENTITY_NOT_FOUND);
+    assert(p.found == 0);
+    assert(sc_a.calls == 1 && sc_b.calls == 1);
+    sc_a.sid = sc_b.sid = NULL;
+    TEST_PASS("negative_cached_by_sid");
+
+    /* UNAVAILABLE is never cached: the second resolve asks the handler again. */
+    sc_a.uid    = sc_b.uid = 0x7ffffff6;
+    sc_a.status = sc_b.status = CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+    sc_a.calls  = sc_b.calls = 0;
+    memset(&p, 0, sizeof(p));
+    chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_UID,
+                                 0x7ffffff6, NULL, resolve_cb, &p);
+    while (!p.done) {
+        evpl_continue(evpl);
+    }
+    assert(p.status == CHIMERA_VFS_IDENTITY_UNAVAILABLE);
+    assert(sc_a.calls == 1);
+
+    memset(&p, 0, sizeof(p));
+    chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_UID,
+                                 0x7ffffff6, NULL, resolve_cb, &p);
+    assert(p.done == 0);
+    while (!p.done) {
+        evpl_continue(evpl);
+    }
+    assert(p.status == CHIMERA_VFS_IDENTITY_UNAVAILABLE);
+    assert(sc_a.calls == 2);
+    TEST_PASS("unavailable_not_cached");
 
     chimera_vfs_thread_destroy(thread);
     chimera_vfs_destroy(vfs);

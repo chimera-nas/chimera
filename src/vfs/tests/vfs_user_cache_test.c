@@ -531,6 +531,62 @@ test_group_remove(void)
     TEST_PASS("group removal by name takes every record of that name and tolerates NULL");
 } /* test_group_remove */
 
+static void
+test_negative_add_lookup_expire(void)
+{
+    struct chimera_vfs_user_cache *cache;
+    const char                    *sid = "S-1-5-21-111-222-333-9999";
+
+    cache = chimera_vfs_user_cache_create(64, 600);
+
+    chimera_rcu_read_lock(&cache->rcu);
+    assert(chimera_vfs_user_cache_lookup_negative(
+               cache, CHIMERA_VFS_IDENTITY_BY_SID, 0, sid) == 0);
+    chimera_rcu_read_unlock(&cache->rcu);
+
+    chimera_vfs_user_cache_add_negative(cache, CHIMERA_VFS_IDENTITY_BY_SID,
+                                        0, sid, 1);
+    chimera_vfs_user_cache_add_negative(cache, CHIMERA_VFS_IDENTITY_BY_UID,
+                                        4242, NULL, 600);
+
+    chimera_rcu_read_lock(&cache->rcu);
+    assert(chimera_vfs_user_cache_lookup_negative(
+               cache, CHIMERA_VFS_IDENTITY_BY_SID, 0, sid) == 1);
+    /* Key kinds are separate namespaces. */
+    assert(chimera_vfs_user_cache_lookup_negative(
+               cache, CHIMERA_VFS_IDENTITY_BY_NAME, 0, sid) == 0);
+    assert(chimera_vfs_user_cache_lookup_negative(
+               cache, CHIMERA_VFS_IDENTITY_BY_UID, 4242, NULL) == 1);
+    assert(chimera_vfs_user_cache_lookup_negative(
+               cache, CHIMERA_VFS_IDENTITY_BY_GID, 4242, NULL) == 0);
+    chimera_rcu_read_unlock(&cache->rcu);
+
+    /* A positive add for the same key removes the negative. */
+    chimera_vfs_user_cache_add(cache, "pos", NULL, NULL, NULL,
+                               4242, 4242, 0, NULL, 0);
+    chimera_rcu_read_lock(&cache->rcu);
+    assert(chimera_vfs_user_cache_lookup_negative(
+               cache, CHIMERA_VFS_IDENTITY_BY_UID, 4242, NULL) == 0);
+    chimera_rcu_read_unlock(&cache->rcu);
+
+    sleep(2);
+
+    chimera_rcu_read_lock(&cache->rcu);
+    assert(chimera_vfs_user_cache_lookup_negative(
+               cache, CHIMERA_VFS_IDENTITY_BY_SID, 0, sid) == 0);
+    chimera_rcu_read_unlock(&cache->rcu);
+
+    /* The sweep reclaims the expired record. */
+    evpl_mutex_lock(&cache->expiry_lock);
+    evpl_cond_signal(&cache->expiry_cond);
+    evpl_mutex_unlock(&cache->expiry_lock);
+    usleep(100000);
+
+    chimera_vfs_user_cache_destroy(cache);
+
+    TEST_PASS("negative entries expire and are superseded by positives");
+} /* test_negative_add_lookup_expire */
+
 int
 main(void)
 {
@@ -550,6 +606,7 @@ main(void)
     test_group_user_isolation();
     test_group_ttl_expiration();
     test_group_remove();
+    test_negative_add_lookup_expire();
 
     fprintf(stderr, "All tests passed.\n");
 

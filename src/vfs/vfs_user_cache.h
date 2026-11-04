@@ -74,6 +74,36 @@ struct chimera_vfs_group {
     char                      sid[CHIMERA_VFS_SID_MAX_LEN];
 };
 
+/*
+ * Lookup key kinds of the identity resolver.  Defined here (and re-exported by
+ * vfs_identity.h) because the negative store below is keyed by them.
+ */
+enum chimera_vfs_identity_key {
+    CHIMERA_VFS_IDENTITY_BY_UID,
+    CHIMERA_VFS_IDENTITY_BY_GID,
+    CHIMERA_VFS_IDENTITY_BY_NAME,
+    CHIMERA_VFS_IDENTITY_BY_SID,
+};
+
+/*
+ * A cached authoritative miss: "the identity provider answered and there is no
+ * such identity".  One record per (key kind, id-or-name); the key kinds are
+ * separate namespaces.  Always TTL-expiring, never pinned.  Chained in its own
+ * bucket array, RCU-published like the positive records.
+ */
+struct chimera_vfs_negative {
+    enum chimera_vfs_identity_key key;
+    uint32_t                      id;
+    struct timespec               expiration;
+    chimera_rcu_head              rcu;
+    struct chimera_vfs_negative  *next;
+    char                          name[256];
+};
+
+struct chimera_vfs_negative_bucket {
+    struct chimera_vfs_negative *head;
+};
+
 struct chimera_vfs_user_cache_bucket {
     struct chimera_vfs_user *head;
 };
@@ -90,6 +120,7 @@ struct chimera_vfs_user_cache {
     struct chimera_vfs_user_cache_bucket  *sid_buckets;
     struct chimera_vfs_group_cache_bucket *group_gid_buckets;
     struct chimera_vfs_group_cache_bucket *group_sid_buckets;
+    struct chimera_vfs_negative_bucket    *neg_buckets;
     struct chimera_vfs_user               *builtin_users;
     struct chimera_rcu_domain              rcu;
     evpl_mutex_t                           write_lock;
@@ -131,6 +162,84 @@ chimera_vfs_group_cache_hash_gid(
 {
     return gid % num_buckets;
 } // chimera_vfs_group_cache_hash_gid
+
+static inline unsigned int
+chimera_vfs_negative_hash(
+    enum chimera_vfs_identity_key key,
+    uint32_t                      id,
+    const char                   *name,
+    int                           num_buckets)
+{
+    if (key == CHIMERA_VFS_IDENTITY_BY_UID ||
+        key == CHIMERA_VFS_IDENTITY_BY_GID) {
+        return (id * 4u + (unsigned int) key) % num_buckets;
+    }
+    return chimera_vfs_hash(name, strlen(name)) % num_buckets;
+} // chimera_vfs_negative_hash
+
+static inline int
+chimera_vfs_negative_match(
+    const struct chimera_vfs_negative *neg,
+    enum chimera_vfs_identity_key      key,
+    uint32_t                           id,
+    const char                        *name)
+{
+    if (neg->key != key) {
+        return 0;
+    }
+    if (key == CHIMERA_VFS_IDENTITY_BY_UID ||
+        key == CHIMERA_VFS_IDENTITY_BY_GID) {
+        return neg->id == id;
+    }
+    return strcmp(neg->name, name) == 0;
+} // chimera_vfs_negative_match
+
+static void
+chimera_vfs_negative_rcu_free(chimera_rcu_head *head)
+{
+    free(container_of(head, struct chimera_vfs_negative, rcu));
+} // chimera_vfs_negative_rcu_free
+
+static inline int
+chimera_vfs_negative_expired(
+    const struct chimera_vfs_negative *neg,
+    const struct timespec             *now)
+{
+    return now->tv_sec > neg->expiration.tv_sec ||
+           (now->tv_sec == neg->expiration.tv_sec &&
+            now->tv_nsec >= neg->expiration.tv_nsec);
+} // chimera_vfs_negative_expired
+
+/*
+ * Unlink and retire every negative record matching the key.  Caller holds
+ * cache->write_lock inside a publish region on cache->rcu.
+ */
+static inline void
+chimera_vfs_negative_remove_locked(
+    struct chimera_vfs_user_cache *cache,
+    enum chimera_vfs_identity_key  key,
+    uint32_t                       id,
+    const char                    *name)
+{
+    struct chimera_vfs_negative **pp;
+    struct chimera_vfs_negative  *neg;
+
+    if (!name) {
+        name = "";
+    }
+
+    pp = &cache->neg_buckets[chimera_vfs_negative_hash(
+                                 key, id, name, cache->num_buckets)].head;
+    while (*pp) {
+        neg = *pp;
+        if (chimera_vfs_negative_match(neg, key, id, name)) {
+            chimera_rcu_assign(*pp, neg->next);
+            chimera_rcu_pend(&neg->rcu, chimera_vfs_negative_rcu_free);
+            continue;
+        }
+        pp = &neg->next;
+    }
+} // chimera_vfs_negative_remove_locked
 
 static void
 chimera_vfs_user_cache_rcu_free(chimera_rcu_head *head)
@@ -312,6 +421,22 @@ chimera_vfs_user_cache_expiry_thread(void *arg)
             }
         }
 
+        /* And for the negative records. */
+        for (i = 0; i < cache->num_buckets; i++) {
+            struct chimera_vfs_negative **pp = &cache->neg_buckets[i].head;
+
+            while (*pp) {
+                struct chimera_vfs_negative *neg = *pp;
+
+                if (chimera_vfs_negative_expired(neg, &ts)) {
+                    chimera_rcu_assign(*pp, neg->next);
+                    chimera_rcu_pend(&neg->rcu, chimera_vfs_negative_rcu_free);
+                    continue;
+                }
+                pp = &neg->next;
+            }
+        }
+
         evpl_mutex_unlock(&cache->write_lock);
         chimera_rcu_publish_end(&cache->rcu);
 
@@ -347,6 +472,9 @@ chimera_vfs_user_cache_create(
     cache->group_sid_buckets = calloc(num_buckets,
                                       sizeof(struct chimera_vfs_group_cache_bucket));
 
+    cache->neg_buckets = calloc(num_buckets,
+                                sizeof(struct chimera_vfs_negative_bucket));
+
     cache->builtin_users = NULL;
 
     chimera_rcu_domain_init(&cache->rcu);
@@ -363,9 +491,10 @@ chimera_vfs_user_cache_create(
 static inline void
 chimera_vfs_user_cache_destroy(struct chimera_vfs_user_cache *cache)
 {
-    struct chimera_vfs_user  *user, *next;
-    struct chimera_vfs_group *group, *group_next;
-    int                       i;
+    struct chimera_vfs_user     *user, *next;
+    struct chimera_vfs_group    *group, *group_next;
+    struct chimera_vfs_negative *neg, *neg_next;
+    int                          i;
 
     evpl_mutex_lock(&cache->expiry_lock);
     cache->shutdown = 1;
@@ -394,6 +523,16 @@ chimera_vfs_user_cache_destroy(struct chimera_vfs_user_cache *cache)
         }
     }
 
+    for (i = 0; i < cache->num_buckets; i++) {
+        neg = cache->neg_buckets[i].head;
+        while (neg) {
+            neg_next = neg->next;
+            free(neg);
+            neg = neg_next;
+        }
+    }
+
+    free(cache->neg_buckets);
     free(cache->name_buckets);
     free(cache->uid_buckets);
     free(cache->sid_buckets);
@@ -467,6 +606,16 @@ chimera_vfs_user_cache_add(
 
     chimera_rcu_publish_begin(&cache->rcu);
     evpl_mutex_lock(&cache->write_lock);
+
+    /* A positive answer supersedes any cached miss for the same keys. */
+    chimera_vfs_negative_remove_locked(cache, CHIMERA_VFS_IDENTITY_BY_UID,
+                                       uid, NULL);
+    chimera_vfs_negative_remove_locked(cache, CHIMERA_VFS_IDENTITY_BY_NAME,
+                                       0, username);
+    if (user->sid[0]) {
+        chimera_vfs_negative_remove_locked(cache, CHIMERA_VFS_IDENTITY_BY_SID,
+                                           0, user->sid);
+    }
 
     /* Check for an existing entry with the same username and remove it */
     existing = cache->name_buckets[name_idx].head;
@@ -675,6 +824,14 @@ chimera_vfs_group_cache_add(
 
     chimera_rcu_publish_begin(&cache->rcu);
     evpl_mutex_lock(&cache->write_lock);
+
+    /* A positive answer supersedes any cached miss for the same keys. */
+    chimera_vfs_negative_remove_locked(cache, CHIMERA_VFS_IDENTITY_BY_GID,
+                                       gid, NULL);
+    if (group->sid[0]) {
+        chimera_vfs_negative_remove_locked(cache, CHIMERA_VFS_IDENTITY_BY_SID,
+                                           0, group->sid);
+    }
 
     /* Replace any existing record for this gid. */
     existing = cache->group_gid_buckets[gid_idx].head;
@@ -890,3 +1047,85 @@ chimera_vfs_user_cache_iterate_builtin(
 
     evpl_mutex_unlock(&cache->write_lock);
 } // chimera_vfs_user_cache_iterate_builtin
+
+/*
+ * Record an authoritative miss for the key (BY_UID/BY_GID use `id`; BY_NAME and
+ * BY_SID use `name`) for `ttl` seconds.  A key longer than a record can hold is
+ * simply not cached.
+ */
+static inline void
+chimera_vfs_user_cache_add_negative(
+    struct chimera_vfs_user_cache *cache,
+    enum chimera_vfs_identity_key  key,
+    uint32_t                       id,
+    const char                    *name,
+    int                            ttl)
+{
+    struct chimera_vfs_negative *neg;
+    struct timespec              now;
+    unsigned int                 idx;
+
+    if (!name) {
+        name = "";
+    }
+
+    if (strlen(name) >= sizeof(neg->name)) {
+        return;
+    }
+
+    neg      = calloc(1, sizeof(*neg));
+    neg->key = key;
+    neg->id  = id;
+    snprintf(neg->name, sizeof(neg->name), "%s", name);
+
+    clock_gettime(CLOCK_REALTIME, &now);
+    neg->expiration.tv_sec  = now.tv_sec + ttl;
+    neg->expiration.tv_nsec = now.tv_nsec;
+
+    idx = chimera_vfs_negative_hash(key, id, neg->name, cache->num_buckets);
+
+    chimera_rcu_publish_begin(&cache->rcu);
+    evpl_mutex_lock(&cache->write_lock);
+
+    /* Refresh: replace any record already held for this key. */
+    chimera_vfs_negative_remove_locked(cache, key, id, neg->name);
+
+    neg->next = cache->neg_buckets[idx].head;
+    chimera_rcu_assign(cache->neg_buckets[idx].head, neg);
+
+    evpl_mutex_unlock(&cache->write_lock);
+    chimera_rcu_publish_end(&cache->rcu);
+} // chimera_vfs_user_cache_add_negative
+
+/*
+ * 1 when an unexpired negative record exists for the key (RCU read-side; the
+ * caller holds chimera_rcu_read_lock(&cache->rcu)).  Expiry is checked here as
+ * well as by the sweep, so a miss never outlives its TTL by the sweep period.
+ */
+static inline int
+chimera_vfs_user_cache_lookup_negative(
+    struct chimera_vfs_user_cache *cache,
+    enum chimera_vfs_identity_key  key,
+    uint32_t                       id,
+    const char                    *name)
+{
+    struct chimera_vfs_negative *neg;
+    struct timespec              now;
+
+    if (!name) {
+        name = "";
+    }
+
+    clock_gettime(CLOCK_REALTIME, &now);
+
+    neg = chimera_rcu_deref(cache->neg_buckets[chimera_vfs_negative_hash(
+                                                   key, id, name, cache->num_buckets)].head);
+    while (neg) {
+        if (chimera_vfs_negative_match(neg, key, id, name)) {
+            return !chimera_vfs_negative_expired(neg, &now);
+        }
+        neg = chimera_rcu_deref(neg->next);
+    }
+
+    return 0;
+} // chimera_vfs_user_cache_lookup_negative
