@@ -2956,10 +2956,34 @@ classify_status_mismatch(
     /* The RFC 7862 data ops are per-backend capabilities (CAP_READ_PLUS,
      * CAP_WRITE_SAME, CAP_CLONE_RANGE): a backend without one answers
      * NFS4ERR_NOTSUPP, which is a profile mismatch rather than a defect
-     * unless the instance pinned the feature FeatMandatory. */
+     * unless the instance pinned the feature FeatMandatory.
+     *
+     * READ_PLUS is reconciled per operation rather than per trace.  WRITE_SAME
+     * and CLONE mutate the file, so a backend that cannot run one leaves the
+     * model's block map ahead of the server's and the rest of the trace is no
+     * longer comparable -- caps_mismatch abandons it.  READ_PLUS mutates
+     * nothing, so a NOTSUPP there costs only that op's read: record it as an
+     * accepted status deviation (as D4-26 does) and let the trace carry its
+     * remaining coverage -- the delegation-stateid cells send READ_PLUS and
+     * would otherwise SKIP from the first one on backends without the
+     * capability (cairn, linux, io_uring), dropping their recall, DELAY and
+     * return coverage.  A profile that pinned readPlus FeatMandatory still
+     * fails hard. */
     if (strcmp(tag, "SReadPlus") == 0 && has_notsupp) {
-        caps_mismatch(o, m, "readPlus", "%s: expected %u, got %u",
-                      tag, est, ast);
+        int mand = 0;
+        int k;
+
+        for (k = 0; k < o->nmandatory; k++) {
+            if (strcmp(o->mandatory[k], "readPlus") == 0) {
+                mand = 1;
+            }
+        }
+        if (mand) {
+            mism_add(m, "MANDATORY capability [readPlus] mismatch: %s: "
+                     "expected %u, got %u", tag, est, ast);
+        } else {
+            o->status_dev = ast;
+        }
         return;
     }
     if (strcmp(tag, "SIoAdvise") == 0 && has_notsupp) {
