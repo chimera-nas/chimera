@@ -256,6 +256,29 @@ struct chimera_vfs_handle_state {
  * chimera_vfs_gate_attrs_missing(). */
 #define CHIMERA_VFS_CAP_ACL_NATIVE            (1U << 23)
 
+/* If set, the module stores ACL principals by SID identity only, and the
+ * core resolves between Windows and POSIX identities on its behalf.  The
+ * module's side of that contract:
+ *
+ *  - On writes the core hands it SID-only principals (CHIMERA_PRINCIPAL_SID
+ *    or a SPECIAL principal); the numeric uid/gid the principal might map
+ *    to is not part of what the module stores.
+ *  - On reads the module returns the stored SID-only principals as they
+ *    were written, and the core enriches them (SID to uid/gid) before they
+ *    reach a protocol server.
+ *  - The module must still return va_uid, va_gid and va_mode whenever
+ *    va_req_mask asks for them, exactly as the existing reply contract
+ *    requires of every module.
+ *
+ * Meaningful only alongside CHIMERA_VFS_CAP_ACL_NATIVE: a module declaring
+ * this bit without it is a module bug, and a mount of such a module fails
+ * with CHIMERA_VFS_EINVAL.  The same mount-time check refuses the
+ * "windows_acl" mount option on a module without ACL_NATIVE.
+ *
+ * The bit lives above bit 31 because the 32-bit capability space is full;
+ * capabilities is a uint64_t. */
+#define CHIMERA_VFS_CAP_ACL_WINDOWS           (1ULL << 32)
+
 /* If set, the module delegates discretionary access control to a real
  * underlying enforcer (e.g. the host kernel, via the seteuid/setegid
  * impersonation in chimera_setup_credential).  The central VFS access gate

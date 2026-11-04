@@ -212,6 +212,13 @@ if(CAIRN_ENABLED)
     add_test(NAME chimera/vfs/acl_sid_cairn COMMAND vfs_acl_sid_test cairn)
 endif()
 
+# The windows-identity ACL capability and mount option.  "noaclnat" is memfs
+# without CAP_ACL_NATIVE, found in the executable's own exports.
+add_executable(vfs_acl_windows_test vfs_acl_windows_test.c)
+target_link_libraries(vfs_acl_windows_test chimera_vfs chimera_vfs_memfs_objs evpl)
+set_target_properties(vfs_acl_windows_test PROPERTIES ENABLE_EXPORTS ON)
+add_test(chimera/vfs/acl_windows_test vfs_acl_windows_test)
+
 # The stored ACL, not the mode, decides a non-root open on every open route,
 # parameterized by the backends that store the canonical ACL natively.
 add_executable(vfs_open_acl_test vfs_open_acl_test.c)
