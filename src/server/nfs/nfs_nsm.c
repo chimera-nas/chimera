@@ -464,15 +464,21 @@ nsm_state_load_cb(
     uint32_t                          prev   = 0;
     uint32_t                          newstate;
     uint64_t                          prev_alive_s, now_s;
+    int                               have_prev;
 
-    if (error_code == CHIMERA_VFS_OK && value &&
-        nsm_state_value_parse(value, value_len, &prev) == 0) {
-        /* Smallest odd number strictly greater than prev (odd == "we are up"
-         * after a reboot -- the classic NSM state-number convention). */
-        newstate = nsm_next_state(prev);
-    } else {
-        newstate = 1;
+    have_prev = error_code == CHIMERA_VFS_OK && value &&
+        nsm_state_value_parse(value, value_len, &prev) == 0;
+
+    if (!have_prev && error_code != CHIMERA_VFS_ENOENT) {
+        chimera_nfs_error("NSM cold-start: stored state number %s (error %d); "
+                          "deriving a new one from the clock",
+                          error_code == CHIMERA_VFS_OK ?
+                          "did not parse" : "could not be read",
+                          error_code);
     }
+    newstate = nsm_boot_state_number(have_prev, prev,
+                                     error_code == CHIMERA_VFS_ENOENT,
+                                     nsm_wall_now_s());
 
     evpl_mutex_lock(&nsm->mutex);
     nsm->state_number = newstate;
