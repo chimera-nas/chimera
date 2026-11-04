@@ -19,24 +19,72 @@
 #include "evpl/evpl_rpc2.h"
 
 /* ------------------------------------------------------------------ *
-*  KV persistence (fire-and-forget, heap ctx freed in the callback)   *
+*  KV persistence (fire-and-forget, heap ctx freed in the callback;   *
+*  a failure is logged there, and a failed monitor write re-armed)    *
 * ------------------------------------------------------------------ */
 
 struct nsm_kv_ctx {
-    uint8_t  key[CHIMERA_KV_NSM_MONITOR_KEY_MAX];
-    uint32_t key_len;
-    uint8_t  value[NSM_MON_VALUE_MAX > NSM_STATE_VALUE_LEN ?
-                   NSM_MON_VALUE_MAX : NSM_STATE_VALUE_LEN];
-    uint32_t value_len;
+    const char       *op;                      /* for the failure log */
+    struct nsm_state *nsm;                     /* non-NULL: a monitor write to re-arm */
+    uint64_t          stamp_s;                 /* the stamp that write carried */
+    char              host[SM_MAXSTRLEN + 1];  /* empty when not per-host */
+    uint8_t           key[CHIMERA_KV_NSM_MONITOR_KEY_MAX];
+    uint32_t          key_len;
+    uint8_t           value[NSM_MON_VALUE_MAX > NSM_STATE_VALUE_LEN ?
+                            NSM_MON_VALUE_MAX : NSM_STATE_VALUE_LEN];
+    uint32_t          value_len;
 };
+
+static struct nsm_kv_ctx *
+nsm_kv_ctx_new(
+    const char       *op,
+    struct nsm_state *nsm,
+    const char       *host,
+    uint64_t          stamp_s)
+{
+    struct nsm_kv_ctx *ctx = calloc(1, sizeof(*ctx));
+
+    ctx->op      = op;
+    ctx->nsm     = nsm;
+    ctx->stamp_s = stamp_s;
+    if (host) {
+        snprintf(ctx->host, sizeof(ctx->host), "%s", host);
+    }
+    return ctx;
+} /* nsm_kv_ctx_new */
 
 static void
 nsm_kv_done(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
-    (void) error_code;
-    free(private_data);
+    struct nsm_kv_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs_error("NSM %s%s%s failed (error %d)%s",
+                          ctx->op,
+                          ctx->host[0] ? " for " : "",
+                          ctx->host,
+                          error_code,
+                          ctx->nsm ?
+                          "; the next lock grant or renewal sweep rewrites it" :
+                          "");
+        if (ctx->nsm) {
+            struct nsm_monitor *mon;
+
+            /* The entry claims the stamp this write carried, but the store
+             * does not hold it: zero the stamp (unless a later write already
+             * advanced it) so the grant path and the sweep, which both treat
+             * 0 as due, retry instead of waiting out half the expiry. */
+            evpl_mutex_lock(&ctx->nsm->mutex);
+            HASH_FIND_STR(ctx->nsm->monitors, ctx->host, mon);
+            if (mon && mon->stamp_s == ctx->stamp_s) {
+                mon->stamp_s = 0;
+            }
+            evpl_mutex_unlock(&ctx->nsm->mutex);
+        }
+    }
+    free(ctx);
 } /* nsm_kv_done */
 
 /* Bound on the number of monitor entries an IP- or caller-keyed sweep will
@@ -48,7 +96,7 @@ nsm_state_persist(
     struct chimera_vfs_thread *vfs_thread,
     uint32_t                   state_number)
 {
-    struct nsm_kv_ctx *ctx = malloc(sizeof(*ctx));
+    struct nsm_kv_ctx *ctx = nsm_kv_ctx_new("state-number write", NULL, NULL, 0);
 
     ctx->key_len   = nfs_kv_nsm_state_key(ctx->key);
     ctx->value_len = nsm_state_value_serialize(ctx->value, sizeof(ctx->value),
@@ -98,7 +146,7 @@ nsm_monitor(
 
     host_len = strnlen(host, SM_MAXSTRLEN);
 
-    ctx          = malloc(sizeof(*ctx));
+    ctx          = nsm_kv_ctx_new("monitor write", nsm, host, now_s);
     ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, nsm->node_id,
                                           (const uint8_t *) host, host_len);
     ctx->value_len = nsm_monitor_value_serialize(ctx->value, sizeof(ctx->value),
@@ -166,7 +214,8 @@ chimera_nfs_nsm_renew_sweep(struct chimera_server_nfs_thread *thread)
         snprintf(addr, sizeof(addr), "%s", mon->addr);
         evpl_mutex_unlock(&nsm->mutex);
 
-        ctx          = malloc(sizeof(*ctx));
+        ctx = nsm_kv_ctx_new("monitor renewal write", nsm, t->host,
+                             now_s);
         ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, nsm->node_id,
                                               (const uint8_t *) t->host,
                                               strnlen(t->host, SM_MAXSTRLEN));
@@ -198,7 +247,7 @@ nsm_unmonitor(
     }
 
     host_len     = strnlen(host, SM_MAXSTRLEN);
-    ctx          = malloc(sizeof(*ctx));
+    ctx          = nsm_kv_ctx_new("monitor delete", NULL, host, 0);
     ctx->key_len = nfs_kv_nsm_monitor_key(ctx->key, nsm->node_id,
                                           (const uint8_t *) host, host_len);
     chimera_vfs_delete_key(thread->vfs_thread, ctx->key, ctx->key_len,
@@ -281,6 +330,7 @@ struct nsm_load_ctx {
     struct {
         uint8_t  key[CHIMERA_KV_NSM_MONITOR_KEY_MAX];
         uint32_t key_len;
+        char     host[SM_MAXSTRLEN + 1];
     } *expired;
     uint32_t                          nexpired;
     uint32_t                          expired_cap;
@@ -326,6 +376,8 @@ nsm_monitor_scan_cb(
             }
             memcpy(ctx->expired[ctx->nexpired].key, key, key_len);
             ctx->expired[ctx->nexpired].key_len = key_len;
+            snprintf(ctx->expired[ctx->nexpired].host,
+                     sizeof(ctx->expired[ctx->nexpired].host), "%s", host);
             ctx->nexpired++;
             return 0;
         case NSM_RECORD_LOAD:
@@ -362,7 +414,8 @@ nsm_monitor_scan_complete(
     /* The scan is over, so the band can be mutated: drop the expired records
      * (fire-and-forget, heap ctx freed in nsm_kv_done). */
     for (uint32_t i = 0; i < ctx->nexpired; i++) {
-        struct nsm_kv_ctx *kv = malloc(sizeof(*kv));
+        struct nsm_kv_ctx *kv = nsm_kv_ctx_new("expired-monitor purge", NULL,
+                                               ctx->expired[i].host, 0);
 
         memcpy(kv->key, ctx->expired[i].key, ctx->expired[i].key_len);
         kv->key_len = ctx->expired[i].key_len;
