@@ -353,24 +353,51 @@ smb_wbclient_map_principal(
     return 0;
 } // smb_wbclient_map_principal
 
+/* Classify a wbc error for the identity resolver.  Winbind having answered
+ * "no such identity" is authoritative (NOT_FOUND); anything that suggests the
+ * lookup did not really run -- daemon missing, out of memory, a garbled
+ * response, or a failure we cannot interpret -- is UNAVAILABLE, so a transient
+ * outage is never mistaken for a negative answer. */
+static enum chimera_vfs_identity_status
+wbc_err_to_status(wbcErr wbc_err)
+{
+    switch (wbc_err) {
+        case WBC_ERR_SUCCESS:
+            return CHIMERA_VFS_IDENTITY_OK;
+        case WBC_ERR_DOMAIN_NOT_FOUND:
+        case WBC_ERR_UNKNOWN_USER:
+        case WBC_ERR_UNKNOWN_GROUP:
+        case WBC_ERR_NOT_MAPPED:
+        case WBC_ERR_INVALID_SID:
+            return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+        case WBC_ERR_WINBIND_NOT_AVAILABLE:
+        case WBC_ERR_NO_MEMORY:
+        case WBC_ERR_INVALID_RESPONSE:
+        case WBC_ERR_NSS_ERROR:
+        default:
+            return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+    } /* switch */
+} // wbc_err_to_status
+
 /* Fill a chimera_vfs_user (uid/gid/groups/name + real SID) from a resolved user
- * SID.  Returns 0 on success, -1 if the SID does not map to a Unix user. */
-static int
+ * SID.  Returns OK, NOT_FOUND if the SID does not map to a Unix user, or
+ * UNAVAILABLE if winbind could not be asked. */
+static enum chimera_vfs_identity_status
 wbc_fill_user(
     const struct wbcDomainSid *user_sid,
     const char                *sidstr,
     struct chimera_vfs_user   *out)
 {
-    wbcErr               wbc_err;
-    uint32_t             unix_uid;
+    wbcErr wbc_err;
+    uint32_t unix_uid;
     struct passwd       *pwd         = NULL;
     struct wbcDomainSid *groups_sids = NULL;
-    uint32_t             num_groups  = 0;
-    uint32_t             i;
+    uint32_t num_groups = 0;
+    uint32_t i;
 
     wbc_err = wbcSidToUid(user_sid, &unix_uid);
     if (wbc_err != WBC_ERR_SUCCESS) {
-        return -1;
+        return wbc_err_to_status(wbc_err);
     }
 
     out->uid = unix_uid;
@@ -402,24 +429,25 @@ wbc_fill_user(
         wbcFreeMemory(groups_sids);
     }
 
-    return 0;
+    return CHIMERA_VFS_IDENTITY_OK;
 } // wbc_fill_user
 
 /* Fill a chimera_vfs_group (gid/name + real SID) from a resolved group SID.
- * Returns 0 on success, -1 if the SID does not map to a Unix group. */
-static int
+ * Returns OK, NOT_FOUND if the SID does not map to a Unix group, or
+ * UNAVAILABLE if winbind could not be asked. */
+static enum chimera_vfs_identity_status
 wbc_fill_group(
     const struct wbcDomainSid *group_sid,
     const char                *sidstr,
     struct chimera_vfs_group  *out)
 {
-    wbcErr        wbc_err;
-    uint32_t      unix_gid;
+    wbcErr wbc_err;
+    uint32_t unix_gid;
     struct group *grp = NULL;
 
     wbc_err = wbcSidToGid(group_sid, &unix_gid);
     if (wbc_err != WBC_ERR_SUCCESS) {
-        return -1;
+        return wbc_err_to_status(wbc_err);
     }
 
     out->gid = unix_gid;
@@ -436,7 +464,7 @@ wbc_fill_group(
         wbcFreeMemory(grp);
     }
 
-    return 0;
+    return CHIMERA_VFS_IDENTITY_OK;
 } // wbc_fill_group
 
 /* Non-zero if `type` names a group rather than a user. */
@@ -448,7 +476,7 @@ wbc_sid_type_is_group(enum wbcSidType type)
            type == WBC_SID_NAME_WKN_GRP;
 } // wbc_sid_type_is_group
 
-int
+enum chimera_vfs_identity_status
 smb_wbclient_identity_handler(
     enum chimera_vfs_identity_key       key,
     uint32_t                            id,
@@ -456,12 +484,12 @@ smb_wbclient_identity_handler(
     struct chimera_vfs_identity_result *out,
     void                               *private_data)
 {
-    wbcErr              wbc_err;
-    struct wbcDomainSid sid;
-    enum wbcSidType     sid_type;
-    char                sidbuf[SMB_WBCLIENT_SID_MAX_LEN];
-    char               *lookup_domain = NULL, *lookup_name = NULL;
-    int                 rc;
+    wbcErr wbc_err;
+    struct wbcDomainSid              sid;
+    enum wbcSidType                  sid_type;
+    char sidbuf[SMB_WBCLIENT_SID_MAX_LEN];
+    char *lookup_domain = NULL, *lookup_name = NULL;
+    enum chimera_vfs_identity_status rc;
 
     (void) private_data;
 
@@ -469,31 +497,31 @@ smb_wbclient_identity_handler(
         case CHIMERA_VFS_IDENTITY_BY_UID:
             wbc_err = wbcUidToSid(id, &sid);
             if (wbc_err != WBC_ERR_SUCCESS) {
-                return -1;
+                return wbc_err_to_status(wbc_err);
             }
             if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
-                return -1;
+                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
             }
             return wbc_fill_user(&sid, sidbuf, &out->user);
 
         case CHIMERA_VFS_IDENTITY_BY_GID:
             wbc_err = wbcGidToSid(id, &sid);
             if (wbc_err != WBC_ERR_SUCCESS) {
-                return -1;
+                return wbc_err_to_status(wbc_err);
             }
             if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
-                return -1;
+                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
             }
             out->is_group = 1;
             return wbc_fill_group(&sid, sidbuf, &out->group);
 
         case CHIMERA_VFS_IDENTITY_BY_SID:
             if (!name) {
-                return -1;
+                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
             }
             wbc_err = wbcStringToSid(name, &sid);
             if (wbc_err != WBC_ERR_SUCCESS) {
-                return -1;
+                return wbc_err_to_status(wbc_err);
             }
             /* A SID is ambiguous.  Ask winbind what it names before choosing
              * the fill: a group SID put through the user-shaped fill fails at
@@ -501,7 +529,8 @@ smb_wbclient_identity_handler(
             wbc_err = wbcLookupSid(&sid, &lookup_domain, &lookup_name,
                                    &sid_type);
             if (wbc_err != WBC_ERR_SUCCESS) {
-                /* Unknown to the DC: fall back to the historical user fill. */
+                /* Unknown to the DC: fall back to the historical user fill,
+                 * which delivers the final verdict. */
                 return wbc_fill_user(&sid, name, &out->user);
             }
             if (lookup_domain) {
@@ -518,11 +547,11 @@ smb_wbclient_identity_handler(
 
         case CHIMERA_VFS_IDENTITY_BY_NAME:
             if (!name) {
-                return -1;
+                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
             }
             wbc_err = wbcLookupName("", name, &sid, &sid_type);
             if (wbc_err != WBC_ERR_SUCCESS) {
-                return -1;
+                return wbc_err_to_status(wbc_err);
             }
             if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
                 sidbuf[0] = '\0';
@@ -531,7 +560,7 @@ smb_wbclient_identity_handler(
                 out->is_group = 1;
                 rc            = wbc_fill_group(&sid, sidbuf[0] ? sidbuf : NULL,
                                                &out->group);
-                if (rc == 0 && !out->group.groupname[0]) {
+                if (rc == CHIMERA_VFS_IDENTITY_OK && !out->group.groupname[0]) {
                     wbc_copy_string(out->group.groupname,
                                     sizeof(out->group.groupname), name);
                     out->group.groupname_len = (int) strlen(out->group.groupname);
@@ -539,10 +568,10 @@ smb_wbclient_identity_handler(
                 return rc;
             }
             if (sid_type != WBC_SID_NAME_USER) {
-                return -1;
+                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
             }
             rc = wbc_fill_user(&sid, sidbuf[0] ? sidbuf : NULL, &out->user);
-            if (rc == 0 && !out->user.username[0]) {
+            if (rc == CHIMERA_VFS_IDENTITY_OK && !out->user.username[0]) {
                 wbc_copy_string(out->user.username,
                                 sizeof(out->user.username), name);
                 out->user.username_len = (int) strlen(out->user.username);
@@ -550,7 +579,7 @@ smb_wbclient_identity_handler(
             return rc;
 
         default:
-            return -1;
+            return CHIMERA_VFS_IDENTITY_PASS;
     } // switch
 } // smb_wbclient_identity_handler
 
@@ -732,7 +761,7 @@ smb_wbclient_map_principal(
     return -1;
 } // smb_wbclient_map_principal
 
-int
+enum chimera_vfs_identity_status
 smb_wbclient_identity_handler(
     enum chimera_vfs_identity_key       key,
     uint32_t                            id,
@@ -746,7 +775,7 @@ smb_wbclient_identity_handler(
     (void) out;
     (void) private_data;
 
-    return -1;
+    return CHIMERA_VFS_IDENTITY_PASS;
 } // smb_wbclient_identity_handler
 
 int

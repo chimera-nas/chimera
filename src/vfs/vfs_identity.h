@@ -45,27 +45,45 @@ struct chimera_vfs_identity_result {
 };
 
 /*
- * Delivered to the resolve callback.  `result` is NULL when the identity could
- * not be resolved; otherwise it points to a transient copy valid only for the
- * duration of the callback (copy out what you need).
+ * Outcome of a resolution.  NOT_FOUND is an authoritative negative (the
+ * identity provider answered and there is no such identity); UNAVAILABLE means
+ * the provider could not be asked or could not answer (winbind down, no handler
+ * able to try), so the caller must not treat it as proof the identity does not
+ * exist.  PASS is for handlers only and is never delivered as a result.
+ */
+enum chimera_vfs_identity_status {
+    CHIMERA_VFS_IDENTITY_OK          = 0,
+    CHIMERA_VFS_IDENTITY_NOT_FOUND   = 1, /* authoritative negative          */
+    CHIMERA_VFS_IDENTITY_UNAVAILABLE = 2, /* infrastructure failure          */
+    CHIMERA_VFS_IDENTITY_PASS        = 3, /* handler cannot answer this key;
+                                           * handler-only, never a result    */
+};
+
+/*
+ * Delivered to the resolve callback.  `result` is non-NULL exactly when status
+ * is OK, and then points to a transient copy valid only for the duration of the
+ * callback (copy out what you need).
  */
 typedef void (*chimera_vfs_identity_callback)(
+    enum chimera_vfs_identity_status          status,
     const struct chimera_vfs_identity_result *result,
     void                                     *private_data);
 
 /*
  * A miss handler performs a (possibly blocking) lookup on a resolver worker
  * thread and fills `*out`: either out->user (uid/gid/ngids/gids/username/sid)
- * or out->group (gid/groupname/sid) with out->is_group set.  Returns 0 on
- * success, -1 if it cannot resolve the key.  Handlers are tried in registration
- * order until one succeeds.
+ * or out->group (gid/groupname/sid) with out->is_group set.  Returns OK on
+ * success, NOT_FOUND if it authoritatively knows no such identity, UNAVAILABLE
+ * if it failed to ask its provider, or PASS if it cannot answer this kind of
+ * key at all.  Handlers are tried in registration order; the overall status is
+ * aggregated from their answers (see chimera_vfs_identity_run_handlers).
  */
-typedef int (*chimera_vfs_identity_handler)(
-    enum chimera_vfs_identity_key       key,
-    uint32_t                            id,
-    const char                         *name,
+typedef enum chimera_vfs_identity_status (*chimera_vfs_identity_handler)(
+    enum chimera_vfs_identity_key key,
+    uint32_t id,
+    const char *name,
     struct chimera_vfs_identity_result *out,
-    void                               *private_data);
+    void *private_data);
 
 SYMBOL_EXPORT struct chimera_vfs_identity *
 chimera_vfs_identity_create(
