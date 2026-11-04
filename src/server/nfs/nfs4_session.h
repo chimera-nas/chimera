@@ -34,6 +34,12 @@ enum nfs4_slot_state {
     NFS4_SLOT_IN_PROGRESS = 1,
     NFS4_SLOT_CACHED      = 2, /* completed; cachethis=true; bytes held */
     NFS4_SLOT_COMPLETED   = 3, /* completed; cachethis=false; no bytes */
+    NFS4_SLOT_RESYNC      = 4, /* restored; seqid unknown until the client's
+                                * first request */
+    NFS4_SLOT_RESYNCING   = 5, /* the resync in flight, between the claim of
+                                * a RESYNC slot and its COMPLETED store,
+                                * while the principal is recorded; every
+                                * reader treats it as in progress */
 };
 
 /* Set on req->replay_action by the SEQUENCE handler so the compound
@@ -45,21 +51,31 @@ enum nfs4_slot_state {
 
 /*
  * Per-slot state lives in a single atomic word so the SEQUENCE hot path needs
- * no per-session lock: bits [1:0] hold enum nfs4_slot_state, bits [33:2] hold
- * the 32-bit seqid (the in-flight seqid while IN_PROGRESS, otherwise the last
- * completed seqid).  calloc() zero-init == (seqid 0, NFS4_SLOT_UNUSED).
+ * no per-session lock: bits [2:0] hold enum nfs4_slot_state, bits [34:3] hold
+ * the 32-bit seqid (the in-flight seqid while IN_PROGRESS or RESYNCING,
+ * otherwise the last completed seqid).  calloc() zero-init == (seqid 0,
+ * NFS4_SLOT_UNUSED).  A restored session's slots start as (seqid 0,
+ * NFS4_SLOT_RESYNC) and leave it only through the CAS in
+ * nfs4_replay_slot_acquire (to RESYNCING, then COMPLETED; not before the
+ * reply scan has finished, see replay_hydrating in struct nfs4_session) or
+ * the one in nfs4_drc_repopulate_slot (to IN_PROGRESS, then CACHED, or
+ * COMPLETED when the bytes cannot be allocated).
  *
  * Distinct slots are independent (RFC 5661: a client has at most one
  * outstanding request per slot id), so concurrent SEQUENCEs touch different
- * words and never contend.  The only same-slot race is a retransmit arriving on
- * another connection/thread; it is arbitrated by the CAS in
- * nfs4_replay_slot_acquire.  cached_buf/cached_len are written by the (rare)
- * cachethis capture path on the owning thread and published via the release
- * store in nfs4_replay_slot_finalize.  A retransmit that replays those bytes
- * first claims the slot CACHED -> IN_PROGRESS with that same CAS (restored by
- * nfs4_replay_slot_replay_done after the send): holding IN_PROGRESS excludes a
- * concurrent advance (seqid+1) from freeing cached_buf mid-replay, so the
- * buffer is only ever read or freed by the single thread that owns the slot.
+ * words and never contend.  A same-slot race has two sources: a retransmit
+ * arriving on another connection/thread, arbitrated by the CAS in
+ * nfs4_replay_slot_acquire, and the hydrate's reply scan filling a restored
+ * slot, arbitrated by the CAS in nfs4_drc_repopulate_slot.  The (rare)
+ * cachethis capture path writes cached_buf/cached_len on the owning thread,
+ * published via the release store in nfs4_replay_slot_finalize;
+ * nfs4_drc_repopulate_slot also writes them, on the scan's thread under its
+ * own IN_PROGRESS claim, published by its CACHED store.  A retransmit that
+ * replays those bytes first claims the slot CACHED -> IN_PROGRESS with the
+ * acquire CAS (restored by nfs4_replay_slot_replay_done after the send):
+ * holding IN_PROGRESS excludes a concurrent advance (seqid+1) from freeing
+ * cached_buf mid-replay, so the buffer is only ever read or freed by the
+ * single thread that owns the slot.
  */
 struct nfs4_replay_slot {
     _Atomic uint64_t state_word;       /* (seqid << NFS4_SLOT_SEQID_SHIFT) | state */
@@ -72,7 +88,7 @@ struct nfs4_replay_slot {
      * and a retry, then the replier MUST return NFS4ERR_SEQ_FALSE_RETRY".
      * Without it, one user's reply answers another's request.  Written by the
      * thread that owns the slot, under the same IN_PROGRESS exclusion as
-     * cached_buf. */
+     * cached_buf (on the resync path, under RESYNCING instead). */
     uint64_t         principal;
     /* Diagnostics for a wedged compound: when the slot entered IN_PROGRESS
      * and when a stuck-slot report was last logged for it.  Written only by
@@ -82,8 +98,8 @@ struct nfs4_replay_slot {
     time_t           last_stuck_report;
 };
 
-#define NFS4_SLOT_STATE_MASK  0x3u
-#define NFS4_SLOT_SEQID_SHIFT 2
+#define NFS4_SLOT_STATE_MASK  0x7u
+#define NFS4_SLOT_SEQID_SHIFT 3
 
 /* Coarse monotonic seconds for the slot-stuck diagnostics; off every hot
  * comparison except the IN_PROGRESS transitions and the already-failing
@@ -278,6 +294,12 @@ struct nfs4_session {
     uint32_t                          replay_maxresp_cached;
     _Atomic size_t                    replay_bytes_in_use;
     struct nfs4_replay_slot          *replay_slots;
+    /* Set on a session rebuilt from the KV store (a restore_sessionid passed
+     * to nfs4_create_session) until the hydrate's reply scan has finished
+     * (nfs4_session_hydrate_done).  While it is set, a request on a RESYNC
+     * slot is answered NFS4ERR_DELAY: the scan may still install that slot's
+     * reply record. */
+    _Atomic bool                      replay_hydrating;
     /* NFSv4.1 backchannel for delegation recalls (RFC 8881 §2.10.3.1).
      * Set at CREATE_SESSION when CREATE_SESSION4_FLAG_CONN_BACK_CHAN is
      * requested: cb_program is the client's callback program number and
@@ -600,6 +622,14 @@ nfs4_create_session(
     const struct channel_attrs4 *back_attrs,
     const uint8_t               *restore_sessionid,
     bool                         persist);
+
+/* The hydrate's reply scan for a restored session has finished (on success or
+ * error): its RESYNC slots may now take the client's seqid.  Clears
+ * replay_hydrating with a release store, so a request that sees it clear also
+ * sees every slot the scan installed. */
+void
+nfs4_session_hydrate_done(
+    struct nfs4_session *session);
 
 /* SEQUENCE replay slot state machine.  See plan in
  * /root/.claude/plans/lets-plan-out-the-steady-steele.md for the full

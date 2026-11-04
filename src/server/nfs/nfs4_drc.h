@@ -29,6 +29,14 @@ struct nfs4_client_principal;
  * nfs4_drc_session_hydrate reconstructs one session's records on demand, the
  * first time a client presents an unknown sessionid to whatever node it
  * reconnects to (see nfs4_proc_sequence / nfs4_proc_bind_conn_to_session).
+ * A rebuilt session's slots start in NFS4_SLOT_RESYNC; the reply scan moves
+ * those with a record to CACHED, and once it has finished any other slot takes
+ * the client's seqid on its first request (until then such a request is
+ * answered NFS4ERR_DELAY).  RFC 8881 section 2.10.6.5 wants the slot table
+ * persisted; the seqids of uncached slots are not, so they are recovered from
+ * the client.  A stale record is deleted once the scan completes, so a later
+ * restart cannot install it over a slot the client has moved past (a KEPT
+ * record neither installs nor is deleted).
  */
 
 /* Write-through one cached reply (fire-and-forget; copies the bytes). */
@@ -169,9 +177,25 @@ nfs4_drc_reconstruct_session(
     const struct nfs4_drc_session_record *rec,
     uint64_t                              boot_id);
 
-/* Repopulate one reply-cache slot from persisted bytes (CACHED state) so a
- * post-restart retransmit on {slotid,seqid} replays. */
-void
+enum nfs4_drc_repopulate_result {
+    NFS4_DRC_REPOPULATE_INSTALLED, /* won the CAS from RESYNC; bytes cached */
+    NFS4_DRC_REPOPULATE_KEPT,      /* slot already at this seqid, CACHED or
+                                    * IN_PROGRESS: the record is the live
+                                    * slot's own and must stay in the store */
+    NFS4_DRC_REPOPULATE_STALE      /* anything else that did not install:
+                                    * the slot is at another seqid (a record
+                                    * this scan already installed, or a live
+                                    * request, got there first), COMPLETED or
+                                    * RESYNCING at this seqid, slotid out of
+                                    * range, record too large, or malloc
+                                    * failure; the caller deletes the record */
+};
+
+/* Fill one RESYNC slot from a persisted reply record (CACHED state) so a
+ * post-restart retransmit on {slotid,seqid} replays.  A slot no longer in
+ * RESYNC is left alone.  The result says whether the record installed, is the
+ * live slot's own, or is stale (see enum nfs4_drc_repopulate_result). */
+enum nfs4_drc_repopulate_result
 nfs4_drc_repopulate_slot(
     struct nfs4_session *session,
     uint32_t             slotid,

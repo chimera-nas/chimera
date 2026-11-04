@@ -1458,7 +1458,22 @@ nfs4_create_session(
     if (session->replay_max_slots) {
         session->replay_slots = calloc(session->replay_max_slots,
                                        sizeof(*session->replay_slots));
+        /* The slot table of a session rebuilt from the KV store
+         * (nfs4_drc_reconstruct_session) has no seqids.  RFC 8881 section
+         * 2.10.6.5 requires a persisted session to keep its slot table, and
+         * the reply scan only fills the slots that have a record, so the rest
+         * must take the client's seqid when it arrives rather than demand 1. */
+        if (session->replay_slots && restore_sessionid) {
+            for (uint32_t i = 0; i < session->replay_max_slots; i++) {
+                atomic_init(&session->replay_slots[i].state_word,
+                            nfs4_slot_word(0, NFS4_SLOT_RESYNC));
+            }
+        }
     }
+    /* A restored session's reply scan has not run yet; the flag holds its
+     * RESYNC slots off until nfs4_session_hydrate_done.  Set before the
+     * session is hashed, like the persist flag above. */
+    atomic_init(&session->replay_hydrating, restore_sessionid != NULL);
 
     if (fore_attrs) {
         session->nfs4_session_fore_attrs = *fore_attrs;
@@ -1506,6 +1521,17 @@ nfs4_create_session(
     return session;
 
 } /* nfs4_create_session */
+
+void
+nfs4_session_hydrate_done(struct nfs4_session *session)
+{
+    /* Pairs with the acquire load in the RESYNC branch of
+     * nfs4_replay_slot_acquire: every slot word the scan stored happens before
+     * this store, so a request that reads the flag clear then finds those
+     * slots installed (its CAS from RESYNC fails and it re-reads). */
+    atomic_store_explicit(&session->replay_hydrating, false,
+                          memory_order_release);
+} /* nfs4_session_hydrate_done */
 
 struct nfs4_session *
 nfs4_session_lookup(
@@ -2020,6 +2046,56 @@ nfs4_replay_slot_acquire(
             } else {
                 status = NFS4ERR_SEQ_MISORDERED;
             }
+            break;
+        } else if (state == NFS4_SLOT_RESYNC) {
+            /*
+             * A slot of a session restored from the KV store that has no
+             * reply record, so its seqid is unknown.  RFC 8881 section
+             * 2.10.6.5 requires the replier to persist the slot table
+             * including the sequence ID and cached reply of each slot; this
+             * server persists only cached replies, so a slot without a record
+             * has lost its seqid.  RESYNC is the recovery: adopt the client's.
+             *
+             * Answer this request as an uncached retry (section 2.10.6.1.3
+             * describes what that answer means: the replier holds no reply
+             * for it).  The Linux client reacts to
+             * NFS4ERR_RETRY_UNCACHED_REP by resending at seqid+1 as a new
+             * request.  That is safe for a request sent with cachethis false,
+             * whose reply the client never asked to keep.  The resync waits
+             * for the hydrate's reply scan (below), so after it the only
+             * cachethis true request that reaches RESYNC is one whose reply
+             * was sent but whose persist had not landed when the server died
+             * (or whose record the scan could not read); it is re-executed at
+             * seqid+1.  The slot ends COMPLETED at this seqid, so a
+             * retransmit lands in the branches above and a later advance is
+             * ordinary.  While the principal is recorded the slot reads
+             * RESYNCING, which every other reader treats as in progress (the
+             * catch-all branch below).
+             */
+            if (atomic_load_explicit(&session->replay_hydrating,
+                                     memory_order_acquire)) {
+                /* While the reply scan is still running, the record for this
+                 * very request may still be on its way; answering DELAY (what
+                 * the hydrate already answers at SEQUENCE while the session
+                 * itself is being rebuilt) keeps a cached reply from being
+                 * re-executed and its record from being dropped.  Cold path:
+                 * only a request on a RESYNC slot pays the load. */
+                status = NFS4ERR_DELAY;
+                break;
+            }
+            if (!atomic_compare_exchange_weak_explicit(
+                    &slot->state_word, &cur,
+                    nfs4_slot_word(seqid, NFS4_SLOT_RESYNCING),
+                    memory_order_acq_rel, memory_order_acquire)) {
+                continue;  /* lost the race; re-read and re-evaluate */
+            }
+            slot->principal = nfs4_replay_principal_digest(req);
+            atomic_store_explicit(&slot->state_word,
+                                  nfs4_slot_word(seqid, NFS4_SLOT_COMPLETED),
+                                  memory_order_release);
+            chimera_nfs_debug("nfs4 session slot %u resynced to seqid %u "
+                              "after a restore", slotid, seqid);
+            status = NFS4ERR_RETRY_UNCACHED_REP;
             break;
         } else { /* NFS4_SLOT_IN_PROGRESS */
             /* Original compound is still running.  Whether seqid matches

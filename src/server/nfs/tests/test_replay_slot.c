@@ -594,6 +594,219 @@ test_false_retry_other_principal(void)
     destroy_session_table(&table, session);
 } /* test_false_retry_other_principal */
 
+/* Case 12: a slot restored from the KV store with no reply record does not
+ * know its seqid.  It takes the client's, answers that request as an
+ * uncached retry, and carries on from there as a normal slot. */
+static void
+test_resync_slot_accepts_client_seqid(void)
+{
+    struct nfs4_client_table table;
+    struct nfs4_session     *session = make_session(&table, TEST_SLOTS, TEST_MAXRESP);
+    struct nfs_request       req;
+    bool                     is_replay = true;
+    nfsstat4                 status;
+
+    atomic_store(&session->replay_slots[0].state_word,
+                 nfs4_slot_word(0, NFS4_SLOT_RESYNC));
+
+    reset_request(&req);
+    req.session       = session;
+    req.principal_uid = 1000;
+    status            = nfs4_replay_slot_acquire(session, 0, 31, false, &req, &is_replay);
+    CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
+    CHECK(!is_replay);
+    CHECK(req.replay_slot == NULL);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 31);
+    CHECK(session->replay_slots[0].principal == nfs4_replay_principal_digest(&req));
+
+    /* The same user retransmits the request that resynced the slot. */
+    reset_request(&req);
+    req.session       = session;
+    req.principal_uid = 1000;
+    status            = nfs4_replay_slot_acquire(session, 0, 31, false, &req, &is_replay);
+    CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
+
+    /* Another user at that seqid is a false retry, as on a live slot. */
+    reset_request(&req);
+    req.session       = session;
+    req.principal_uid = 1001;
+    status            = nfs4_replay_slot_acquire(session, 0, 31, false, &req, &is_replay);
+    CHECK(status == NFS4ERR_SEQ_FALSE_RETRY);
+
+    /* The client moves on: an ordinary advance. */
+    reset_request(&req);
+    req.session       = session;
+    req.principal_uid = 1000;
+    status            = nfs4_replay_slot_acquire(session, 0, 32, false, &req, &is_replay);
+    CHECK(status == NFS4_OK);
+    CHECK(!is_replay);
+    CHECK(req.replay_action == NFS4_REPLAY_ACTION_NEW);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_IN_PROGRESS);
+    nfs4_replay_slot_finalize(&req);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 32);
+
+    /* Jumping ahead after the resync is misordered as usual. */
+    reset_request(&req);
+    req.session       = session;
+    req.principal_uid = 1000;
+    status            = nfs4_replay_slot_acquire(session, 0, 34, false, &req, &is_replay);
+    CHECK(status == NFS4ERR_SEQ_MISORDERED);
+
+    destroy_session_table(&table, session);
+} /* test_resync_slot_accepts_client_seqid */
+
+/* Case 13: no seqid is special on a resync slot -- not 1 (the slot may never
+ * have been used before the restart, or may be retrying its first request)
+ * and not the top of the 32-bit range (the state field grew by a bit). */
+static void
+test_resync_slot_no_special_seqids(void)
+{
+    struct nfs4_client_table table;
+    struct nfs4_session     *session = make_session(&table, TEST_SLOTS, TEST_MAXRESP);
+    struct nfs_request       req;
+    bool                     is_replay;
+    nfsstat4                 status;
+
+    atomic_store(&session->replay_slots[1].state_word,
+                 nfs4_slot_word(0, NFS4_SLOT_RESYNC));
+    atomic_store(&session->replay_slots[2].state_word,
+                 nfs4_slot_word(0, NFS4_SLOT_RESYNC));
+
+    reset_request(&req);
+    req.session = session;
+    status      = nfs4_replay_slot_acquire(session, 1, 1, false, &req, &is_replay);
+    CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
+    CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[1]) == 1);
+
+    reset_request(&req);
+    req.session = session;
+    status      = nfs4_replay_slot_acquire(session, 1, 2, false, &req, &is_replay);
+    CHECK(status == NFS4_OK);
+    nfs4_replay_slot_finalize(&req);
+    CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[1]) == 2);
+
+    reset_request(&req);
+    req.session = session;
+    status      = nfs4_replay_slot_acquire(session, 2, 0xFFFFFFFFu, false, &req,
+                                           &is_replay);
+    CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
+    CHECK(nfs4_slot_state(&session->replay_slots[2]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[2]) == 0xFFFFFFFFu);
+
+    destroy_session_table(&table, session);
+} /* test_resync_slot_no_special_seqids */
+
+/* Case 14: a session rebuilt under its original sessionid starts every slot in
+ * RESYNC, held off until its reply scan is marked done; a freshly minted one
+ * starts them UNUSED (case 1 pins that side). */
+static void
+test_restored_session_starts_resync(void)
+{
+    static const uint8_t     owner[] = "owner-restored";
+    struct nfs4_client_table table;
+    uint64_t                 clientid;
+    struct nfs4_session     *session;
+    uint8_t                  sid[NFS4_SESSIONID_SIZE];
+    uint32_t                 i;
+
+    memset(sid, 0xab, sizeof(sid));
+    nfs4_client_table_init(&table, 1);
+    clientid = nfs4_client_register(&table, owner, (int) sizeof(owner) - 1,
+                                    0xabcdULL, 40, NULL, NULL);
+    session = nfs4_create_session(&table, clientid, 0, TEST_SLOTS, TEST_MAXRESP,
+                                  NULL, NULL, sid, true);
+    CHECK(session != NULL);
+    CHECK(atomic_load(&session->replay_hydrating));
+    for (i = 0; i < TEST_SLOTS; i++) {
+        CHECK(nfs4_slot_state(&session->replay_slots[i]) == NFS4_SLOT_RESYNC);
+        CHECK(nfs4_slot_seqid(&session->replay_slots[i]) == 0);
+        CHECK(session->replay_slots[i].cached_buf == NULL);
+    }
+
+    nfs4_session_hydrate_done(session);
+    CHECK(!atomic_load(&session->replay_hydrating));
+
+    destroy_session_table(&table, session);
+} /* test_restored_session_starts_resync */
+
+/* Case 15: a resync in flight is in progress to every other reader: the same
+ * seqid is NFS4ERR_DELAY, any other is NFS4ERR_SEQ_MISORDERED, and the word is
+ * left alone. */
+static void
+test_resyncing_slot_is_in_progress(void)
+{
+    struct nfs4_client_table table;
+    struct nfs4_session     *session = make_session(&table, TEST_SLOTS, TEST_MAXRESP);
+    struct nfs_request       req;
+    bool                     is_replay = true;
+    nfsstat4                 status;
+
+    atomic_store(&session->replay_slots[0].state_word,
+                 nfs4_slot_word(17, NFS4_SLOT_RESYNCING));
+
+    reset_request(&req);
+    req.session = session;
+    status      = nfs4_replay_slot_acquire(session, 0, 17, false, &req, &is_replay);
+    CHECK(status == NFS4ERR_DELAY);
+    CHECK(!is_replay);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_RESYNCING);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 17);
+
+    status = nfs4_replay_slot_acquire(session, 0, 18, false, &req, &is_replay);
+    CHECK(status == NFS4ERR_SEQ_MISORDERED);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_RESYNCING);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 17);
+
+    destroy_session_table(&table, session);
+} /* test_resyncing_slot_is_in_progress */
+
+/* Case 16: a cachethis=true request that resyncs a slot is answered as an
+ * uncached retry like any other.  The resync path never owns the slot -- it
+ * leaves it COMPLETED -- so it must not arm a reply capture whose bytes would
+ * land on a slot another request may already hold. */
+static void
+test_resync_slot_cachethis_not_captured(void)
+{
+    struct nfs4_client_table  table;
+    struct nfs4_session      *session = make_session(&table, TEST_SLOTS, TEST_MAXRESP);
+    struct evpl_rpc2_encoding encoding;
+    struct nfs_request        req;
+    bool                      is_replay = true;
+    nfsstat4                  status;
+
+    atomic_store(&session->replay_slots[3].state_word,
+                 nfs4_slot_word(0, NFS4_SLOT_RESYNC));
+
+    memset(&encoding, 0, sizeof(encoding));
+    reset_request(&req);
+    req.session  = session;
+    req.encoding = &encoding;
+    status       = nfs4_replay_slot_acquire(session, 3, 9, true, &req, &is_replay);
+    CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
+    CHECK(!is_replay);
+    CHECK(req.replay_slot == NULL);
+    CHECK(encoding.reply_capture_cb == NULL);
+    CHECK(nfs4_slot_state(&session->replay_slots[3]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[3]) == 9);
+    CHECK(session->replay_slots[3].cached_buf == NULL);
+
+    /* The same encoding on an ordinary first request does arm the capture,
+     * so the check above is not vacuous. */
+    reset_request(&req);
+    req.session  = session;
+    req.encoding = &encoding;
+    status       = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
+    CHECK(status == NFS4_OK);
+    CHECK(encoding.reply_capture_cb != NULL);
+    nfs4_replay_slot_finalize(&req);
+
+    destroy_session_table(&table, session);
+} /* test_resync_slot_cachethis_not_captured */
+
 int
 main(
     int   argc,
@@ -618,6 +831,11 @@ main(
     test_slots_independent();
     test_implicit_session_no_slots();
     test_false_retry_other_principal();
+    test_resync_slot_accepts_client_seqid();
+    test_resync_slot_no_special_seqids();
+    test_restored_session_starts_resync();
+    test_resyncing_slot_is_in_progress();
+    test_resync_slot_cachethis_not_captured();
 
     printf("nfs4_replay_slot: all tests passed\n");
     return 0;

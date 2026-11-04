@@ -574,7 +574,7 @@ nfs4_drc_reconstruct_session(
     return unified;
 } /* nfs4_drc_reconstruct_session */
 
-void
+enum nfs4_drc_repopulate_result
 nfs4_drc_repopulate_slot(
     struct nfs4_session *session,
     uint32_t             slotid,
@@ -583,20 +583,65 @@ nfs4_drc_repopulate_slot(
     uint32_t             len)
 {
     struct nfs4_replay_slot *slot;
+    uint64_t expect;
 
     if (slotid >= session->replay_max_slots ||
         len > session->replay_maxresp_cached) {
-        return;
+        return NFS4_DRC_REPOPULATE_STALE;
     }
 
     slot = &session->replay_slots[slotid];
-    if (slot->cached_buf) {
-        return;  /* a higher seqid already won this slot */
+
+    /*
+     * A slot leaves RESYNC exactly once, through this CAS or through the one
+     * in nfs4_replay_slot_acquire, whichever runs first.  The session is in
+     * the table before the reply scan starts, but acquire leaves a RESYNC
+     * slot alone until the scan has finished (replay_hydrating), so within a
+     * scan this CAS fails only on a slot the scan already filled from another
+     * record, which a live request may since have replayed or advanced; the
+     * word that beat the CAS says whether the record is that slot's own
+     * (kept) or stale (dropped).  Holding IN_PROGRESS while the bytes are
+     * copied keeps a concurrent retry off cached_buf (it sees NFS4ERR_DELAY
+     * for that instant; an advance to seqid+1 landing then gets
+     * NFS4ERR_SEQ_MISORDERED, which the Linux client turns into a backoff).
+     *
+     * A record that did not install is reported to the caller, which deletes
+     * it from the KV store unless it is the live slot's own: the advance path
+     * only deletes the record of a slot it finds CACHED, so a dropped record
+     * would otherwise survive to win a RESYNC slot after the next restart.
+     */
+    expect = nfs4_slot_word(0, NFS4_SLOT_RESYNC);
+    if (!atomic_compare_exchange_strong_explicit(
+            &slot->state_word, &expect,
+            nfs4_slot_word(seqid, NFS4_SLOT_IN_PROGRESS),
+            memory_order_acq_rel, memory_order_acquire)) {
+        /* expect now holds the word that beat us.  CACHED at this seqid is
+         * the live slot's own record (the finalize path stores CACHED before
+         * it persists).  IN_PROGRESS at this seqid is either that record
+         * being replayed (the pin from CACHED) or a new request at this
+         * seqid, whose reply replaces the record only if it is captured
+         * (cachethis=true, and not demoted over replay_maxresp_cached or the
+         * session byte cap); otherwise the slot ends COMPLETED with nothing
+         * persisted, and the record is kept all the same.  A resync in flight
+         * shows RESYNCING and does not keep the record: the slot ends
+         * COMPLETED with no bytes, so the record is stale. */
+        if ((expect >> NFS4_SLOT_SEQID_SHIFT) == seqid &&
+            ((expect & NFS4_SLOT_STATE_MASK) == NFS4_SLOT_CACHED ||
+             (expect & NFS4_SLOT_STATE_MASK) == NFS4_SLOT_IN_PROGRESS)) {
+            return NFS4_DRC_REPOPULATE_KEPT;
+        }
+        return NFS4_DRC_REPOPULATE_STALE;
     }
 
     slot->cached_buf = malloc(len);
     if (!slot->cached_buf) {
-        return;  /* OOM: leave the slot uncached (degrade to a cache miss) */
+        /* OOM: the seqid is known even though the bytes cannot be kept, so
+         * the slot degrades to an uncached retry rather than waiting to
+         * resync. */
+        atomic_store_explicit(&slot->state_word,
+                              nfs4_slot_word(seqid, NFS4_SLOT_COMPLETED),
+                              memory_order_release);
+        return NFS4_DRC_REPOPULATE_STALE;
     }
     memcpy(slot->cached_buf, data, len);
     slot->cached_len = len;
@@ -605,6 +650,7 @@ nfs4_drc_repopulate_slot(
     atomic_store_explicit(&slot->state_word,
                           nfs4_slot_word(seqid, NFS4_SLOT_CACHED),
                           memory_order_release);
+    return NFS4_DRC_REPOPULATE_INSTALLED;
 } /* nfs4_drc_repopulate_slot */
 
 /* ------------------------------------------------------------------ *
@@ -666,7 +712,15 @@ struct nfs4_drc_hydrate_ctx {
     bool                              found;
     bool                              restored;
     uint32_t                          nreplies;
+    uint32_t                          nstale;   /* records dropped (stale or orphaned) */
     struct nfs_client                *hydrated; /* the client the session rebuilt (a reference) */
+    /* Keys of the dropped records, deleted by nfs4_drc_hydrate_reply_complete
+     * on the owning thread (bounded by slot count, as in forget_ctx);
+     * ndrop_over counts the ones past the bound, left in the store. */
+    uint8_t                           drop_keys[NFS4_MAX_REPLY_CACHE_SLOTS][CHIMERA_KV_REPLY_KEY_LEN];
+    uint32_t                          drop_key_lens[NFS4_MAX_REPLY_CACHE_SLOTS];
+    uint32_t                          ndrop;
+    uint32_t                          ndrop_over;
 };
 
 static int
@@ -699,6 +753,28 @@ nfs4_drc_hydrate_session_cb(
     return 0;
 } /* nfs4_drc_hydrate_session_cb */
 
+/* Queue a scanned reply record for deletion, by its scanned key bytes.  The
+ * scan callback runs on whatever thread the KV module searches on (a sync
+ * delegation thread for a blocking module), which must not allocate VFS
+ * requests from the owning thread's free list, so the deletes are issued from
+ * nfs4_drc_hydrate_reply_complete instead (as nfs4_drc_forget_complete does). */
+static void
+nfs4_drc_hydrate_drop(
+    struct nfs4_drc_hydrate_ctx *ctx,
+    const void                  *key,
+    uint32_t                     key_len)
+{
+    ctx->nstale++;
+    if (ctx->ndrop < NFS4_MAX_REPLY_CACHE_SLOTS &&
+        key_len <= CHIMERA_KV_REPLY_KEY_LEN) {
+        memcpy(ctx->drop_keys[ctx->ndrop], key, key_len);
+        ctx->drop_key_lens[ctx->ndrop] = key_len;
+        ctx->ndrop++;
+    } else {
+        ctx->ndrop_over++;
+    }
+} /* nfs4_drc_hydrate_drop */
+
 static int
 nfs4_drc_hydrate_reply_cb(
     const void *key,
@@ -730,12 +806,23 @@ nfs4_drc_hydrate_reply_cb(
                                   ctx->sessionid);
     if (!session) {
         /* Orphan (no session record reconstructed): drop it. */
-        nfs4_drc_delete_reply(thread->vfs_thread, ctx->sessionid, slotid, seqid);
+        nfs4_drc_hydrate_drop(ctx, key, key_len);
         return 0;
     }
 
-    nfs4_drc_repopulate_slot(session, slotid, seqid, cached_data, cached_len);
-    ctx->nreplies++;
+    switch (nfs4_drc_repopulate_slot(session, slotid, seqid, cached_data,
+                                     cached_len)) {
+        case NFS4_DRC_REPOPULATE_INSTALLED:
+            ctx->nreplies++;
+            break;
+        case NFS4_DRC_REPOPULATE_KEPT:
+            break;
+        case NFS4_DRC_REPOPULATE_STALE:
+            chimera_nfs_debug("nfs4 drc dropping stale reply record "
+                              "slot %u seqid %u", slotid, seqid);
+            nfs4_drc_hydrate_drop(ctx, key, key_len);
+            break;
+    } /* switch */
 
     nfs4_session_put(session);
     return 0;
@@ -749,8 +836,25 @@ nfs4_drc_hydrate_reply_complete(
     struct nfs4_drc_hydrate_ctx      *ctx    = private_data;
     struct chimera_server_nfs_shared *shared = ctx->thread->shared;
     struct nfs4_drc_hydra            *h;
+    struct nfs4_session              *session;
+    uint32_t                          i;
 
     (void) error_code;
+
+    /* The reply scan is over, whether it ran to the end, failed part way or
+     * never dispatched (chimera_vfs_search_keys then completes inline with the
+     * error): let the restored session's RESYNC slots take the client's seqid.
+     * Done before the hydra entry flips, so no second hydrate of this
+     * sessionid can have rebuilt another session under it.  A failed lookup
+     * means the session was destroyed meanwhile. */
+    if (ctx->restored) {
+        session = nfs4_session_lookup(&shared->nfs4_shared_clients,
+                                      ctx->sessionid);
+        if (session) {
+            nfs4_session_hydrate_done(session);
+            nfs4_session_put(session);
+        }
+    }
 
     /* Reconstruction settled: flip the hydra entry to DONE so a retry that
      * still cannot find the session in memory resolves to ABSENT (not a
@@ -762,9 +866,28 @@ nfs4_drc_hydrate_reply_complete(
     }
     evpl_mutex_unlock(&shared->nfs4_drc_hydra_lock);
 
+    /* Delete the records the scan dropped, from this (the owning) thread; see
+     * nfs4_drc_hydrate_drop. */
+    for (i = 0; i < ctx->ndrop; i++) {
+        struct nfs4_drc_kv_ctx *dctx = malloc(sizeof(*dctx));
+
+        dctx->value     = NULL;
+        dctx->value_len = 0;
+        dctx->key_len   = ctx->drop_key_lens[i];
+        memcpy(dctx->key, ctx->drop_keys[i], ctx->drop_key_lens[i]);
+        chimera_vfs_delete_key(ctx->thread->vfs_thread, dctx->key,
+                               dctx->key_len, nfs4_drc_kv_done, dctx);
+    }
+    if (ctx->ndrop_over) {
+        chimera_nfs_info("NFS4.1 DRC: %u dropped reply record(s) past the "
+                         "per-scan delete bound of %u left in the store",
+                         ctx->ndrop_over, NFS4_MAX_REPLY_CACHE_SLOTS);
+    }
+
     if (ctx->restored) {
-        chimera_nfs_info("NFS4.1 DRC: hydrated session + %u reply record(s) "
-                         "for a returning client", ctx->nreplies);
+        chimera_nfs_info("NFS4.1 DRC: hydrated session + %u reply record(s), "
+                         "%u stale dropped, for a returning client",
+                         ctx->nreplies, ctx->nstale);
     } else if (ctx->found) {
         chimera_nfs_info("NFS4.1 DRC: dropped a persisted session whose client "
                          "was fenced or superseded");
