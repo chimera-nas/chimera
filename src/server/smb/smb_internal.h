@@ -272,7 +272,7 @@ struct chimera_smb_config {
      * enables it (chimera_server_config_set_smb_mode_from_sid). */
     int                            mode_from_sid;
     /* POSIX rename semantics: skip the contained-open recall and destination-
-     * parent dir-lease probe (a POSIX rename never fails on open handles).
+     * parent share probe (a POSIX rename never fails on open handles).
      * Default 0; the POSIX-over-SMB loopback enables it. */
     int                            posix_rename;
     /* Answer a replayed durable-v2 CREATE that matches a still-deferred CREATE
@@ -1182,12 +1182,14 @@ struct chimera_smb_request {
             uint32_t                           notify_mask;
             /* Rename information */
             struct chimera_smb_rename_info     rename_info;
-            /* Destination-parent directory-lease conflict park (rename into a
-             * leased directory): a transient deny-only probe (deny=D) on the dst
-             * parent triggers the dir-lease HANDLE break (RH->R) via the share
-             * conflict path and parks the rename until the holder closes
-             * (GRANTED -> rename proceeds) or keeps its handle
-             * (DENIED -> SHARING_VIOLATION).  dirlease.rename_dst_parent. */
+            /* Destination-parent share check (MS-FSA 2.1.5.15.12): a transient
+             * share probe (access=W, deny=D) on the dst parent.  An open of the
+             * parent that does not share write, or that holds DELETE, conflicts
+             * with it; when that open holds a directory lease, the probe
+             * triggers the HANDLE break (RH->R) and parks the rename until the
+             * holder closes (GRANTED -> rename proceeds) or keeps its handle
+             * (DENIED -> SHARING_VIOLATION).  dirlease.rename_dst_parent,
+             * rename.no_share_delete_no_delete_access. */
             struct chimera_vfs_claim           dp_probe;
             struct chimera_vfs_file_state     *dp_file_state;
             struct chimera_vfs_pending_acquire dp_ticket;

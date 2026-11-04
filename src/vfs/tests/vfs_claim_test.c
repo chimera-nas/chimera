@@ -1082,6 +1082,78 @@ test_nonbreakable_share_denies(void)
     chimera_vfs_state_destroy(state);
 } /* test_nonbreakable_share_denies */
 
+/* The SMB rename's destination-parent share probe: uses W, denies D.  A
+ * standing open that does not share write blocks it, one that uses D is
+ * displaced by it, and one that shares R|W without D admits it. */
+static void
+test_share_probe(void)
+{
+    struct chimera_vfs_state         *state;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_claim          holder, probe;
+    struct chimera_claim_owner        owner;
+    enum chimera_vfs_claim_result     r;
+    struct chimera_vfs_claim_conflict conflict;
+
+    fprintf(stderr, "\ntest_share_probe\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    /* Holder does not share write: its deny-W blocks the probe's W. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 0xA, 1);
+    chimera_vfs_claim_init_smb_open(&holder, CHIMERA_CLAIM_R, CHIMERA_CLAIM_W,
+                                    &owner);
+    r = chimera_vfs_claim_try_acquire(state, file, &holder, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "holder R deny-W granted");
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 0xB, 2);
+    chimera_vfs_claim_init_share_probe(&probe, CHIMERA_CLAIM_W,
+                                       CHIMERA_CLAIM_D, &owner);
+    r = chimera_vfs_claim_try_acquire(state, file, &probe, &conflict);
+    CHECK(r == CHIMERA_CLAIM_DENIED,
+          "share probe denied by a holder that does not share write");
+    chimera_vfs_claim_release(state, file, &holder);
+
+    /* Holder uses D (sharing everything): the probe's deny-D displaces it. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 0xA, 1);
+    chimera_vfs_claim_init_smb_open(&holder,
+                                    CHIMERA_CLAIM_R | CHIMERA_CLAIM_D, 0,
+                                    &owner);
+    r = chimera_vfs_claim_try_acquire(state, file, &holder, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "holder R|D sharing RWD granted");
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 0xB, 2);
+    chimera_vfs_claim_init_share_probe(&probe, CHIMERA_CLAIM_W,
+                                       CHIMERA_CLAIM_D, &owner);
+    r = chimera_vfs_claim_try_acquire(state, file, &probe, &conflict);
+    CHECK(r == CHIMERA_CLAIM_DENIED,
+          "share probe denied by a holder using DELETE");
+    CHECK((conflict.used & CHIMERA_CLAIM_D) != 0,
+          "conflict names the D-using holder");
+    chimera_vfs_claim_release(state, file, &holder);
+
+    /* Holder shares R|W and holds no D: the probe is admitted. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 0xA, 1);
+    chimera_vfs_claim_init_smb_open(&holder,
+                                    CHIMERA_CLAIM_R | CHIMERA_CLAIM_W,
+                                    CHIMERA_CLAIM_D, &owner);
+    r = chimera_vfs_claim_try_acquire(state, file, &holder, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "holder R|W sharing R|W granted");
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 0xB, 2);
+    chimera_vfs_claim_init_share_probe(&probe, CHIMERA_CLAIM_W,
+                                       CHIMERA_CLAIM_D, &owner);
+    r = chimera_vfs_claim_try_acquire(state, file, &probe, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED,
+          "share probe admitted by a holder sharing R|W without D");
+    chimera_vfs_claim_release(state, file, &probe);
+    chimera_vfs_claim_release(state, file, &holder);
+
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_share_probe */
+
 /* Test 19: the share-conflict escape onto a handle-caching RqLs lease must
 * never land on the ACQUIRER's own lease.  A second open under one LeaseKey
 * presents that key on both opens, so the escape's RqLs arm -- which matches
@@ -1864,6 +1936,7 @@ main(
     test_lease_test();
     test_breakable_share_recall();
     test_nonbreakable_share_denies();
+    test_share_probe();
     test_share_escape_skips_own_lease();
     test_sole_opener_legacy_cap();
     test_sole_opener_rqls_h_cap();

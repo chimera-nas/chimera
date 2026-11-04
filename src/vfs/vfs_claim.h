@@ -340,10 +340,13 @@ chimera_vfs_claim_init_range(
     uint64_t                          length,
     const struct chimera_claim_owner *owner);
 
-/* Transient deny-only probe (the SMB rename dp_probe: used 0, deny D). */
+/* Transient share-mode probe: an ACCESS-class claim that asks for `access`
+ * and denies `deny`, inserted only for the length of one admission check
+ * (the SMB rename dp_probe: used W, deny D). */
 SYMBOL_EXPORT void
-chimera_vfs_claim_init_deny_probe(
+chimera_vfs_claim_init_share_probe(
     struct chimera_vfs_claim         *claim,
+    uint8_t                           access,
     uint8_t                           deny,
     const struct chimera_claim_owner *owner);
 

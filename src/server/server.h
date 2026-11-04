@@ -189,7 +189,7 @@ chimera_server_config_get_smb_mode_from_sid(
     const struct chimera_server_config *config);
 
 /* POSIX rename semantics: skip the SMB contained-open recall and destination-
- * parent dir-lease probe so a rename never fails because of open handles (POSIX
+ * parent share probe so a rename never fails because of open handles (POSIX
  * rename does not).  Default 0; the POSIX-over-SMB loopback enables it. */
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_posix_rename(

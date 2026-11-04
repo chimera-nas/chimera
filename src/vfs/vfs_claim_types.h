@@ -80,15 +80,15 @@ enum chimera_claim_construct {
     CHIMERA_CONSTRUCT_LOCK_SMB,       /* SMB byte-range (mandatory)         */
     CHIMERA_CONSTRUCT_IMPLICIT,       /* chimera's internal I/O claim       */
     CHIMERA_CONSTRUCT_FUSE_GRANT,     /* FUSE kernel read-cache grant       */
-    CHIMERA_CONSTRUCT_DENY_PROBE,     /* transient deny-only probe (rename  */
-                                      /* dp_probe: used 0, deny D)          */
+    CHIMERA_CONSTRUCT_SHARE_PROBE,    /* transient share-mode probe (rename */
+                                      /* dp_probe: used W, deny D)          */
     CHIMERA_CONSTRUCT_COUNT
 };
 
 /* Storage class: which per-file list a claim lives on.  Purely an indexing
  * concern (walk efficiency, the MAND fast path); carries no semantics. */
 enum chimera_claim_class {
-    CHIMERA_CLAIM_CLASS_ACCESS = 0, /* share reservations, deny probes      */
+    CHIMERA_CLAIM_CLASS_ACCESS = 0, /* share reservations, share probes     */
     CHIMERA_CLAIM_CLASS_CACHE  = 1, /* leases, oplocks, delegations, impl.  */
     CHIMERA_CLAIM_CLASS_RANGE  = 2, /* byte-range locks                     */
     CHIMERA_CLAIM_CLASS_COUNT

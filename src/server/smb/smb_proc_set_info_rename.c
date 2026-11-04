@@ -169,8 +169,8 @@ chimera_smb_set_info_rename_callback(
     chimera_smb_complete_request(request, status);
 } /* chimera_smb_set_info_rename_callback */
 
-/* Release the transient destination-parent dir-lease conflict probe (if it was
- * inserted) and drop the file-state reference taken for it. */
+/* Release the transient destination-parent share probe (if it was inserted)
+ * and drop the file-state reference taken for it. */
 static void
 chimera_smb_set_info_rename_dp_release(struct chimera_smb_request *request)
 {
@@ -188,8 +188,8 @@ chimera_smb_set_info_rename_dp_release(struct chimera_smb_request *request)
     }
 } /* chimera_smb_set_info_rename_dp_release */
 
-/* Issue the rename once the destination parent's directory lease (if any) has
- * yielded its HANDLE caching. */
+/* Issue the rename once the destination-parent share check has passed (a
+ * conflicting directory lease, if any, having yielded its HANDLE caching). */
 static void
 chimera_smb_set_info_rename_emit(struct chimera_smb_request *request)
 {
@@ -230,10 +230,11 @@ chimera_smb_set_info_rename_emit(struct chimera_smb_request *request)
         request);
 } /* chimera_smb_set_info_rename_emit */
 
-/* Resume after the destination-parent dir-lease conflict probe resolves.
- * GRANTED: no conflicting handle-leased opener remains (none, or it closed in
- * response to the RH->R break) -> proceed with the rename.  DENIED: a holder
- * kept its handle open -> SHARING_VIOLATION (MS-SMB2 dirlease.rename_dst_parent). */
+/* Resume after the destination-parent share probe resolves.
+ * GRANTED: no conflicting open of the dst parent remains (none, or a leased one
+ * closed in response to the RH->R break) -> proceed with the rename.  DENIED: a
+ * conflicting open stays -> SHARING_VIOLATION (MS-FSA 2.1.5.15.12;
+ * dirlease.rename_dst_parent, rename.no_share_delete_no_delete_access). */
 static void
 chimera_smb_set_info_rename_dp_cb(
     enum chimera_vfs_claim_result            result,
@@ -248,8 +249,8 @@ chimera_smb_set_info_rename_dp_cb(
     (void) conflict;
 
     if (result == CHIMERA_CLAIM_GRANTED) {
-        /* claim_acquire inserted the probe; drop it (its only purpose was to
-         * break the dir lease / detect the conflict) and rename. */
+        /* claim_acquire inserted the probe; drop it (its only purpose was the
+         * share check and any dir-lease break) and rename. */
         request->set_info.dp_probe_active = 1;
         chimera_smb_set_info_rename_dp_release(request);
         chimera_smb_set_info_rename_emit(request);
@@ -286,14 +287,18 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
     request->set_info.dp_probe_active = 0;
     request->set_info.dp_file_state   = NULL;
 
-    /* A rename INTO a directory must break that directory's lease HANDLE caching
-     * (RH->R): a conflicting handle-leased opener (one holding the dst parent
-     * open with DELETE access) may close in response and free the rename, else
-     * the rename fails SHARING_VIOLATION (MS-SMB2; dirlease.rename_dst_parent).
-     * Model it as a transient deny-only probe (deny=D) on the dst parent: it
-     * conflicts ONLY with a DELETE-access holder, so it is inert for ordinary
-     * renames into a leased directory (dirlease.rename holders take no DELETE
-     * access).  No dst-parent state => no lease => rename directly. */
+    /* MS-FSA 2.1.5.15.12: the rename opens the destination directory for
+     * FILE_ADD_FILE (FILE_ADD_SUBDIRECTORY for a directory) sharing READ|WRITE
+     * (product note <185>: no SHARE_DELETE), and fails with that open's error.
+     * Both access rights are the W share bit, so model the open as a transient
+     * share probe (access=W, deny=D) on the dst parent: it conflicts with an
+     * open of the parent that does not share write
+     * (rename.no_share_delete_no_delete_access) or that holds DELETE access.
+     * When that open holds a directory lease, the probe breaks its HANDLE
+     * caching (RH->R): the holder may close in response and free the rename,
+     * else the rename fails SHARING_VIOLATION (dirlease.rename_dst_parent).
+     * Opens that share write and hold no DELETE (dirlease.rename holders) do
+     * not conflict.  No dst-parent state => no other open => rename directly. */
     fs = dest_parent_oh ? chimera_vfs_state_get(vfs_state, dest_parent_oh->fh,
                                                 dest_parent_oh->fh_len,
                                                 dest_parent_oh->fh_hash, false)
@@ -310,7 +315,12 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
      * ParentLeaseKey: a rename issued under the dst parent's own lease must not
      * break (and then deny against) that lease.  The 16-byte key rides in
      * owner.key (the KEY circle replaces the old break-skip fields; an all-zero
-     * key means no exemption -- every dir lease breaks). */
+     * key means no exemption -- every dir lease breaks).  The exemption also
+     * skips the break when that same-key holder conflicts on share mode (holds
+     * DELETE, or does not share write): the probe is denied without an RH->R
+     * break, where Windows breaks HANDLE caching first.  The status is the
+     * same, and clients open the directories they lease with full sharing,
+     * so the case does not arise in practice. */
     memset(&dp_owner, 0, sizeof(dp_owner));
     dp_owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
     dp_owner.client_key = request->session_handle->session->client_key;
@@ -318,8 +328,9 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
     dp_owner.owner_hi   = open_file->file_id.vid;
     memcpy(dp_owner.key, open_file->parent_lease_key, 16);
 
-    chimera_vfs_claim_init_deny_probe(&request->set_info.dp_probe,
-                                      CHIMERA_CLAIM_D, &dp_owner);
+    chimera_vfs_claim_init_share_probe(&request->set_info.dp_probe,
+                                       CHIMERA_CLAIM_W, CHIMERA_CLAIM_D,
+                                       &dp_owner);
     request->set_info.dp_probe.policy_tag = open_file->file_id.pid;
 
     struct chimera_server_smb_thread *thread = request->compound->thread;
@@ -614,7 +625,7 @@ chimera_smb_set_info_rename_recall_children(struct chimera_smb_request *request)
     /* POSIX rename semantics (the POSIX-over-SMB loopback): a rename never fails
      * because of open handles -- on the source, on a file inside the renamed
      * directory, or on the destination parent.  Skip the SMB contained-open
-     * recall and the destination-parent dir-lease probe entirely and go straight
+     * recall and the destination-parent share probe entirely and go straight
      * to rename_at, which enforces the POSIX rename(2) error rules. */
     if (request->compound->thread->shared->config.posix_rename) {
         chimera_smb_set_info_rename_emit(request);
@@ -631,8 +642,9 @@ chimera_smb_set_info_rename_recall_children(struct chimera_smb_request *request)
      * i.e. "mv c c/d") is POSIX EINVAL -- a structural invalidity that precedes
      * every SMB lease/recall gate.  The contained-open recall would enumerate
      * the source's children (including the just-probed destination name) and
-     * deny ACCESS_DENIED, and the destination-parent dir-lease probe would
-     * conflict with the source's own DELETE handle and deny SHARING_VIOLATION.
+     * deny ACCESS_DENIED, and the destination-parent share probe would
+     * conflict with the source's own open (its DELETE access, or a share mode
+     * without write) and deny SHARING_VIOLATION.
      * Go straight to rename_at, which returns EINVAL. */
     if (rename_info->new_parent_handle &&
         rename_info->new_parent_handle->fh_len == open_file->handle->fh_len &&
