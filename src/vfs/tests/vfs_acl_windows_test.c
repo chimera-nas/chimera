@@ -28,6 +28,8 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_acl_windows.h"
+#include "vfs/sdk/vfs_sid.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
@@ -285,6 +287,164 @@ test_mount_option_rejected_without_acl_native(struct test_ctx *ctx)
     TEST_PASS("windows_acl on a module without ACL_NATIVE is refused");
 } /* test_mount_option_rejected_without_acl_native */
 
+/* ---- pure principal transforms ------------------------------------------ */
+
+#define TEST_ACL_MAX 4
+
+struct test_acl {
+    struct chimera_acl hdr;
+    struct chimera_ace aces[TEST_ACL_MAX];
+};
+
+static struct chimera_acl *
+acl_init(
+    struct test_acl *t,
+    unsigned         n)
+{
+    memset(t, 0, sizeof(*t));
+    t->hdr.num_aces = n;
+    return &t->hdr;
+} /* acl_init */
+
+static struct chimera_principal
+make_sid_principal(const char *str)
+{
+    struct chimera_principal p;
+
+    memset(&p, 0, sizeof(p));
+    p.type = CHIMERA_PRINCIPAL_SID;
+    assert(chimera_sid_from_str(&p.sid, str) == 0);
+    return p;
+} /* make_sid_principal */
+
+static struct chimera_principal
+make_id_principal(
+    uint8_t     type,
+    uint32_t    id,
+    const char *sid)
+{
+    struct chimera_principal p;
+
+    memset(&p, 0, sizeof(p));
+    p.type = type;
+    p.id   = id;
+    if (sid) {
+        assert(chimera_sid_from_str(&p.sid, sid) == 0);
+    }
+    return p;
+} /* make_id_principal */
+
+static void
+test_strip_native_sid(void)
+{
+    struct test_acl          t;
+    struct chimera_acl      *acl = acl_init(&t, 1);
+    struct chimera_principal expect;
+
+    t.aces[0].who = make_id_principal(CHIMERA_PRINCIPAL_USER, 1000,
+                                      "S-1-5-21-7-8-9-500");
+    expect = make_sid_principal("S-1-5-21-7-8-9-500");
+
+    assert(chimera_vfs_acl_windows_strip(acl) == 0);
+    assert(memcmp(&t.aces[0].who, &expect, sizeof(expect)) == 0);
+    TEST_PASS("strip: native SID becomes PRINCIPAL_SID");
+} /* test_strip_native_sid */
+
+static void
+test_strip_numeric_only(void)
+{
+    struct test_acl          t;
+    struct chimera_acl      *acl = acl_init(&t, 2);
+    struct chimera_principal eu, eg;
+
+    t.aces[0].who = make_id_principal(CHIMERA_PRINCIPAL_USER, 1000, NULL);
+    t.aces[1].who = make_id_principal(CHIMERA_PRINCIPAL_GROUP, 5, NULL);
+    eu            = make_sid_principal("S-1-5-88-1-1000");
+    eg            = make_sid_principal("S-1-5-88-2-5");
+
+    assert(chimera_vfs_acl_windows_strip(acl) == 2);
+    assert(memcmp(&t.aces[0].who, &eu, sizeof(eu)) == 0);
+    assert(memcmp(&t.aces[1].who, &eg, sizeof(eg)) == 0);
+    TEST_PASS("strip: numeric-only principals get algorithmic SIDs");
+} /* test_strip_numeric_only */
+
+static void
+test_strip_passthrough(void)
+{
+    struct test_acl          t;
+    struct chimera_acl      *acl = acl_init(&t, 2);
+    struct chimera_principal owner, opaque;
+
+    memset(&owner, 0, sizeof(owner));
+    owner.type    = CHIMERA_PRINCIPAL_SPECIAL;
+    owner.special = CHIMERA_WHO_OWNER;
+    opaque        = make_sid_principal("S-1-5-21-1-2-3-1234");
+    t.aces[0].who = owner;
+    t.aces[1].who = opaque;
+
+    assert(chimera_vfs_acl_windows_strip(acl) == 0);
+    assert(memcmp(&t.aces[0].who, &owner, sizeof(owner)) == 0);
+    assert(memcmp(&t.aces[1].who, &opaque, sizeof(opaque)) == 0);
+    TEST_PASS("strip: SPECIAL and PRINCIPAL_SID pass through");
+} /* test_strip_passthrough */
+
+static void
+test_enrich_sync_algorithmic(void)
+{
+    struct test_acl          t;
+    struct chimera_acl      *acl = acl_init(&t, 2);
+    struct chimera_principal eu, eg;
+
+    t.aces[0].who = make_sid_principal("S-1-5-88-1-1000");
+    t.aces[1].who = make_sid_principal("S-1-5-88-2-5");
+    /* A stale flag on the user ACE must be cleared, and the group's set. */
+    t.aces[0].flags = CHIMERA_ACE_FLAG_IDENTIFIER_GROUP;
+    eu              = make_id_principal(CHIMERA_PRINCIPAL_USER, 1000, NULL);
+    eg              = make_id_principal(CHIMERA_PRINCIPAL_GROUP, 5, NULL);
+
+    assert(chimera_vfs_acl_windows_enrich_sync(acl) == 0);
+    assert(memcmp(&t.aces[0].who, &eu, sizeof(eu)) == 0);
+    assert(memcmp(&t.aces[1].who, &eg, sizeof(eg)) == 0);
+    assert(!(t.aces[0].flags & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP));
+    assert(t.aces[1].flags & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP);
+    TEST_PASS("enrich_sync: algorithmic SIDs decode to USER/GROUP");
+} /* test_enrich_sync_algorithmic */
+
+static void
+test_enrich_sync_counts_native(void)
+{
+    struct test_acl          t;
+    struct chimera_acl      *acl = acl_init(&t, 2);
+    struct chimera_principal native, expect;
+
+    native        = make_sid_principal("S-1-5-21-7-8-9-500");
+    expect        = native;
+    t.aces[0].who = native;
+    t.aces[1].who = make_sid_principal("S-1-5-88-1-7");
+
+    assert(chimera_vfs_acl_windows_enrich_sync(acl) == 1);
+    assert(memcmp(&t.aces[0].who, &expect, sizeof(expect)) == 0);
+    assert(t.aces[1].who.type == CHIMERA_PRINCIPAL_USER);
+    TEST_PASS("enrich_sync: native SIDs untouched and counted");
+} /* test_enrich_sync_counts_native */
+
+static void
+test_strip_enrich_roundtrip(void)
+{
+    struct test_acl     t, orig;
+    struct chimera_acl *acl = acl_init(&t, 2);
+
+    t.aces[0].who   = make_id_principal(CHIMERA_PRINCIPAL_USER, 1000, NULL);
+    t.aces[1].who   = make_id_principal(CHIMERA_PRINCIPAL_GROUP, 5, NULL);
+    t.aces[1].flags = CHIMERA_ACE_FLAG_IDENTIFIER_GROUP;
+    memcpy(&orig, &t, sizeof(t));
+
+    assert(chimera_vfs_acl_windows_strip(acl) == 2);
+    assert(chimera_vfs_acl_windows_enrich_sync(acl) == 0);
+    assert(memcmp(&orig, &t, sizeof(t)) == 0);
+    TEST_PASS("strip then enrich_sync round-trips byte-for-byte");
+} /* test_strip_enrich_roundtrip */
+
 int
 main(
     int    argc,
@@ -294,6 +454,14 @@ main(
     struct chimera_vfs_module_cfg module_cfgs[3];
 
     chimera_log_init();
+
+    test_strip_native_sid();
+    test_strip_numeric_only();
+    test_strip_passthrough();
+    test_enrich_sync_algorithmic();
+    test_enrich_sync_counts_native();
+    test_strip_enrich_roundtrip();
+
     chimera_vfs_cred_init_unix(&ctx.root_cred, 0, 0, 0, NULL);
 
     /* The shim is memfs in every respect but the cleared ACL_NATIVE bit. */
