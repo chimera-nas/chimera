@@ -370,10 +370,17 @@ test_cross_reboot_replay(void)
     CHECK(session->nfs4_session_clientid == srec.clientid);
     CHECK(session->nfs4_session_persist);
 
+    /* Every slot of the rebuilt session waits for either a reply record or
+     * the client's own seqid; none demands seqid 1. */
+    CHECK(nfs4_slot_state(&session->replay_slots[SLOT]) == NFS4_SLOT_RESYNC);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_RESYNC);
+
     /* Repopulate the slot from the persisted reply. */
-    CHECK(nfs4_drc_reply_parse(rbuf, rlen, &pseqid, &pdata, &pdata_len) == 0);
-    nfs4_drc_repopulate_slot(session, SLOT,pseqid,pdata,pdata_len);
+    CHECK(nfs4_drc_reply_parse(rbuf,rlen,&pseqid,&pdata,&pdata_len) == 0);
+    CHECK(nfs4_drc_repopulate_slot(session,SLOT,pseqid,pdata,pdata_len) ==
+          NFS4_DRC_REPOPULATE_INSTALLED);
     CHECK(nfs4_slot_state(&session->replay_slots[SLOT]) == NFS4_SLOT_CACHED);
+    nfs4_session_hydrate_done(session);
 
     /* The decisive check: a retransmit on {SLOT, SEQ} is served from cache,
      * i.e. cross-reboot exactly-once holds. */
@@ -394,6 +401,282 @@ test_cross_reboot_replay(void)
 
     printf("ok: cross_reboot_replay\n");
 } /* test_cross_reboot_replay */
+
+/*
+ * Build a persistent session on instance A, "reboot", and rebuild it on
+ * instance B from the persisted session record alone.  Initialises *table_b;
+ * the caller owns the returned session's reference (nfs4_session_put) and the
+ * table's teardown (nfs4_client_table_destroy_unified, then
+ * nfs4_client_table_free).  No reply record is replayed and the reply scan is
+ * not marked done: the session still has replay_hydrating set.
+ */
+static struct nfs4_session*
+rebuild_session_after_reboot(struct nfs4_client_table*table_b)
+{
+    struct nfs4_client_table       table_a;
+    struct nfs4_session           *session;
+    struct nfs4_drc_session_record srec;
+    uint8_t                        sessionid[NFS4_SESSIONID_SIZE];
+    uint8_t                        sbuf[4096];
+    uint32_t                       slen;
+    static const uint8_t           owner[] = "co_owner_resync";
+    uint64_t                       clientid;
+
+    nfs4_client_table_init(&table_a,1);
+    clientid = nfs4_client_register(&table_a,owner,(int) sizeof(owner) - 1,
+                                    0x1234ULL,40,NULL,NULL);
+    session = nfs4_create_session(&table_a,clientid,0,8,4096,
+                                  NULL,NULL,NULL,true);
+    CHECK(session != NULL);
+    memcpy(sessionid,session->nfs4_session_id,NFS4_SESSIONID_SIZE);
+
+    memset(&srec,0,sizeof(srec));
+    srec.clientid              = session->client_unified->client_id;
+    srec.verifier              = session->client_unified->verifier;
+    srec.princ_flavor          = 1;
+    srec.replay_max_slots      = session->replay_max_slots;
+    srec.replay_maxresp_cached = session->replay_maxresp_cached;
+    srec.fore                  = session->nfs4_session_fore_attrs;
+    srec.back                  = session->nfs4_session_back_attrs;
+    srec.owner_len             = sizeof(owner) - 1;
+    memcpy(srec.owner,owner,srec.owner_len);
+
+    slen = nfs4_drc_session_serialize(sbuf,sizeof(sbuf),&srec);
+    CHECK(slen > 0);
+
+    nfs4_session_put(session);
+    nfs4_client_table_destroy_unified(&table_a,NULL,NULL);
+    nfs4_client_table_free(&table_a);
+
+    nfs4_client_table_init(table_b,1);
+    CHECK(nfs4_drc_session_deserialize(sbuf,slen,&srec) == 0);
+    nfs_client_put(nfs4_drc_reconstruct_session(table_b,sessionid,&srec,
+                                                0x9999ULL));
+    session = nfs4_session_lookup(table_b,sessionid);
+    CHECK(session != NULL);
+    return session;
+} /* rebuild_session_after_reboot */
+
+/*
+ * The slot's last request before the restart was a WRITE, READ or GETATTR,
+ * which the client does not ask to cache, so no reply record exists for it
+ * and its seqid is unknown to the rebuilt session.  The client carries on at
+ * its next seqid: the slot takes that seqid, answers the request as an
+ * uncached retry, and the client's resend at the following seqid runs as a
+ * new request.
+ */
+static void
+test_cross_reboot_uncached_slot_resyncs(void)
+{
+    struct nfs4_client_table table_b;
+    struct nfs4_session     *session;
+    const uint32_t           SLOT = 3,NEXT = 31;
+    struct nfs_request       req;
+    bool                     is_replay = true;
+    nfsstat4                 status;
+
+    session = rebuild_session_after_reboot(&table_b);
+
+    CHECK(nfs4_slot_state(&session->replay_slots[SLOT]) == NFS4_SLOT_RESYNC);
+
+    /* The reply scan finishes without a record for the slot. */
+    nfs4_session_hydrate_done(session);
+    CHECK(nfs4_slot_state(&session->replay_slots[SLOT]) == NFS4_SLOT_RESYNC);
+
+    /* The client's next request on the slot, at its own seqid. */
+    memset(&req,0,sizeof(req));
+    req.session = session;
+    status      = nfs4_replay_slot_acquire(session,SLOT,NEXT,false,&req,
+                                           &is_replay);
+    CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
+    CHECK(!is_replay);
+    CHECK(nfs4_slot_state(&session->replay_slots[SLOT]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[SLOT]) == NEXT);
+
+    /* The client resends it as a new request at the next seqid. */
+    memset(&req,0,sizeof(req));
+    req.session = session;
+    status      = nfs4_replay_slot_acquire(session,SLOT,NEXT + 1,false,&req,
+                                           &is_replay);
+    CHECK(status == NFS4_OK);
+    CHECK(!is_replay);
+    CHECK(req.replay_action == NFS4_REPLAY_ACTION_NEW);
+    nfs4_replay_slot_finalize(&req);
+    CHECK(nfs4_slot_state(&session->replay_slots[SLOT]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[SLOT]) == NEXT + 1);
+
+    nfs4_session_put(session);
+    nfs4_client_table_destroy_unified(&table_b,NULL,NULL);
+    nfs4_client_table_free(&table_b);
+
+    printf("ok: cross_reboot_uncached_slot_resyncs\n");
+} /* test_cross_reboot_uncached_slot_resyncs */
+
+/*
+ * A retransmit of a cachethis=true request whose reply record is persisted
+ * reaches the rebuilt session while the reply scan is still running.  The
+ * record may not have been read yet, so the slot must neither resync to the
+ * retransmit's seqid (the client would resend at seqid+1 and run the request
+ * a second time) nor let the scan then drop the record as stale.  It answers
+ * NFS4ERR_DELAY and stays in RESYNC; the scan installs the record, and the
+ * client's retry after the scan replays it.
+ */
+static void
+test_cross_reboot_retry_waits_for_reply_scan(void)
+{
+    struct nfs4_client_table table_b;
+    struct nfs4_session     *session;
+    const uint8_t            bytes[] = "CACHED-REMOVE-OK-REPLY";
+    const uint32_t           SLOT = 1,SEQ = 12;
+    struct nfs_request       req;
+    bool                     is_replay = true;
+    nfsstat4                 status;
+
+    session = rebuild_session_after_reboot(&table_b);
+    CHECK(atomic_load(&session->replay_hydrating));
+
+    /* The retransmit arrives before the scan has reached its record. */
+    memset(&req,0,sizeof(req));
+    req.session = session;
+    status      = nfs4_replay_slot_acquire(session,SLOT,SEQ,true,&req,
+                                           &is_replay);
+    CHECK(status == NFS4ERR_DELAY);
+    CHECK(!is_replay);
+    CHECK(req.replay_slot == NULL);
+    CHECK(atomic_load(&session->replay_slots[SLOT].state_word) ==
+          nfs4_slot_word(0,NFS4_SLOT_RESYNC));
+
+    /* The scan installs the record, then finishes. */
+    CHECK(nfs4_drc_repopulate_slot(session,SLOT,SEQ,bytes,sizeof(bytes)) ==
+          NFS4_DRC_REPOPULATE_INSTALLED);
+    nfs4_session_hydrate_done(session);
+    CHECK(!atomic_load(&session->replay_hydrating));
+
+    /* The client's retry of the same request replays the cached reply, with
+     * the slot pinned IN_PROGRESS for the send. */
+    memset(&req,0,sizeof(req));
+    req.session = session;
+    status      = nfs4_replay_slot_acquire(session,SLOT,SEQ,true,&req,
+                                           &is_replay);
+    CHECK(status == NFS4_OK);
+    CHECK(is_replay);
+    CHECK(req.replay_action == NFS4_REPLAY_ACTION_FROM_CACHE);
+    CHECK(req.replay_slot == &session->replay_slots[SLOT]);
+    CHECK(atomic_load(&session->replay_slots[SLOT].state_word) ==
+          nfs4_slot_word(SEQ,NFS4_SLOT_IN_PROGRESS));
+    CHECK(session->replay_slots[SLOT].cached_len == sizeof(bytes));
+    CHECK(memcmp(session->replay_slots[SLOT].cached_buf,bytes,
+                 sizeof(bytes)) == 0);
+
+    nfs4_replay_slot_replay_done(&req);
+    CHECK(atomic_load(&session->replay_slots[SLOT].state_word) ==
+          nfs4_slot_word(SEQ,NFS4_SLOT_CACHED));
+
+    nfs4_session_put(session);
+    nfs4_client_table_destroy_unified(&table_b,NULL,NULL);
+    nfs4_client_table_free(&table_b);
+
+    printf("ok: cross_reboot_retry_waits_for_reply_scan\n");
+} /* test_cross_reboot_retry_waits_for_reply_scan */
+
+/*
+ * nfs4_drc_repopulate_slot fills a slot only while it is in RESYNC, and says
+ * what became of each record.  A slot a live request has resynced carries the
+ * client's current seqid; installing an older cached reply over it would
+ * answer the client's next request NFS4ERR_SEQ_MISORDERED, so the record is
+ * stale, as is one for a slot already filled at another seqid, one whose
+ * resync is in flight, one too large for the session, or one past the slot
+ * table.  A repeat of the record a slot holds, or one for a request at that
+ * seqid still executing, is kept.
+ */
+static void
+test_repopulate_only_fills_a_resync_slot(void)
+{
+    enum { TEST_BIG = 4097 };  /* > the session's replay_maxresp_cached */
+    struct nfs4_client_table table_b;
+    struct nfs4_session     *session;
+    const uint8_t            bytes[] = "CACHED-REPLY";
+    uint8_t                  big[TEST_BIG];
+    struct nfs_request       req;
+    bool                     is_replay;
+    nfsstat4                 status;
+
+    session = rebuild_session_after_reboot(&table_b);
+    nfs4_session_hydrate_done(session);
+
+    /* A live request resyncs slot 2 at seqid 7, then a record for the slot
+     * is offered. */
+    memset(&req,0,sizeof(req));
+    req.session = session;
+    status      = nfs4_replay_slot_acquire(session,2,7,false,&req,&is_replay);
+    CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
+    CHECK(nfs4_drc_repopulate_slot(session,2,5,bytes,sizeof(bytes)) ==
+          NFS4_DRC_REPOPULATE_STALE);
+    CHECK(nfs4_slot_state(&session->replay_slots[2]) == NFS4_SLOT_COMPLETED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[2]) == 7);
+    CHECK(session->replay_slots[2].cached_buf == NULL);
+    CHECK(session->replay_bytes_in_use == 0);
+
+    /* A record for an untouched slot installs; a second one for the same
+     * slot is ignored (one record per slot is the invariant). */
+    CHECK(nfs4_drc_repopulate_slot(session,1,9,bytes,sizeof(bytes)) ==
+          NFS4_DRC_REPOPULATE_INSTALLED);
+    CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_CACHED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[1]) == 9);
+    CHECK(session->replay_slots[1].cached_len == sizeof(bytes));
+    CHECK(session->replay_bytes_in_use == sizeof(bytes));
+    CHECK(nfs4_drc_repopulate_slot(session,1,10,bytes,sizeof(bytes)) ==
+          NFS4_DRC_REPOPULATE_STALE);
+    CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_CACHED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[1]) == 9);
+    CHECK(session->replay_bytes_in_use == sizeof(bytes));
+
+    /* A repeat of the installed record is the live slot's own: kept. */
+    CHECK(nfs4_drc_repopulate_slot(session,1,9,bytes,sizeof(bytes)) ==
+          NFS4_DRC_REPOPULATE_KEPT);
+    CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_CACHED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[1]) == 9);
+    CHECK(session->replay_bytes_in_use == sizeof(bytes));
+
+    /* A record whose payload exceeds the session's cached-reply limit is
+     * dropped and the slot still waits for the client. */
+    memset(big,'b',sizeof(big));
+    CHECK(nfs4_drc_repopulate_slot(session,0,4,big,sizeof(big)) ==
+          NFS4_DRC_REPOPULATE_STALE);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_RESYNC);
+    CHECK(session->replay_slots[0].cached_buf == NULL);
+    CHECK(session->replay_bytes_in_use == sizeof(bytes));
+
+    /* A resync in flight is not the slot's own record: stale, untouched. */
+    atomic_store(&session->replay_slots[4].state_word,
+                 nfs4_slot_word(5,NFS4_SLOT_RESYNCING));
+    CHECK(nfs4_drc_repopulate_slot(session,4,5,bytes,sizeof(bytes)) ==
+          NFS4_DRC_REPOPULATE_STALE);
+    CHECK(atomic_load(&session->replay_slots[4].state_word) ==
+          nfs4_slot_word(5,NFS4_SLOT_RESYNCING));
+    CHECK(session->replay_bytes_in_use == sizeof(bytes));
+
+    /* A new request at this seqid still executing: its record is kept. */
+    atomic_store(&session->replay_slots[5].state_word,
+                 nfs4_slot_word(6,NFS4_SLOT_IN_PROGRESS));
+    CHECK(nfs4_drc_repopulate_slot(session,5,6,bytes,sizeof(bytes)) ==
+          NFS4_DRC_REPOPULATE_KEPT);
+    CHECK(atomic_load(&session->replay_slots[5].state_word) ==
+          nfs4_slot_word(6,NFS4_SLOT_IN_PROGRESS));
+    CHECK(session->replay_slots[5].cached_buf == NULL);
+    CHECK(session->replay_bytes_in_use == sizeof(bytes));
+
+    /* A slot id past the table is dropped. */
+    CHECK(nfs4_drc_repopulate_slot(session,session->replay_max_slots,4,
+                                   bytes,sizeof(bytes)) ==
+          NFS4_DRC_REPOPULATE_STALE);
+
+    nfs4_session_put(session);
+    nfs4_client_table_destroy_unified(&table_b,NULL,NULL);
+    nfs4_client_table_free(&table_b);
+
+    printf("ok: repopulate_only_fills_a_resync_slot\n");
+} /* test_repopulate_only_fills_a_resync_slot */
 
 /* ------------------------------------------------------------------ *
 *  Hydrated session: the reclaim obligation                          *
@@ -1846,6 +2129,9 @@ main(void)
     test_session_record_roundtrip();
     test_reply_record_roundtrip();
     test_cross_reboot_replay();
+    test_cross_reboot_uncached_slot_resyncs();
+    test_cross_reboot_retry_waits_for_reply_scan();
+    test_repopulate_only_fills_a_resync_slot();
     test_cross_reboot_reclaim_complete();
     test_reclaim_complete_not_granted_to_new_clients();
     test_hydrated_client_leaves_owner_table();
