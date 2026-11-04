@@ -1860,6 +1860,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.rename.close-full-information
     smb2.rename.msword
     smb2.rename.no_share_delete_but_delete_access
+    smb2.rename.no_share_delete_no_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
@@ -2466,6 +2467,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.rename.close-full-information
     smb2.rename.msword
     smb2.rename.no_share_delete_but_delete_access
+    smb2.rename.no_share_delete_no_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
@@ -3011,6 +3013,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.rename.close-full-information
     smb2.rename.msword
     smb2.rename.no_share_delete_but_delete_access
+    smb2.rename.no_share_delete_no_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
@@ -3584,6 +3587,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.rename.close-full-information
     smb2.rename.msword
     smb2.rename.no_share_delete_but_delete_access
+    smb2.rename.no_share_delete_no_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
@@ -4209,6 +4213,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.rename.close-full-information
     smb2.rename.msword
     smb2.rename.no_share_delete_but_delete_access
+    smb2.rename.no_share_delete_no_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
@@ -4832,6 +4837,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.rename.close-full-information
     smb2.rename.msword
     smb2.rename.no_share_delete_but_delete_access
+    smb2.rename.no_share_delete_no_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench

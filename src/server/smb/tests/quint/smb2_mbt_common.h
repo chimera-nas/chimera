@@ -195,6 +195,7 @@
 #define MBT_GENERIC_READ                        0x80000000u
 #define MBT_FILE_READ_ACCESS                    0x00120089u     /* R data/attr/EA + SYNC */
 #define MBT_FILE_WRITE_ACCESS                   0x00120116u     /* W data/attr/EA + SYNC */
+#define MBT_DELETE                              0x00010000u
 #define MBT_FILE_ATTRIBUTE_NORMAL               0x00000080u
 #define MBT_FILE_ATTRIBUTE_READONLY             0x00000001u
 #define MBT_FILE_DIRECTORY_FILE                 0x00000001u

@@ -904,6 +904,88 @@ probe_ntfs_semantics(struct smb2_conn *c)
     smb2_close(c, d1.file_id);
 } /* probe_ntfs_semantics */
 
+/* Rename a fresh rdp\<from> to rdp\<to> while rdp is held open with `access`
+ * and `share`, and return the rename's status. */
+static uint32_t
+rename_under_held_dir(
+    struct smb2_conn *c,
+    uint32_t          access,
+    uint32_t          share,
+    const char       *from,
+    const char       *to)
+{
+    struct smb2_create_out d, f;
+    char                   src[64], dst[64];
+    uint32_t               st;
+
+    snprintf(src, sizeof(src), "rdp\\%s", from);
+    snprintf(dst, sizeof(dst), "rdp\\%s", to);
+
+    st = smb2_create_opts(c, "rdp", MBT_FILE_OPEN, access, share,
+                          MBT_FILE_DIRECTORY_FILE, NULL, &d);
+    if (st != ST_SUCCESS) {
+        CHECK(0, "setup: OPEN rdp (access 0x%08x share 0x%x) -> 0x%08x",
+              access, share, st);
+        return st;
+    }
+    st = smb2_create(c, src, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, 0, NULL, &f);
+    if (st != ST_SUCCESS) {
+        CHECK(0, "setup: CREATE %s -> 0x%08x", src, st);
+        smb2_close(c, d.file_id);
+        return st;
+    }
+    st = smb2_rename(c, f.file_id, dst, 0);
+    smb2_close(c, f.file_id);
+    smb2_close(c, d.file_id);
+    return st;
+} /* rename_under_held_dir */
+
+/* MS-FSA 2.1.5.15.12: the rename opens the destination directory for
+ * FILE_ADD_FILE (FILE_ADD_SUBDIRECTORY for a directory) sharing READ|WRITE, and
+ * fails with that open's error.  So an open of the directory that does not share
+ * write, or that holds DELETE access (product note <185>), fails the rename with
+ * SHARING_VIOLATION; an open that shares write and holds no DELETE does not
+ * (smb2.rename.no_share_delete_no_delete_access). */
+static void
+probe_rename_dst_parent_share(struct smb2_conn *c)
+{
+    struct smb2_create_out d;
+    uint32_t               st;
+
+    printf("# --- rename vs the destination directory's share mode ---\n");
+
+    st = smb2_create_opts(c, "rdp", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                          MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &d);
+    CHECK(st == ST_SUCCESS, "setup: CREATE rdp -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(c, d.file_id);
+
+    st = rename_under_held_dir(c,
+                               MBT_FILE_READ_ACCESS | MBT_FILE_WRITE_ACCESS, 0,
+                               "a1", "b1");
+    CHECK(st == ST_SHARING_VIOLATION, "rename into a dir held open sharing "
+          "nothing, no DELETE -> SHARING_VIOLATION (0x%08x)", st);
+
+    st = rename_under_held_dir(c, MBT_FILE_READ_ACCESS,
+                               MBT_FILE_SHARE_READ | MBT_FILE_SHARE_DELETE,
+                               "a2", "b2");
+    CHECK(st == ST_SHARING_VIOLATION, "rename into a dir held open without "
+          "FILE_SHARE_WRITE -> SHARING_VIOLATION (0x%08x)", st);
+
+    st = rename_under_held_dir(c, MBT_FILE_READ_ACCESS | MBT_DELETE,
+                               MBT_FILE_SHARE_RWD, "a3", "b3");
+    CHECK(st == ST_SHARING_VIOLATION, "rename into a dir held open with DELETE "
+          "access -> SHARING_VIOLATION (0x%08x)", st);
+
+    st = rename_under_held_dir(c, MBT_FILE_READ_ACCESS | MBT_FILE_WRITE_ACCESS,
+                               MBT_FILE_SHARE_READ | MBT_FILE_SHARE_WRITE,
+                               "a4", "b4");
+    CHECK(st == ST_SUCCESS, "rename into a dir held open sharing READ|WRITE, "
+          "no DELETE -> SUCCESS (0x%08x)", st);
+} /* probe_rename_dst_parent_share */
+
 static void
 probe_set_info(struct smb2_conn *c)
 {
@@ -2029,6 +2111,7 @@ main(
     probe_agreement(c);
     probe_set_info(c);
     probe_ntfs_semantics(c);
+    probe_rename_dst_parent_share(c);
     probe_ea(c);
     probe_streams(c);
     probe_link(c);

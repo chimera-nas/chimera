@@ -671,15 +671,16 @@ chimera_vfs_claim_init_range(
 } /* chimera_vfs_claim_init_range */
 
 SYMBOL_EXPORT void
-chimera_vfs_claim_init_deny_probe(
+chimera_vfs_claim_init_share_probe(
     struct chimera_vfs_claim         *claim,
+    uint8_t                           access,
     uint8_t                           deny,
     const struct chimera_claim_owner *owner)
 {
-    chimera_vfs_claim_init_common(claim, CHIMERA_CONSTRUCT_DENY_PROBE,
+    chimera_vfs_claim_init_common(claim, CHIMERA_CONSTRUCT_SHARE_PROBE,
                                   CHIMERA_CLAIM_CLASS_ACCESS,
-                                  0, deny, owner);
-} /* chimera_vfs_claim_init_deny_probe */
+                                  access, deny, owner);
+} /* chimera_vfs_claim_init_share_probe */
 
 /* -------------------------------------------------------------------- */
 /* The admission mask table, part 2 (deny-row derivation)               */
@@ -698,7 +699,7 @@ chimera_vfs_claim_deny_rows(
     switch (claim->construct) {
         case CHIMERA_CONSTRUCT_SMB_OPEN:
         case CHIMERA_CONSTRUCT_NFS4_OPEN:
-        case CHIMERA_CONSTRUCT_DENY_PROBE:
+        case CHIMERA_CONSTRUCT_SHARE_PROBE:
             /* Share-deny bits, owner-exempt.  Target ACCESS (open-vs-open,
              * the implicit claim) and CACHE so a deny clash reaches a
              * delegation's data-bit use (R11's deny∩granted arm); cache
@@ -1121,7 +1122,7 @@ chimera_vfs_claim_admit_locked(
 
     /* Inert probes are granted with no side effects (R6). */
     if (probe->used == 0 && probe->denied == 0 &&
-        probe->construct != CHIMERA_CONSTRUCT_DENY_PROBE) {
+        probe->construct != CHIMERA_CONSTRUCT_SHARE_PROBE) {
         return CHIMERA_CLAIM_GRANTED;
     }
 
