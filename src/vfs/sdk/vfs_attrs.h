@@ -131,7 +131,9 @@ struct chimera_acl;
  * background, so a later READDIR carries it).  CHIMERA_VFS_ATTR_ACL is clear
  * and va_acl NULL; the rest of the entry is intact.  A protocol must not
  * synthesise an ACL for such an entry from its mode: NFSv4 answers it with
- * rdattr_error NFS4ERR_DELAY. */
+ * rdattr_error NFS4ERR_DELAY.  The bit lives only on the attrs handed to a
+ * readdir entry callback; it is never stored or carried into a set_attr, so
+ * nothing has to clear it. */
 #define CHIMERA_VFS_ATTR_ACL_WITHHELD       (1ULL << 32)
 
 #define CHIMERA_VFS_ATTR_MASK_STAT          ( \

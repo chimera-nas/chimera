@@ -154,7 +154,8 @@ Version 6 carries the windows-identity ACL capability
 the core-owned `acl_windows` block in `struct chimera_vfs_request` (the
 completion wrapper that resolves SID-only ACL principals on a
 windows-identity mount); the readdir warm-dedup fields
-(`readdir.acl_warmed_n` / `acl_warmed`) in the request's readdir block;
+(`readdir.acl_warmed_n` / `acl_warmed`) and the bounce-buffer
+`readdir.bounce_status` in the request's readdir block;
 `CHIMERA_VFS_ATTR_ACL_WITHHELD` (attribute bit 32), set on readdir entries
 whose ACL the core withheld; and a new obligation on modules, namely that
 on such a mount the core rewrites the reply ACL in place, so the module
