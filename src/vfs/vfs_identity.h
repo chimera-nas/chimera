@@ -114,6 +114,22 @@ chimera_vfs_identity_resolve(
     chimera_vfs_identity_callback callback,
     void                         *private_data);
 
+/*
+ * Ask the resolver to fetch and cache an identity, with nobody waiting on the
+ * answer.  A cached identity or cached authoritative miss makes this a no-op;
+ * otherwise a worker resolves it and caches the outcome as a resolve would,
+ * then frees the job.  No VFS thread is recorded or touched, so a warm may
+ * outlive the thread that issued it.  Use this rather than a resolve with an
+ * empty callback: a resolve's job is handed back to its thread, which must
+ * then still exist.
+ */
+SYMBOL_EXPORT void
+chimera_vfs_identity_warm(
+    struct chimera_vfs           *vfs,
+    enum chimera_vfs_identity_key key,
+    uint32_t                      id,
+    const char                   *name);
+
 /* Drain this thread's completed resolve jobs (called from its doorbell). */
 SYMBOL_EXPORT void
 chimera_vfs_identity_thread_complete(

@@ -126,9 +126,10 @@ chimera_vfs_acl_windows_pre_dispatch(
  * partially resolved ACL never leaves core, so CHIMERA_VFS_ATTR_ACL is
  * cleared from va_set_mask, CHIMERA_VFS_ATTR_ACL_WITHHELD set so a protocol
  * does not synthesise one, and va_acl set NULL (the entry is still
- * delivered), and one fire-and-forget BY_SID resolve per unresolved SID warms
- * the cache for the next pass.  The warm callback touches nothing
- * request-scoped.  Edits are made in place in the module's ACL scratch, which
+ * delivered), and a chimera_vfs_identity_warm per unresolved SID (at most
+ * CHIMERA_VFS_ACL_WARM_MAX per entry) fills the cache for the next pass.  A
+ * warm is detached from the request and from every VFS thread, so it may
+ * outlive both.  Edits are made in place in the module's ACL scratch, which
  * is live only for the duration of the per-entry callback.
  *
  * The _pass form additionally dedupes warms across one readdir pass through
@@ -148,7 +149,7 @@ chimera_vfs_acl_windows_enrich_dirent_pass(
     uint32_t                  *nseen,
     uint32_t                   max);
 
-/* True when `dir_fh`'s mount runs with windows-identity ACLs. */
+/* True when `fh`'s mount runs with windows-identity ACLs. */
 SYMBOL_EXPORT int
 chimera_vfs_acl_windows_fh_flagged(
     struct chimera_vfs_thread *thread,
