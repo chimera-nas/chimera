@@ -146,6 +146,20 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memcnt = {
     .dispatch    = memcnt_dispatch,
 };
 
+/* ---- the memblk shim ---------------------------------------------------- */
+
+/* memfs in every respect, except that it declares READDIR blocking, so the
+ * core bounces the entries through its collector (the module runs on a
+ * delegation thread) and replays them to the caller from another thread, by
+ * which time memfs's per-thread ACL scratch has moved on. */
+SYMBOL_EXPORT struct chimera_vfs_module vfs_memblk = {
+    .sdk_version  = CHIMERA_VFS_SDK_VERSION,
+    .name         = "memblk",
+    .fh_magic     = CHIMERA_VFS_FH_MAGIC_VENDOR2,
+    .dispatch     = noaclnat_dispatch,
+    .blocking_ops = CHIMERA_VFS_OP_BIT(CHIMERA_VFS_OP_READDIR),
+};
+
 /* ---- fixture ------------------------------------------------------------ */
 
 struct test_ctx {
@@ -2355,13 +2369,54 @@ test_readdir_algorithmic_passes(struct test_ctx *ctx)
     TEST_PASS("readdir: algorithmic-only ACLs enrich inline even cold");
 } /* test_readdir_algorithmic_passes */
 
+/* The blocking-bounce branch: the entries are collected on a delegation
+ * thread and replayed later, so each must carry its own ACL by value, not a
+ * pointer into the module's scratch (which holds the last entry's by then). */
+static void
+test_readdir_bounce_own_acl(struct test_ctx *ctx)
+{
+    const char                     *sid1 = "S-1-5-21-70-71-72-7101";
+    const char                     *sid2 = "S-1-5-21-70-71-72-7102";
+    struct fixture_sid             *f1   = fixture_sid_add(sid1, CHIMERA_VFS_IDENTITY_OK, 0, 7101);
+    struct fixture_sid             *f2   = fixture_sid_add(sid2, CHIMERA_VFS_IDENTITY_OK, 0, 7102);
+    struct chimera_vfs_open_handle *dir  = rd_make_dir(ctx, "rdbounce");
+    struct chimera_vfs_open_handle *h;
+    struct rd_result                r;
+    struct rd_entry                *a, *b;
+    struct chimera_principal        e1, e2;
+
+    rd_make_file_sid(ctx, dir, "a", sid1);
+    rd_make_file_sid(ctx, dir, "b", sid2);
+
+    /* Warm both SIDs deterministically through getattr. */
+    h = create_file(ctx, dir, "a");
+    assert(get_acl(ctx, h, NULL) == CHIMERA_VFS_OK);
+    chimera_vfs_release(ctx->vfs_thread, h);
+    h = create_file(ctx, dir, "b");
+    assert(get_acl(ctx, h, NULL) == CHIMERA_VFS_OK);
+    chimera_vfs_release(ctx->vfs_thread, h);
+    assert(fixture_calls(f1) == 1 && fixture_calls(f2) == 1);
+
+    rd_run(ctx, dir, &r);
+    a  = rd_find(&r, "a");
+    b  = rd_find(&r, "b");
+    e1 = make_id_principal(CHIMERA_PRINCIPAL_USER, 7101, sid1);
+    e2 = make_id_principal(CHIMERA_PRINCIPAL_USER, 7102, sid2);
+    assert(a && b && a->has_acl && b->has_acl);
+    assert(principal_eq(&((struct chimera_acl *) a->acl_buf)->aces[0].who, &e1));
+    assert(principal_eq(&((struct chimera_acl *) b->acl_buf)->aces[0].who, &e2));
+
+    chimera_vfs_release(ctx->vfs_thread, dir);
+    TEST_PASS("readdir: bounced entries each carry their own ACL");
+} /* test_readdir_bounce_own_acl */
+
 int
 main(
     int    argc,
     char **argv)
 {
     struct test_ctx               ctx = { 0 };
-    struct chimera_vfs_module_cfg module_cfgs[4];
+    struct chimera_vfs_module_cfg module_cfgs[5];
 
     chimera_log_init();
 
@@ -2389,6 +2444,13 @@ main(
     vfs_memcnt.thread_init    = vfs_memfs.thread_init;
     vfs_memcnt.thread_destroy = vfs_memfs.thread_destroy;
 
+    /* And memblk: memfs with READDIR declared blocking. */
+    vfs_memblk.capabilities   = vfs_memfs.capabilities;
+    vfs_memblk.init           = vfs_memfs.init;
+    vfs_memblk.destroy        = vfs_memfs.destroy;
+    vfs_memblk.thread_init    = vfs_memfs.thread_init;
+    vfs_memblk.thread_destroy = vfs_memfs.thread_destroy;
+
     ctx.metrics = prometheus_metrics_create(NULL, NULL, 0);
     assert(ctx.metrics != NULL);
 
@@ -2397,11 +2459,12 @@ main(
     strncpy(module_cfgs[1].module_name, "noaclnat", sizeof(module_cfgs[1].module_name) - 1);
     strncpy(module_cfgs[2].module_name, "memcnt", sizeof(module_cfgs[2].module_name) - 1);
     strncpy(module_cfgs[3].module_name, "memkv", sizeof(module_cfgs[3].module_name) - 1);
+    strncpy(module_cfgs[4].module_name, "memblk", sizeof(module_cfgs[4].module_name) - 1);
 
     ctx.evpl = evpl_create(NULL);
     assert(ctx.evpl != NULL);
 
-    ctx.vfs = chimera_vfs_init(0, 0, module_cfgs, 4, "memkv", 60, 1, 1, 0,
+    ctx.vfs = chimera_vfs_init(1, 0, module_cfgs, 5, "memkv", 60, 1, 1, 0,
                                ctx.metrics);
     assert(ctx.vfs != NULL);
 
@@ -2416,6 +2479,7 @@ main(
     make_fs(&ctx, "noaclnat", "fs_shim");
     make_fs(&ctx, "memfs", "fs_wacl");
     make_fs(&ctx, "memcnt", "fs_wcnt");
+    make_fs(&ctx, "memblk", "fs_wblk");
 
     test_mount_option_accepted(&ctx);
     test_mount_option_absent(&ctx);
@@ -2445,6 +2509,19 @@ main(
     test_readdir_cold_withholds_acl(&ctx);
     test_readdir_warm_enriches(&ctx);
     test_readdir_algorithmic_passes(&ctx);
+
+    /* The blocking-bounce readdir branch, on a mount of its own. */
+    assert(mount_status(&ctx, "wblk", "memblk", "fs_wblk", "windows_acl") ==
+           CHIMERA_VFS_OK);
+    open_mount_root(&ctx, "wblk");
+    {
+        struct chimera_vfs_open_handle *saved = ctx.wdir;
+
+        ctx.wdir = ctx.handle;
+        test_readdir_bounce_own_acl(&ctx);
+        chimera_vfs_release(ctx.vfs_thread, ctx.wdir);
+        ctx.wdir = saved;
+    }
 
     /* Write-path normalization, on the same flagged mounts; the memcnt one
      * (mounted by test_enrich_unavailable_open_closes) also shows what the
