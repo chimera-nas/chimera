@@ -9,6 +9,7 @@
 
 struct chimera_vfs_attrs;
 struct chimera_vfs_request;
+struct chimera_vfs_thread;
 
 /*
  * Strip to SID-only: every USER/GROUP principal carrying a native SID becomes
@@ -111,3 +112,45 @@ chimera_vfs_acl_windows_gate_install(
 SYMBOL_EXPORT int
 chimera_vfs_acl_windows_pre_dispatch(
     struct chimera_vfs_request *request);
+
+/*
+ * Synchronous, cache-only enrichment of one readdir entry's attrs, called per
+ * entry when the directory's mount has CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL and
+ * the entry carries an ACL.  A readdir entry is delivered by a callback that
+ * cannot park, so nothing here may block or wait on the resolver: algorithmic
+ * S-1-5-88 principals decode in place (enrich_sync), and each remaining
+ * native SID is resolved through the identity cache alone -- a positive hit
+ * rewrites the ACE as USER/GROUP with the SID kept, a cached authoritative
+ * miss leaves it an opaque PRINCIPAL_SID (it matches no caller, as on the
+ * getattr path).  A SID the cache knows nothing about is unresolved: the
+ * partially resolved ACL never leaves core, so CHIMERA_VFS_ATTR_ACL is
+ * cleared from va_set_mask, CHIMERA_VFS_ATTR_ACL_WITHHELD set so a protocol
+ * does not synthesise one, and va_acl set NULL (the entry is still
+ * delivered), and one fire-and-forget BY_SID resolve per unresolved SID warms
+ * the cache for the next pass.  The warm callback touches nothing
+ * request-scoped.  Edits are made in place in the module's ACL scratch, which
+ * is live only for the duration of the per-entry callback.
+ *
+ * The _pass form additionally dedupes warms across one readdir pass through
+ * `seen`/`nseen` (hashes of SIDs already warmed, capacity `max`); the plain
+ * form dedupes within the entry only.
+ */
+SYMBOL_EXPORT void
+chimera_vfs_acl_windows_enrich_dirent(
+    struct chimera_vfs_thread *thread,
+    struct chimera_vfs_attrs  *attrs);
+
+SYMBOL_EXPORT void
+chimera_vfs_acl_windows_enrich_dirent_pass(
+    struct chimera_vfs_thread *thread,
+    struct chimera_vfs_attrs  *attrs,
+    uint64_t                  *seen,
+    uint32_t                  *nseen,
+    uint32_t                   max);
+
+/* True when `dir_fh`'s mount runs with windows-identity ACLs. */
+SYMBOL_EXPORT int
+chimera_vfs_acl_windows_fh_flagged(
+    struct chimera_vfs_thread *thread,
+    const uint8_t             *fh,
+    uint32_t                   fh_len);
