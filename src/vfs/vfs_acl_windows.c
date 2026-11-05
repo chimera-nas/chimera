@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <string.h>
+#include <inttypes.h>
 
 #include "vfs_acl_windows.h"
 #include "vfs_internal.h"
@@ -12,6 +13,7 @@
 #include "vfs_user_cache.h"
 #include "vfs_mount_table.h"
 #include "sdk/vfs_sid.h"
+#include "common/ratelimit.h"
 
 /*
  * The algorithmic modefromsid SIDs are S-1-5-88-<kind>-<id>: revision 1, three
@@ -300,15 +302,34 @@ acl_windows_abandon_open(struct chimera_vfs_request *request)
                       NULL, NULL);
 } /* acl_windows_abandon_open */
 
+/* A fail-closed outcome comes in floods while the identity service is down:
+ * each site reports at error level, at most once per interval, with a count
+ * of the reports it held back. */
+#define ACL_WINDOWS_LOG_INTERVAL_NS (10ULL * 1000000000ULL)
+
+#define acl_windows_error_limited(rl, fmt, ...) do { \
+            uint64_t acl_windows_held_back; \
+            if (chimera_ratelimit_allow((rl), ACL_WINDOWS_LOG_INTERVAL_NS, \
+                                        &acl_windows_held_back)) { \
+                chimera_vfs_error(fmt " (%" PRIu64 " more since the last " \
+                                  "report)", __VA_ARGS__, \
+                                  acl_windows_held_back); \
+            } \
+} while (0)
+
 /* Fail closed: the op fails EIO and the unresolved ACL is withheld, so a
  * partially-resolved ACL never leaves the core. */
 static void
 acl_windows_fail(
     struct chimera_vfs_request *request,
-    struct chimera_vfs_attrs   *attr)
+    struct chimera_vfs_attrs   *attr,
+    const char                 *why)
 {
-    chimera_vfs_debug("acl_windows: op %u: a SID in the reply ACL could not "
-                      "be resolved; failing with EIO", request->opcode);
+    static struct chimera_ratelimit rl;
+
+    acl_windows_error_limited(&rl, "acl_windows: op %u: the reply ACL could "
+                              "not be resolved to unix identities (%s); "
+                              "failing with EIO", request->opcode, why);
 
     acl_windows_abandon_open(request);
     attr->va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
@@ -321,7 +342,8 @@ static void
 acl_windows_finish(struct chimera_vfs_request *request)
 {
     if (request->acl_windows.failed) {
-        acl_windows_fail(request, chimera_vfs_acl_windows_reply_attrs(request));
+        acl_windows_fail(request, chimera_vfs_acl_windows_reply_attrs(request),
+                         "identity service unavailable");
     }
 
     request->complete(request);
@@ -466,7 +488,7 @@ acl_windows_complete(struct chimera_vfs_request *request)
 
     res = acl_windows_preserve(request, attr, remaining);
     if (!res) {
-        acl_windows_fail(request, attr);
+        acl_windows_fail(request, attr, "out of request memory");
         request->complete(request);
         return;
     }
@@ -723,8 +745,12 @@ acl_windows_normalize_done(
     struct acl_windows_norm    *norm)
 {
     if (request->acl_windows.failed) {
-        chimera_vfs_debug("acl_windows: op %u: a uid/gid in the set_attr could "
-                          "not be resolved; failing with EIO", request->opcode);
+        static struct chimera_ratelimit rl;
+
+        acl_windows_error_limited(&rl, "acl_windows: op %u: a uid/gid in the "
+                                  "set_attr could not be resolved to a SID "
+                                  "(identity service unavailable); failing "
+                                  "with EIO", request->opcode);
 
         acl_windows_restore_set_attr(request);
         request->status = CHIMERA_VFS_EIO;
@@ -857,6 +883,13 @@ chimera_vfs_acl_windows_pre_dispatch(struct chimera_vfs_request *request)
         /* Past the cap no protocol produces (and the pending count is
          * sized for). */
         if (acl->num_aces > CHIMERA_ACL_MAX_ACES) {
+            static struct chimera_ratelimit rl;
+
+            acl_windows_error_limited(&rl, "acl_windows: op %u: refusing an "
+                                      "ACL of %u ACEs, over the cap of %u, "
+                                      "with EINVAL", request->opcode,
+                                      (unsigned) acl->num_aces,
+                                      (unsigned) CHIMERA_ACL_MAX_ACES);
             request->status = CHIMERA_VFS_EINVAL;
             request->complete(request);
             return 1;
@@ -886,6 +919,11 @@ chimera_vfs_acl_windows_pre_dispatch(struct chimera_vfs_request *request)
                                            (size_t) ids * sizeof(*res) +
                                            acl_size);
     if (!mem) {
+        static struct chimera_ratelimit rl;
+
+        acl_windows_error_limited(&rl, "acl_windows: op %u: out of request "
+                                  "memory normalizing the set_attr; failing "
+                                  "with EIO", request->opcode);
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return 1;
