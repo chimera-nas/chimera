@@ -971,6 +971,9 @@ struct chimera_vfs_request {
 
             struct evpl_iovec               bounce_iov;
             int                             bounce_offset;
+            /* Core-owned: set when an entry could not be staged in the
+             * bounce buffer, failing the readdir. */
+            enum chimera_vfs_error          bounce_status;
             chimera_vfs_readdir_callback_t  orig_callback;
             void                           *orig_private_data;
             /* Optional SMB-style wildcard filter applied in the VFS core so the
