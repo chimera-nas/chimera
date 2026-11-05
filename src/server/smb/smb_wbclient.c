@@ -9,6 +9,7 @@
 #ifdef HAVE_WBCLIENT
 
 #include <wbclient.h>
+#include "smb_wbclient_status.h"
 #include <string.h>
 #include <pwd.h>
 #include <grp.h>
@@ -353,32 +354,6 @@ smb_wbclient_map_principal(
     return 0;
 } // smb_wbclient_map_principal
 
-/* Classify a wbc error for the identity resolver.  Winbind having answered
- * "no such identity" is authoritative (NOT_FOUND); anything that suggests the
- * lookup did not really run -- daemon missing, out of memory, a garbled
- * response, or a failure we cannot interpret -- is UNAVAILABLE, so a transient
- * outage is never mistaken for a negative answer. */
-static enum chimera_vfs_identity_status
-wbc_err_to_status(wbcErr wbc_err)
-{
-    switch (wbc_err) {
-        case WBC_ERR_SUCCESS:
-            return CHIMERA_VFS_IDENTITY_OK;
-        case WBC_ERR_DOMAIN_NOT_FOUND:
-        case WBC_ERR_UNKNOWN_USER:
-        case WBC_ERR_UNKNOWN_GROUP:
-        case WBC_ERR_NOT_MAPPED:
-        case WBC_ERR_INVALID_SID:
-            return CHIMERA_VFS_IDENTITY_NOT_FOUND;
-        case WBC_ERR_WINBIND_NOT_AVAILABLE:
-        case WBC_ERR_NO_MEMORY:
-        case WBC_ERR_INVALID_RESPONSE:
-        case WBC_ERR_NSS_ERROR:
-        default:
-            return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
-    } /* switch */
-} // wbc_err_to_status
-
 /* Fill a chimera_vfs_user (uid/gid/groups/name + real SID) from a resolved user
  * SID.  Returns OK, NOT_FOUND if the SID does not map to a Unix user, or
  * UNAVAILABLE if winbind could not be asked. */
@@ -397,7 +372,7 @@ wbc_fill_user(
 
     wbc_err = wbcSidToUid(user_sid, &unix_uid);
     if (wbc_err != WBC_ERR_SUCCESS) {
-        return wbc_err_to_status(wbc_err);
+        return smb_wbclient_err_to_status(wbc_err);
     }
 
     out->uid = unix_uid;
@@ -447,7 +422,7 @@ wbc_fill_group(
 
     wbc_err = wbcSidToGid(group_sid, &unix_gid);
     if (wbc_err != WBC_ERR_SUCCESS) {
-        return wbc_err_to_status(wbc_err);
+        return smb_wbclient_err_to_status(wbc_err);
     }
 
     out->gid = unix_gid;
@@ -497,31 +472,33 @@ smb_wbclient_identity_handler(
         case CHIMERA_VFS_IDENTITY_BY_UID:
             wbc_err = wbcUidToSid(id, &sid);
             if (wbc_err != WBC_ERR_SUCCESS) {
-                return wbc_err_to_status(wbc_err);
+                return smb_wbclient_err_to_status(wbc_err);
             }
+            /* Winbind named a SID: failing to format it here is ours, not
+             * an answer that the identity has none. */
             if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
-                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+                return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
             }
             return wbc_fill_user(&sid, sidbuf, &out->user);
 
         case CHIMERA_VFS_IDENTITY_BY_GID:
             wbc_err = wbcGidToSid(id, &sid);
             if (wbc_err != WBC_ERR_SUCCESS) {
-                return wbc_err_to_status(wbc_err);
+                return smb_wbclient_err_to_status(wbc_err);
             }
             if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
-                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+                return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
             }
             out->is_group = 1;
             return wbc_fill_group(&sid, sidbuf, &out->group);
 
         case CHIMERA_VFS_IDENTITY_BY_SID:
             if (!name) {
-                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+                return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
             }
             wbc_err = wbcStringToSid(name, &sid);
             if (wbc_err != WBC_ERR_SUCCESS) {
-                return wbc_err_to_status(wbc_err);
+                return smb_wbclient_err_to_status(wbc_err);
             }
             /* A SID is ambiguous.  Ask winbind what it names before choosing
              * the fill: a group SID put through the user-shaped fill fails at
@@ -547,18 +524,18 @@ smb_wbclient_identity_handler(
 
         case CHIMERA_VFS_IDENTITY_BY_NAME:
             if (!name) {
-                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+                return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
             }
             wbc_err = wbcLookupName("", name, &sid, &sid_type);
             if (wbc_err != WBC_ERR_SUCCESS) {
-                return wbc_err_to_status(wbc_err);
+                return smb_wbclient_err_to_status(wbc_err);
             }
             if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
-                sidbuf[0] = '\0';
+                return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
             }
             if (wbc_sid_type_is_group(sid_type)) {
                 out->is_group = 1;
-                rc            = wbc_fill_group(&sid, sidbuf[0] ? sidbuf : NULL,
+                rc            = wbc_fill_group(&sid, sidbuf,
                                                &out->group);
                 if (rc == CHIMERA_VFS_IDENTITY_OK && !out->group.groupname[0]) {
                     wbc_copy_string(out->group.groupname,
@@ -570,7 +547,7 @@ smb_wbclient_identity_handler(
             if (sid_type != WBC_SID_NAME_USER) {
                 return CHIMERA_VFS_IDENTITY_NOT_FOUND;
             }
-            rc = wbc_fill_user(&sid, sidbuf[0] ? sidbuf : NULL, &out->user);
+            rc = wbc_fill_user(&sid, sidbuf, &out->user);
             if (rc == CHIMERA_VFS_IDENTITY_OK && !out->user.username[0]) {
                 wbc_copy_string(out->user.username,
                                 sizeof(out->user.username), name);
