@@ -140,6 +140,11 @@ ops whose dispatch blocks, and the `CHIMERA_VFS_OP_BIT()` /
 a module that set it sets `.blocking_ops = CHIMERA_VFS_BLOCKING_ALL`
 instead.  The module struct layout changes, so modules built against
 earlier SDK versions must be rebuilt.
+Version 5 adds the core-owned `acl_windows` block to
+`struct chimera_vfs_request` (the completion wrapper that resolves SID-only
+ACL principals on a windows-identity mount); a module never touches it, but
+the request layout changes, so modules built against earlier SDK versions
+must be rebuilt.
 
 The `struct chimera_vfs_request` layout is exposed in full and is
 therefore ABI-stable only within an SDK version.  A public-head /

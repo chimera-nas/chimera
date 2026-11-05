@@ -5,6 +5,10 @@
 #include <string.h>
 
 #include "vfs_acl_windows.h"
+#include "vfs_internal.h"
+#include "vfs_identity.h"
+#include "vfs_procs.h"
+#include "vfs_open_cache.h"
 #include "sdk/vfs_sid.h"
 
 /*
@@ -139,3 +143,403 @@ chimera_vfs_acl_windows_enrich_sync(struct chimera_acl *acl)
 
     return remaining;
 } /* chimera_vfs_acl_windows_enrich_sync */
+
+/* ---- read-path enrichment --------------------------------------------- */
+
+/*
+ * One distinct native SID being resolved for a request's reply ACL.  Kept in
+ * request memory, so it outlives the wrapper's frame while the request is
+ * parked; `sid` is the canonical copy every ACE bearing it is matched
+ * against and rewritten with.
+ */
+struct acl_windows_resolve {
+    struct chimera_vfs_request *request;
+    struct chimera_sid          sid;
+};
+
+SYMBOL_EXPORT struct chimera_vfs_attrs *
+chimera_vfs_acl_windows_reply_attrs(struct chimera_vfs_request *request)
+{
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_GETATTR:
+            return &request->getattr.r_attr;
+        case CHIMERA_VFS_OP_LOOKUP_AT:
+            return &request->lookup_at.r_attr;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            return &request->open_at.r_attr;
+        case CHIMERA_VFS_OP_MKDIR_AT:
+            return &request->mkdir_at.r_attr;
+        case CHIMERA_VFS_OP_MKNOD_AT:
+            return &request->mknod_at.r_attr;
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+            return &request->symlink_at.r_attr;
+        case CHIMERA_VFS_OP_CREATE_UNLINKED:
+            return &request->create_unlinked.r_attr;
+        case CHIMERA_VFS_OP_OPEN_STREAM:
+            return &request->open_stream.r_attr;
+        case CHIMERA_VFS_OP_LINK_AT:
+            return &request->link_at.r_attr;
+        case CHIMERA_VFS_OP_READLINK:
+            return &request->readlink.r_attr;
+        case CHIMERA_VFS_OP_READ:
+            return &request->read.r_attr;
+        case CHIMERA_VFS_OP_SETATTR:
+            return &request->setattr.r_post_attr;
+        default:
+            return NULL;
+    } /* switch */
+} /* chimera_vfs_acl_windows_reply_attrs */
+
+/* The op's set_attr pointer, for handing the caller's own back. */
+static struct chimera_vfs_attrs **
+acl_windows_set_attr_slot(struct chimera_vfs_request *request)
+{
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_SETATTR:
+            return &request->setattr.set_attr;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            return &request->open_at.set_attr;
+        case CHIMERA_VFS_OP_MKDIR_AT:
+            return &request->mkdir_at.set_attr;
+        case CHIMERA_VFS_OP_MKNOD_AT:
+            return &request->mknod_at.set_attr;
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+            return &request->symlink_at.set_attr;
+        case CHIMERA_VFS_OP_CREATE_UNLINKED:
+            return &request->create_unlinked.set_attr;
+        case CHIMERA_VFS_OP_OPEN_STREAM:
+            return &request->open_stream.set_attr;
+        default:
+            return NULL;
+    } /* switch */
+} /* acl_windows_set_attr_slot */
+
+/* The mount-attrs lookup chimera_vfs_mount_is_readonly makes, for the
+ * windows-identity flag.  The fh every covered op carries in request->fh (the
+ * object, or the directory a name is resolved or created in) is on the mount
+ * the reply comes from. */
+static int
+acl_windows_mount_flagged(const struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_mount_attrs attrs;
+
+    if (request->fh_len < CHIMERA_VFS_MOUNT_ID_SIZE) {
+        return 0;
+    }
+
+    if (chimera_vfs_mount_table_lookup_attrs(request->thread->vfs->mount_table,
+                                             request->fh, &attrs) != 0) {
+        return 0;
+    }
+
+    return !!(attrs.flags & CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL);
+} /* acl_windows_mount_flagged */
+
+/*
+ * An op that opened something hands the core a backend open to wrap in a
+ * handle, and the core wraps it only on success.  Failing such an op here
+ * would strand it, so close it first -- for exactly the opens the procs
+ * would have retained (chimera_vfs_open_finish, open_stream_complete,
+ * create_unlinked_complete).
+ */
+static void
+acl_windows_abandon_open(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_attrs *attr;
+    uint64_t                  vfs_private;
+
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_OPEN_AT:
+            if (!chimera_vfs_open_handle_retained(request->open_at.flags,
+                                                  request->module->capabilities)) {
+                return;
+            }
+            attr        = &request->open_at.r_attr;
+            vfs_private = request->open_at.r_vfs_private;
+            break;
+        case CHIMERA_VFS_OP_OPEN_STREAM:
+            attr        = &request->open_stream.r_attr;
+            vfs_private = request->open_stream.r_vfs_private;
+            break;
+        case CHIMERA_VFS_OP_CREATE_UNLINKED:
+            attr        = &request->create_unlinked.r_attr;
+            vfs_private = request->create_unlinked.r_vfs_private;
+            break;
+        default:
+            return;
+    } /* switch */
+
+    if (vfs_private == CHIMERA_VFS_OPEN_CACHE_NO_BACKEND_OPEN ||
+        !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        return;
+    }
+
+    chimera_vfs_close(request->thread, request->module, attr->va_fh,
+                      attr->va_fh_len, vfs_private,
+                      chimera_vfs_hash(attr->va_fh, attr->va_fh_len),
+                      NULL, NULL);
+} /* acl_windows_abandon_open */
+
+/* Fail closed: the op fails EIO and the unresolved ACL is withheld, so a
+ * partially-resolved ACL never leaves the core. */
+static void
+acl_windows_fail(
+    struct chimera_vfs_request *request,
+    struct chimera_vfs_attrs   *attr)
+{
+    chimera_vfs_debug("acl_windows: op %u: a SID in the reply ACL could not "
+                      "be resolved; failing with EIO", request->opcode);
+
+    acl_windows_abandon_open(request);
+    attr->va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
+    attr->va_acl       = NULL;
+    request->status    = CHIMERA_VFS_EIO;
+} /* acl_windows_fail */
+
+/* Every resolve has answered: run the real completion (already restored). */
+static void
+acl_windows_finish(struct chimera_vfs_request *request)
+{
+    if (request->acl_windows.failed) {
+        acl_windows_fail(request, chimera_vfs_acl_windows_reply_attrs(request));
+    }
+
+    request->complete(request);
+} /* acl_windows_finish */
+
+/* Rewrite every ACE still bearing `sid` as the identity it resolved to:
+ * USER/GROUP by result->is_group, with the resolved id and the native SID
+ * kept, and the IDENTIFIER_GROUP flag made to agree.  Principals are rebuilt
+ * from zero (the by-value contract in vfs_acl.h). */
+static void
+acl_windows_rewrite(
+    struct chimera_acl                       *acl,
+    const struct chimera_sid                 *sid,
+    const struct chimera_vfs_identity_result *result)
+{
+    for (unsigned i = 0; i < acl->num_aces; i++) {
+        struct chimera_ace *ace = &acl->aces[i];
+
+        if (ace->who.type != CHIMERA_PRINCIPAL_SID ||
+            !chimera_sid_equal(&ace->who.sid, sid)) {
+            continue;
+        }
+
+        memset(&ace->who, 0, sizeof(ace->who));
+        ace->who.sid = *sid;
+        if (result->is_group) {
+            ace->who.type = CHIMERA_PRINCIPAL_GROUP;
+            ace->who.id   = result->group.gid;
+            ace->flags   |= CHIMERA_ACE_FLAG_IDENTIFIER_GROUP;
+        } else {
+            ace->who.type = CHIMERA_PRINCIPAL_USER;
+            ace->who.id   = result->user.uid;
+            ace->flags   &= ~CHIMERA_ACE_FLAG_IDENTIFIER_GROUP;
+        }
+    }
+} /* acl_windows_rewrite */
+
+/*
+ * A BY_SID answer, on the request's own thread: inline from
+ * chimera_vfs_identity_resolve on a cache hit, else from the thread's
+ * identity drain.  The last answer to arrive once the issuer has finished
+ * issuing (active clear) completes the request; while it is still issuing,
+ * the issuer does.
+ */
+static void
+acl_windows_resolve_cb(
+    enum chimera_vfs_identity_status          status,
+    const struct chimera_vfs_identity_result *result,
+    void                                     *private_data)
+{
+    struct acl_windows_resolve *res     = private_data;
+    struct chimera_vfs_request *request = res->request;
+
+    if (status == CHIMERA_VFS_IDENTITY_OK && result) {
+        acl_windows_rewrite(chimera_vfs_acl_windows_reply_attrs(request)->va_acl,
+                            &res->sid, result);
+    } else if (status != CHIMERA_VFS_IDENTITY_NOT_FOUND) {
+        /* Infrastructure failure: fail closed.  (An authoritative NOT_FOUND
+         * leaves the ACE opaque; it matches no caller.) */
+        request->acl_windows.failed = 1;
+    }
+
+    /* `res` lives in request memory, which the completion frees. */
+    if (--request->acl_windows.pending == 0 && !request->acl_windows.active) {
+        acl_windows_finish(request);
+    }
+} /* acl_windows_resolve_cb */
+
+/*
+ * Move the reply ACL and owner/group SIDs out of module scratch -- valid only
+ * until the module serves its next request, which may be before a parked
+ * resolve answers -- into request memory, repointing the attrs, and allocate
+ * room for `nsids` resolves alongside.  One allocation; NULL on failure.
+ */
+static struct acl_windows_resolve *
+acl_windows_preserve(
+    struct chimera_vfs_request *request,
+    struct chimera_vfs_attrs   *attr,
+    int                         nsids)
+{
+    size_t              res_size = (size_t) nsids * sizeof(struct acl_windows_resolve);
+    size_t              acl_size = chimera_acl_size(attr->va_acl->num_aces);
+    uint8_t            *mem;
+    struct chimera_sid *sids;
+
+    mem = chimera_vfs_request_alloc_memory(request, res_size + acl_size +
+                                           2 * sizeof(struct chimera_sid));
+    if (!mem) {
+        return NULL;
+    }
+
+    memcpy(mem + res_size, attr->va_acl, acl_size);
+    attr->va_acl = (struct chimera_acl *) (mem + res_size);
+
+    sids = (struct chimera_sid *) (mem + res_size + acl_size);
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) && attr->va_owner_sid) {
+        sids[0]            = *attr->va_owner_sid;
+        attr->va_owner_sid = &sids[0];
+    }
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) && attr->va_group_sid) {
+        sids[1]            = *attr->va_group_sid;
+        attr->va_group_sid = &sids[1];
+    }
+
+    return (struct acl_windows_resolve *) mem;
+} /* acl_windows_preserve */
+
+/* The completion swapped in by chimera_vfs_acl_windows_gate_install. */
+static void
+acl_windows_complete(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_attrs  **slot;
+    struct chimera_vfs_attrs   *attr;
+    struct chimera_acl         *acl;
+    struct acl_windows_resolve *res;
+    char                        str[CHIMERA_SID_STR_MAX];
+    int                         remaining, nres = 0;
+
+    /* Unwrap first: every exit below runs the real completion exactly once,
+     * and a later re-dispatch of this request installs the wrapper afresh. */
+    request->complete                   = request->acl_windows.saved_complete;
+    request->acl_windows.saved_complete = NULL;
+
+    if (request->acl_windows.saved_set_attr) {
+        slot = acl_windows_set_attr_slot(request);
+        if (slot) {
+            *slot = request->acl_windows.saved_set_attr;
+        }
+        request->acl_windows.saved_set_attr = NULL;
+    }
+
+    attr = chimera_vfs_acl_windows_reply_attrs(request);
+
+    if (request->status != CHIMERA_VFS_OK || !attr ||
+        !(attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) || !attr->va_acl) {
+        request->complete(request);
+        return;
+    }
+
+    /* Algorithmic SIDs decode in place; if nothing else is SID-only, the
+     * reply is complete as it stands and never leaves module scratch. */
+    remaining = chimera_vfs_acl_windows_enrich_sync(attr->va_acl);
+    if (remaining == 0) {
+        request->complete(request);
+        return;
+    }
+
+    res = acl_windows_preserve(request, attr, remaining);
+    if (!res) {
+        acl_windows_fail(request, attr);
+        request->complete(request);
+        return;
+    }
+    acl = attr->va_acl;
+
+    /* One resolve per distinct SID.  `active` holds off completion while
+     * issuing: a cache hit (positive or negative) answers inline, before
+     * chimera_vfs_identity_resolve returns, and must not finish the request
+     * under this loop.  An inline OK has already rewritten every ACE bearing
+     * its SID, so later ones are no longer PRINCIPAL_SID; the scan of `res`
+     * catches the SIDs still waiting (or authoritatively unknown). */
+    request->acl_windows.pending = 0;
+    request->acl_windows.failed  = 0;
+    request->acl_windows.active  = 1;
+
+    for (unsigned i = 0; i < acl->num_aces; i++) {
+        const struct chimera_principal *who = &acl->aces[i].who;
+        int                             dup = 0;
+
+        /* An inline UNAVAILABLE has already decided the outcome; asking
+         * about the rest would only load a resolver that is down. */
+        if (request->acl_windows.failed) {
+            break;
+        }
+
+        if (who->type != CHIMERA_PRINCIPAL_SID ||
+            !chimera_sid_present(&who->sid)) {
+            continue;
+        }
+
+        for (int j = 0; j < nres; j++) {
+            if (chimera_sid_equal(&res[j].sid, &who->sid)) {
+                dup = 1;
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+
+        /* A malformed SID cannot be asked about; like an unknown one it
+         * stays opaque and matches no caller. */
+        if (chimera_sid_from_bin(&res[nres].sid, who->sid.data,
+                                 who->sid.len) < 0 ||
+            chimera_sid_to_str(&res[nres].sid, str, sizeof(str)) < 0) {
+            continue;
+        }
+
+        res[nres].request = request;
+        request->acl_windows.pending++;
+        chimera_vfs_identity_resolve(request->thread,
+                                     CHIMERA_VFS_IDENTITY_BY_SID, 0, str,
+                                     acl_windows_resolve_cb, &res[nres]);
+        nres++;
+    }
+
+    request->acl_windows.active = 0;
+
+    /* Every answer arrived inline (or there was nothing to ask): complete
+     * now.  Otherwise the request stays parked, and the last answer to come
+     * through the identity drain completes it. */
+    if (request->acl_windows.pending == 0) {
+        acl_windows_finish(request);
+    }
+} /* acl_windows_complete */
+
+SYMBOL_EXPORT void
+chimera_vfs_acl_windows_gate_install(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_attrs *attr;
+
+    /* Already wrapped: this is a re-dispatch of a request still in flight. */
+    if (request->acl_windows.saved_complete) {
+        return;
+    }
+
+    /* A normalized set_attr copy is handed back however the op completes;
+     * otherwise only an op whose reply asks for the ACL on a flagged mount
+     * needs the wrapper, and the request-local tests come before the
+     * mount-attrs lookup. */
+    if (!request->acl_windows.saved_set_attr) {
+        attr = chimera_vfs_acl_windows_reply_attrs(request);
+        if (!attr || !(attr->va_req_mask & CHIMERA_VFS_ATTR_ACL) ||
+            !acl_windows_mount_flagged(request)) {
+            return;
+        }
+    }
+
+    request->acl_windows.saved_complete = request->complete;
+    request->complete                   = acl_windows_complete;
+} /* chimera_vfs_acl_windows_gate_install */
