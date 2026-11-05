@@ -149,6 +149,11 @@ file-handle signing key this way), so a module that ignored the flag would
 let racing callers each overwrite the key and each report success.
 Registration refuses a module built against any other SDK version, so
 all modules must be rebuilt; KV modules must also implement the flag.
+Version 6 adds the core-owned `acl_windows` block to
+`struct chimera_vfs_request` (the completion wrapper that resolves SID-only
+ACL principals on a windows-identity mount); a module never touches it, but
+the request layout changes, so modules built against earlier SDK versions
+must be rebuilt.
 
 The `struct chimera_vfs_request` layout is exposed in full and is
 therefore ABI-stable only within an SDK version.  A public-head /
