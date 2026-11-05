@@ -234,9 +234,10 @@ struct chimera_vfs_handle_state {
  * losslessly.  If unset, the module is mode-only, and a mode-only module that
  * wants ACLs at all translates them itself: linux maps a set-ACL down to chmod
  * and synthesizes one back from the mode on query, io_uring does neither.  The
- * VFS core does not translate on a module's behalf -- it only reads va_acl to
- * gate access.  There is no POSIX.1e capability by design -- Chimera carries a
- * single ACL model (see vfs_acl.h).
+ * VFS core does not translate on a module's behalf -- it reads va_acl to
+ * gate access and, on a CHIMERA_VFS_CAP_ACL_WINDOWS mount, rewrites the reply
+ * ACL in place (see that capability).  There is no POSIX.1e capability by
+ * design -- Chimera carries a single ACL model (see vfs_acl.h).
  *
  * This is a statement about fidelity, and the SMB server's
  * FILE_PERSISTENT_ACLS advertisement gates on it deliberately: a mode-bit
@@ -269,6 +270,14 @@ struct chimera_vfs_handle_state {
  *  - The module must still return va_uid, va_gid and va_mode whenever
  *    va_req_mask asks for them, exactly as the existing reply contract
  *    requires of every module.
+ *  - Because the core rewrites the reply ACL in place on such a mount, the
+ *    module must return that ACL in private, writable storage: module
+ *    thread-local scratch and request-owned memory
+ *    (chimera_vfs_request_alloc_memory) both qualify; memory shared with a
+ *    cache or with other replies does not.
+ *  - The module's own access gates see the stored SID-only ACL directly, so
+ *    a named-ACE grant does not match a caller there (see
+ *    docs/vfs-module-sdk.md).
  *
  * Meaningful only alongside CHIMERA_VFS_CAP_ACL_NATIVE: a module declaring
  * this bit without it is a module bug, and a mount of such a module fails
