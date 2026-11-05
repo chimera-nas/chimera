@@ -982,20 +982,6 @@ chimera_vfs_acl_windows_fh_flagged(
     return !!(attrs.flags & CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL);
 } /* chimera_vfs_acl_windows_fh_flagged */
 
-/* The warm resolve's callback: it exists only to make the resolver fetch and
- * cache the identity.  Its answer may arrive after the readdir reply is gone,
- * so it touches nothing. */
-static void
-acl_windows_warm_cb(
-    enum chimera_vfs_identity_status          status,
-    const struct chimera_vfs_identity_result *result,
-    void                                     *private_data)
-{
-    (void) status;
-    (void) result;
-    (void) private_data;
-} /* acl_windows_warm_cb */
-
 static uint64_t
 acl_windows_sid_hash(const struct chimera_sid *sid)
 {
@@ -1146,8 +1132,8 @@ chimera_vfs_acl_windows_enrich_dirent_pass(
             chimera_sid_to_str(&missing[j], str, sizeof(str)) < 0) {
             continue;
         }
-        chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_SID, 0,
-                                     str, acl_windows_warm_cb, NULL);
+        chimera_vfs_identity_warm(thread->vfs, CHIMERA_VFS_IDENTITY_BY_SID, 0,
+                                  str);
     }
 } /* chimera_vfs_acl_windows_enrich_dirent_pass */
 

@@ -320,6 +320,14 @@ chimera_vfs_identity_worker(void *arg)
                 CHIMERA_VFS_IDENTITY_NEGATIVE_TTL);
         }
 
+        /* A warm has no origin: nobody waits on it, and the thread that
+         * issued it may already be gone. */
+        if (!req->origin) {
+            free(req);
+            evpl_mutex_lock(&identity->lock);
+            continue;
+        }
+
         /* Hand the completed job back to the originating evpl thread.
          *
          * Read the origin out of the job FIRST.  Appending it publishes it:
@@ -564,43 +572,49 @@ chimera_vfs_identity_register_handler(
     chimera_vfs_identity_add_handler(vfs->identity, handler, private_data);
 } /* chimera_vfs_identity_register_handler */
 
-SYMBOL_EXPORT void
-chimera_vfs_identity_resolve(
-    struct chimera_vfs_thread    *thread,
+/* Answer from the cache if it can: OK (with *hit filled), NOT_FOUND for a
+ * cached authoritative miss, or PASS when a worker has to be asked. */
+static enum chimera_vfs_identity_status
+chimera_vfs_identity_cache_answer(
+    struct chimera_vfs                 *vfs,
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *hit)
+{
+    int neg;
+
+    memset(hit, 0, sizeof(*hit));
+
+    if (chimera_vfs_identity_cache_probe(vfs->vfs_user_cache, key, id, name,
+                                         hit)) {
+        return CHIMERA_VFS_IDENTITY_OK;
+    }
+
+    chimera_rcu_read_lock(&vfs->vfs_user_cache->rcu);
+    neg = chimera_vfs_user_cache_lookup_negative(vfs->vfs_user_cache, key, id,
+                                                 name);
+    chimera_rcu_read_unlock(&vfs->vfs_user_cache->rcu);
+
+    return neg ? CHIMERA_VFS_IDENTITY_NOT_FOUND : CHIMERA_VFS_IDENTITY_PASS;
+} /* chimera_vfs_identity_cache_answer */
+
+/* Queue a job for a worker.  `origin` NULL makes it a warm: the worker frees
+ * it after caching the outcome instead of handing it back. */
+static void
+chimera_vfs_identity_enqueue(
+    struct chimera_vfs_identity  *identity,
+    struct chimera_vfs_thread    *origin,
     enum chimera_vfs_identity_key key,
     uint32_t                      id,
     const char                   *name,
     chimera_vfs_identity_callback callback,
     void                         *private_data)
 {
-    struct chimera_vfs_identity         *identity = thread->vfs->identity;
-    struct chimera_vfs_identity_result   hit;
     struct chimera_vfs_identity_request *req;
-    int                                  neg;
 
-    memset(&hit, 0, sizeof(hit));
-
-    /* Fast path: a cache hit resolves inline on this thread. */
-    if (chimera_vfs_identity_cache_probe(thread->vfs->vfs_user_cache,
-                                         key, id, name, &hit)) {
-        callback(CHIMERA_VFS_IDENTITY_OK, &hit, private_data);
-        return;
-    }
-
-    /* A cached authoritative miss completes inline too, never queued. */
-    chimera_rcu_read_lock(&thread->vfs->vfs_user_cache->rcu);
-    neg = chimera_vfs_user_cache_lookup_negative(thread->vfs->vfs_user_cache,
-                                                 key, id, name);
-    chimera_rcu_read_unlock(&thread->vfs->vfs_user_cache->rcu);
-    if (neg) {
-        callback(CHIMERA_VFS_IDENTITY_NOT_FOUND, NULL, private_data);
-        return;
-    }
-
-    /* Miss: dispatch to a worker and park (the callback fires on `thread`'s
-     * evpl loop once the worker has resolved and cached the identity). */
     req               = calloc(1, sizeof(*req));
-    req->origin       = thread;
+    req->origin       = origin;
     req->key          = key;
     req->id           = id;
     req->callback     = callback;
@@ -613,7 +627,50 @@ chimera_vfs_identity_resolve(
     DL_APPEND(identity->queue, req);
     evpl_cond_signal(&identity->cond);
     evpl_mutex_unlock(&identity->lock);
+} /* chimera_vfs_identity_enqueue */
+
+SYMBOL_EXPORT void
+chimera_vfs_identity_resolve(
+    struct chimera_vfs_thread    *thread,
+    enum chimera_vfs_identity_key key,
+    uint32_t                      id,
+    const char                   *name,
+    chimera_vfs_identity_callback callback,
+    void                         *private_data)
+{
+    struct chimera_vfs_identity_result hit;
+    enum chimera_vfs_identity_status   cached;
+
+    /* A cache hit, or a cached authoritative miss, completes inline on this
+     * thread and is never queued. */
+    cached = chimera_vfs_identity_cache_answer(thread->vfs, key, id, name, &hit);
+    if (cached != CHIMERA_VFS_IDENTITY_PASS) {
+        callback(cached, cached == CHIMERA_VFS_IDENTITY_OK ? &hit : NULL,
+                 private_data);
+        return;
+    }
+
+    /* Miss: dispatch to a worker and park (the callback fires on `thread`'s
+     * evpl loop once the worker has resolved and cached the identity). */
+    chimera_vfs_identity_enqueue(thread->vfs->identity, thread, key, id, name,
+                                 callback, private_data);
 } /* chimera_vfs_identity_resolve */
+
+SYMBOL_EXPORT void
+chimera_vfs_identity_warm(
+    struct chimera_vfs           *vfs,
+    enum chimera_vfs_identity_key key,
+    uint32_t                      id,
+    const char                   *name)
+{
+    struct chimera_vfs_identity_result hit;
+
+    if (chimera_vfs_identity_cache_answer(vfs, key, id, name, &hit) ==
+        CHIMERA_VFS_IDENTITY_PASS) {
+        chimera_vfs_identity_enqueue(vfs->identity, NULL, key, id, name, NULL,
+                                     NULL);
+    }
+} /* chimera_vfs_identity_warm */
 
 SYMBOL_EXPORT int
 chimera_vfs_identity_cached(

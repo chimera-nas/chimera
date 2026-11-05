@@ -11,10 +11,13 @@
 
 #include <stdio.h>
 #include <string.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include "common/platform.h"
+#else /* ifdef _WIN32 */
+#include <unistd.h>
 #include <pwd.h>
 #include <grp.h>
-#endif /* ifndef _WIN32 */
+#endif /* ifdef _WIN32 */
 #undef NDEBUG
 #include <assert.h>
 
@@ -150,6 +153,47 @@ scripted_handler(
     return sc->status;
 } /* scripted_handler */
 
+/* Answers one uid, but only once the test opens the gate, so a job can be held
+ * in flight across the destruction of the thread that issued it. */
+struct gated {
+    evpl_mutex_t lock;
+    evpl_cond_t  cond;
+    int          entered;
+    int          open;
+    uint32_t     uid;
+};
+
+static enum chimera_vfs_identity_status
+gated_handler(
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out,
+    void                               *private_data)
+{
+    struct gated *g = private_data;
+
+    (void) name;
+
+    if (key != CHIMERA_VFS_IDENTITY_BY_UID || id != g->uid) {
+        return CHIMERA_VFS_IDENTITY_PASS;
+    }
+
+    evpl_mutex_lock(&g->lock);
+    g->entered = 1;
+    evpl_cond_broadcast(&g->cond);
+    while (!g->open) {
+        evpl_cond_wait(&g->cond, &g->lock);
+    }
+    evpl_mutex_unlock(&g->lock);
+
+    out->user.uid = id;
+    out->user.gid = id;
+    snprintf(out->user.username, sizeof(out->user.username), "gated%u", id);
+    out->user.username_len = (int) strlen(out->user.username);
+    return CHIMERA_VFS_IDENTITY_OK;
+} /* gated_handler */
+
 #ifdef _WIN32
 /* Windows has no NSS provider. Supply deterministic worker results so the
  * same async completion, caching, and SID-precedence checks still run. */
@@ -207,6 +251,7 @@ main(
     uint32_t                      scratch_id;
     uint32_t                      wb_gid;
     struct scripted               sc_a, sc_b;
+    struct gated                  gate;
 
     chimera_log_init();
 
@@ -548,8 +593,48 @@ main(
     assert(sc_a.calls == 2);
     TEST_PASS("unavailable_not_cached");
 
+    /* A warm outlives the thread it was issued from.  Destroy the thread
+     * while the warm's handler is still running, then let it answer: the
+     * worker must cache the answer without reaching for any thread (a
+     * hand-back to the destroyed one is a use-after-free under ASan). */
+    memset(&gate, 0, sizeof(gate));
+    evpl_mutex_init(&gate.lock, NULL);
+    evpl_cond_init(&gate.cond, NULL);
+    gate.uid = 0x7fffffe0;
+    chimera_vfs_identity_register_handler(vfs, gated_handler, &gate);
+
+    assert(!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
+                                        gate.uid, NULL));
+    chimera_vfs_identity_warm(vfs, CHIMERA_VFS_IDENTITY_BY_UID, gate.uid, NULL);
+
+    evpl_mutex_lock(&gate.lock);
+    while (!gate.entered) {
+        evpl_cond_wait(&gate.cond, &gate.lock);
+    }
+    evpl_mutex_unlock(&gate.lock);
+
+    chimera_vfs_thread_destroy(thread);
+
+    evpl_mutex_lock(&gate.lock);
+    gate.open = 1;
+    evpl_cond_broadcast(&gate.cond);
+    evpl_mutex_unlock(&gate.lock);
+
+    thread = chimera_vfs_thread_init(evpl, vfs);
+    assert(thread != NULL);
+    for (int i = 0; i < 2000 &&
+         !chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
+                                      gate.uid, NULL); i++) {
+        usleep(1000);
+    }
+    assert(chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
+                                       gate.uid, NULL));
+    TEST_PASS("warm_outlives_thread");
+
     chimera_vfs_thread_destroy(thread);
     chimera_vfs_destroy(vfs);
+    evpl_mutex_destroy(&gate.lock);
+    evpl_cond_destroy(&gate.cond);
     evpl_destroy(evpl);
     prometheus_metrics_destroy(metrics);
 
