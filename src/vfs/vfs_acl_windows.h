@@ -34,13 +34,15 @@ SYMBOL_EXPORT int chimera_vfs_acl_windows_enrich_sync(
 /*
  * The reply attrs whose ACL the read path enriches: the op's r_attr (for
  * SETATTR, r_post_attr), or NULL for an op that returns no such attrs.
- * Covers every op whose reply attrs a backend fills from the object's
+ * Covers the ops whose reply attrs a backend fills from the object's
  * metadata, so may carry va_acl when it was requested: getattr, lookup_at,
  * open_at, mkdir_at, mknod_at, symlink_at, create_unlinked, open_stream,
  * link_at, readlink, read and setattr.  readdir is not among them: its
  * entries are delivered by a callback that cannot park (see
- * vfs_proc_readdir.c).  Directory pre/post attrs are not covered either; no
- * caller asks for an ACL in them.
+ * vfs_proc_readdir.c).  Directory pre/post attrs are not covered either, as
+ * no caller asks for an ACL in them.  An op or caller added later whose
+ * reply attrs can carry va_acl must be added here, or its SID-only ACL
+ * reaches the protocol unresolved.
  */
 SYMBOL_EXPORT struct chimera_vfs_attrs *
 chimera_vfs_acl_windows_reply_attrs(
@@ -79,10 +81,11 @@ chimera_vfs_acl_windows_gate_install(
  * it with an error); it re-enters chimera_vfs_dispatch when done, with
  * request->acl_windows.saved_set_attr non-NULL marking the normalized state
  * so re-entry falls through.  Applies to ops carrying a set_attr:
- * setattr/fsetattr, open_at (create), mkdir_at, mknod_at, symlink_at,
- * create_unlinked -- and open_stream, whose set_attr a module applies to
- * the base file -- on a mount with CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL whose
- * set_attr carries an ACL, a uid or a gid.
+ * setattr/fsetattr, open_at (create or truncate), mkdir_at, mknod_at,
+ * symlink_at, create_unlinked -- and open_stream, whose set_attr a module
+ * applies to the base file -- on a mount with
+ * CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL whose set_attr carries an ACL, a uid or
+ * a gid.
  *
  * The op is handed a private copy of the set_attr (and its ACL) in request
  * memory; the caller's buffers are never written, and the completion
