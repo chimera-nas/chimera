@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
 #ifdef _WIN32
 #include "common/platform.h"
 #else /* ifdef _WIN32 */
@@ -79,15 +80,29 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_noaclnat = {
  * are not counted), so a test can see a backend open being released.  It also
  * keeps a copy of the last ACL an op's set_attr handed it, so a test can see
  * exactly what the module was asked to store. */
-static struct chimera_vfs_thread      *memcnt_thread;
-static int                             memcnt_closes;
+static struct chimera_vfs_thread *memcnt_thread;
+static int                        memcnt_closes;
 
-#define MEMCNT_ACL_MAX 4
+/* A sized stand-in for struct chimera_acl, whose flexible array member MSVC
+ * refuses to embed in another struct (C2229).  The hdr mirror keeps the real
+ * header layout; the assert below pins the two together. */
+#define TEST_ACL_MAX 4
 
-static struct {
-    struct chimera_acl hdr;
-    struct chimera_ace aces[MEMCNT_ACL_MAX];
-} memcnt_acl;
+struct test_acl {
+    struct {
+        uint16_t num_aces;
+        uint16_t ctrl_flags;
+    } hdr;
+    struct chimera_ace aces[TEST_ACL_MAX];
+};
+
+_Static_assert(offsetof(struct test_acl, aces) ==
+               offsetof(struct chimera_acl, aces),
+               "test_acl must mirror the struct chimera_acl layout");
+
+#define MEMCNT_ACL_MAX TEST_ACL_MAX
+
+static struct test_acl                 memcnt_acl;
 static int                             memcnt_acl_seen;  /* ops that carried one */
 /* ...and the set_attr and ACL pointers that op was handed. */
 static const struct chimera_vfs_attrs *memcnt_set_attr_ptr;
@@ -399,13 +414,6 @@ test_mount_option_rejected_without_acl_native(struct test_ctx *ctx)
 
 /* ---- pure principal transforms ------------------------------------------ */
 
-#define TEST_ACL_MAX 4
-
-struct test_acl {
-    struct chimera_acl hdr;
-    struct chimera_ace aces[TEST_ACL_MAX];
-};
-
 static struct chimera_acl *
 acl_init(
     struct test_acl *t,
@@ -413,7 +421,7 @@ acl_init(
 {
     memset(t, 0, sizeof(*t));
     t->hdr.num_aces = n;
-    return &t->hdr;
+    return (struct chimera_acl *) t;
 } /* acl_init */
 
 static struct chimera_principal
