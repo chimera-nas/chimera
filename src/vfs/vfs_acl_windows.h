@@ -71,3 +71,43 @@ chimera_vfs_acl_windows_reply_attrs(
 SYMBOL_EXPORT void
 chimera_vfs_acl_windows_gate_install(
     struct chimera_vfs_request *request);
+
+/*
+ * Called at the top of chimera_vfs_dispatch, before the notify-gate install.
+ * Returns 1 when it has taken the request (parked on resolves, or completed
+ * it with an error); it re-enters chimera_vfs_dispatch when done, with
+ * request->acl_windows.saved_set_attr non-NULL marking the normalized state
+ * so re-entry falls through.  Applies to ops carrying a set_attr:
+ * setattr/fsetattr, open_at (create), mkdir_at, mknod_at, symlink_at,
+ * create_unlinked -- and open_stream, whose set_attr a module applies to
+ * the base file -- on a mount with CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL whose
+ * set_attr carries an ACL, a uid or a gid.
+ *
+ * The op is handed a private copy of the set_attr (and its ACL) in request
+ * memory; the caller's buffers are never written, and the completion
+ * wrapper gives the caller its own set_attr back.  On the copy:
+ *
+ *   - each USER/GROUP principal without a native SID is resolved BY_UID /
+ *     BY_GID (one resolve per distinct id, parking on misses): a resolved
+ *     native SID is written into the principal; an authoritative NOT_FOUND
+ *     (or an identity with no SID) leaves it numeric;
+ *   - a uid (gid) change naming no owner (group) SID companion is resolved
+ *     the same way, and the native SID attached as the companion; NOT_FOUND
+ *     leaves it absent, which clears a stored one as before;
+ *   - then chimera_vfs_acl_windows_strip makes the ACL SID-only: a principal
+ *     with a native SID keeps only that, a numeric one gets its algorithmic
+ *     SID.  SPECIAL and PRINCIPAL_SID principals pass through untouched.
+ *
+ * Any UNAVAILABLE answer fails the op with CHIMERA_VFS_EIO without
+ * dispatching it.  It runs after the setattr permission gate (which ran on
+ * the request as the client sent it, before chimera_vfs_setattr_dispatch
+ * reached chimera_vfs_dispatch), so the SIDs attached here are the engine's
+ * own derivation and do not face the client-facing owner-SID discipline.
+ * Otherwise the request is left untouched: off a flagged mount, or with no
+ * relevant set_attr bits, it costs a switch and a mask test (and, for a
+ * relevant op on an ACL-native module, the mount-attrs lookup); a read-only
+ * mount is left to refuse the op with EROFS.
+ */
+SYMBOL_EXPORT int
+chimera_vfs_acl_windows_pre_dispatch(
+    struct chimera_vfs_request *request);

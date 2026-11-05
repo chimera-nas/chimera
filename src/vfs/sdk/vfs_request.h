@@ -616,10 +616,12 @@ struct chimera_vfs_request {
      * the real one in saved_complete (non-NULL exactly while the wrapper is
      * installed), which resolves the reply ACL's SID-only principals before
      * running it.  saved_set_attr is the caller's set_attr while the op
-     * carries a normalized private copy; the wrapper puts it back.  pending
-     * counts outstanding identity resolves, active is set while they are
-     * being issued (so one answered inline cannot finish the request under
-     * the issuer), and failed records an UNAVAILABLE answer. */
+     * carries a normalized private copy (made before dispatch, and marking
+     * the request normalized); the wrapper puts it back.  pending counts
+     * outstanding identity resolves, active is set while they are being
+     * issued (so one answered inline cannot finish the request under the
+     * issuer), and failed records an UNAVAILABLE answer -- for the
+     * pre-dispatch normalization's resolves, then for the wrapper's. */
     struct {
         void                      ( *saved_complete )(
             struct chimera_vfs_request *request);
