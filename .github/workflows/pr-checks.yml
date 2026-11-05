@@ -276,7 +276,15 @@ jobs:
           # uncovered lines their hyperlinks.
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          # Size the io_uring rings for a test, not a server, with the values
+          # the build-test.yml test jobs use (see the comment there): under
+          # ctest -j nproc the default libevpl, VFS worker and FUSE-over-io_uring
+          # rings stack up until one is refused with ENOMEM, which aborts that
+          # test's daemon at startup and fails an unrelated test.
           docker run --rm --privileged \
+            -e EVPL_IO_URING_ENTRIES=1024 \
+            -e CHIMERA_IO_URING_MAX_INFLIGHT=256 \
+            -e CHIMERA_FUSE_URING_DEPTH=2 \
             -e RUN_URL="$RUN_URL" \
             -e GH_REPO="$GH_REPO" \
             -e PR_HEAD_SHA="$PR_HEAD_SHA" \
