@@ -47,6 +47,15 @@ chimera_vfs_create_unlinked_complete(struct chimera_vfs_request *request)
     struct vfs_open_cache     *cache  = thread->vfs->vfs_open_file_cache;
     uint64_t                   fh_hash;
 
+    /* A failed create has no backend open for a handle to own -- the backend
+     * made none, or the core already closed the one it made before failing
+     * the op (vfs_acl_windows.c) -- so cache nothing and hand back no handle,
+     * as open_at and open_stream do. */
+    if (request->status != CHIMERA_VFS_OK) {
+        chimera_vfs_create_unlinked_hdl_callback(request, NULL);
+        return;
+    }
+
     fh_hash = chimera_vfs_hash(request->create_unlinked.r_attr.va_fh,
                                request->create_unlinked.r_attr.va_fh_len);
 

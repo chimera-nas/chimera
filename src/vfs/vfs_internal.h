@@ -22,6 +22,7 @@
 #include "vfs/sdk/vfs_fh.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/vfs_mount_table.h"
+#include "vfs/vfs_acl_windows.h"
 #include "common/logging.h"
 #include "common/misc.h"
 #include "metrics/metrics.h"
@@ -384,6 +385,10 @@ chimera_vfs_request_alloc_common(
     request->io_owns_lease_ref    = 0;
     request->io_pnfs_backing      = NULL;
 
+    /* Likewise the windows-identity ACL wrapper state (unwrapped, no
+     * set_attr to hand back, nothing outstanding). */
+    memset(&request->acl_windows, 0, sizeof(request->acl_windows));
+
     if (fh && fhlen > 0) {
         memcpy(request->fh, fh, fhlen);
     }
@@ -744,6 +749,12 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
     /* Namespace mutations gate their completion on sync watchers'
      * invalidation acks; a single relaxed load when none are registered. */
     chimera_vfs_notify_gate_install(request);
+
+    /* On a windows-identity mount, a reply ACL's SID-only principals are
+     * resolved before anything sees the reply.  Installed after the notify
+     * gate so it wraps it and runs first at completion: the gate's watchers
+     * and the proc's own completion only ever see the enriched ACL. */
+    chimera_vfs_acl_windows_gate_install(request);
 
     if (!module || !thread->module_private[module->fh_magic]) {
         request->status = CHIMERA_VFS_ESTALE;

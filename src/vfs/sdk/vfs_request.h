@@ -614,6 +614,25 @@ struct chimera_vfs_request {
         struct chimera_vfs_request *request);
     uint8_t                            notify_gate_wrapped;
     uint8_t                            notify_gate_resume;
+
+    /* Windows-identity ACLs (vfs_acl_windows.c), on a mount whose ACLs are
+     * stored SID-only.  Core-owned: a module never reads or writes these.
+     * At dispatch the core swaps the op's completion for a wrapper, keeping
+     * the real one in saved_complete (non-NULL exactly while the wrapper is
+     * installed), which resolves the reply ACL's SID-only principals before
+     * running it.  saved_set_attr is the caller's set_attr while the op
+     * carries a normalized private copy; the wrapper puts it back.  pending
+     * counts outstanding identity resolves, active is set while they are
+     * being issued (so one answered inline cannot finish the request under
+     * the issuer), and failed records an UNAVAILABLE answer. */
+    struct {
+        void                      ( *saved_complete )(
+            struct chimera_vfs_request *request);
+        struct chimera_vfs_attrs *saved_set_attr;
+        uint16_t                  pending;
+        uint8_t                   active;
+        uint8_t                   failed;
+    } acl_windows;
     /* Set by chimera_vfs_io_recall(): this request is a namespace/metadata
      * mutation that must recall every caching lease on a target file (regardless
      * of owner) rather than hold an implicit lease. */
