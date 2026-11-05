@@ -1682,6 +1682,77 @@ test_write_stores_sid_only(struct test_ctx *ctx)
 } /* test_write_stores_sid_only */
 
 static void
+test_chmod_keeps_sid_only_aces(struct test_ctx *ctx)
+{
+    const char                     *sid = "S-1-5-21-70-71-72-7000";
+    struct fixture_sid             *fs  = fixture_sid_add(sid, CHIMERA_VFS_IDENTITY_NOT_FOUND, 0, 0);
+    struct chimera_vfs_open_handle *h   = create_file(ctx, ctx->wdir, "w_chmod");
+    struct chimera_acl             *acl = acl_buf_init(acl_in_buf, 3);
+    struct chimera_principal        opaque;
+    struct chimera_vfs_attrs        sattr;
+    const struct chimera_ace       *named = NULL;
+    unsigned                        i;
+
+    /* A named ACE for a SID the resolver has no answer for: it is stored
+     * SID-only and reads back as an opaque PRINCIPAL_SID. */
+    opaque = make_sid_principal(sid);
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL, 0,
+            make_special_principal(CHIMERA_WHO_OWNER));
+    ace_set(&acl->aces[1], CHIMERA_ACE_ALLOWED,
+            CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA, 0, opaque);
+    ace_set(&acl->aces[2], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0,
+            make_special_principal(CHIMERA_WHO_EVERYONE));
+    set_acl(ctx, h, acl);
+
+    assert(get_acl(ctx, h, NULL) == CHIMERA_VFS_OK);
+    assert(fixture_calls(fs) >= 1);
+
+    /* A mode-only setattr rebuilds the special ACEs from the new mode and
+     * must leave the named one alone. */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    sattr.va_mode     = 0640;
+    assert(setattr_status(ctx, &ctx->root_cred, h, &sattr) == CHIMERA_VFS_OK);
+
+    assert(get_acl(ctx, h, NULL) == CHIMERA_VFS_OK);
+    for (i = 0; i < ctx->got_acl->num_aces; i++) {
+        const struct chimera_ace *ace = &ctx->got_acl->aces[i];
+
+        if (ace->who.type == CHIMERA_PRINCIPAL_SPECIAL) {
+            continue;
+        }
+        assert(named == NULL);
+        named = ace;
+    }
+    assert(named);
+    assert(principal_eq(&named->who, &opaque));
+    assert(named->type == CHIMERA_ACE_ALLOWED);
+    assert(named->flags == 0);
+    assert(named->access_mask == (CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA));
+
+    /* The specials follow the new mode: the owner holds read/write, others
+     * hold nothing, so neither can be the original full-control/read ACEs. */
+    for (i = 0; i < ctx->got_acl->num_aces; i++) {
+        const struct chimera_ace *ace = &ctx->got_acl->aces[i];
+
+        if (ace->who.type == CHIMERA_PRINCIPAL_SPECIAL &&
+            ace->who.special == CHIMERA_WHO_OWNER &&
+            ace->type == CHIMERA_ACE_ALLOWED) {
+            assert(ace->access_mask != CHIMERA_ACE_MASK_ALL);
+            assert(ace->access_mask & CHIMERA_ACE_WRITE_DATA);
+        }
+        if (ace->who.type == CHIMERA_PRINCIPAL_SPECIAL &&
+            ace->who.special == CHIMERA_WHO_EVERYONE &&
+            ace->type == CHIMERA_ACE_ALLOWED) {
+            assert(!(ace->access_mask & CHIMERA_ACE_READ_DATA));
+        }
+    }
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+    TEST_PASS("chmod: a stored SID-only ACE survives a mode-only setattr");
+} /* test_chmod_keeps_sid_only_aces */
+
+static void
 test_write_numeric_algorithmic(struct test_ctx *ctx)
 {
     struct fixture_id              *fu  = fixture_id_add(0, 6100, CHIMERA_VFS_IDENTITY_NOT_FOUND, NULL);
@@ -2543,6 +2614,7 @@ main(
     ctx.wcnt = ctx.handle;
 
     test_write_stores_sid_only(&ctx);
+    test_chmod_keeps_sid_only_aces(&ctx);
     test_write_numeric_algorithmic(&ctx);
     test_write_unavailable_fails(&ctx);
     test_write_caller_buffer_const(&ctx);

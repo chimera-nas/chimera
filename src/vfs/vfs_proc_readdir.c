@@ -223,9 +223,9 @@ chimera_vfs_readdir_filter_callback(
          * unresolved SID loses its ACL (and the resolver is asked in the
          * background), so a partially resolved ACL never leaves core.  Done
          * here, as the module hands the entry over, because that is the only
-         * moment the ACL it points at (module scratch) is live: the blocking
-         * path's bounce buffer copies the attrs struct, not the ACL behind
-         * it, and the entry is read after the module has moved on.  The
+         * moment the ACL it points at (module scratch) is live, and before
+         * the blocking path's bounce collector deep-copies the entry, so
+         * the copy carries the finished (or withheld) ACL.  The
          * decision is made on a copy of the attrs; the ACL edits are in
          * place, in scratch the module owns for this entry. */
         enriched = *attrs;
