@@ -2199,8 +2199,25 @@ struct rd_entry {
     char     name[64];
     uint64_t mask;
     int      has_acl;
+    uint32_t num_aces;
+    uint64_t aces_hash; /* rd_hash of the delivered ACEs, however many */
     uint8_t  acl_buf[sizeof(struct chimera_acl) + 4 * sizeof(struct chimera_ace)];
 };
+
+/* FNV-1a, to compare an ACL too large to keep a copy of. */
+static uint64_t
+rd_hash(
+    const void *data,
+    size_t      len)
+{
+    const uint8_t *p = data;
+    uint64_t       h = 14695981039346656037ULL;
+
+    for (size_t i = 0; i < len; i++) {
+        h = (h ^ p[i]) * 1099511628211ULL;
+    }
+    return h;
+} /* rd_hash */
 
 struct rd_result {
     struct rd_entry entries[RD_MAX];
@@ -2229,9 +2246,12 @@ rd_entry_cb(
     e->mask          = attrs->va_set_mask;
     e->has_acl       = 0;
     if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attrs->va_acl) {
-        assert(attrs->va_acl->num_aces <= 4);
-        memcpy(e->acl_buf, attrs->va_acl,
-               chimera_acl_size(attrs->va_acl->num_aces));
+        e->num_aces  = attrs->va_acl->num_aces;
+        e->aces_hash = rd_hash(attrs->va_acl->aces,
+                               e->num_aces * sizeof(struct chimera_ace));
+        if (e->num_aces <= 4) {
+            memcpy(e->acl_buf, attrs->va_acl, chimera_acl_size(e->num_aces));
+        }
         e->has_acl = 1;
     }
     return 0;
@@ -2502,6 +2522,43 @@ test_readdir_bounce_own_acl(struct test_ctx *ctx)
     TEST_PASS("readdir: bounced entries each carry their own ACL");
 } /* test_readdir_bounce_own_acl */
 
+/* An ACL larger than a 64 KiB bounce page still reaches the caller whole:
+ * the buffer has room for the largest ACL a module may return. */
+static void
+test_readdir_bounce_large_acl(struct test_ctx *ctx)
+{
+    const unsigned                  n   = 800;
+    struct chimera_vfs_open_handle *dir = rd_make_dir(ctx, "rdbig");
+    struct chimera_vfs_open_handle *h;
+    struct chimera_acl             *acl;
+    struct rd_result                r;
+    struct rd_entry                *e;
+
+    assert(chimera_acl_size(n) > 64 * 1024);
+    acl = calloc(1, chimera_acl_size(n));
+    assert(acl != NULL);
+    acl->num_aces = (uint16_t) n;
+    for (unsigned i = 0; i < n; i++) {
+        ace_set(&acl->aces[i], CHIMERA_ACE_ALLOWED,
+                (i & 1) ? CHIMERA_ACE_READ_DATA : CHIMERA_ACE_EXECUTE, 0,
+                make_special_principal(CHIMERA_WHO_EVERYONE));
+    }
+    h = create_file(ctx, dir, "big");
+    set_acl(ctx, h, acl);
+    chimera_vfs_release(ctx->vfs_thread, h);
+
+    rd_run(ctx, dir, &r);
+    e = rd_find(&r, "big");
+    assert(e && e->has_acl);
+    assert(!(e->mask & CHIMERA_VFS_ATTR_ACL_WITHHELD));
+    assert(e->num_aces == n);
+    assert(e->aces_hash == rd_hash(acl->aces, n * sizeof(struct chimera_ace)));
+
+    free(acl);
+    chimera_vfs_release(ctx->vfs_thread, dir);
+    TEST_PASS("readdir: a bounced entry carries an ACL past 64 KiB whole");
+} /* test_readdir_bounce_large_acl */
+
 int
 main(
     int    argc,
@@ -2611,6 +2668,7 @@ main(
 
         ctx.wdir = ctx.handle;
         test_readdir_bounce_own_acl(&ctx);
+        test_readdir_bounce_large_acl(&ctx);
         chimera_vfs_release(ctx.vfs_thread, ctx.wdir);
         ctx.wdir = saved;
     }

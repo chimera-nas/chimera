@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <ctype.h>
+#include <inttypes.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_mount_table.h"
@@ -272,16 +273,32 @@ chimera_vfs_readdir_bounce_extra_size(const struct chimera_vfs_attrs *attrs)
     return n;
 } /* chimera_vfs_readdir_bounce_extra_size */
 
+/* Entries a blocking module lists are staged in a bounce buffer of 64 KiB;
+ * a readdir that asks for ACLs gets room on top for one entry carrying the
+ * largest ACL a module may return (CHIMERA_ACL_MAX_ACES ACEs), so every entry
+ * a module can legitimately produce fits an empty buffer. */
+static size_t
+chimera_vfs_readdir_bounce_size(uint64_t attr_mask)
+{
+    size_t size = 64 * 1024;
+
+    if (attr_mask & CHIMERA_VFS_ATTR_ACL) {
+        size += (chimera_acl_size(CHIMERA_ACL_MAX_ACES) + 7) & ~(size_t) 7;
+    }
+    return size;
+} /* chimera_vfs_readdir_bounce_size */
+
 /* The collector runs inside the module's per-entry callback on a delegation
  * thread; the entries are replayed later on the caller's thread, by which
  * time the module's per-thread scratch behind va_acl / va_owner_sid /
  * va_group_sid holds a later entry's.  So the pointed-to data is copied into
  * the bounce buffer after the entry's name and the stored attrs repointed at
  * the copies.  An entry whose copies do not fit the space left stops the
- * scan (it is the first of the next page); an ACL too large for an empty
- * buffer is dropped from just that entry, as a withheld one on a
- * windows-identity mount (its copy could never be delivered, and a stale
- * pointer must not be). */
+ * scan (it is the first of the next page).  One that would not fit even an
+ * empty buffer is outside what a module may return (an ACL past
+ * CHIMERA_ACL_MAX_ACES): it can never be delivered, and neither a stale
+ * pointer nor an entry without its ACL may stand in for it, so the readdir
+ * fails with EIO. */
 static int
 chimera_vfs_readdir_bounce_result_callback(
     uint64_t                        inum,
@@ -293,26 +310,24 @@ chimera_vfs_readdir_bounce_result_callback(
 {
     struct chimera_vfs_request       *request = arg;
     struct chimera_vfs_readdir_entry *entry;
-    struct chimera_vfs_attrs          local;
     size_t                            name_size, extra_size, entry_size;
     char                             *entry_data, *extra;
 
     name_size  = (sizeof(*entry) + namelen + 7) & ~(size_t) 7;
     extra_size = chimera_vfs_readdir_bounce_extra_size(attrs);
-
-    if (name_size + extra_size > request->readdir.bounce_iov.length &&
-        (attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attrs->va_acl) {
-        local              = *attrs;
-        local.va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
-        local.va_acl       = NULL;
-        if (request->readdir.acl_windows) {
-            local.va_set_mask |= CHIMERA_VFS_ATTR_ACL_WITHHELD;
-        }
-        attrs      = &local;
-        extra_size = chimera_vfs_readdir_bounce_extra_size(attrs);
-    }
-
     entry_size = name_size + extra_size;
+
+    if (entry_size > request->readdir.bounce_iov.length) {
+        chimera_vfs_error("readdir: entry %.*s (inum %" PRIu64 ") needs %zu "
+                          "bytes, more than a module may return (ACL of %u "
+                          "ACEs); failing the readdir with EIO",
+                          namelen, name, inum, entry_size,
+                          ((attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
+                           attrs->va_acl) ?
+                          (unsigned) attrs->va_acl->num_aces : 0U);
+        request->readdir.bounce_status = CHIMERA_VFS_EIO;
+        return -1;
+    }
 
     /* Check if we have enough space in the bounce buffer */
     if (request->readdir.bounce_offset + entry_size > request->readdir.bounce_iov.length) {
@@ -386,6 +401,15 @@ chimera_vfs_bounce_complete(struct chimera_vfs_request *request)
 
     data_ptr = request->readdir.bounce_iov.data;
     data_end = data_ptr + request->readdir.bounce_offset;
+
+    /* An entry that could not be staged fails the whole readdir: deliver
+     * none of the page rather than a listing that silently stops short. */
+    if (request->readdir.bounce_status != CHIMERA_VFS_OK) {
+        if (request->status == CHIMERA_VFS_OK) {
+            request->status = request->readdir.bounce_status;
+        }
+        data_end = data_ptr;
+    }
 
     while (data_ptr < data_end && rc == 0) {
         entry = (struct chimera_vfs_readdir_entry *) data_ptr;
@@ -478,7 +502,9 @@ chimera_vfs_readdir_dispatch(
         (thread->vfs->num_sync_delegation_threads > 0 ||
          thread->vfs->num_async_delegation_threads > 0)) {
 
-        evpl_iovec_alloc(thread->evpl, 64 * 1024, 8, 1, 0, &request->readdir.bounce_iov);
+        evpl_iovec_alloc(thread->evpl, chimera_vfs_readdir_bounce_size(attr_mask),
+                         8, 1, 0, &request->readdir.bounce_iov);
+        request->readdir.bounce_status = CHIMERA_VFS_OK;
 
         request->readdir.orig_callback     = callback;
         request->readdir.orig_private_data = private_data;
