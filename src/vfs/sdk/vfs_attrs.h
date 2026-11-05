@@ -125,6 +125,15 @@ struct chimera_acl;
  * it with rdattr_error. */
 #define CHIMERA_VFS_ATTR_WITHHELD           (1ULL << 31)
 
+/* Not an attribute: marks a readdir entry whose ACL was requested but withheld
+ * by the VFS core on a windows-identity mount because an SID in it could not
+ * be resolved from cache without blocking (the resolver is asked in the
+ * background, so a later READDIR carries it).  CHIMERA_VFS_ATTR_ACL is clear
+ * and va_acl NULL; the rest of the entry is intact.  A protocol must not
+ * synthesise an ACL for such an entry from its mode: NFSv4 answers it with
+ * rdattr_error NFS4ERR_DELAY. */
+#define CHIMERA_VFS_ATTR_ACL_WITHHELD       (1ULL << 32)
+
 #define CHIMERA_VFS_ATTR_MASK_STAT          ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \

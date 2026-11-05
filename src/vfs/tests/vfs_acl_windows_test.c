@@ -2098,6 +2098,263 @@ test_write_create_paths(struct test_ctx *ctx)
     TEST_PASS("write: creates normalize through open_at's own set_attr swap");
 } /* test_write_create_paths */
 
+/* ---- readdir: cache-only enrichment ------------------------------------- */
+
+#define RD_MAX 16
+
+struct rd_entry {
+    char     name[64];
+    uint64_t mask;
+    int      has_acl;
+    uint8_t  acl_buf[sizeof(struct chimera_acl) + 4 * sizeof(struct chimera_ace)];
+};
+
+struct rd_result {
+    struct rd_entry entries[RD_MAX];
+    int             n;
+    int             done;
+    enum chimera_vfs_error status;
+};
+
+static int
+rd_entry_cb(
+    uint64_t                        inum,
+    uint64_t                        cookie,
+    const char                     *name,
+    int                             namelen,
+    const struct chimera_vfs_attrs *attrs,
+    void                           *arg)
+{
+    struct rd_result *r = arg;
+    struct rd_entry  *e;
+
+    assert(r->n < RD_MAX);
+    e = &r->entries[r->n++];
+    assert(namelen < (int) sizeof(e->name));
+    memcpy(e->name, name, namelen);
+    e->name[namelen] = '\0';
+    e->mask          = attrs->va_set_mask;
+    e->has_acl       = 0;
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attrs->va_acl) {
+        assert(attrs->va_acl->num_aces <= 4);
+        memcpy(e->acl_buf, attrs->va_acl,
+               chimera_acl_size(attrs->va_acl->num_aces));
+        e->has_acl = 1;
+    }
+    return 0;
+} /* rd_entry_cb */
+
+static void
+rd_complete_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        cookie,
+    uint64_t                        verifier,
+    uint32_t                        eof,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    struct rd_result *r = private_data;
+
+    r->status = error_code;
+    r->done   = 1;
+} /* rd_complete_cb */
+
+/* READDIR `dir` (as root) asking for the ACL; the whole pass completes
+ * synchronously for memfs. */
+static void
+rd_run(
+    struct test_ctx                *ctx,
+    struct chimera_vfs_open_handle *dir,
+    struct rd_result               *r)
+{
+    memset(r, 0, sizeof(*r));
+    chimera_vfs_readdir(ctx->vfs_thread, &ctx->root_cred, dir,
+                        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL, 0,
+                        0, 0, 0, NULL, 0, rd_entry_cb, rd_complete_cb, r);
+    while (!r->done) {
+        evpl_continue(ctx->evpl);
+    }
+    assert(r->status == CHIMERA_VFS_OK);
+} /* rd_run */
+
+static struct rd_entry *
+rd_find(
+    struct rd_result *r,
+    const char       *name)
+{
+    for (int i = 0; i < r->n; i++) {
+        if (strcmp(r->entries[i].name, name) == 0) {
+            return &r->entries[i];
+        }
+    }
+    return NULL;
+} /* rd_find */
+
+/* A fresh directory under the windows_acl mount root, opened. */
+static struct chimera_vfs_open_handle *
+rd_make_dir(
+    struct test_ctx *ctx,
+    const char      *name)
+{
+    struct chimera_vfs_attrs sattr;
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    sattr.va_mode     = 0755;
+    chimera_vfs_mkdir_at(ctx->vfs_thread, &ctx->root_cred, ctx->wdir, name,
+                         (int) strlen(name), &sattr, CHIMERA_VFS_ATTR_FH, 0, 0,
+                         mkdir_acl_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    chimera_vfs_open_fh(ctx->vfs_thread, &ctx->root_cred, ctx->fh, ctx->fh_len,
+                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    return ctx->handle;
+} /* rd_make_dir */
+
+/* Create `name` in `dir` carrying a one-ACE ACL naming `sid`. */
+static void
+rd_make_file_sid(
+    struct test_ctx                *ctx,
+    struct chimera_vfs_open_handle *dir,
+    const char                     *name,
+    const char                     *sid)
+{
+    struct chimera_vfs_open_handle *h   = create_file(ctx, dir, name);
+    struct chimera_acl             *acl = acl_buf_init(acl_in_buf, 1);
+
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0,
+            make_sid_principal(sid));
+    set_acl(ctx, h, acl);
+    chimera_vfs_release(ctx->vfs_thread, h);
+} /* rd_make_file_sid */
+
+static void
+test_readdir_cold_withholds_acl(struct test_ctx *ctx)
+{
+    const char                     *sid = "S-1-5-21-70-71-72-7001";
+    struct fixture_sid             *f   = fixture_sid_add(sid, CHIMERA_VFS_IDENTITY_OK, 0, 7001);
+    struct chimera_vfs_open_handle *dir = rd_make_dir(ctx, "rdcold");
+    struct rd_result                r;
+    struct rd_entry                *a, *b;
+    struct chimera_principal        expect;
+
+    rd_make_file_sid(ctx, dir, "a", sid);
+    rd_make_file_sid(ctx, dir, "b", sid);
+
+    /* Cold cache: the entries are delivered, their ACLs withheld. */
+    rd_run(ctx, dir, &r);
+    a = rd_find(&r, "a");
+    b = rd_find(&r, "b");
+    assert(a && b);
+    assert(!(a->mask & CHIMERA_VFS_ATTR_ACL) && !a->has_acl);
+    assert(!(b->mask & CHIMERA_VFS_ATTR_ACL) && !b->has_acl);
+    assert((a->mask & CHIMERA_VFS_ATTR_ACL_WITHHELD) &&
+           (b->mask & CHIMERA_VFS_ATTR_ACL_WITHHELD));
+    assert(a->mask & CHIMERA_VFS_ATTR_MODE);
+
+    /* The fire-and-forget warm resolves the SID once for the whole pass. */
+    for (int i = 0; i < 2000 && fixture_calls(f) == 0; i++) {
+        evpl_continue(ctx->evpl);
+        usleep(1000);
+    }
+    assert(fixture_calls(f) == 1);
+
+    /* Once the warm has landed in the cache, the same readdir enriches. */
+    expect = make_id_principal(CHIMERA_PRINCIPAL_USER, 7001, sid);
+    for (int i = 0; i < 2000; i++) {
+        rd_run(ctx, dir, &r);
+        if (rd_find(&r, "a")->has_acl) {
+            break;
+        }
+        evpl_continue(ctx->evpl);
+        usleep(1000);
+    }
+    a = rd_find(&r, "a");
+    assert(a->has_acl);
+    assert(principal_eq(&((struct chimera_acl *) a->acl_buf)->aces[0].who,
+                        &expect));
+    assert(fixture_calls(f) == 1);
+
+    chimera_vfs_release(ctx->vfs_thread, dir);
+    TEST_PASS("readdir: a cold native SID withholds the ACL, one warm per SID");
+} /* test_readdir_cold_withholds_acl */
+
+static void
+test_readdir_warm_enriches(struct test_ctx *ctx)
+{
+    const char                     *sid = "S-1-5-21-70-71-72-7002";
+    struct fixture_sid             *f   = fixture_sid_add(sid, CHIMERA_VFS_IDENTITY_OK, 0, 7002);
+    struct chimera_vfs_open_handle *dir = rd_make_dir(ctx, "rdwarm");
+    struct chimera_vfs_open_handle *h;
+    struct rd_result                r;
+    struct rd_entry                *e;
+    struct chimera_principal        expect;
+    struct chimera_acl             *acl;
+
+    rd_make_file_sid(ctx, dir, "w", sid);
+
+    /* A getattr parks, resolves and warms the cache deterministically. */
+    h = create_file(ctx, dir, "w");
+    assert(get_acl(ctx, h, NULL) == CHIMERA_VFS_OK);
+    assert(fixture_calls(f) == 1);
+    chimera_vfs_release(ctx->vfs_thread, h);
+
+    rd_run(ctx, dir, &r);
+    e = rd_find(&r, "w");
+    assert(e && e->has_acl && (e->mask & CHIMERA_VFS_ATTR_ACL));
+    acl    = (struct chimera_acl *) e->acl_buf;
+    expect = make_id_principal(CHIMERA_PRINCIPAL_USER, 7002, sid);
+    assert(acl->num_aces == 1);
+    assert(principal_eq(&acl->aces[0].who, &expect));
+    assert(!(acl->aces[0].flags & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP));
+    assert(fixture_calls(f) == 1);
+
+    chimera_vfs_release(ctx->vfs_thread, dir);
+    TEST_PASS("readdir: a warm native SID enriches the entry's ACL");
+} /* test_readdir_warm_enriches */
+
+static void
+test_readdir_algorithmic_passes(struct test_ctx *ctx)
+{
+    struct chimera_vfs_open_handle *dir = rd_make_dir(ctx, "rdalgo");
+    struct chimera_vfs_open_handle *h   = create_file(ctx, dir, "g");
+    struct chimera_acl             *acl = acl_buf_init(acl_in_buf, 2);
+    struct rd_result                r;
+    struct rd_entry                *e;
+    struct chimera_principal        eu, eg;
+    int                             calls = chimera_atomic_load_n(&fixture_sid_calls,
+                                                                  CHIMERA_MEMORY_RELAXED);
+
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0,
+            make_id_principal(CHIMERA_PRINCIPAL_USER, 7003, NULL));
+    ace_set(&acl->aces[1], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA,
+            CHIMERA_ACE_FLAG_IDENTIFIER_GROUP,
+            make_id_principal(CHIMERA_PRINCIPAL_GROUP, 7004, NULL));
+    (void) chimera_vfs_acl_windows_strip(acl);
+    set_acl(ctx, h, acl);
+    chimera_vfs_release(ctx->vfs_thread, h);
+
+    /* Cold, with no native SID to ask about: enriched inline. */
+    rd_run(ctx, dir, &r);
+    e = rd_find(&r, "g");
+    assert(e && e->has_acl);
+    acl = (struct chimera_acl *) e->acl_buf;
+    eu  = make_id_principal(CHIMERA_PRINCIPAL_USER, 7003, NULL);
+    eg  = make_id_principal(CHIMERA_PRINCIPAL_GROUP, 7004, NULL);
+    assert(acl->num_aces == 2);
+    assert(principal_eq(&acl->aces[0].who, &eu));
+    assert(principal_eq(&acl->aces[1].who, &eg));
+    assert(acl->aces[1].flags & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP);
+    assert(chimera_atomic_load_n(&fixture_sid_calls,
+                                 CHIMERA_MEMORY_RELAXED) == calls);
+
+    chimera_vfs_release(ctx->vfs_thread, dir);
+    TEST_PASS("readdir: algorithmic-only ACLs enrich inline even cold");
+} /* test_readdir_algorithmic_passes */
+
 int
 main(
     int    argc,
@@ -2184,6 +2441,10 @@ main(
     test_enrich_parked_scratch_reuse(&ctx);
     test_enrich_unavailable_open_closes(&ctx);
     test_enrich_off_without_flag(&ctx);
+
+    test_readdir_cold_withholds_acl(&ctx);
+    test_readdir_warm_enriches(&ctx);
+    test_readdir_algorithmic_passes(&ctx);
 
     /* Write-path normalization, on the same flagged mounts; the memcnt one
      * (mounted by test_enrich_unavailable_open_closes) also shows what the

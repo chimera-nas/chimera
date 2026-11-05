@@ -7,6 +7,7 @@
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_mount_table.h"
+#include "vfs_acl_windows.h"
 #include "sdk/vfs_access.h"
 #include "sdk/vfs_acl.h"
 #include "common/misc.h"
@@ -173,6 +174,7 @@ chimera_vfs_readdir_filter_callback(
     struct chimera_vfs_open_handle *dir     = request->readdir.handle;
     struct chimera_vfs_attrs        cross;
     struct chimera_vfs_attrs        withheld;
+    struct chimera_vfs_attrs        enriched;
     uint8_t                         cross_fh[CHIMERA_VFS_FH_SIZE + 16];
     int                             cross_fh_len;
 
@@ -214,6 +216,25 @@ chimera_vfs_readdir_filter_callback(
             withheld.va_mode = attrs->va_mode & S_IFMT;
         }
         attrs = &withheld;
+    } else if (request->readdir.acl_windows &&
+               (attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attrs->va_acl) {
+        /* A windows-identity mount stores SID-only ACLs, and this callback
+         * cannot park for the resolver.  Decode what is algorithmic and take
+         * the rest from the identity cache alone; an entry left with an
+         * unresolved SID loses its ACL (and the resolver is asked in the
+         * background), so a partially resolved ACL never leaves core.  Done
+         * here, as the module hands the entry over, because that is the only
+         * moment the ACL it points at (module scratch) is live: the blocking
+         * path's bounce buffer copies the attrs struct, not the ACL behind
+         * it, and the entry is read after the module has moved on.  The
+         * decision is made on a copy of the attrs; the ACL edits are in
+         * place, in scratch the module owns for this entry. */
+        enriched = *attrs;
+        chimera_vfs_acl_windows_enrich_dirent_pass(
+            request->thread, &enriched,
+            request->readdir.acl_warmed, &request->readdir.acl_warmed_n,
+            CHIMERA_VFS_ACL_WARM_MAX);
+        attrs = &enriched;
     }
 
     return request->readdir.inner_callback(inum, cookie, name, namelen, attrs,
@@ -419,8 +440,14 @@ chimera_vfs_readdir_dispatch(
         request->readdir.match_pattern     = match_pattern;
         request->readdir.match_pattern_len = match_pattern_len;
     }
-    request->readdir.withhold = withhold;
-    if (request->readdir.match_pattern || withhold ||
+    request->readdir.withhold     = withhold;
+    request->readdir.acl_windows  = 0;
+    request->readdir.acl_warmed_n = 0;
+    if ((attr_mask & CHIMERA_VFS_ATTR_ACL) &&
+        chimera_vfs_acl_windows_fh_flagged(thread, handle->fh, handle->fh_len)) {
+        request->readdir.acl_windows = 1;
+    }
+    if (request->readdir.match_pattern || withhold || request->readdir.acl_windows ||
         chimera_atomic_load_n(&thread->vfs->mount_table->num_covers,
                               CHIMERA_MEMORY_RELAXED) > 0) {
         request->readdir.inner_callback = request->readdir.callback;
