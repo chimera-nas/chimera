@@ -9,6 +9,8 @@
 #include "vfs_identity.h"
 #include "vfs_procs.h"
 #include "vfs_open_cache.h"
+#include "vfs_user_cache.h"
+#include "vfs_mount_table.h"
 #include "sdk/vfs_sid.h"
 
 /*
@@ -957,3 +959,202 @@ chimera_vfs_acl_windows_pre_dispatch(struct chimera_vfs_request *request)
 
     return 1;
 } /* chimera_vfs_acl_windows_pre_dispatch */
+
+/* ---- readdir: cache-only enrichment ----------------------------------- */
+
+SYMBOL_EXPORT int
+chimera_vfs_acl_windows_fh_flagged(
+    struct chimera_vfs_thread *thread,
+    const uint8_t             *fh,
+    uint32_t                   fh_len)
+{
+    struct chimera_vfs_mount_attrs attrs;
+
+    if (fh_len < CHIMERA_VFS_MOUNT_ID_SIZE) {
+        return 0;
+    }
+
+    if (chimera_vfs_mount_table_lookup_attrs(thread->vfs->mount_table, fh,
+                                             &attrs) != 0) {
+        return 0;
+    }
+
+    return !!(attrs.flags & CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL);
+} /* chimera_vfs_acl_windows_fh_flagged */
+
+/* The warm resolve's callback: it exists only to make the resolver fetch and
+ * cache the identity.  Its answer may arrive after the readdir reply is gone,
+ * so it touches nothing. */
+static void
+acl_windows_warm_cb(
+    enum chimera_vfs_identity_status          status,
+    const struct chimera_vfs_identity_result *result,
+    void                                     *private_data)
+{
+    (void) status;
+    (void) result;
+    (void) private_data;
+} /* acl_windows_warm_cb */
+
+static uint64_t
+acl_windows_sid_hash(const struct chimera_sid *sid)
+{
+    uint64_t h = 1469598103934665603ULL;
+
+    for (unsigned i = 0; i < sid->len; i++) {
+        h = (h ^ sid->data[i]) * 1099511628211ULL;
+    }
+    return h;
+} /* acl_windows_sid_hash */
+
+/* 1 if `h` was already recorded in seen[]; otherwise records it (while there
+ * is room) and returns 0.  A full table reports "seen": the SID is simply
+ * warmed by a later pass, never twice in this one. */
+static int
+acl_windows_warm_seen(
+    uint64_t *seen,
+    uint32_t *nseen,
+    uint32_t  max,
+    uint64_t  h)
+{
+    for (uint32_t i = 0; i < *nseen; i++) {
+        if (seen[i] == h) {
+            return 1;
+        }
+    }
+    if (*nseen >= max) {
+        return 1;
+    }
+    seen[(*nseen)++] = h;
+    return 0;
+} /* acl_windows_warm_seen */
+
+SYMBOL_EXPORT void
+chimera_vfs_acl_windows_enrich_dirent_pass(
+    struct chimera_vfs_thread *thread,
+    struct chimera_vfs_attrs  *attrs,
+    uint64_t                  *seen,
+    uint32_t                  *nseen,
+    uint32_t                   max)
+{
+    struct chimera_acl *acl;
+    struct chimera_sid  missing[CHIMERA_VFS_ACL_WARM_MAX];
+    char                str[CHIMERA_SID_STR_MAX];
+    uint64_t            local_seen[CHIMERA_VFS_ACL_WARM_MAX];
+    uint32_t            local_n    = 0;
+    unsigned            nmissing   = 0;
+    int                 unresolved = 0;
+
+    if (!(attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) || !attrs->va_acl) {
+        return;
+    }
+
+    acl = attrs->va_acl;
+
+    if (chimera_vfs_acl_windows_enrich_sync(acl) == 0) {
+        return;
+    }
+
+    if (!seen) {
+        seen  = local_seen;
+        nseen = &local_n;
+        max   = CHIMERA_VFS_ACL_WARM_MAX;
+    }
+
+    for (unsigned i = 0; i < acl->num_aces; i++) {
+        struct chimera_ace                *ace = &acl->aces[i];
+        struct chimera_vfs_identity_result hit;
+        struct chimera_sid                 sid;
+        uint32_t                           id;
+        int                                is_group = 0, found, neg;
+
+        if (ace->who.type != CHIMERA_PRINCIPAL_SID) {
+            continue;
+        }
+
+        sid = ace->who.sid;
+
+        /* A SID that cannot be asked about is opaque for good, like an
+         * authoritatively unknown one. */
+        if (!chimera_sid_present(&sid) ||
+            chimera_sid_to_str(&sid, str, sizeof(str)) < 0) {
+            continue;
+        }
+
+        /* Cache only: the synchronous bridges, user then group as the
+         * resolver's own BY_SID probe does. */
+        found = chimera_vfs_identity_sid_to_uid(thread->vfs, str, &id) == 0;
+        if (!found) {
+            found    = chimera_vfs_identity_sid_to_gid(thread->vfs, str, &id) == 0;
+            is_group = found;
+        }
+
+        if (found) {
+            memset(&hit, 0, sizeof(hit));
+            hit.is_group = is_group;
+            if (is_group) {
+                hit.group.gid = id;
+            } else {
+                hit.user.uid = id;
+            }
+            acl_windows_rewrite(acl, &sid, &hit);
+            continue;
+        }
+
+        /* An authoritative miss the resolver already cached: the ACE stays
+         * opaque and matches no caller, exactly as on the getattr path. */
+        chimera_rcu_read_lock(&thread->vfs->vfs_user_cache->rcu);
+        neg = chimera_vfs_user_cache_lookup_negative(thread->vfs->vfs_user_cache,
+                                                     CHIMERA_VFS_IDENTITY_BY_SID,
+                                                     0, str);
+        chimera_rcu_read_unlock(&thread->vfs->vfs_user_cache->rcu);
+        if (neg) {
+            continue;
+        }
+
+        unresolved = 1;
+
+        /* Distinct unresolved SIDs of this entry; past the cap the entry is
+         * withheld all the same and the rest are warmed by a later pass. */
+        {
+            int dup = 0;
+
+            for (unsigned j = 0; j < nmissing; j++) {
+                if (chimera_sid_equal(&missing[j], &sid)) {
+                    dup = 1;
+                    break;
+                }
+            }
+            if (!dup && nmissing < CHIMERA_VFS_ACL_WARM_MAX) {
+                missing[nmissing++] = sid;
+            }
+        }
+    }
+
+    if (!unresolved) {
+        return;
+    }
+
+    /* Withhold: a partially resolved ACL never leaves core. */
+    attrs->va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
+    attrs->va_set_mask |= CHIMERA_VFS_ATTR_ACL_WITHHELD;
+    attrs->va_acl       = NULL;
+
+    for (unsigned j = 0; j < nmissing; j++) {
+        if (acl_windows_warm_seen(seen, nseen, max,
+                                  acl_windows_sid_hash(&missing[j])) ||
+            chimera_sid_to_str(&missing[j], str, sizeof(str)) < 0) {
+            continue;
+        }
+        chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_SID, 0,
+                                     str, acl_windows_warm_cb, NULL);
+    }
+} /* chimera_vfs_acl_windows_enrich_dirent_pass */
+
+SYMBOL_EXPORT void
+chimera_vfs_acl_windows_enrich_dirent(
+    struct chimera_vfs_thread *thread,
+    struct chimera_vfs_attrs  *attrs)
+{
+    chimera_vfs_acl_windows_enrich_dirent_pass(thread, attrs, NULL, NULL, 0);
+} /* chimera_vfs_acl_windows_enrich_dirent */

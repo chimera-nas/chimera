@@ -37,6 +37,8 @@
 #include "oteltracing.h"
 
 #define CHIMERA_VFS_PATH_MAX         4096
+/* SIDs one readdir pass warms (see readdir.acl_warmed). */
+#define CHIMERA_VFS_ACL_WARM_MAX     32
 #define CHIMERA_VFS_NAME_MAX         256
 
 /* Size of the per-request scratch buffer (request->plugin_data) available
@@ -982,6 +984,15 @@ struct chimera_vfs_request {
             int                             withhold;
             chimera_vfs_readdir_callback_t  inner_callback;
             void                           *inner_arg;
+            /* Windows-identity ACLs: the directory is on a mount whose ACLs
+             * are SID-only and the caller asked for them, so the filter
+             * enriches or withholds each entry's ACL (vfs_acl_windows.c).
+             * acl_warmed holds hashes of the SIDs this pass already asked the
+             * resolver to warm, so a directory of entries sharing SIDs queues
+             * one job per SID.  Core-owned. */
+            int                             acl_windows;
+            uint32_t                        acl_warmed_n;
+            uint64_t                        acl_warmed[CHIMERA_VFS_ACL_WARM_MAX];
         } readdir;
 
         struct {
