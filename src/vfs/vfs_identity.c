@@ -15,6 +15,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include "common/thread.h"
@@ -32,6 +33,7 @@
 #include "vfs.h"
 #include "vfs_internal.h"
 #include "vfs_user_cache.h"
+#include "common/ratelimit.h"
 #include "vfs_identity.h"
 #include "common/macros.h"
 #include "common/pthread_util.h"
@@ -358,8 +360,9 @@ chimera_vfs_identity_worker(void *arg)
 #ifndef _WIN32
 /*
  * Classify a getpwuid_r/getgrgid_r-family result.  rc == 0 with no entry, or
- * one of the errno values POSIX documents for "no such entry" (ENOENT, ESRCH,
- * EBADF, EPERM), is an authoritative negative.  Any other nonzero rc (EIO,
+ * one of the errno values the glibc getpwnam(3) and getgrnam(3) pages list as
+ * returned by implementations for "no such entry" (ENOENT, ESRCH, EBADF,
+ * EPERM), is an authoritative negative.  Any other nonzero rc (EIO,
  * EAGAIN, ERANGE on the fixed buffer, ...) is a lookup failure, not an answer:
  * reporting it as NOT_FOUND would let a transient NSS backend outage read as
  * proof the identity does not exist.
@@ -380,7 +383,19 @@ chimera_vfs_identity_nss_status(
         case EPERM:
             return CHIMERA_VFS_IDENTITY_NOT_FOUND;
         default:
+        {
+            static struct chimera_ratelimit rl;
+            uint64_t held_back;
+
+            if (chimera_ratelimit_allow(&rl, 10ULL * 1000000000ULL,
+                                        &held_back)) {
+                chimera_vfs_error("identity: NSS lookup failed: %s; treating "
+                                  "the identity service as unavailable (%"
+                                  PRIu64 " more since the last report)",
+                                  strerror(rc), held_back);
+            }
             return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+        }
     } /* switch */
 } /* chimera_vfs_identity_nss_status */
 
