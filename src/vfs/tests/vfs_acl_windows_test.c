@@ -569,7 +569,7 @@ test_strip_enrich_roundtrip(void)
  * Answers BY_SID from a table: each SID resolves to a user or a group, is
  * authoritatively unknown, or finds the "infrastructure" down, and every
  * consultation is counted.  It runs on the resolver's worker threads; the
- * table is only edited between tests, while no resolve is in flight.
+ * table and its modes are only edited while no resolve is in flight.
  * Resolved and authoritatively-unknown SIDs are cached by the resolver, so
  * each test uses SIDs of its own.
  */
@@ -2402,7 +2402,10 @@ test_readdir_cold_withholds_acl(struct test_ctx *ctx)
     assert(a && a->has_acl);
     assert(principal_eq(&((struct chimera_acl *) a->acl_buf)->aces[0].who,
                         &expect));
-    assert(fixture_calls(f) >= 1);
+    /* One warm for the whole directory: the second entry either found the
+     * SID cached already or was deduped within the pass, and the second
+     * pass found it cached. */
+    assert(fixture_calls(f) == 1);
 
     chimera_vfs_release(ctx->vfs_thread, dir);
     TEST_PASS("readdir: a cold native SID withholds the ACL, one warm per SID");

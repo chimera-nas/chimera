@@ -271,13 +271,14 @@ struct chimera_vfs_handle_state {
  *    va_req_mask asks for them, exactly as the existing reply contract
  *    requires of every module.
  *  - Because the core rewrites the reply ACL in place on such a mount, the
- *    module must return that ACL in private, writable storage: module
- *    thread-local scratch and request-owned memory
- *    (chimera_vfs_request_alloc_memory) both qualify; memory shared with a
- *    cache or with other replies does not.
- *  - The module's own access gates see the stored SID-only ACL directly, so
- *    a named-ACE grant does not match a caller there (see
- *    docs/vfs-module-sdk.md).
+ *    module must return that ACL in private, writable storage: request
+ *    memory (chimera_vfs_request_alloc_memory) always qualifies; module
+ *    thread-local scratch only for an op completed on the dispatching
+ *    thread, never for a blocking op; memory shared with a cache or with
+ *    other replies never.
+ *  - The module's own access gates see the stored SID-only ACL, not the
+ *    resolved one; docs/vfs-module-sdk.md says what that does and does not
+ *    enforce.
  *
  * Meaningful only alongside CHIMERA_VFS_CAP_ACL_NATIVE: a module declaring
  * this bit without it is a module bug, and a mount of such a module fails
