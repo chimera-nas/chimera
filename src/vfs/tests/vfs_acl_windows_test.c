@@ -76,18 +76,65 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_noaclnat = {
 
 /* memfs in every respect, counting the CLOSEs dispatched from the test's own
  * thread (the close thread's cache sweeps run on a thread of their own and
- * are not counted), so a test can see a backend open being released. */
-static struct chimera_vfs_thread       *memcnt_thread;
-static int                              memcnt_closes;
+ * are not counted), so a test can see a backend open being released.  It also
+ * keeps a copy of the last ACL an op's set_attr handed it, so a test can see
+ * exactly what the module was asked to store. */
+static struct chimera_vfs_thread      *memcnt_thread;
+static int                             memcnt_closes;
+
+#define MEMCNT_ACL_MAX 4
+
+static struct {
+    struct chimera_acl hdr;
+    struct chimera_ace aces[MEMCNT_ACL_MAX];
+} memcnt_acl;
+static int                             memcnt_acl_seen;  /* ops that carried one */
+/* ...and the set_attr and ACL pointers that op was handed. */
+static const struct chimera_vfs_attrs *memcnt_set_attr_ptr;
+static const struct chimera_acl       *memcnt_acl_ptr;
+
+static struct chimera_vfs_attrs *
+memcnt_set_attr(struct chimera_vfs_request *request)
+{
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_SETATTR:
+            return request->setattr.set_attr;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            return request->open_at.set_attr;
+        case CHIMERA_VFS_OP_MKDIR_AT:
+            return request->mkdir_at.set_attr;
+        case CHIMERA_VFS_OP_MKNOD_AT:
+            return request->mknod_at.set_attr;
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+            return request->symlink_at.set_attr;
+        case CHIMERA_VFS_OP_CREATE_UNLINKED:
+            return request->create_unlinked.set_attr;
+        default:
+            return NULL;
+    } /* switch */
+} /* memcnt_set_attr */
 
 static void
 memcnt_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
+    struct chimera_vfs_attrs *sa = memcnt_set_attr(request);
+
     if (request->opcode == CHIMERA_VFS_OP_CLOSE &&
         request->thread == memcnt_thread) {
         memcnt_closes++;
+    }
+    if (sa && (sa->va_set_mask & CHIMERA_VFS_ATTR_ACL) && sa->va_acl) {
+        unsigned n = sa->va_acl->num_aces;
+
+        memcnt_acl.hdr.num_aces   = sa->va_acl->num_aces;
+        memcnt_acl.hdr.ctrl_flags = sa->va_acl->ctrl_flags;
+        memcpy(memcnt_acl.aces, sa->va_acl->aces,
+               (n < MEMCNT_ACL_MAX ? n : MEMCNT_ACL_MAX) * sizeof(struct chimera_ace));
+        memcnt_set_attr_ptr = sa;
+        memcnt_acl_ptr      = sa->va_acl;
+        memcnt_acl_seen++;
     }
     vfs_memfs.dispatch(request, private_data);
 } /* memcnt_dispatch */
@@ -117,6 +164,15 @@ struct test_ctx {
     struct chimera_vfs_open_handle *wdir;
     uint64_t                        got_mask;
     struct chimera_acl             *got_acl;
+    /* ...and that reply's uid/gid and owner/group SID companions (zero when
+     * absent), and the set_attr pointer a setattr or create handed back. */
+    uint64_t                        got_uid;
+    uint64_t                        got_gid;
+    struct chimera_sid              got_owner_sid;
+    struct chimera_sid              got_group_sid;
+    struct chimera_vfs_attrs       *got_set_attr;
+    /* The windows_acl memcnt mount's root. */
+    struct chimera_vfs_open_handle *wcnt;
 };
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -181,8 +237,9 @@ setattr_cb(
 {
     struct test_ctx *ctx = private_data;
 
-    ctx->status = error_code;
-    ctx->done   = 1;
+    ctx->status       = error_code;
+    ctx->got_set_attr = set_attr;
+    ctx->done         = 1;
 } /* setattr_cb */
 
 static void
@@ -533,6 +590,104 @@ fixture_calls(struct fixture_sid *f)
     return chimera_atomic_load_n(&f->calls, CHIMERA_MEMORY_RELAXED);
 } /* fixture_calls */
 
+/*
+ * The write direction, BY_UID / BY_GID, likewise from a table: each uid or
+ * gid resolves to an identity carrying the native SID `sid`, is
+ * authoritatively unknown, or finds the infrastructure down.  An id the
+ * table does not name gets fixture_id_default -- PASS, so the NSS handler's
+ * answer stands, unless a test takes the infrastructure down for every id.
+ * The write path caches what it resolves (BY_UID positively, with the SID,
+ * which the user cache also indexes BY_SID), so each test uses ids of its
+ * own.
+ */
+#define FIX_ID_MAX 32
+
+struct fixture_id {
+    int                              is_group;
+    uint32_t                         id;
+    enum chimera_vfs_identity_status mode;
+    char                             sid[CHIMERA_VFS_SID_MAX_LEN];
+    int                              calls;
+};
+
+static struct fixture_id                fixture_ids[FIX_ID_MAX];
+static int                              fixture_nids;
+static int                              fixture_id_calls; /* every BY_UID/BY_GID consultation */
+static enum chimera_vfs_identity_status fixture_id_default = CHIMERA_VFS_IDENTITY_PASS;
+
+static struct fixture_id *
+fixture_id_add(
+    int                              is_group,
+    uint32_t                         id,
+    enum chimera_vfs_identity_status mode,
+    const char                      *sid)
+{
+    struct fixture_id *f;
+
+    assert(fixture_nids < FIX_ID_MAX);
+    f = &fixture_ids[fixture_nids++];
+    memset(f, 0, sizeof(*f));
+    f->is_group = is_group;
+    f->id       = id;
+    f->mode     = mode;
+    if (sid) {
+        snprintf(f->sid, sizeof(f->sid), "%s", sid);
+    }
+    return f;
+} /* fixture_id_add */
+
+static int
+fixture_id_calls_of(struct fixture_id *f)
+{
+    return chimera_atomic_load_n(&f->calls, CHIMERA_MEMORY_RELAXED);
+} /* fixture_id_calls_of */
+
+static int
+fixture_id_calls_all(void)
+{
+    return chimera_atomic_load_n(&fixture_id_calls, CHIMERA_MEMORY_RELAXED);
+} /* fixture_id_calls_all */
+
+static enum chimera_vfs_identity_status
+fixture_id_answer(
+    int                                 is_group,
+    uint32_t                            id,
+    struct chimera_vfs_identity_result *out)
+{
+    chimera_atomic_fetch_add(&fixture_id_calls, 1, CHIMERA_MEMORY_RELAXED);
+
+    for (int i = 0; i < fixture_nids; i++) {
+        struct fixture_id *f = &fixture_ids[i];
+
+        if (f->is_group != is_group || f->id != id) {
+            continue;
+        }
+
+        chimera_atomic_fetch_add(&f->calls, 1, CHIMERA_MEMORY_RELAXED);
+
+        if (f->mode == CHIMERA_VFS_IDENTITY_OK) {
+            if (is_group) {
+                out->is_group  = 1;
+                out->group.gid = id;
+                snprintf(out->group.groupname, sizeof(out->group.groupname),
+                         "waclg%u", id);
+                out->group.groupname_len = (int) strlen(out->group.groupname);
+                snprintf(out->group.sid, sizeof(out->group.sid), "%s", f->sid);
+            } else {
+                out->user.uid = id;
+                out->user.gid = id;
+                snprintf(out->user.username, sizeof(out->user.username),
+                         "waclu%u", id);
+                out->user.username_len = (int) strlen(out->user.username);
+                snprintf(out->user.sid, sizeof(out->user.sid), "%s", f->sid);
+            }
+        }
+        return f->mode;
+    }
+
+    return fixture_id_default;
+} /* fixture_id_answer */
+
 static enum chimera_vfs_identity_status
 fixture_sid_handler(
     enum chimera_vfs_identity_key       key,
@@ -541,8 +696,11 @@ fixture_sid_handler(
     struct chimera_vfs_identity_result *out,
     void                               *private_data)
 {
-    (void) id;
     (void) private_data;
+
+    if (key == CHIMERA_VFS_IDENTITY_BY_UID || key == CHIMERA_VFS_IDENTITY_BY_GID) {
+        return fixture_id_answer(key == CHIMERA_VFS_IDENTITY_BY_GID, id, out);
+    }
 
     if (key != CHIMERA_VFS_IDENTITY_BY_SID || !name) {
         return CHIMERA_VFS_IDENTITY_PASS;
@@ -599,12 +757,30 @@ getattr_acl_cb(
     ctx->status            = error_code;
     ctx->got_mask          = 0;
     ctx->got_acl->num_aces = 0;
+    ctx->got_uid           = 0;
+    ctx->got_gid           = 0;
+    memset(&ctx->got_owner_sid, 0, sizeof(ctx->got_owner_sid));
+    memset(&ctx->got_group_sid, 0, sizeof(ctx->got_group_sid));
     if (error_code == CHIMERA_VFS_OK && attr) {
         ctx->got_mask = attr->va_set_mask;
         if ((attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attr->va_acl) {
             assert(attr->va_acl->num_aces <= WACL_MAX_ACES);
             memcpy(ctx->got_acl, attr->va_acl,
                    chimera_acl_size(attr->va_acl->num_aces));
+        }
+        if (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) {
+            ctx->got_uid = attr->va_uid;
+        }
+        if (attr->va_set_mask & CHIMERA_VFS_ATTR_GID) {
+            ctx->got_gid = attr->va_gid;
+        }
+        if ((attr->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) &&
+            attr->va_owner_sid) {
+            ctx->got_owner_sid = *attr->va_owner_sid;
+        }
+        if ((attr->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) &&
+            attr->va_group_sid) {
+            ctx->got_group_sid = *attr->va_group_sid;
         }
     }
     ctx->done = 1;
@@ -622,8 +798,9 @@ openat_cb(
 {
     struct test_ctx *ctx = private_data;
 
-    ctx->status = error_code;
-    ctx->handle = oh;
+    ctx->status       = error_code;
+    ctx->handle       = oh;
+    ctx->got_set_attr = set_attr;
     if (error_code == CHIMERA_VFS_OK) {
         memcpy(ctx->fh, oh->fh, oh->fh_len);
         ctx->fh_len = oh->fh_len;
@@ -677,6 +854,7 @@ mkdir_acl_cb(
         memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
         ctx->fh_len = attr->va_fh_len;
     }
+    ctx->got_set_attr = set_attr;
     getattr_acl_cb(error_code, attr, private_data);
 } /* mkdir_acl_cb */
 
@@ -1371,6 +1549,555 @@ test_enrich_off_without_flag(struct test_ctx *ctx)
     TEST_PASS("enrich: a mount without the flag is left untouched");
 } /* test_enrich_off_without_flag */
 
+/* ---- write-path normalization ------------------------------------------- */
+
+/* SETATTR `sattr` on `h` as `cred` and return the status; the set_attr the
+ * completion handed back is left in ctx->got_set_attr.  *inline_done
+ * reports whether it completed before chimera_vfs_setattr returned: a write
+ * whose identities are all cached never parks. */
+static enum chimera_vfs_error
+setattr_status_inline(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *h,
+    struct chimera_vfs_attrs       *sattr,
+    int                            *inline_done)
+{
+    ctx->got_set_attr = NULL;
+    chimera_vfs_setattr(ctx->vfs_thread, cred, h, sattr, 0, 0, setattr_cb, ctx);
+    if (inline_done) {
+        *inline_done = ctx->done;
+    }
+    wait_done(ctx);
+    return ctx->status;
+} /* setattr_status_inline */
+
+static enum chimera_vfs_error
+setattr_status(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *h,
+    struct chimera_vfs_attrs       *sattr)
+{
+    return setattr_status_inline(ctx, cred, h, sattr, NULL);
+} /* setattr_status */
+
+/* Store `acl` on `h` as root and return the status. */
+static enum chimera_vfs_error
+set_acl_status_inline(
+    struct test_ctx                *ctx,
+    struct chimera_vfs_open_handle *h,
+    struct chimera_acl             *acl,
+    int                            *inline_done)
+{
+    struct chimera_vfs_attrs sattr;
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_ACL;
+    sattr.va_acl      = acl;
+    return setattr_status_inline(ctx, &ctx->root_cred, h, &sattr, inline_done);
+} /* set_acl_status_inline */
+
+static enum chimera_vfs_error
+set_acl_status(
+    struct test_ctx                *ctx,
+    struct chimera_vfs_open_handle *h,
+    struct chimera_acl             *acl)
+{
+    return set_acl_status_inline(ctx, h, acl, NULL);
+} /* set_acl_status */
+
+/* GETATTR h (as root) for the stat set and the SID companions. */
+static enum chimera_vfs_error
+get_owner(
+    struct test_ctx                *ctx,
+    struct chimera_vfs_open_handle *h)
+{
+    chimera_vfs_getattr(ctx->vfs_thread, &ctx->root_cred, h,
+                        CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_OWNER_SID |
+                        CHIMERA_VFS_ATTR_GROUP_SID,
+                        getattr_acl_cb, ctx);
+    wait_done(ctx);
+    return ctx->status;
+} /* get_owner */
+
+static struct chimera_sid
+make_sid(const char *str)
+{
+    struct chimera_sid sid;
+
+    assert(chimera_sid_from_str(&sid, str) == 0);
+    return sid;
+} /* make_sid */
+
+static void
+test_write_stores_sid_only(struct test_ctx *ctx)
+{
+    const char                     *sid = "S-1-5-21-60-61-62-6000";
+    struct fixture_sid             *fs  = fixture_sid_add(sid, CHIMERA_VFS_IDENTITY_OK, 0, 6000);
+    struct fixture_id              *fu  = fixture_id_add(0, 6000, CHIMERA_VFS_IDENTITY_OK, sid);
+    struct chimera_vfs_open_handle *h   = create_file(ctx, ctx->wdir, "w_sidonly");
+    struct chimera_acl             *acl = acl_buf_init(acl_in_buf, 1);
+    struct chimera_principal        dual;
+
+    /* uid 6000 <-> S, set with both halves of its identity. */
+    dual = make_id_principal(CHIMERA_PRINCIPAL_USER, 6000, sid);
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0, dual);
+    set_acl(ctx, h, acl);
+
+    /* The principal came with its SID: there was nothing to resolve on the
+     * way down, so neither direction of the identity has been asked about. */
+    assert(fixture_id_calls_of(fu) == 0);
+    assert(fixture_calls(fs) == 0);
+
+    /* A dual-identity store would hand USER 6000 back without consulting the
+     * resolver.  Stored SID-only, the read has to resolve S -- and while the
+     * resolver is down it fails closed. */
+    fs->mode = CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+    assert(get_acl(ctx, h, NULL) == CHIMERA_VFS_EIO);
+    assert(fixture_calls(fs) == 1);
+
+    fs->mode = CHIMERA_VFS_IDENTITY_OK;
+    assert(get_acl(ctx, h, NULL) == CHIMERA_VFS_OK);
+    assert(ctx->got_acl->num_aces == 1);
+    assert(principal_eq(&ctx->got_acl->aces[0].who, &dual));
+    assert(fixture_calls(fs) == 2);
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+    TEST_PASS("write: a dual-identity principal is stored SID-only");
+} /* test_write_stores_sid_only */
+
+static void
+test_write_numeric_algorithmic(struct test_ctx *ctx)
+{
+    struct fixture_id              *fu  = fixture_id_add(0, 6100, CHIMERA_VFS_IDENTITY_NOT_FOUND, NULL);
+    struct chimera_vfs_open_handle *h   = create_file(ctx, ctx->wcnt, "w_numeric");
+    struct chimera_acl             *acl = acl_buf_init(acl_in_buf, 1);
+    struct chimera_principal        numeric, algo;
+    int                             sid_calls, inline_done;
+
+    numeric = make_id_principal(CHIMERA_PRINCIPAL_USER, 6100, NULL);
+    algo    = make_sid_principal("S-1-5-88-1-6100");
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0, numeric);
+
+    /* uid 6100 has no domain identity: the write still succeeds, once the
+     * cold resolve has answered. */
+    memcnt_acl_seen = 0;
+    assert(set_acl_status_inline(ctx, h, acl, &inline_done) == CHIMERA_VFS_OK);
+    assert(!inline_done);
+    assert(fixture_id_calls_of(fu) == 1);
+
+    /* The module was handed the lossless algorithmic SID, not the uid. */
+    assert(memcnt_acl_seen == 1);
+    assert(memcnt_acl.hdr.num_aces == 1);
+    assert(principal_eq(&memcnt_acl.aces[0].who, &algo));
+
+    /* The answer is cached negatively: the same write again is all inline. */
+    memcnt_acl_seen = 0;
+    assert(set_acl_status_inline(ctx, h, acl, &inline_done) == CHIMERA_VFS_OK);
+    assert(inline_done);
+    assert(fixture_id_calls_of(fu) == 1);
+    assert(memcnt_acl_seen == 1);
+    assert(principal_eq(&memcnt_acl.aces[0].who, &algo));
+
+    /* It decodes back inline, without the resolver. */
+    sid_calls = chimera_atomic_load_n(&fixture_sid_calls, CHIMERA_MEMORY_RELAXED);
+    assert(get_acl(ctx, h, &inline_done) == CHIMERA_VFS_OK);
+    assert(inline_done);
+    assert(ctx->got_acl->num_aces == 1);
+    assert(principal_eq(&ctx->got_acl->aces[0].who, &numeric));
+    assert(chimera_atomic_load_n(&fixture_sid_calls, CHIMERA_MEMORY_RELAXED) ==
+           sid_calls);
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+    TEST_PASS("write: an unmappable uid round-trips through its algorithmic SID");
+} /* test_write_numeric_algorithmic */
+
+static void
+test_write_unavailable_fails(struct test_ctx *ctx)
+{
+    struct fixture_id              *fu = fixture_id_add(0, 6200, CHIMERA_VFS_IDENTITY_UNAVAILABLE, NULL);
+    struct chimera_vfs_open_handle *h  = create_file(ctx, ctx->wdir, "w_unavail");
+    struct test_acl                 prev;
+    struct chimera_acl             *acl;
+    struct chimera_vfs_attrs        sattr;
+
+    /* The ACL in place before the failed write. */
+    acl = acl_buf_init(acl_in_buf, 2);
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL, 0,
+            make_special_principal(CHIMERA_WHO_OWNER));
+    ace_set(&acl->aces[1], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0,
+            make_special_principal(CHIMERA_WHO_EVERYONE));
+    memcpy(&prev, acl, chimera_acl_size(2));
+    set_acl(ctx, h, acl);
+
+    /* uid 6200 cannot be resolved: the write fails closed rather than store
+     * an algorithmic SID for a user who may really have a domain one. */
+    acl = acl_buf_init(acl_in_buf, 1);
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED,
+            CHIMERA_ACE_READ_DATA | CHIMERA_ACE_WRITE_DATA, 0,
+            make_id_principal(CHIMERA_PRINCIPAL_USER, 6200, NULL));
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_ACL;
+    sattr.va_acl      = acl;
+    assert(setattr_status(ctx, &ctx->root_cred, h, &sattr) == CHIMERA_VFS_EIO);
+    assert(fixture_id_calls_of(fu) == 1);
+    /* Failed before dispatch, it still hands the caller its own set_attr. */
+    assert(ctx->got_set_attr == &sattr);
+
+    /* Nothing reached the module: the previous ACL is intact. */
+    assert(get_acl(ctx, h, NULL) == CHIMERA_VFS_OK);
+    assert(ctx->got_acl->num_aces == 2);
+    assert(memcmp(ctx->got_acl->aces, prev.aces, 2 * sizeof(struct chimera_ace)) == 0);
+
+    /* An outage is never cached: the next attempt asks again. */
+    assert(set_acl_status(ctx, h, acl) == CHIMERA_VFS_EIO);
+    assert(fixture_id_calls_of(fu) == 2);
+
+    /* On a read-only windows_acl mount the write is refused EROFS, as on
+     * any read-only mount, without the resolver being asked. */
+    chimera_vfs_release(ctx->vfs_thread, h);
+    open_mount_root(ctx, "comb");
+    h = ctx->handle;
+    assert(set_acl_status(ctx, h, acl) == CHIMERA_VFS_EROFS);
+    assert(fixture_id_calls_of(fu) == 2);
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+    TEST_PASS("write: an unavailable resolver fails the write with EIO");
+} /* test_write_unavailable_fails */
+
+static void
+test_write_caller_buffer_const(struct test_ctx *ctx)
+{
+    const char                     *s_res = "S-1-5-21-60-61-62-6300";
+    const char                     *s_own = "S-1-5-21-60-61-62-6301";
+    struct chimera_vfs_open_handle *h     = create_file(ctx, ctx->wdir, "w_const");
+    struct chimera_acl             *acl   = acl_buf_init(acl_in_buf, 3);
+    struct chimera_vfs_attrs        sattr;
+    struct test_acl                 snap;
+    struct chimera_principal        e_res, e_own, e_grp;
+
+    fixture_id_add(0, 6300, CHIMERA_VFS_IDENTITY_OK, s_res);
+    fixture_sid_add(s_own, CHIMERA_VFS_IDENTITY_OK, 0, 6301);
+    fixture_id_add(1, 6302, CHIMERA_VFS_IDENTITY_NOT_FOUND, NULL);
+
+    /* Every kind of principal the normalization rewrites: one it resolves,
+     * one it strips to its SID, one it encodes algorithmically. */
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0,
+            make_id_principal(CHIMERA_PRINCIPAL_USER, 6300, NULL));
+    ace_set(&acl->aces[1], CHIMERA_ACE_DENIED, CHIMERA_ACE_WRITE_DATA, 0,
+            make_id_principal(CHIMERA_PRINCIPAL_USER, 6301, s_own));
+    ace_set(&acl->aces[2], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA,
+            CHIMERA_ACE_FLAG_IDENTIFIER_GROUP,
+            make_id_principal(CHIMERA_PRINCIPAL_GROUP, 6302, NULL));
+    memcpy(&snap, acl, chimera_acl_size(3));
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_ACL;
+    sattr.va_acl      = acl;
+    assert(setattr_status(ctx, &ctx->root_cred, h, &sattr) == CHIMERA_VFS_OK);
+
+    /* The caller's buffer (the posix setacl path hands the core a const one)
+     * is exactly as it was, and its own set_attr is what came back. */
+    assert(memcmp(acl, &snap, chimera_acl_size(3)) == 0);
+    assert(sattr.va_acl == acl);
+    assert(ctx->got_set_attr == &sattr);
+
+    /* What was stored is the normalized form, enriched back on the read. */
+    e_res = make_id_principal(CHIMERA_PRINCIPAL_USER, 6300, s_res);
+    e_own = make_id_principal(CHIMERA_PRINCIPAL_USER, 6301, s_own);
+    e_grp = make_id_principal(CHIMERA_PRINCIPAL_GROUP, 6302, NULL);
+    assert(get_acl(ctx, h, NULL) == CHIMERA_VFS_OK);
+    assert(ctx->got_acl->num_aces == 3);
+    assert(principal_eq(&ctx->got_acl->aces[0].who, &e_res));
+    assert(principal_eq(&ctx->got_acl->aces[1].who, &e_own));
+    assert(principal_eq(&ctx->got_acl->aces[2].who, &e_grp));
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+    TEST_PASS("write: the caller's ACL buffer is never written");
+} /* test_write_caller_buffer_const */
+
+static void
+test_chown_attaches_companion(struct test_ctx *ctx)
+{
+    const char                     *s_user  = "S-1-5-21-60-61-62-6400";
+    const char                     *s_group = "S-1-5-21-60-61-62-6401";
+    struct fixture_id              *fu      = fixture_id_add(0, 6400, CHIMERA_VFS_IDENTITY_OK, s_user);
+    struct fixture_id              *fg      = fixture_id_add(1, 6401, CHIMERA_VFS_IDENTITY_OK, s_group);
+    struct fixture_id              *fn      = fixture_id_add(0, 6402, CHIMERA_VFS_IDENTITY_NOT_FOUND, NULL);
+    struct chimera_vfs_open_handle *h       = create_file(ctx, ctx->wdir, "w_chown");
+    struct chimera_vfs_attrs        sattr;
+    struct chimera_sid              e_user  = make_sid(s_user);
+    struct chimera_sid              e_group = make_sid(s_group);
+
+    /* A chown naming the ids alone. */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
+    sattr.va_uid      = 6400;
+    sattr.va_gid      = 6401;
+    assert(setattr_status(ctx, &ctx->root_cred, h, &sattr) == CHIMERA_VFS_OK);
+    assert(fixture_id_calls_of(fu) == 1 && fixture_id_calls_of(fg) == 1);
+
+    /* The engine attached the SIDs the ids resolve to (on its own copy). */
+    assert(sattr.va_owner_sid == NULL && sattr.va_group_sid == NULL);
+    assert(get_owner(ctx, h) == CHIMERA_VFS_OK);
+    assert(ctx->got_uid == 6400 && ctx->got_gid == 6401);
+    assert(chimera_sid_equal(&ctx->got_owner_sid, &e_user));
+    assert(chimera_sid_equal(&ctx->got_group_sid, &e_group));
+
+    /* A chown to a uid with no domain identity attaches nothing: the stored
+     * owner SID no longer describes the owner and is cleared, as on any
+     * mount.  (A cold resolve: the request parks and is dispatched once,
+     * still handing back the caller's own set_attr.) */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_UID;
+    sattr.va_uid      = 6402;
+    assert(setattr_status(ctx, &ctx->root_cred, h, &sattr) == CHIMERA_VFS_OK);
+    assert(fixture_id_calls_of(fn) == 1);
+    assert(ctx->got_set_attr == &sattr);
+    assert(get_owner(ctx, h) == CHIMERA_VFS_OK);
+    assert(ctx->got_uid == 6402);
+    assert(!(ctx->got_mask & CHIMERA_VFS_ATTR_OWNER_SID));
+    assert(chimera_sid_equal(&ctx->got_group_sid, &e_group));
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+    TEST_PASS("write: a chown gets the owner and group SID companions");
+} /* test_chown_attaches_companion */
+
+static void
+test_chown_stale_companion_no_eperm(struct test_ctx *ctx)
+{
+    const char                     *s_old = "S-1-5-21-60-61-62-6500";
+    const char                     *s_new = "S-1-5-21-60-61-62-6501";
+    struct fixture_id              *fu    = fixture_id_add(0, 6500, CHIMERA_VFS_IDENTITY_OK, s_old);
+    struct chimera_vfs_open_handle *h     = create_file(ctx, ctx->wdir, "w_stale");
+    struct chimera_vfs_attrs        sattr;
+    struct chimera_vfs_cred         owner;
+    struct chimera_sid              sid_old = make_sid(s_old);
+    struct chimera_sid              sid_new = make_sid(s_new);
+
+    chimera_vfs_cred_init_unix(&owner, 6500, 6500, 0, NULL);
+
+    /* Root gives the file to uid 6500 with owner SID A, stated outright:
+     * nothing is resolved, so the identity stays cold. */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_uid       = 6500;
+    sattr.va_owner_sid = &sid_old;
+    assert(setattr_status(ctx, &ctx->root_cred, h, &sattr) == CHIMERA_VFS_OK);
+    assert(fixture_id_calls_of(fu) == 0);
+    assert(get_owner(ctx, h) == CHIMERA_VFS_OK);
+    assert(chimera_sid_equal(&ctx->got_owner_sid, &sid_old));
+
+    /* The directory has since remapped uid 6500 to SID B. */
+    snprintf(fu->sid, sizeof(fu->sid), "%s", s_new);
+
+    /* A client naming B itself is replacing the stored owner SID: the gate's
+     * owner-SID discipline refuses that to a non-root owner. */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask  = CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_OWNER_SID;
+    sattr.va_uid       = 6500;
+    sattr.va_owner_sid = &sid_new;
+    assert(setattr_status(ctx, &owner, h, &sattr) == CHIMERA_VFS_EPERM);
+
+    /* The owner restating its uid alone passes the gate as sent; only then
+     * does the engine attach the uid's current SID, so the stale companion
+     * is refreshed instead of turning the chown into an EPERM. */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_UID;
+    sattr.va_uid      = 6500;
+    assert(setattr_status(ctx, &owner, h, &sattr) == CHIMERA_VFS_OK);
+    assert(fixture_id_calls_of(fu) == 1);
+    assert(get_owner(ctx, h) == CHIMERA_VFS_OK);
+    assert(ctx->got_uid == 6500);
+    assert(chimera_sid_equal(&ctx->got_owner_sid, &sid_new));
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+    TEST_PASS("write: a stale owner SID is refreshed after the gate, no EPERM");
+} /* test_chown_stale_companion_no_eperm */
+
+static void
+test_specials_untouched(struct test_ctx *ctx)
+{
+    struct chimera_vfs_open_handle *h   = create_file(ctx, ctx->wcnt, "w_specials");
+    struct chimera_acl             *acl = acl_buf_init(acl_in_buf, 3);
+    struct chimera_vfs_attrs        sattr;
+    struct test_acl                 snap;
+    int                             id_calls, inline_done;
+
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL, 0,
+            make_special_principal(CHIMERA_WHO_OWNER));
+    ace_set(&acl->aces[1], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA,
+            CHIMERA_ACE_FLAG_IDENTIFIER_GROUP,
+            make_special_principal(CHIMERA_WHO_GROUP));
+    ace_set(&acl->aces[2], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0,
+            make_special_principal(CHIMERA_WHO_EVERYONE));
+    memcpy(&snap, acl, chimera_acl_size(3));
+
+    /* With every uid and gid unresolvable, an ACL that names none of them
+     * needs nothing from the resolver and is stored as given. */
+    fixture_id_default = CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+    id_calls           = fixture_id_calls_all();
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_ACL;
+    sattr.va_acl      = acl;
+    memcnt_acl_seen   = 0;
+    assert(setattr_status_inline(ctx, &ctx->root_cred, h, &sattr, &inline_done) ==
+           CHIMERA_VFS_OK);
+    assert(inline_done);
+    assert(fixture_id_calls_all() == id_calls);
+    fixture_id_default = CHIMERA_VFS_IDENTITY_PASS;
+
+    /* Nothing to resolve or strip: the op went down untouched, carrying the
+     * caller's own set_attr and ACL rather than a private copy. */
+    assert(memcnt_acl_seen == 1);
+    assert(memcnt_set_attr_ptr == &sattr && memcnt_acl_ptr == acl);
+
+    assert(get_acl(ctx, h, &inline_done) == CHIMERA_VFS_OK);
+    assert(inline_done);
+    assert(ctx->got_acl->num_aces == 3);
+    assert(memcmp(ctx->got_acl->aces, snap.aces, 3 * sizeof(struct chimera_ace)) == 0);
+
+    chimera_vfs_release(ctx->vfs_thread, h);
+    TEST_PASS("write: an ACL of special principals needs no resolution");
+} /* test_specials_untouched */
+
+/*
+ * The creates, through open_at's own set_attr swap: a CREATE carrying a size
+ * defers it (vfs_proc_open_at.c), so the module already sees a private copy
+ * of the caller's set_attr before normalization copies that again.  Both
+ * swaps must unwind to the caller's own buffer, and an unresolvable uid must
+ * fail the create before the module is asked to make anything.
+ */
+static void
+test_write_create_paths(struct test_ctx *ctx)
+{
+    const char              *s_res = "S-1-5-21-60-61-62-6600";
+    struct fixture_id       *fu    = fixture_id_add(0, 6600, CHIMERA_VFS_IDENTITY_OK, s_res);
+    struct fixture_id       *fd    = fixture_id_add(0, 6601, CHIMERA_VFS_IDENTITY_UNAVAILABLE, NULL);
+    struct chimera_acl      *acl   = acl_buf_init(acl_in_buf, 3);
+    struct chimera_vfs_attrs sattr;
+    struct test_acl          snap;
+    struct chimera_principal native, owner;
+    struct chimera_sid       sid_res = make_sid(s_res);
+    uint64_t                 mask;
+    int                      inline_done;
+
+    native = make_sid_principal(s_res);
+    owner  = make_special_principal(CHIMERA_WHO_OWNER);
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0,
+            make_id_principal(CHIMERA_PRINCIPAL_USER, 6600, NULL));
+    ace_set(&acl->aces[1], CHIMERA_ACE_DENIED, CHIMERA_ACE_WRITE_DATA, 0,
+            make_id_principal(CHIMERA_PRINCIPAL_USER, 6600, NULL));
+    ace_set(&acl->aces[2], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL, 0, owner);
+    memcpy(&snap, acl, chimera_acl_size(3));
+
+    /* open_at CREATE with a size: the deferred-truncate copy and the
+     * normalized copy, one on top of the other.  uid 6600 is named by two
+     * ACEs and by the create's own owner: one resolve answers all three. */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_SIZE |
+        CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_ACL;
+    sattr.va_mode   = 0644;
+    sattr.va_size   = 0;
+    sattr.va_uid    = 6600;
+    sattr.va_acl    = acl;
+    mask            = sattr.va_set_mask;
+    memcnt_acl_seen = 0;
+    chimera_vfs_open_at(ctx->vfs_thread, &ctx->root_cred, ctx->wcnt, "w_create", 8,
+                        CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
+                        0, 0, openat_cb, ctx);
+    inline_done = ctx->done;
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(!inline_done);
+    assert(fixture_id_calls_of(fu) == 1);
+    assert(memcnt_acl_seen == 1);
+    assert(memcnt_acl.hdr.num_aces == 3);
+    assert(principal_eq(&memcnt_acl.aces[0].who, &native));
+    assert(principal_eq(&memcnt_acl.aces[1].who, &native));
+    assert(principal_eq(&memcnt_acl.aces[2].who, &owner));
+    assert(ctx->got_set_attr == &sattr);
+    assert(sattr.va_set_mask == mask && sattr.va_acl == acl);
+    assert(sattr.va_owner_sid == NULL);
+    assert(memcmp(acl, &snap, chimera_acl_size(3)) == 0);
+    assert(get_owner(ctx, ctx->handle) == CHIMERA_VFS_OK);
+    assert(ctx->got_uid == 6600);
+    assert(chimera_sid_equal(&ctx->got_owner_sid, &sid_res));
+    chimera_vfs_release(ctx->vfs_thread, ctx->handle);
+
+    /* mkdir_at: the identity is warm now, so this one never parks. */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_ACL;
+    sattr.va_mode     = 0755;
+    sattr.va_acl      = acl;
+    memcnt_acl_seen   = 0;
+    chimera_vfs_mkdir_at(ctx->vfs_thread, &ctx->root_cred, ctx->wcnt, "w_mkdir", 7,
+                         &sattr, CHIMERA_VFS_ATTR_FH, 0, 0, mkdir_acl_cb, ctx);
+    inline_done = ctx->done;
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(inline_done);
+    assert(fixture_id_calls_of(fu) == 1);
+    assert(memcnt_acl_seen == 1);
+    assert(principal_eq(&memcnt_acl.aces[0].who, &native));
+    assert(principal_eq(&memcnt_acl.aces[1].who, &native));
+    assert(ctx->got_set_attr == &sattr);
+    assert(memcmp(acl, &snap, chimera_acl_size(3)) == 0);
+
+    /* The same CREATE-with-size on the now existing file: the open is
+     * normalized like any other, and the deferred truncate it then issues
+     * reuses open_at's private attrs for a size-only fsetattr of its own --
+     * after both swaps have already handed the caller's buffer back. */
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_SIZE |
+        CHIMERA_VFS_ATTR_ACL;
+    sattr.va_mode   = 0644;
+    sattr.va_size   = 0;
+    sattr.va_acl    = acl;
+    memcnt_acl_seen = 0;
+    chimera_vfs_open_at(ctx->vfs_thread, &ctx->root_cred, ctx->wcnt, "w_create", 8,
+                        CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
+                        0, 0, openat_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(memcnt_acl_seen == 1);
+    assert(principal_eq(&memcnt_acl.aces[0].who, &native));
+    assert(ctx->got_set_attr == &sattr);
+    assert(sattr.va_set_mask == (mask & ~(uint64_t) CHIMERA_VFS_ATTR_UID) &&
+           sattr.va_acl == acl);
+    assert(memcmp(acl, &snap, chimera_acl_size(3)) == 0);
+    chimera_vfs_release(ctx->vfs_thread, ctx->handle);
+
+    /* An unresolvable uid fails the create before it is dispatched: the
+     * module never sees it and the name is not created. */
+    acl = acl_buf_init(acl_in_buf, 1);
+    ace_set(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_READ_DATA, 0,
+            make_id_principal(CHIMERA_PRINCIPAL_USER, 6601, NULL));
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_SIZE |
+        CHIMERA_VFS_ATTR_ACL;
+    sattr.va_mode   = 0644;
+    sattr.va_acl    = acl;
+    memcnt_acl_seen = 0;
+    chimera_vfs_open_at(ctx->vfs_thread, &ctx->root_cred, ctx->wcnt, "w_nocreate", 10,
+                        CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
+                        0, 0, openat_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EIO);
+    assert(fixture_id_calls_of(fd) == 1);
+    assert(memcnt_acl_seen == 0);
+    assert(ctx->got_set_attr == &sattr);
+
+    chimera_vfs_lookup(ctx->vfs_thread, &ctx->root_cred, ctx->wcnt->fh,
+                       ctx->wcnt->fh_len, "w_nocreate", 10,
+                       CHIMERA_VFS_ATTR_FH, 0, lookup_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_ENOENT);
+
+    TEST_PASS("write: creates normalize through open_at's own set_attr swap");
+} /* test_write_create_paths */
+
 int
 main(
     int    argc,
@@ -1458,6 +2185,22 @@ main(
     test_enrich_unavailable_open_closes(&ctx);
     test_enrich_off_without_flag(&ctx);
 
+    /* Write-path normalization, on the same flagged mounts; the memcnt one
+     * (mounted by test_enrich_unavailable_open_closes) also shows what the
+     * module was handed. */
+    open_mount_root(&ctx, "wcnt");
+    ctx.wcnt = ctx.handle;
+
+    test_write_stores_sid_only(&ctx);
+    test_write_numeric_algorithmic(&ctx);
+    test_write_unavailable_fails(&ctx);
+    test_write_caller_buffer_const(&ctx);
+    test_chown_attaches_companion(&ctx);
+    test_chown_stale_companion_no_eperm(&ctx);
+    test_specials_untouched(&ctx);
+    test_write_create_paths(&ctx);
+
+    chimera_vfs_release(ctx.vfs_thread, ctx.wcnt);
     chimera_vfs_release(ctx.vfs_thread, ctx.wdir);
     free(ctx.got_acl);
 

@@ -744,6 +744,14 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
     struct chimera_vfs_delegation_thread *delegation_thread;
     int                                   thread_id;
 
+    /* On a windows-identity mount, an op's set_attr is normalized to
+     * SID-only identities before anything else sees it.  When that needs the
+     * resolver the request parks here and comes back through this function,
+     * normalized, so everything below runs once. */
+    if (chimera_vfs_acl_windows_pre_dispatch(request)) {
+        return;
+    }
+
     chimera_vfs_dump_request(request);
 
     /* Namespace mutations gate their completion on sync watchers'
