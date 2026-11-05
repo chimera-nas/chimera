@@ -117,8 +117,11 @@ struct chimera_vfs_readdir_entry {
     uint64_t                 inum;
     uint64_t                 cookie;
     uint32_t                 namelen;
+    uint32_t                 extra_size;
     struct chimera_vfs_attrs attrs;
-    /* Name follows immediately after this struct */
+    /* Name follows immediately after this struct, padded to 8; then
+     * extra_size bytes of out-of-line attrs (ACL, owner SID, group SID, each
+     * padded to 8) that attrs' pointers refer to */
 };
 
 /* chimera_vfs_hash comes from sdk/vfs_utils.h (via vfs.h): it is part of

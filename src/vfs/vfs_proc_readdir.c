@@ -253,6 +253,35 @@ chimera_vfs_readdir_filter_complete(struct chimera_vfs_request *request)
     chimera_vfs_readdir_complete(request);
 } /* chimera_vfs_readdir_filter_complete */
 
+/* Bytes an entry's out-of-line attributes (ACL, owner and group SID) take in
+ * the bounce buffer after the name, each rounded to 8. */
+static size_t
+chimera_vfs_readdir_bounce_extra_size(const struct chimera_vfs_attrs *attrs)
+{
+    size_t n = 0;
+
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attrs->va_acl) {
+        n += (chimera_acl_size(attrs->va_acl->num_aces) + 7) & ~(size_t) 7;
+    }
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) && attrs->va_owner_sid) {
+        n += (sizeof(struct chimera_sid) + 7) & ~(size_t) 7;
+    }
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) && attrs->va_group_sid) {
+        n += (sizeof(struct chimera_sid) + 7) & ~(size_t) 7;
+    }
+    return n;
+} /* chimera_vfs_readdir_bounce_extra_size */
+
+/* The collector runs inside the module's per-entry callback on a delegation
+ * thread; the entries are replayed later on the caller's thread, by which
+ * time the module's per-thread scratch behind va_acl / va_owner_sid /
+ * va_group_sid holds a later entry's.  So the pointed-to data is copied into
+ * the bounce buffer after the entry's name and the stored attrs repointed at
+ * the copies.  An entry whose copies do not fit the space left stops the
+ * scan (it is the first of the next page); an ACL too large for an empty
+ * buffer is dropped from just that entry, as a withheld one on a
+ * windows-identity mount (its copy could never be delivered, and a stale
+ * pointer must not be). */
 static int
 chimera_vfs_readdir_bounce_result_callback(
     uint64_t                        inum,
@@ -264,10 +293,26 @@ chimera_vfs_readdir_bounce_result_callback(
 {
     struct chimera_vfs_request       *request = arg;
     struct chimera_vfs_readdir_entry *entry;
-    int                               entry_size;
-    char                             *entry_data;
+    struct chimera_vfs_attrs          local;
+    size_t                            name_size, extra_size, entry_size;
+    char                             *entry_data, *extra;
 
-    entry_size = (sizeof(*entry) + namelen + 7) & ~7;
+    name_size  = (sizeof(*entry) + namelen + 7) & ~(size_t) 7;
+    extra_size = chimera_vfs_readdir_bounce_extra_size(attrs);
+
+    if (name_size + extra_size > request->readdir.bounce_iov.length &&
+        (attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attrs->va_acl) {
+        local              = *attrs;
+        local.va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
+        local.va_acl       = NULL;
+        if (request->readdir.acl_windows) {
+            local.va_set_mask |= CHIMERA_VFS_ATTR_ACL_WITHHELD;
+        }
+        attrs      = &local;
+        extra_size = chimera_vfs_readdir_bounce_extra_size(attrs);
+    }
+
+    entry_size = name_size + extra_size;
 
     /* Check if we have enough space in the bounce buffer */
     if (request->readdir.bounce_offset + entry_size > request->readdir.bounce_iov.length) {
@@ -278,11 +323,31 @@ chimera_vfs_readdir_bounce_result_callback(
     entry_data = (char *) request->readdir.bounce_iov.data + request->readdir.bounce_offset;
     entry      = (struct chimera_vfs_readdir_entry *) entry_data;
 
-    entry->inum    = inum;
-    entry->cookie  = cookie;
-    entry->namelen = namelen;
-    entry->attrs   = *attrs;
+    entry->inum       = inum;
+    entry->cookie     = cookie;
+    entry->namelen    = namelen;
+    entry->extra_size = (uint32_t) extra_size;
+    entry->attrs      = *attrs;
     memcpy(entry_data + sizeof(*entry), name, namelen);
+
+    extra = entry_data + name_size;
+
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attrs->va_acl) {
+        size_t n = chimera_acl_size(attrs->va_acl->num_aces);
+
+        memcpy(extra, attrs->va_acl, n);
+        entry->attrs.va_acl = (struct chimera_acl *) extra;
+        extra              += (n + 7) & ~(size_t) 7;
+    }
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_OWNER_SID) && attrs->va_owner_sid) {
+        memcpy(extra, attrs->va_owner_sid, sizeof(struct chimera_sid));
+        entry->attrs.va_owner_sid = (struct chimera_sid *) extra;
+        extra                    += (sizeof(struct chimera_sid) + 7) & ~(size_t) 7;
+    }
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_GROUP_SID) && attrs->va_group_sid) {
+        memcpy(extra, attrs->va_group_sid, sizeof(struct chimera_sid));
+        entry->attrs.va_group_sid = (struct chimera_sid *) extra;
+    }
 
     request->readdir.bounce_offset += entry_size;
 
@@ -340,7 +405,8 @@ chimera_vfs_bounce_complete(struct chimera_vfs_request *request)
             break;
         }
 
-        data_ptr += (sizeof(*entry) + entry->namelen + 7) & ~7;
+        data_ptr += ((sizeof(*entry) + entry->namelen + 7) & ~(size_t) 7) +
+            entry->extra_size;
     }
 
     evpl_iovec_release(request->thread->evpl, &request->readdir.bounce_iov);
