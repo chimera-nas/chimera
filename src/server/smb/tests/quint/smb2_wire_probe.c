@@ -46,6 +46,13 @@
  * as a bad token (MS-NLMP 3.2.5.1.2) rather than keyed with the wrong key.
  * W12 is the allowed side of that refusal: no KEY_EXCH, no key, accepted.
  *
+ * A connection the server drops fails the case it happened in and the probe
+ * goes on to the next one (smb2c_arm_drop), so one broken profile still lets
+ * the rest report.  W15 pins that.  Each case that arms the recovery keeps its
+ * env static: the env changes after the setjmp and is read after the longjmp,
+ * and C leaves a non-volatile local in that position indeterminate.  The cases
+ * run one at a time, and smb2_env_open_wire clears the env each time.
+ *
  * With --winbind (run under scripts/ad_test_wrapper.sh) W2-W4 and W7 (as
  * WB2-WB4 and WB7), W10, W11 and W12 run again as a domain user that the
  * server validates through winbind.  winbind returns only the session base
@@ -85,6 +92,14 @@ static int failures = 0;
             }                                        \
         } while (0)
 
+/* The server dropped a connection while case `name` was running.  The case is
+ * abandoned at that point; its env is still torn down normally. */
+static void
+check_dropped(const char *name)
+{
+    CHECK(0, "%s: SMB server dropped the connection", name);
+} /* check_dropped */
+
 /* *INDENT-OFF* */
 /* uncrustify 0.78.1 does not converge on aligned designated initializers: each
  * pass widens the '=' column, so `make syntax` and syntax-check disagree
@@ -119,14 +134,15 @@ static const struct smb2_wire_profile profiles[] = {
 /* *INDENT-ON* */
 
 /* Drive one profile through a complete session.  Returns the dialect actually
- * negotiated so the caller can assert the profile got the wire it asked for. */
+ * negotiated so the caller can assert the profile got the wire it asked for,
+ * or 0 when the server dropped the connection first. */
 static uint16_t
 run_profile(
     const struct smb2_wire_profile *w,
     const char                     *user,
     const char                     *password)
 {
-    struct smb2_env        env;
+    static struct smb2_env env;
     struct smb2_env_opts   opts = { .leases = 1, .oplocks = 1 };
     struct smb2_conn      *c;
     struct smb2_create_out co;
@@ -134,11 +150,19 @@ run_profile(
     uint8_t                rdbuf[64];
     uint32_t               st, count = 0, rlen = 0;
     uint16_t               dialect;
+    jmp_buf                drop;
 
     printf("# --- %s ---\n", w->name);
 
     smb2_env_open_wire(&env, &opts, w);
     smb2_env_fs_setup(&env, "fs0");
+
+    smb2c_arm_drop(&drop);
+    if (setjmp(drop)) {
+        check_dropped(w->name);
+        dialect = 0;
+        goto out;
+    }
 
     c = smb2_conn_open(&env);
 
@@ -171,7 +195,9 @@ run_profile(
     CHECK(st == ST_SUCCESS, "%s: CLOSE -> 0x%08x", w->name, st);
 
     dialect = c->dialect;
+    smb2c_disarm_drop();
 
+ out:
     smb2_env_fs_teardown(&env, "fs0");
     smb2_env_stop(&env);
     return dialect;
@@ -182,10 +208,11 @@ run_profile(
 static void
 run_bad_credentials(void)
 {
-    struct smb2_env                       env;
+    static struct smb2_env                env;
     struct smb2_env_opts                  opts = { 0 };
     struct smb2_conn                     *c;
     uint32_t                              st;
+    jmp_buf                               drop;
     static const struct smb2_wire_profile w = {
         .name = "W9 bad password", .max_dialect = 0x0300, .ntlmv2 = 1
     };
@@ -194,6 +221,12 @@ run_bad_credentials(void)
 
     smb2_env_open_wire(&env, &opts, &w);
     smb2_env_fs_setup(&env, "fs0");
+
+    smb2c_arm_drop(&drop);
+    if (setjmp(drop)) {
+        check_dropped(w.name);
+        goto out;
+    }
 
     /* Re-register the account with a DIFFERENT password than the client will
      * present, so the NTLMv2 proof cannot verify. */
@@ -214,7 +247,9 @@ run_bad_credentials(void)
     st = smb2_session_setup(c);
     CHECK(st != ST_SUCCESS,
           "%s: SESSION_SETUP is REFUSED (0x%08x)", w.name, st);
+    smb2c_disarm_drop();
 
+ out:
     smb2_env_fs_teardown(&env, "fs0");
     smb2_env_stop(&env);
 } /* run_bad_credentials */
@@ -280,15 +315,22 @@ run_bad_key_exchange(
     uint16_t                        kx_len,
     int                             past_end)
 {
-    struct smb2_env      env;
-    struct smb2_env_opts opts = { 0 };
-    struct smb2_conn    *c;
-    uint32_t             st;
+    static struct smb2_env env;
+    struct smb2_env_opts   opts = { 0 };
+    struct smb2_conn      *c;
+    uint32_t               st;
+    jmp_buf                drop;
 
     printf("# --- %s ---\n", w->name);
 
     smb2_env_open_wire(&env, &opts, w);
     smb2_env_fs_setup(&env, "fs0");
+
+    smb2c_arm_drop(&drop);
+    if (setjmp(drop)) {
+        check_dropped(w->name);
+        goto out;
+    }
 
     c = smb2_conn_open(&env);
 
@@ -298,10 +340,79 @@ run_bad_key_exchange(
     st = session_setup_bad_kx(c, user, password, kx_len, past_end);
     CHECK(st == ST_INVALID_PARAMETER,
           "%s: SESSION_SETUP is refused as a bad token (0x%08x)", w->name, st);
+    smb2c_disarm_drop();
 
+ out:
     smb2_env_fs_teardown(&env, "fs0");
     smb2_env_stop(&env);
 } /* run_bad_key_exchange */
+
+/* W15 checks the harness itself: a connection the server drops must fail
+ * only the case it happened in.  A second NEGOTIATE on an established
+ * connection is the drop MS-SMB2 3.3.5.4 requires ("the server MUST
+ * disconnect the connection"), so it does not depend on any other server
+ * policy.  The cases after this one running at all is the other half of the
+ * check.  second_sent is volatile because it changes after the setjmp and is
+ * read after the longjmp. */
+static void
+run_dropped_connection(void)
+{
+    static struct smb2_env env;
+    struct smb2_env_opts   opts = { 0 };
+    struct smb2_conn      *c;
+    uint32_t               st;
+    jmp_buf                drop;
+    volatile int           second_sent;
+
+    /* *INDENT-OFF* */
+    static const struct smb2_wire_profile w = {
+        .name = "W15 a dropped connection fails only its own case",
+        .max_dialect = 0x0300, .ntlmv2 = 1
+    };
+    /* *INDENT-ON* */
+
+    printf("# --- %s ---\n", w.name);
+
+    smb2_env_open_wire(&env, &opts, &w);
+    smb2_env_fs_setup(&env, "fs0");
+
+    second_sent = 0;
+    smb2c_arm_drop(&drop);
+    if (setjmp(drop)) {
+        /* The drop this case provokes, delivered back here rather than
+         * stopping the probe, is the expected outcome; a drop any earlier is
+         * not. */
+        CHECK(second_sent, "%s: a second NEGOTIATE drops the connection and "
+              "the probe goes on", w.name);
+
+        /* Recover the way the replayer does, with smb2_conn_reset before the
+         * teardown.  evpl has already closed and freed the dropped bind, so
+         * reset must leave it alone: closing it again aborts ("bind ...
+         * already closed").  Reset has no failure return, so the check is
+         * that the probe is still running after it; the CHECK before it
+         * confirms the connection is in the state the guard is for. */
+        CHECK(env.nconns == 1 && env.conns[0]->disconnected &&
+              !env.conns[0]->closed_by_client,
+              "%s: the server, not the client, closed the connection", w.name);
+        smb2_conn_reset(&env);
+        goto out;
+    }
+
+    c = smb2_conn_open(&env);
+
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS, "%s: NEGOTIATE -> 0x%08x", w.name, st);
+
+    second_sent = 1;
+    st          = smb2_negotiate(c);
+    smb2c_disarm_drop();
+    CHECK(0, "%s: a second NEGOTIATE is answered (0x%08x), not dropped",
+          w.name, st);
+
+ out:
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_dropped_connection */
 
 static void
 run_profiles(
@@ -318,8 +429,9 @@ run_profiles(
         /* The profile asked for a ceiling; the server picks within it.  A
          * 3.1.1 profile that quietly settled for 3.0 would still pass every
          * I/O check above while testing none of the 3.1.1 paths, so pin the
-         * dialect itself. */
-        if (list[i].max_dialect == 0x0311) {
+         * dialect itself.  0 means the connection was dropped, which has
+         * already failed the profile. */
+        if (list[i].max_dialect == 0x0311 && dialect != 0) {
             CHECK(dialect == 0x0311,
                   "%s: negotiated 3.1.1 (0x%04x)", list[i].name, dialect);
         }
@@ -547,6 +659,7 @@ main(
     } else {
         run_profiles(profiles, sizeof(profiles) / sizeof(profiles[0]),
                      SMB2W_USER, SMB2W_PASSWORD);
+        run_dropped_connection();
         run_bad_credentials();
         run_bad_key_exchange(&no_key, SMB2W_USER, SMB2W_PASSWORD, 0, 0);
         run_bad_key_exchange(&short_key, SMB2W_USER, SMB2W_PASSWORD, 8, 0);

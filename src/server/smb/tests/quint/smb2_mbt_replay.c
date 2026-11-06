@@ -351,7 +351,7 @@ slot_overflow(
             strcmp(what, "session") == 0 ? "SESS"
             : strcmp(what, "tree") == 0 ? "TREE" : "FID",
             g_trace ? g_trace : "?");
-    exit(3);
+    smb2c_exit(3);
 } /* slot_overflow */
 
 /* The live connection a model session is bound to.
@@ -2392,6 +2392,21 @@ run_trace(
     snprintf(sdbkey, sizeof(sdbkey), "%.*s::sdb",
              (int) (sep ? (size_t) (sep - lokey) : strlen(lokey)), lokey);
 
+    /* A connection the server drops fails THIS trace, not the batch: the
+     * replay of it stops where the drop was noticed, and the trace is reset
+     * and torn down below like any other, so the next trace still runs and
+     * the summary counts this one.  Everything the abandoned frames held
+     * belongs to a connection, which smb2_conn_reset releases. */
+    jmp_buf drop;
+
+    smb2c_arm_drop(&drop);
+    if (setjmp(drop)) {
+        mism("the SMB server dropped the connection");
+        printf("ABANDONED [%s] at state %zu: the server dropped the "
+               "connection\n", path, g_state_index);
+        goto replayed;
+    }
+
     for (size_t i = 1; i < ns; i++) {
         json_t *st_i = json_array_get(states, i);
         json_t *lo   = json_object_get(st_i, lokey);
@@ -2415,6 +2430,9 @@ run_trace(
             break;
         }
     }
+    smb2c_disarm_drop();
+
+ replayed:
     g_post_sdb           = NULL;
     g_create_outstanding = 0;
 

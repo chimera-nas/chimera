@@ -153,7 +153,7 @@ conflicting_open(
         if (opener->disconnected) {
             fprintf(stderr, "conflicting_open('%s'): connection dropped\n",
                     name);
-            exit(3);
+            smb2c_dead(opener);
         }
         if (smb2c_now_ms() >= deadline) {
             /* Not a modeled outcome: the opener is parked on an event this
