@@ -193,6 +193,7 @@
 #define MBT_FILE_READ_ATTRIBUTES                0x00000080u     /* attribute-only access */
 #define MBT_FILE_LIST_DIRECTORY                 0x00000001u     /* == FILE_READ_DATA */
 #define MBT_READ_CONTROL                        0x00020000u
+#define MBT_MAXIMUM_ALLOWED                     0x02000000u
 #define MBT_GENERIC_READ                        0x80000000u
 #define MBT_FILE_READ_ACCESS                    0x00120089u     /* R data/attr/EA + SYNC */
 #define MBT_FILE_WRITE_ACCESS                   0x00120116u     /* W data/attr/EA + SYNC */

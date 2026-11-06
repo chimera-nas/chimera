@@ -1290,11 +1290,11 @@ probe_security(struct smb2_conn *c)
     }
 
     /* MS-FSA "Server Requests a Query of Security Information" (2.1.5.14 in
-     * the v2025-09 numbering): reading the owner, group or DACL needs
-     * READ_CONTROL on the open.  A FILE_READ_ATTRIBUTES-only open is
-     * refused each one with STATUS_ACCESS_DENIED, yet a query that selects
-     * nothing still succeeds with the bare header (smb2.sdread).  A
-     * READ_CONTROL-only open reads all three. */
+    * the v2025-09 numbering): reading the owner, group or DACL needs
+    * READ_CONTROL on the open.  A FILE_READ_ATTRIBUTES-only open is
+    * refused each one with STATUS_ACCESS_DENIED, yet a query that selects
+    * nothing still succeeds with the bare header (smb2.sdread).  A
+    * READ_CONTROL, GENERIC_READ or MAXIMUM_ALLOWED open reads all three. */
     {
         static const struct {
             const char *name;
@@ -1305,6 +1305,18 @@ probe_security(struct smb2_conn *c)
             { "owner", SEC_OWNER },
             { "group", SEC_GROUP },
             { "dacl",  SEC_DACL  },
+        };
+        /* The opens real clients make to read a descriptor: READ_CONTROL
+         * named outright, GENERIC_READ (which maps to it) and
+         * MAXIMUM_ALLOWED (granted it by the ACL). */
+        static const struct {
+            const char *name;
+            uint32_t    access;
+        }
+        readers[] = {
+            { "READ_CONTROL",    MBT_READ_CONTROL    },
+            { "GENERIC_READ",    MBT_GENERIC_READ    },
+            { "MAXIMUM_ALLOWED", MBT_MAXIMUM_ALLOWED },
         };
         /* *INDENT-ON* */
         struct smb2_create_out ra;
@@ -1331,17 +1343,20 @@ probe_security(struct smb2_conn *c)
             smb2_close(c, ra.file_id);
         }
 
-        st = smb2_create(c, "sec.bin", MBT_FILE_OPEN, MBT_READ_CONTROL,
-                         MBT_FILE_SHARE_RWD, NULL, &ra);
-        CHECK(st == ST_SUCCESS,
-              "open sec.bin with READ_CONTROL only -> 0x%08x", st);
-        if (st == ST_SUCCESS) {
+        for (i = 0; i < sizeof(readers) / sizeof(readers[0]); i++) {
+            st = smb2_create(c, "sec.bin", MBT_FILE_OPEN, readers[i].access,
+                             MBT_FILE_SHARE_RWD, NULL, &ra);
+            CHECK(st == ST_SUCCESS, "open sec.bin with %s -> 0x%08x",
+                  readers[i].name, st);
+            if (st != ST_SUCCESS) {
+                continue;
+            }
             st = smb2_query_info(c, SMB2_INFO_SECURITY_T, 0, ra.file_id,
                                  SEC_OWNER | SEC_GROUP | SEC_DACL, sd,
                                  sizeof(sd), &len);
             CHECK(st == ST_SUCCESS && len >= 20,
-                  "  ... QUERY SECURITY(owner|group|dacl) with READ_CONTROL "
-                  "-> 0x%08x (%u bytes)", st, len);
+                  "  ... QUERY SECURITY(owner|group|dacl) on a %s open -> "
+                  "0x%08x (%u bytes)", readers[i].name, st, len);
             smb2_close(c, ra.file_id);
         }
     }
