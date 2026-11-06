@@ -1289,12 +1289,12 @@ probe_security(struct smb2_conn *c)
               "SET SECURITY with the descriptor just read -> 0x%08x", st);
     }
 
-    /* MS-FSA "Server Requests a Query of Security Information" (2.1.5.14 in
-    * the v2025-09 numbering): reading the owner, group or DACL needs
-    * READ_CONTROL on the open.  A FILE_READ_ATTRIBUTES-only open is
-    * refused each one with STATUS_ACCESS_DENIED, yet a query that selects
-    * nothing still succeeds with the bare header (smb2.sdread).  A
-    * READ_CONTROL, GENERIC_READ or MAXIMUM_ALLOWED open reads all three. */
+    /* MS-FSA "Server Requests a Query of Security Information"
+     * (2.1.5.14 in the v2025-09 numbering): reading the owner, group or
+     * DACL needs READ_CONTROL on the open.  A FILE_READ_ATTRIBUTES-only
+     * open is refused each one with STATUS_ACCESS_DENIED, yet a query that
+     * selects nothing still succeeds with the bare header (smb2.sdread).  A
+     * READ_CONTROL, GENERIC_READ or MAXIMUM_ALLOWED open reads all three. */
     {
         static const struct {
             const char *name;
