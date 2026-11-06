@@ -1674,10 +1674,11 @@ chimera_smb_client_lookup_at(
      *
      * READ_CONTROL: the enrich chain reads the owner/group/DACL on this handle
      * for the real uid/gid/mode, and a server refuses that query on an open
-     * without READ_CONTROL (MS-FSA 2.1.5.13).  So a lookup, like the other
-     * metadata opens here, needs READ_CONTROL to be grantable: where the
-     * server's ACL grants FILE_READ_ATTRIBUTES but not READ_CONTROL, the open
-     * is refused and the lookup fails with EACCES. */
+     * without READ_CONTROL (MS-FSA "Server Requests a Query of Security
+     * Information", 2.1.5.14 in the v2025-09 numbering).  So a lookup, like
+     * the other metadata opens here, needs READ_CONTROL to be grantable:
+     * where the server's ACL grants FILE_READ_ATTRIBUTES but not READ_CONTROL,
+     * the open is refused and the lookup fails with EACCES. */
     smb_send_create_follow(conn, request, path, path_len,
                            SMB2_FILE_READ_ATTRIBUTES | SMB2_READ_CONTROL,
                            SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
