@@ -140,6 +140,83 @@ ops whose dispatch blocks, and the `CHIMERA_VFS_OP_BIT()` /
 a module that set it sets `.blocking_ops = CHIMERA_VFS_BLOCKING_ALL`
 instead.  The module struct layout changes, so modules built against
 earlier SDK versions must be rebuilt.
+Version 5 carries the windows-identity ACL capability
+(`CHIMERA_VFS_CAP_ACL_WINDOWS`, the first capability above bit 31 of the
+64-bit capability word):
+the core-owned `acl_windows` block in `struct chimera_vfs_request` (the
+completion wrapper that resolves SID-only ACL principals on a
+windows-identity mount); the readdir warm-dedup fields
+(`readdir.acl_warmed_n` / `acl_warmed`) and the bounce-buffer
+`readdir.bounce_status` in the request's readdir block;
+`CHIMERA_VFS_ATTR_ACL_WITHHELD` (attribute bit 32), set on readdir entries
+whose ACL the core withheld; and a new obligation on modules, namely that
+on such a mount the core rewrites the reply ACL in place, so the module
+must return it in private, writable storage (see below).  The request
+layout changes, so modules built against earlier SDK versions must be
+rebuilt.
+
+## Windows-identity ACLs (`CHIMERA_VFS_CAP_ACL_WINDOWS`)
+
+A module that stores ACLs natively (`CHIMERA_VFS_CAP_ACL_NATIVE`) may also
+declare `CHIMERA_VFS_CAP_ACL_WINDOWS`, or the operator may enable the same
+behaviour per mount with the `windows_acl` mount option.  The capability
+requires `ACL_NATIVE`: declaring it without, or giving `windows_acl` to a
+module without `ACL_NATIVE`, fails the mount with `EINVAL`.  As of SDK
+version 5 no in-tree module declares the capability; it is reached through
+the mount option on memfs, diskfs and cairn.
+
+The contract:
+
+* **SID-only storage.**  On writes the module receives principals that are
+  `CHIMERA_PRINCIPAL_SID` or SPECIAL only; any uid/gid mapping is not part
+  of what it stores.  On reads it returns the stored principals as written.
+* **Core owns identity.**  The core strips POSIX-form principals to SIDs
+  before dispatch on writes, and enriches SIDs to uid/gid in the reply
+  before any protocol server sees the ACL.  The module still returns
+  `va_uid`, `va_gid` and `va_mode` whenever `va_req_mask` asks.
+* **In-place rewrite obligation.**  Enrichment rewrites the reply ACL in
+  place, so a module on such a mount must return its reply ACL in private,
+  writable storage.  Request-owned memory (`chimera_vfs_request_alloc_memory`)
+  always qualifies.  Module thread-local scratch qualifies only for an op the
+  module completes on the thread that dispatched it: a blocking op's reply is
+  rewritten after its completion has crossed back to the dispatching thread,
+  when the delegation thread may be reusing its scratch, so it needs request
+  memory, as any pointer-valued reply of a blocking op does.  Memory shared
+  with a cache or other replies never qualifies.
+
+Behaviour operators and protocol authors can rely on:
+
+* **Fail closed without a SID-capable identity handler.**  A flagged mount
+  with no SID-capable identity handler (winbind absent) fails fetches of
+  ACLs bearing native SIDs.  This is by design: guessing an identity would
+  grant or deny wrongly.
+* **Unknown SIDs.**  A SID the authority positively reports as unknown
+  stays in the ACL as an opaque principal that matches no caller.
+* **What winbind can report as an outage.**  libwbclient gives an
+  unreachable domain controller or idmap backend the same error code as an
+  identity that does not exist, so while winbindd is running such a SID is
+  treated as unknown -- opaque, and cached as a miss for 60 seconds --
+  rather than failing the fetch.  Only winbindd itself being down, or a
+  failure local to the lookup, fails closed.
+* **Readdir is cache-only.**  Directory listings never block on the
+  resolver; entries whose ACL needs a cold resolution are queued for
+  warming and their ACL is withheld (`CHIMERA_VFS_ATTR_ACL_WITHHELD`).
+  For an NFSv4 READDIR that asks for the ACL attribute, a withheld ACL is
+  reported through `FATTR4_RDATTR_ERROR` with `NFS4ERR_DELAY`, or fails
+  the READDIR with `NFS4ERR_DELAY` when `rdattr_error` was not requested.
+  SMB access-based enumeration hides entries whose ACLs are cold until the
+  cache warms.
+
+Known limitation: module-internal access gates (the memfs, cairn and
+diskfs parent EXECUTE-traverse and WRITE_DATA-at-create checks) evaluate
+the stored SID-only ACL directly, where opaque principals match no caller.
+On a flagged mount, named-ACE grants therefore fail closed at those gates
+for non-root creates and traversal, and named-ACE DENYs are not enforced at
+creates.  The engine's own gates see enriched ACLs and are unaffected.  The
+limit is confined to the `windows_acl` mount option on engine-authoritative
+backends.  An engine-side parent create/traverse gate for windows-identity
+mounts would lift it; until one lands there is no extended-tier smbtorture
+share on a `windows_acl` mount.
 
 The `struct chimera_vfs_request` layout is exposed in full and is
 therefore ABI-stable only within an SDK version.  A public-head /

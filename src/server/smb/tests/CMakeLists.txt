@@ -14,6 +14,17 @@ target_include_directories(smb_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/auth_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_auth_test --mode=local)
 
+# How each libwbclient error is classified for the identity resolver.
+if(WBCLIENT_FOUND)
+add_executable(smb_wbclient_status_test smb_wbclient_status_test.c)
+target_link_libraries(smb_wbclient_status_test chimera_vfs ${WBCLIENT_LIBRARIES})
+target_include_directories(smb_wbclient_status_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${WBCLIENT_INCLUDE_DIRS})
+
+add_test(NAME chimera/server/smb/wbclient_status
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_wbclient_status_test)
+endif()
+
 if(NOT WIN32)
 # SMB smbclient authentication test
 add_executable(smbclient_auth_test smbclient_auth_test.c)

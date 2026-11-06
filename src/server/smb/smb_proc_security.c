@@ -977,9 +977,11 @@ chimera_smb_set_resolve_decr(struct chimera_smb_request *request)
 
 static void
 chimera_smb_set_resolve_cb(
+    enum chimera_vfs_identity_status          status,
     const struct chimera_vfs_identity_result *result,
     void                                     *private_data)
 {
+    (void) status;
     (void) result;
     chimera_smb_set_resolve_decr(private_data);
 } /* chimera_smb_set_resolve_cb */
@@ -1129,9 +1131,11 @@ chimera_smb_query_resolve_decr(struct chimera_smb_request *request)
 
 static void
 chimera_smb_query_resolve_cb(
+    enum chimera_vfs_identity_status          status,
     const struct chimera_vfs_identity_result *result,
     void                                     *private_data)
 {
+    (void) status;
     (void) result;
     chimera_smb_query_resolve_decr(private_data);
 } /* chimera_smb_query_resolve_cb */

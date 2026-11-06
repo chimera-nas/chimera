@@ -56,13 +56,25 @@ chimera_nfs4_readdir_callback(
      * lookup is refused (RFC 8881 5.8.1.12), the entry carries only
      * rdattr_error if the client asked for it, and otherwise the whole
      * READDIR fails. */
-    if (attrs->va_set_mask & CHIMERA_VFS_ATTR_WITHHELD) {
-        void *val;
+    /* A client that asked for FATTR4_ACL on a mount whose ACLs are stored as
+     * SIDs, and whose entry's ACL the VFS withheld because it could not be
+     * fully resolved from cache, is treated the same way: never a silently
+     * thinner attribute set, and above all never the ACL the marshaller would
+     * otherwise synthesise from the mode bits when the ACL is absent.  The
+     * identity is being resolved in the background, so the error is
+     * NFS4ERR_DELAY: a retry finds the ACL. */
+    if ((attrs->va_set_mask & CHIMERA_VFS_ATTR_WITHHELD) ||
+        ((attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL_WITHHELD) &&
+         args->num_attr_request >= 1 &&
+         (args->attr_request[0] & (1 << FATTR4_ACL)))) {
+        void    *val;
+        uint32_t err = (attrs->va_set_mask & CHIMERA_VFS_ATTR_WITHHELD) ?
+            NFS4ERR_ACCESS : NFS4ERR_DELAY;
 
         if (args->num_attr_request < 1 ||
             !(args->attr_request[0] & (1 << FATTR4_RDATTR_ERROR))) {
             req->encoding->dbuf->used = dbuf_before;
-            cursor->denied            = 1;
+            cursor->denied            = err;
             return -1;
         }
 
@@ -78,7 +90,7 @@ chimera_nfs4_readdir_callback(
         entry->attrs.attrmask[0]  = 1 << FATTR4_RDATTR_ERROR;
 
         val = entry->attrs.attr_vals.data;
-        chimera_nfs4_attr_append_uint32(&val, NFS4ERR_ACCESS);
+        chimera_nfs4_attr_append_uint32(&val, err);
         entry->attrs.attr_vals.len = 4;
 
         goto account;
@@ -162,7 +174,7 @@ chimera_nfs4_readdir_complete(
     uint64_t                        cv;
 
     if (status == NFS4_OK && cursor->denied) {
-        status = NFS4ERR_ACCESS;
+        status = cursor->denied;
     }
 
     /* RFC 7530 §16.24.4: if not even one entry fit in maxcount and we are

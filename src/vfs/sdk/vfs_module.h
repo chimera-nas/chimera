@@ -28,7 +28,7 @@ struct chimera_vfs_request;
  * chimera_vfs_register() refuses a module built against a different
  * version, so a stale out-of-tree binary fails loudly at load time
  * instead of corrupting memory. */
-#define CHIMERA_VFS_SDK_VERSION            4
+#define CHIMERA_VFS_SDK_VERSION            5
 
 /* If set, module requires open handles for path operations
  * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open
@@ -234,9 +234,10 @@ struct chimera_vfs_handle_state {
  * losslessly.  If unset, the module is mode-only, and a mode-only module that
  * wants ACLs at all translates them itself: linux maps a set-ACL down to chmod
  * and synthesizes one back from the mode on query, io_uring does neither.  The
- * VFS core does not translate on a module's behalf -- it only reads va_acl to
- * gate access.  There is no POSIX.1e capability by design -- Chimera carries a
- * single ACL model (see vfs_acl.h).
+ * VFS core does not translate on a module's behalf -- it reads va_acl to
+ * gate access and, on a CHIMERA_VFS_CAP_ACL_WINDOWS mount, rewrites the reply
+ * ACL in place (see that capability).  There is no POSIX.1e capability by
+ * design -- Chimera carries a single ACL model (see vfs_acl.h).
  *
  * This is a statement about fidelity, and the SMB server's
  * FILE_PERSISTENT_ACLS advertisement gates on it deliberately: a mode-bit
@@ -255,6 +256,38 @@ struct chimera_vfs_handle_state {
  * that omits it rather than fall back to the mode bits; see
  * chimera_vfs_gate_attrs_missing(). */
 #define CHIMERA_VFS_CAP_ACL_NATIVE            (1U << 23)
+
+/* If set, the module stores ACL principals by SID identity only, and the
+ * core resolves between Windows and POSIX identities on its behalf.  The
+ * module's side of that contract:
+ *
+ *  - On writes the core hands it SID-only principals (CHIMERA_PRINCIPAL_SID
+ *    or a SPECIAL principal); the numeric uid/gid the principal might map
+ *    to is not part of what the module stores.
+ *  - On reads the module returns the stored SID-only principals as they
+ *    were written, and the core enriches them (SID to uid/gid) before they
+ *    reach a protocol server.
+ *  - The module must still return va_uid, va_gid and va_mode whenever
+ *    va_req_mask asks for them, exactly as the existing reply contract
+ *    requires of every module.
+ *  - Because the core rewrites the reply ACL in place on such a mount, the
+ *    module must return that ACL in private, writable storage: request
+ *    memory (chimera_vfs_request_alloc_memory) always qualifies; module
+ *    thread-local scratch only for an op completed on the dispatching
+ *    thread, never for a blocking op; memory shared with a cache or with
+ *    other replies never.
+ *  - The module's own access gates see the stored SID-only ACL, not the
+ *    resolved one; docs/vfs-module-sdk.md says what that does and does not
+ *    enforce.
+ *
+ * Meaningful only alongside CHIMERA_VFS_CAP_ACL_NATIVE: a module declaring
+ * this bit without it is a module bug, and a mount of such a module fails
+ * with CHIMERA_VFS_EINVAL.  The same mount-time check refuses the
+ * "windows_acl" mount option on a module without ACL_NATIVE.
+ *
+ * The bit lives above bit 31 because the 32-bit capability space is full;
+ * capabilities is a uint64_t. */
+#define CHIMERA_VFS_CAP_ACL_WINDOWS           (1ULL << 32)
 
 /* If set, the module delegates discretionary access control to a real
  * underlying enforcer (e.g. the host kernel, via the seteuid/setegid

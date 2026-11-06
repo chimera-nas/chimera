@@ -37,6 +37,8 @@
 #include "oteltracing.h"
 
 #define CHIMERA_VFS_PATH_MAX         4096
+/* SIDs one readdir pass warms (see readdir.acl_warmed). */
+#define CHIMERA_VFS_ACL_WARM_MAX     32
 #define CHIMERA_VFS_NAME_MAX         256
 
 /* Size of the per-request scratch buffer (request->plugin_data) available
@@ -609,6 +611,27 @@ struct chimera_vfs_request {
         struct chimera_vfs_request *request);
     uint8_t                            notify_gate_wrapped;
     uint8_t                            notify_gate_resume;
+
+    /* Windows-identity ACLs (vfs_acl_windows.c), on a mount whose ACLs are
+     * stored SID-only.  Core-owned: a module never reads or writes these.
+     * At dispatch the core swaps the op's completion for a wrapper, keeping
+     * the real one in saved_complete (non-NULL exactly while the wrapper is
+     * installed), which resolves the reply ACL's SID-only principals before
+     * running it.  saved_set_attr is the caller's set_attr while the op
+     * carries a normalized private copy (made before dispatch, and marking
+     * the request normalized); the wrapper puts it back.  pending counts
+     * outstanding identity resolves, active is set while they are being
+     * issued (so one answered inline cannot finish the request under the
+     * issuer), and failed records an UNAVAILABLE answer -- for the
+     * pre-dispatch normalization's resolves, then for the wrapper's. */
+    struct {
+        void                      ( *saved_complete )(
+            struct chimera_vfs_request *request);
+        struct chimera_vfs_attrs *saved_set_attr;
+        uint16_t                  pending;
+        uint8_t                   active;
+        uint8_t                   failed;
+    } acl_windows;
     /* Set by chimera_vfs_io_recall(): this request is a namespace/metadata
      * mutation that must recall every caching lease on a target file (regardless
      * of owner) rather than hold an implicit lease. */
@@ -948,6 +971,9 @@ struct chimera_vfs_request {
 
             struct evpl_iovec               bounce_iov;
             int                             bounce_offset;
+            /* Core-owned: set when an entry could not be staged in the
+             * bounce buffer, failing the readdir. */
+            enum chimera_vfs_error          bounce_status;
             chimera_vfs_readdir_callback_t  orig_callback;
             void                           *orig_private_data;
             /* Optional SMB-style wildcard filter applied in the VFS core so the
@@ -961,6 +987,15 @@ struct chimera_vfs_request {
             int                             withhold;
             chimera_vfs_readdir_callback_t  inner_callback;
             void                           *inner_arg;
+            /* Windows-identity ACLs: the directory is on a mount whose ACLs
+             * are SID-only and the caller asked for them, so the filter
+             * enriches or withholds each entry's ACL (vfs_acl_windows.c).
+             * acl_warmed holds hashes of the SIDs this pass already asked the
+             * resolver to warm, so a directory of entries sharing SIDs queues
+             * one job per SID.  Core-owned. */
+            int                             acl_windows;
+            uint32_t                        acl_warmed_n;
+            uint64_t                        acl_warmed[CHIMERA_VFS_ACL_WARM_MAX];
         } readdir;
 
         struct {

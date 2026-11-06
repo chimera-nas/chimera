@@ -100,9 +100,11 @@ struct nfs_nfs4_readdir_cursor {
     uint64_t       count;
     struct entry4 *entries;
     struct entry4 *last;
-    /* An entry's attributes were withheld and the client did not ask for
-     * RDATTR_ERROR, so the READDIR fails with NFS4ERR_ACCESS. */
-    int            denied;
+    /* An entry's attributes (or its ACL) were withheld and the client did not
+     * ask for RDATTR_ERROR, so the READDIR fails with this nfsstat4:
+     * NFS4ERR_ACCESS for withheld attributes, NFS4ERR_DELAY for a withheld
+     * ACL.  Zero while nothing failed. */
+    uint32_t       denied;
 };
 
 struct nfs_request;

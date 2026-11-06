@@ -22,6 +22,7 @@
 #include "vfs/sdk/vfs_fh.h"
 #include "vfs/sdk/vfs_acl.h"
 #include "vfs/vfs_mount_table.h"
+#include "vfs/vfs_acl_windows.h"
 #include "common/logging.h"
 #include "common/misc.h"
 #include "metrics/metrics.h"
@@ -116,8 +117,11 @@ struct chimera_vfs_readdir_entry {
     uint64_t                 inum;
     uint64_t                 cookie;
     uint32_t                 namelen;
+    uint32_t                 extra_size;
     struct chimera_vfs_attrs attrs;
-    /* Name follows immediately after this struct */
+    /* Name follows immediately after this struct, padded to 8; then
+     * extra_size bytes of out-of-line attrs (ACL, owner SID, group SID, each
+     * padded to 8) that attrs' pointers refer to */
 };
 
 /* chimera_vfs_hash comes from sdk/vfs_utils.h (via vfs.h): it is part of
@@ -383,6 +387,10 @@ chimera_vfs_request_alloc_common(
     request->io_handle            = NULL;
     request->io_owns_lease_ref    = 0;
     request->io_pnfs_backing      = NULL;
+
+    /* Likewise the windows-identity ACL wrapper state (unwrapped, no
+     * set_attr to hand back, nothing outstanding). */
+    memset(&request->acl_windows, 0, sizeof(request->acl_windows));
 
     if (fh && fhlen > 0) {
         memcpy(request->fh, fh, fhlen);
@@ -739,11 +747,25 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
     struct chimera_vfs_delegation_thread *delegation_thread;
     int                                   thread_id;
 
+    /* On a windows-identity mount, an op's set_attr is normalized to
+     * SID-only identities before anything else sees it.  When that needs the
+     * resolver the request parks here and comes back through this function,
+     * normalized, so everything below runs once. */
+    if (chimera_vfs_acl_windows_pre_dispatch(request)) {
+        return;
+    }
+
     chimera_vfs_dump_request(request);
 
     /* Namespace mutations gate their completion on sync watchers'
      * invalidation acks; a single relaxed load when none are registered. */
     chimera_vfs_notify_gate_install(request);
+
+    /* On a windows-identity mount, a reply ACL's SID-only principals are
+     * resolved before anything sees the reply.  Installed after the notify
+     * gate so it wraps it and runs first at completion: the gate's watchers
+     * and the proc's own completion only ever see the enriched ACL. */
+    chimera_vfs_acl_windows_gate_install(request);
 
     if (!module || !thread->module_private[module->fh_magic]) {
         request->status = CHIMERA_VFS_ESTALE;

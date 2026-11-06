@@ -14,6 +14,8 @@
  */
 
 #define _GNU_SOURCE
+#include <errno.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include "common/thread.h"
@@ -31,6 +33,7 @@
 #include "vfs.h"
 #include "vfs_internal.h"
 #include "vfs_user_cache.h"
+#include "common/ratelimit.h"
 #include "vfs_identity.h"
 #include "common/macros.h"
 #include "common/pthread_util.h"
@@ -49,7 +52,8 @@ struct chimera_vfs_identity_request {
     uint32_t                             id;
     char                                 name[CHIMERA_VFS_SID_MAX_LEN > 256 ?
                                               CHIMERA_VFS_SID_MAX_LEN : 256];
-    int                                  found;
+    enum chimera_vfs_identity_status status;
+    int                                  cacheable;
     struct chimera_vfs_identity_result   result;
     chimera_vfs_identity_callback        callback;
     void                                *private_data;
@@ -178,20 +182,32 @@ chimera_vfs_identity_result_has_sid(const struct chimera_vfs_identity_result *re
  * legitimately resolve to different identities (a local "alice" and a domain
  * "alice"), and preferring the SID-bearing answer would silently change which
  * account wins.
+ *
+ * Statuses aggregate on top of that.  A provisional answer stands only if no
+ * other handler, before it or after, came back UNAVAILABLE: that handler might
+ * have supplied the
+ * SID, so the answer is incomplete and is reported UNAVAILABLE and kept out of
+ * the cache (req->cacheable stays 0) rather than pinning a SID-less identity.
+ * Without an OK, any UNAVAILABLE beats NOT_FOUND, and a walk where every
+ * handler PASSed is UNAVAILABLE too -- nothing could even try.
  */
-static int
+static enum chimera_vfs_identity_status
 chimera_vfs_identity_run_handlers(
     struct chimera_vfs_identity         *identity,
     struct chimera_vfs_identity_request *req)
 {
     struct chimera_vfs_identity_handler_entry *entry;
     struct chimera_vfs_identity_result         provisional;
-    int                                        have_provisional = 0;
-    int                                        prefer_sid;
-    int                                        rc = -1;
+    enum chimera_vfs_identity_status           st;
+    int have_provisional = 0;
+    int saw_unavailable  = 0;
+    int saw_not_found    = 0;
+    int prefer_sid;
 
     prefer_sid = (req->key == CHIMERA_VFS_IDENTITY_BY_UID ||
                   req->key == CHIMERA_VFS_IDENTITY_BY_GID);
+
+    req->cacheable = 0;
 
     evpl_mutex_lock(&identity->handler_lock);
     entry = identity->handlers;
@@ -201,28 +217,50 @@ chimera_vfs_identity_run_handlers(
      * after grabbing the head. */
     while (entry) {
         memset(&req->result, 0, sizeof(req->result));
-        if (entry->handler(req->key, req->id, req->name, &req->result,
-                           entry->private_data) == 0) {
-            if (!prefer_sid ||
-                chimera_vfs_identity_result_has_sid(&req->result)) {
-                rc = 0;
+        st = entry->handler(req->key, req->id, req->name, &req->result,
+                            entry->private_data);
+
+        switch (st) {
+            case CHIMERA_VFS_IDENTITY_OK:
+                if (!prefer_sid ||
+                    chimera_vfs_identity_result_has_sid(&req->result)) {
+                    req->cacheable = 1;
+                    return CHIMERA_VFS_IDENTITY_OK;
+                }
+                /* Resolved, but with no SID.  Hold it and keep looking. */
+                if (!have_provisional) {
+                    provisional      = req->result;
+                    have_provisional = 1;
+                }
                 break;
-            }
-            /* Resolved, but with no SID.  Hold it and keep looking. */
-            if (!have_provisional) {
-                provisional      = req->result;
-                have_provisional = 1;
-            }
-        }
+            case CHIMERA_VFS_IDENTITY_NOT_FOUND:
+                saw_not_found = 1;
+                break;
+            case CHIMERA_VFS_IDENTITY_PASS:
+                break;
+            case CHIMERA_VFS_IDENTITY_UNAVAILABLE:
+            default:
+                saw_unavailable = 1;
+                break;
+        } /* switch */
+
         entry = entry->next;
     }
 
-    if (rc != 0 && have_provisional) {
-        req->result = provisional;
-        rc          = 0;
+    if (have_provisional) {
+        if (saw_unavailable) {
+            return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+        }
+        req->result    = provisional;
+        req->cacheable = 1;
+        return CHIMERA_VFS_IDENTITY_OK;
     }
 
-    return rc;
+    if (saw_not_found && !saw_unavailable) {
+        return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+    }
+
+    return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
 } /* chimera_vfs_identity_run_handlers */
 
 static void *
@@ -257,8 +295,8 @@ chimera_vfs_identity_worker(void *arg)
         evpl_mutex_unlock(&identity->lock);
 
         /* Blocking resolution happens here, off the event loop. */
-        if (chimera_vfs_identity_run_handlers(identity, req) == 0) {
-            req->found = 1;
+        req->status = chimera_vfs_identity_run_handlers(identity, req);
+        if (req->status == CHIMERA_VFS_IDENTITY_OK && req->cacheable) {
             /* Populate the cache so future lookups for this identity are
              * synchronous (TTL-expiring, non-pinned).  A group goes to the
              * group chains, never the user ones. */
@@ -277,8 +315,20 @@ chimera_vfs_identity_worker(void *arg)
                     req->result.user.uid, req->result.user.gid,
                     req->result.user.ngids, req->result.user.gids, 0);
             }
-        } else {
-            req->found = 0;
+        }
+
+        if (req->status == CHIMERA_VFS_IDENTITY_NOT_FOUND) {
+            chimera_vfs_user_cache_add_negative(
+                identity->vfs->vfs_user_cache, req->key, req->id, req->name,
+                CHIMERA_VFS_IDENTITY_NEGATIVE_TTL);
+        }
+
+        /* A warm has no origin: nobody waits on it, and the thread that
+         * issued it may already be gone. */
+        if (!req->origin) {
+            free(req);
+            evpl_mutex_lock(&identity->lock);
+            continue;
         }
 
         /* Hand the completed job back to the originating evpl thread.
@@ -309,7 +359,48 @@ chimera_vfs_identity_worker(void *arg)
 /* ---- default NSS miss handler ------------------------------------------ */
 
 #ifndef _WIN32
-static int
+/*
+ * Classify a getpwuid_r/getgrgid_r-family result.  rc == 0 with no entry, or
+ * one of the errno values the glibc getpwnam(3) and getgrnam(3) pages list as
+ * returned by implementations for "no such entry" (ENOENT, ESRCH, EBADF,
+ * EPERM), is an authoritative negative.  Any other nonzero rc (EIO,
+ * EAGAIN, ERANGE on the fixed buffer, ...) is a lookup failure, not an answer:
+ * reporting it as NOT_FOUND would let a transient NSS backend outage read as
+ * proof the identity does not exist.
+ */
+static enum chimera_vfs_identity_status
+chimera_vfs_identity_nss_status(
+    int   rc,
+    void *entry)
+{
+    if (rc == 0) {
+        return entry ? CHIMERA_VFS_IDENTITY_OK : CHIMERA_VFS_IDENTITY_NOT_FOUND;
+    }
+
+    switch (rc) {
+        case ENOENT:
+        case ESRCH:
+        case EBADF:
+        case EPERM:
+            return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+        default:
+        {
+            static struct chimera_ratelimit rl;
+            uint64_t held_back;
+
+            if (chimera_ratelimit_allow(&rl, 10ULL * 1000000000ULL,
+                                        &held_back)) {
+                chimera_vfs_error("identity: NSS lookup failed: %s; treating "
+                                  "the identity service as unavailable (%"
+                                  PRIu64 " more since the last report)",
+                                  strerror(rc), held_back);
+            }
+            return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+        }
+    } /* switch */
+} /* chimera_vfs_identity_nss_status */
+
+static enum chimera_vfs_identity_status
 chimera_vfs_identity_nss_handler(
     enum chimera_vfs_identity_key       key,
     uint32_t                            id,
@@ -317,13 +408,14 @@ chimera_vfs_identity_nss_handler(
     struct chimera_vfs_identity_result *out,
     void                               *private_data)
 {
-    struct passwd       pw, *res = NULL;
-    struct group        gr, *gres = NULL;
-    char                buf[16384];
-    int                 rc;
+    struct passwd                    pw, *res = NULL;
+    struct group                     gr, *gres = NULL;
+    char buf[16384];
+    int rc;
+    enum chimera_vfs_identity_status st;
     chimera_grouplist_t grps[CHIMERA_VFS_CRED_MAX_GIDS];
-    int                 ng = CHIMERA_VFS_CRED_MAX_GIDS;
-    int                 i;
+    int ng = CHIMERA_VFS_CRED_MAX_GIDS;
+    int i;
 
     (void) private_data;
 
@@ -336,8 +428,9 @@ chimera_vfs_identity_nss_handler(
             break;
         case CHIMERA_VFS_IDENTITY_BY_GID:
             rc = getgrgid_r(id, &gr, buf, sizeof(buf), &gres);
-            if (rc != 0 || gres == NULL) {
-                return -1;
+            st = chimera_vfs_identity_nss_status(rc, gres);
+            if (st != CHIMERA_VFS_IDENTITY_OK) {
+                return st;
             }
             out->is_group  = 1;
             out->group.gid = gr.gr_gid;
@@ -346,14 +439,15 @@ chimera_vfs_identity_nss_handler(
             out->group.groupname_len = (int) strlen(out->group.groupname);
             /* NSS supplies no SID; left empty so the algorithmic idmap is
              * used for this group. */
-            return 0;
+            return CHIMERA_VFS_IDENTITY_OK;
         default:
             /* NSS has no notion of a Windows SID. */
-            return -1;
+            return CHIMERA_VFS_IDENTITY_PASS;
     } /* switch */
 
-    if (rc != 0 || res == NULL) {
-        return -1;
+    st = chimera_vfs_identity_nss_status(rc, res);
+    if (st != CHIMERA_VFS_IDENTITY_OK) {
+        return st;
     }
 
     out->user.uid = pw.pw_uid;
@@ -375,7 +469,7 @@ chimera_vfs_identity_nss_handler(
     }
 
     /* NSS supplies no SID; left empty so the algorithmic idmap is used. */
-    return 0;
+    return CHIMERA_VFS_IDENTITY_OK;
 } /* chimera_vfs_identity_nss_handler */
 #endif /* ifndef _WIN32 */
 
@@ -494,32 +588,49 @@ chimera_vfs_identity_register_handler(
     chimera_vfs_identity_add_handler(vfs->identity, handler, private_data);
 } /* chimera_vfs_identity_register_handler */
 
-SYMBOL_EXPORT void
-chimera_vfs_identity_resolve(
-    struct chimera_vfs_thread    *thread,
+/* Answer from the cache if it can: OK (with *hit filled), NOT_FOUND for a
+ * cached authoritative miss, or PASS when a worker has to be asked. */
+static enum chimera_vfs_identity_status
+chimera_vfs_identity_cache_answer(
+    struct chimera_vfs                 *vfs,
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *hit)
+{
+    int neg;
+
+    memset(hit, 0, sizeof(*hit));
+
+    if (chimera_vfs_identity_cache_probe(vfs->vfs_user_cache, key, id, name,
+                                         hit)) {
+        return CHIMERA_VFS_IDENTITY_OK;
+    }
+
+    chimera_rcu_read_lock(&vfs->vfs_user_cache->rcu);
+    neg = chimera_vfs_user_cache_lookup_negative(vfs->vfs_user_cache, key, id,
+                                                 name);
+    chimera_rcu_read_unlock(&vfs->vfs_user_cache->rcu);
+
+    return neg ? CHIMERA_VFS_IDENTITY_NOT_FOUND : CHIMERA_VFS_IDENTITY_PASS;
+} /* chimera_vfs_identity_cache_answer */
+
+/* Queue a job for a worker.  `origin` NULL makes it a warm: the worker frees
+ * it after caching the outcome instead of handing it back. */
+static void
+chimera_vfs_identity_enqueue(
+    struct chimera_vfs_identity  *identity,
+    struct chimera_vfs_thread    *origin,
     enum chimera_vfs_identity_key key,
     uint32_t                      id,
     const char                   *name,
     chimera_vfs_identity_callback callback,
     void                         *private_data)
 {
-    struct chimera_vfs_identity         *identity = thread->vfs->identity;
-    struct chimera_vfs_identity_result   hit;
     struct chimera_vfs_identity_request *req;
 
-    memset(&hit, 0, sizeof(hit));
-
-    /* Fast path: a cache hit resolves inline on this thread. */
-    if (chimera_vfs_identity_cache_probe(thread->vfs->vfs_user_cache,
-                                         key, id, name, &hit)) {
-        callback(&hit, private_data);
-        return;
-    }
-
-    /* Miss: dispatch to a worker and park (the callback fires on `thread`'s
-     * evpl loop once the worker has resolved and cached the identity). */
     req               = calloc(1, sizeof(*req));
-    req->origin       = thread;
+    req->origin       = origin;
     req->key          = key;
     req->id           = id;
     req->callback     = callback;
@@ -532,7 +643,50 @@ chimera_vfs_identity_resolve(
     DL_APPEND(identity->queue, req);
     evpl_cond_signal(&identity->cond);
     evpl_mutex_unlock(&identity->lock);
+} /* chimera_vfs_identity_enqueue */
+
+SYMBOL_EXPORT void
+chimera_vfs_identity_resolve(
+    struct chimera_vfs_thread    *thread,
+    enum chimera_vfs_identity_key key,
+    uint32_t                      id,
+    const char                   *name,
+    chimera_vfs_identity_callback callback,
+    void                         *private_data)
+{
+    struct chimera_vfs_identity_result hit;
+    enum chimera_vfs_identity_status   cached;
+
+    /* A cache hit, or a cached authoritative miss, completes inline on this
+     * thread and is never queued. */
+    cached = chimera_vfs_identity_cache_answer(thread->vfs, key, id, name, &hit);
+    if (cached != CHIMERA_VFS_IDENTITY_PASS) {
+        callback(cached, cached == CHIMERA_VFS_IDENTITY_OK ? &hit : NULL,
+                 private_data);
+        return;
+    }
+
+    /* Miss: dispatch to a worker and park (the callback fires on `thread`'s
+     * evpl loop once the worker has resolved and cached the identity). */
+    chimera_vfs_identity_enqueue(thread->vfs->identity, thread, key, id, name,
+                                 callback, private_data);
 } /* chimera_vfs_identity_resolve */
+
+SYMBOL_EXPORT void
+chimera_vfs_identity_warm(
+    struct chimera_vfs           *vfs,
+    enum chimera_vfs_identity_key key,
+    uint32_t                      id,
+    const char                   *name)
+{
+    struct chimera_vfs_identity_result hit;
+
+    if (chimera_vfs_identity_cache_answer(vfs, key, id, name, &hit) ==
+        CHIMERA_VFS_IDENTITY_PASS) {
+        chimera_vfs_identity_enqueue(vfs->identity, NULL, key, id, name, NULL,
+                                     NULL);
+    }
+} /* chimera_vfs_identity_warm */
 
 SYMBOL_EXPORT int
 chimera_vfs_identity_cached(
@@ -562,7 +716,9 @@ chimera_vfs_identity_thread_complete(struct chimera_vfs_thread *thread)
     while (jobs) {
         req = jobs;
         DL_DELETE(jobs, req);
-        req->callback(req->found ? &req->result : NULL, req->private_data);
+        req->callback(req->status,
+                      req->status == CHIMERA_VFS_IDENTITY_OK ? &req->result : NULL,
+                      req->private_data);
         free(req);
     }
 } /* chimera_vfs_identity_thread_complete */
