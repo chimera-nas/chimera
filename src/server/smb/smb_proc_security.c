@@ -1293,12 +1293,12 @@ chimera_smb_query_security_getattr_callback(
 void
 chimera_smb_query_security(struct chimera_smb_request *request)
 {
-    /* MS-FSA 2.1.5.13 (Server Requests a Query of Security Information) /
-     * MS-SMB2 3.3.5.20.3: reading the owner, group, DACL or label needs
-     * READ_CONTROL on the open, else STATUS_ACCESS_DENIED.  A query that
-     * selects none of them still succeeds with an empty descriptor
-     * (smb2.sdread).  The SACL is gated separately, by
-     * ACCESS_SYSTEM_SECURITY, and chimera does not return one. */
+    /* MS-FSA "Server Requests a Query of Security Information" (2.1.5.14 in
+     * the v2025-09 numbering), which MS-SMB2 3.3.5.20.3 passes through:
+     * reading the owner, group, DACL or label needs READ_CONTROL on the open,
+     * else STATUS_ACCESS_DENIED.  A query that selects none of them still
+     * succeeds with an empty descriptor (smb2.sdread).  This check covers
+     * those four parts only; SACL_SECURITY_INFORMATION is not checked here. */
     if ((request->query_info.addl_info &
          (SMB_OWNER_SECURITY_INFORMATION | SMB_GROUP_SECURITY_INFORMATION |
           SMB_DACL_SECURITY_INFORMATION | SMB_LABEL_SECURITY_INFORMATION)) &&
