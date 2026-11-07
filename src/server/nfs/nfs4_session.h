@@ -59,7 +59,8 @@ enum nfs4_slot_state {
  * nfs4_replay_slot_acquire (to RESYNCING, then COMPLETED; not before the
  * reply scan has finished, see replay_hydrating in struct nfs4_session) or
  * the one in nfs4_drc_repopulate_slot (to IN_PROGRESS, then CACHED, or
- * COMPLETED when the bytes cannot be allocated).
+ * COMPLETED when the record's bytes cannot be kept; while the scan runs, a
+ * newer record takes over a slot the scan filled the same way).
  *
  * Distinct slots are independent (RFC 5661: a client has at most one
  * outstanding request per slot id), so concurrent SEQUENCEs touch different
@@ -81,6 +82,9 @@ struct nfs4_replay_slot {
     _Atomic uint64_t state_word;       /* (seqid << NFS4_SLOT_SEQID_SHIFT) | state */
     uint32_t         cached_len;       /* bytes in cached_buf (CACHED only) */
     void            *cached_buf;       /* RPC reply (header+body); malloc'd */
+    /* The KV store holds a reply record for the current seqid; it outlives a
+     * demotion to COMPLETED and is retired when the slot advances. */
+    bool             persisted;
     /* Who sent the request this slot holds.  RFC 8881 Section 2.10.6.1.3.1: a
      * retry "that uses a different principal in the RPC request's credential
      * field that translates to a different user" is a false retry, and "if the
@@ -219,6 +223,16 @@ struct nfs4_client {
     /* Set once the client has issued RECLAIM_COMPLETE; a second one is
      * NFS4ERR_COMPLETE_ALREADY (RFC 8881 §18.51.4). */
     uint8_t               nfs4_client_reclaim_complete;
+    /* A client that failed over from a dead peer and is asked to reclaim (see
+     * nfs4_client_mark_failover) has reclaim_complete cleared so its
+     * CLAIM_PREVIOUS is accepted.  This records whether it had already sent
+     * RECLAIM_COMPLETE before the failover (persisted evidence on its session
+     * record), so its non-reclaim OPENs are not held back waiting for a second
+     * one it may never send. */
+    uint8_t               nfs4_client_recovered;
+    /* Set by the first nfs4_client_mark_failover: each of the client's
+     * sessions is rebuilt, and may decide on the failover, separately. */
+    uint8_t               nfs4_client_failover_marked;
     /* NFSv4.0 SETCLIENTID/SETCLIENTID_CONFIRM handshake (RFC 7530 §16.33/16.34).
      * When a SETCLIENTID leaves a confirm pending on this record, the 8-byte
      * verifier the client must echo back is stored here and scid_confirm_valid
@@ -261,6 +275,8 @@ struct nfs4_exchange_id_result {
     nfsstat4           status;
     uint64_t           clientid;
     uint32_t           confirmed;
+    /* eir_sequenceid: the csa_sequence the client must send next. */
+    uint32_t           sequenceid;
     struct nfs_client *destroy_unified;
     /* A second hierarchy to tear down: replacing a principal-mismatched
      * confirmed record also destroys its in-flight superseding record. */
@@ -499,6 +515,24 @@ nfs4_client_reclaim_complete(
     struct nfs4_client_table *table,
     uint64_t                  client_id);
 
+/* True while the client owes a RECLAIM_COMPLETE before its non-reclaim OPENs
+ * are served: it has not sent one, and it is not a failed-over client known
+ * to have sent one before the failover. */
+bool
+nfs4_client_needs_reclaim_complete(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id);
+
+/* A client rebuilt from its session record after its node died: clear
+ * reclaim_complete so it may reclaim here, recording in `recovered` whether
+ * it had completed reclaim before.  Only the first call per client does so; a
+ * later one (another of its sessions) keeps what that reclaim has reached. */
+void
+nfs4_client_mark_failover(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    bool                      recovered);
+
 /*
  * DESTROY_CLIENTID (RFC 8881 §18.50): returns NFS4ERR_STALE_CLIENTID if no
  * such client, NFS4ERR_CLIENTID_BUSY if it still owns sessions or any leased
@@ -668,6 +702,13 @@ void nfs4_replay_slot_finalize(
  * buffer stays pinned for the whole replay and no concurrent advance can free
  * it mid-send. */
 void nfs4_replay_slot_replay_done(
+    struct nfs_request *req);
+
+/* As nfs4_replay_slot_replay_done, for a cached reply that could not be
+ * re-sent: drops the bytes, releases the slot as COMPLETED, and shapes
+ * res_compound as an uncached retry (RFC 8881 2.10.6.1.3).  Returns the
+ * COMPOUND status. */
+nfsstat4 nfs4_replay_slot_replay_failed(
     struct nfs_request *req);
 
 /* Record the delegation callback path on a client's unified state record.

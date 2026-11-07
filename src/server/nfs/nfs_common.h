@@ -9,7 +9,9 @@
 #include "common/chimera_rcu.h"
 
 #include "nfs.h"
+#include "nfs_internal.h"
 #include "nfs_fh_wrap.h"
+#include "nfs_fh_keyring.h"
 #include "evpl/evpl_rpc2.h"
 #include "portmap_xdr.h"
 #include "vfs/vfs.h"
@@ -416,6 +418,8 @@ struct chimera_server_nfs_shared {
      * survive a restart (a config-supplied key overrides). */
     int                                 fh_sign;
     uint8_t                             fh_key[16];
+    /* Fleet-wide V2 signing keys; handles are minted V2 once it is ready. */
+    struct nfs_fh_keyring_state         nfs_fh_keyring;
 
     /* True once the RPCSEC_GSS (Kerberos) acceptor is installed, snapshotted
      * from server.nfs_kerberos_enabled at init.  Security-flavor advertisement
@@ -470,6 +474,7 @@ struct chimera_server_nfs_shared {
      * sessionid (see nfs4_drc_session_hydrate). */
     evpl_mutex_t                        nfs4_drc_hydra_lock;
     struct nfs4_drc_hydra              *nfs4_drc_hydra;
+    _Atomic uint32_t                    nfs4_drc_hydrating; /* hydrates not yet settled */
 };
 
 /* Forward decl for the per-thread lease sweeper (defined in nfs4_lease.h). */
@@ -745,6 +750,29 @@ chimera_nfs_squash_cred(
 } /* chimera_nfs_squash_cred */
 
 /*
+ * Authenticate a wire handle without touching request state: V2 against the
+ * fleet keyring once it is loaded, V1 against the per-server key (so handles
+ * minted before the keyring existed keep working).  Used for the current fh
+ * and for secondary handles (RENAME/LINK target directory, NLM lock handle).
+ */
+static inline int
+chimera_nfs_fh_verify(
+    struct chimera_server_nfs_shared *shared,
+    const void                       *wire,
+    int                               wirelen,
+    uint16_t                         *export_id,
+    uint8_t                          *vfs_fh,
+    int                              *vfs_len)
+{
+    enum chimera_nfs_fh_authn_kind authn;
+
+    return chimera_nfs_fh_unwrap_ring(wire, wirelen, export_id, vfs_fh, vfs_len,
+                                      nfs_fh_keyring_ready(&shared->nfs_fh_keyring) ?
+                                      &shared->nfs_fh_keyring.ring : NULL,
+                                      shared->fh_key, shared->fh_sign, &authn);
+} /* chimera_nfs_fh_verify */
+
+/*
  * Decode an incoming wire file handle: authenticate it, recover the inner VFS
  * handle into vfs_fh/vfs_len and the owning export id into req->export_id, and
  * apply that export's squash policy to req->cred.
@@ -766,8 +794,8 @@ chimera_nfs_fh_decode(
     const struct chimera_nfs_export *export;
     int                               rc;
 
-    rc = chimera_nfs_fh_unwrap(wire, wirelen, &req->export_id, vfs_fh, vfs_len,
-                               shared->fh_key, shared->fh_sign);
+    rc = chimera_nfs_fh_verify(shared, wire, wirelen, &req->export_id,
+                               vfs_fh, vfs_len);
 
     if (rc != CHIMERA_NFS_FH_OK) {
         return rc;
@@ -820,6 +848,36 @@ chimera_nfs_set_export(
 } /* chimera_nfs_set_export */
 
 /*
+ * Encode a VFS file handle for the wire, stamped with `export_id`: V2 with the
+ * fleet keyring once it is loaded, otherwise V1 with the per-server key (or
+ * plain when signing is off).  For reply paths without a request (attribute
+ * encoding, callbacks).  out must hold at least CHIMERA_NFS_FH_MAX bytes.
+ */
+static inline void
+chimera_nfs_fh_encode_shared(
+    struct chimera_server_nfs_shared *shared,
+    uint16_t                          export_id,
+    const uint8_t                    *vfs_fh,
+    int                               vfs_len,
+    uint8_t                          *out,
+    int                              *outlen)
+{
+    if (shared->fh_sign && nfs_fh_keyring_ready(&shared->nfs_fh_keyring)) {
+        /* No V1 fallback once the ring is loaded: peers could not verify it.
+         * A bad length leaves *outlen 0, as V1 does; a missing key is a broken
+         * load invariant. */
+        if (chimera_nfs_fh_wrap_v2(out, outlen, export_id, vfs_fh, vfs_len,
+                                   &shared->nfs_fh_keyring.ring) != CHIMERA_NFS_FH_OK) {
+            chimera_nfs_abort_if(vfs_len >= 0 && vfs_len <= CHIMERA_VFS_FH_SIZE,
+                                 "NFS FH keyring has no usable signing key");
+        }
+        return;
+    }
+    chimera_nfs_fh_wrap(out, outlen, export_id, vfs_fh, vfs_len,
+                        shared->fh_key, shared->fh_sign);
+} /* chimera_nfs_fh_encode_shared */
+
+/*
  * Encode a VFS file handle for the wire, stamping it with the request's current
  * export id (inherited by child handles minted in a reply) and signing it if
  * enabled.  out must hold at least CHIMERA_NFS_FH_MAX bytes.
@@ -832,10 +890,8 @@ chimera_nfs_fh_encode(
     uint8_t            *out,
     int                *outlen)
 {
-    struct chimera_server_nfs_shared *shared = req->thread->shared;
-
-    chimera_nfs_fh_wrap(out, outlen, req->export_id, vfs_fh, vfs_len,
-                        shared->fh_key, shared->fh_sign);
+    chimera_nfs_fh_encode_shared(req->thread->shared, req->export_id,
+                                 vfs_fh, vfs_len, out, outlen);
 } /* chimera_nfs_fh_encode */
 
 /*

@@ -161,6 +161,31 @@ target_link_libraries(test_nfs_persist chimera_vfs chimera_common evpl evpl_rpc2
 add_dependencies(test_nfs_persist chimera_nfs_common)
 add_test(NAME chimera/server/nfs/nfs_persist COMMAND test_nfs_persist)
 
+# Fleet-wide client recovery records over a shared (memkv) KV store: per-node
+# reload, legacy migration, owner-checked deletes, dead-peer import.
+add_executable(test_nfs_failover
+    test_nfs_failover.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_session.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_state.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/nsm_renew_stub.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs3_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_v40_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_drc_reply.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c)
+target_include_directories(test_nfs_failover PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_nfs_failover chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
+add_dependencies(test_nfs_failover chimera_nfs_common)
+add_test(NAME chimera/server/nfs/nfs_failover COMMAND test_nfs_failover)
+
 # NSM/statd persistence: KV key/value formats, odd-state bump, monitor table.
 # Compiles nfs_nsm_state.c straight in (its helpers are not SYMBOL_EXPORT'd).
 add_executable(test_nsm_persist
@@ -266,6 +291,19 @@ target_include_directories(test_fh_security PRIVATE
     ${NFS_COMMON_INCLUDE_DIR})
 add_dependencies(test_fh_security chimera_nfs_common)
 add_test(NAME chimera/server/nfs/fh_security COMMAND test_fh_security)
+
+# Fleet-wide FH signing keyring: record (de)serialization, key layout, and the
+# ring derived from the node key when the KV store is not persistent.
+add_executable(test_fh_keyring
+    test_fh_keyring.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_fh_keyring.c)
+target_include_directories(test_fh_keyring PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_fh_keyring chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
+add_dependencies(test_fh_keyring chimera_nfs_common)
+add_test(NAME chimera/server/nfs/fh_keyring COMMAND test_fh_keyring)
 
 # Unit test for the pseudo-fs root READDIR cookie policy (nfs4_root_cookie.h):
 # reserved and out-of-range client cookies must be rejected rather than

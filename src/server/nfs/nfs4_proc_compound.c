@@ -177,13 +177,25 @@ chimera_nfs4_compound_process(
          * never dispatch, so release any cloned iovecs here. */
         nfs4_release_write_args(thread, req, req->args_compound);
         rc = nfs4_send_cached_reply(thread, req);
-        chimera_nfs_abort_if(rc, "Failed to send cached RPC2 reply");
-        /* Release the slot the retransmit path claimed (IN_PROGRESS) back to
-        * CACHED now that the pinned buffer has been sent; this re-arms the
-        * slot for further retransmits and lets a waiting advance proceed. */
-        nfs4_replay_slot_replay_done(req);
-        nfs_request_free(thread, req);
-        return;
+        if (rc == 0) {
+            /* Release the slot the retransmit path claimed (IN_PROGRESS) back
+             * to CACHED now that the pinned buffer has been sent; this re-arms
+             * the slot for further retransmits and lets a waiting advance
+             * proceed. */
+            nfs4_replay_slot_replay_done(req);
+            nfs_request_free(thread, req);
+            return;
+        }
+
+        /* The cached bytes may have come from a peer through the KV store; a
+         * resend failure must not take the server down with it.  Answer as an
+         * uncached retry instead, falling through to the ordinary send: going
+         * round `again` would end this op's span twice. */
+        chimera_nfs_error("NFS4.1 DRC: cached reply for slot %u could not be "
+                          "replayed (%u bytes); answering RETRY_UNCACHED_REP",
+                          req->replay_slot_id, req->replay_slot->cached_len);
+        req->res_compound.status = nfs4_replay_slot_replay_failed(req);
+        req->index               = req->res_compound.num_resarray;
     }
 
     if (status != NFS4_OK) {

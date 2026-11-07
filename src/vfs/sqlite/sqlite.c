@@ -44,6 +44,7 @@ struct sqlite_thread {
     struct sqlite_shared *shared;
     sqlite3              *db;
     sqlite3_stmt         *put_stmt;
+    sqlite3_stmt         *put_if_absent_stmt;
     sqlite3_stmt         *get_stmt;
     sqlite3_stmt         *del_stmt;
 };
@@ -135,6 +136,12 @@ sqlite_thread_init(
                             sqlite3_errmsg(thread->db));
 
     rc = sqlite3_prepare_v2(thread->db,
+                            "INSERT OR IGNORE INTO kv(key,value) VALUES(?,?)",
+                            -1, &thread->put_if_absent_stmt, NULL);
+    chimera_sqlite_abort_if(rc != SQLITE_OK, "sqlite: prepare put-if-absent: %s",
+                            sqlite3_errmsg(thread->db));
+
+    rc = sqlite3_prepare_v2(thread->db,
                             "SELECT value FROM kv WHERE key=?",
                             -1, &thread->get_stmt, NULL);
     chimera_sqlite_abort_if(rc != SQLITE_OK, "sqlite: prepare get: %s",
@@ -155,6 +162,7 @@ sqlite_thread_destroy(void *private_data)
     struct sqlite_thread *thread = private_data;
 
     sqlite3_finalize(thread->put_stmt);
+    sqlite3_finalize(thread->put_if_absent_stmt);
     sqlite3_finalize(thread->get_stmt);
     sqlite3_finalize(thread->del_stmt);
     sqlite3_close(thread->db);
@@ -166,7 +174,8 @@ sqlite_put_key(
     struct sqlite_thread       *thread,
     struct chimera_vfs_request *request)
 {
-    sqlite3_stmt *stmt = thread->put_stmt;
+    int           if_absent = request->put_key.flags & CHIMERA_VFS_PUT_KEY_IF_ABSENT;
+    sqlite3_stmt *stmt      = if_absent ? thread->put_if_absent_stmt : thread->put_stmt;
     int           rc;
 
     sqlite3_bind_blob(stmt, 1, request->put_key.key, request->put_key.key_len, SQLITE_STATIC);
@@ -180,6 +189,8 @@ sqlite_put_key(
     if (rc != SQLITE_DONE) {
         chimera_sqlite_error("put_key step failed: %s", sqlite3_errmsg(thread->db));
         request->status = CHIMERA_VFS_EIO;
+    } else if (if_absent && sqlite3_changes(thread->db) == 0) {
+        request->status = CHIMERA_VFS_EEXIST;
     } else {
         request->status = CHIMERA_VFS_OK;
     }

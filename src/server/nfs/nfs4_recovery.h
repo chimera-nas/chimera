@@ -44,6 +44,10 @@ struct nfs_recovery_record {
      * record written before the stamp existed, which the loader treats as
      * "unknown, keep". */
     uint64_t       last_renew_ns;
+    /* The node that owns the client: the one that last persisted the record
+     * (it is carried in the value, the key being fleet-wide).  Decides who
+     * reloads the record at boot and who may delete it. */
+    uint16_t       owner_node;
     bool           reclaimed;
     bool           returned;  /* re-established this boot (its record was re-persisted) */
     UT_hash_handle hh;
@@ -68,31 +72,36 @@ struct chimera_vfs_thread;
 struct chimera_server_nfs_thread;
 
 struct nfs_recovery {
-    evpl_mutex_t                lock;
-    struct nfs_recovery_record *to_reclaim;       /* uthash by owner_string */
-    uint32_t                    pending_reclaim;  /* count of !reclaimed records */
-    uint64_t                    current_boot_id;
-    uint64_t                    grace_end_ns;
-    bool                        in_grace;
+    evpl_mutex_t                       lock;
+    struct nfs_recovery_record        *to_reclaim; /* uthash by owner_string */
+    uint32_t                           pending_reclaim; /* count of !reclaimed records */
+    uint64_t                           current_boot_id;
+    uint64_t                           grace_end_ns;
+    bool                               in_grace;
     /* Persistence wiring (see nfs4_recovery.c). */
-    struct chimera_vfs         *vfs;                 /* for the cold-start load */
-    uint16_t                    node_id;             /* scopes our records in a shared store */
-    uint32_t                    grace_time_s;        /* captured for deferred begin */
-    uint32_t                    lease_time_s;        /* refresh + heartbeat cadence, stale test */
+    struct chimera_vfs                *vfs;          /* for the cold-start load */
+    uint16_t                           node_id;      /* scopes our records in a shared store */
+    uint32_t                           grace_time_s; /* captured for deferred begin */
+    uint32_t                           lease_time_s; /* refresh + heartbeat cadence, stale test */
     /* Monotonic ns at which the next epoch heartbeat is due; claimed by CAS so
      * exactly one sweeper thread writes it per interval. */
-    _Atomic uint64_t            next_heartbeat_ns;
-    bool                        persistence_disabled;/* kv_module is non-persistent */
-    bool                        nfs4_drc;            /* reply-cache persistence on   */
-    _Atomic int                 load_state;          /* enum nfs_recovery_load_state */
-    uint32_t                    stale_purged;        /* records skipped + deleted at cold start */
-    uint32_t                    unreclaimed_purged;  /* records deleted at grace end, cumulative */
-    uint32_t                    store_errors;        /* KV reads that failed during the cold start */
+    _Atomic uint64_t                   next_heartbeat_ns;
+    bool                               persistence_disabled;/* kv_module is non-persistent */
+    bool                               nfs4_drc;     /* reply-cache persistence on   */
+    _Atomic int                        load_state;   /* enum nfs_recovery_load_state */
+    uint32_t                           stale_purged; /* records skipped + deleted at cold start */
+    uint32_t                           unreclaimed_purged; /* records deleted at grace end, cumulative */
+    uint32_t                           store_errors; /* KV reads that failed during the cold start */
+    uint32_t                           failover_imported; /* peer records imported, cumulative */
+    uint32_t                           imports_in_flight; /* peer scans still adding to to_reclaim */
+    /* Peers whose records were imported this boot, by the boot of theirs that
+     * died: a peer that restarts and dies again is scanned again. */
+    struct nfs_recovery_imported_peer *imported_peers;
     /* CLOCK_REALTIME ns of the previous instance's last epoch heartbeat, read
      * by the cold start (0 = none on record).  Written before load_state turns
      * READY, so a reader that saw READY sees it.  The NSM cold start ages its
      * monitor records against it (nfs_recovery_prev_alive_s). */
-    uint64_t                    prev_alive_ns;
+    uint64_t                           prev_alive_ns;
 };
 
 struct nfs_client;
@@ -120,8 +129,9 @@ nfs_recovery_free(
 /*
  * Run-once cold-start load.  Called from nfs_server_start on the main thread
  * BEFORE the RPC listeners are bound: reads the boot epoch, bumps and rewrites
- * it, scans this node's recovery records into to_reclaim, opens the grace
- * window iff any were loaded, and flips load_state to READY -- all on a
+ * it, loads the client records this node owns from the fleet-wide band into
+ * to_reclaim (moving any left in its legacy per-node band there), opens the
+ * grace window iff any were loaded, and flips load_state to READY -- all on a
  * private evpl loop, so it returns only when the store has answered.  A
  * non-persistent backend (memkv) settles to READY at once.
  */
@@ -226,7 +236,9 @@ nfs_recovery_heartbeat(
 /*
  * Forget a record (DESTROY_CLIENTID / lease teardown): delete it from the KV
  * store and drop any matching to_reclaim entry.  Takes the raw owner bytes so
- * it is safe to call after the owning nfs_client has been freed.
+ * it is safe to call after the owning nfs_client has been freed.  The stored
+ * record is deleted only while this node still owns it: a client that has
+ * since moved to a peer keeps the record that peer wrote.
  */
 void
 nfs_recovery_forget(
@@ -234,6 +246,77 @@ nfs_recovery_forget(
     struct nfs_recovery       *rec,
     const void                *owner,
     uint16_t                   owner_len);
+
+/*
+ * Failover import.  `owner`'s 4.1 session is being rebuilt here (see
+ * nfs4_drc_session_hydrate) and its stored record names `peer` as its owner.
+ * The result, from `peer`'s epoch heartbeat:
+ *   NOT_FAILOVER      `peer` is this node, or its heartbeat has moved past
+ *                     `seen_ns` (the written_at observed on an earlier call).
+ *   LIVENESS_PENDING  fresh but not yet seen to move: a node that has just
+ *                     died looks the same.  Retry with `seen_ns` = observed_ns.
+ *   STORE_ERROR       the epoch record cannot be read or decoded, or the scan
+ *                     for the peer's records failed.  Retry later.
+ *   FAILOVER          over 1.5 leases old, or absent: `peer` is dead, and
+ *                     `owner` is owed a reclaim here (its record is in the
+ *                     open window's set, not yet reclaimed).  Also when the
+ *                     heartbeat is from a later boot than `record_boot_id`
+ *                     (the boot that wrote owner's record; 0 = unknown):
+ *                     `peer` restarted and lost that state, so only records
+ *                     from its earlier boots are imported.
+ * On a dead peer, the grace window is opened before the scan and every record
+ * it owns is loaded into to_reclaim (once per boot of that peer; a failed scan
+ * is retried on the next call).  Once no import is in flight and nobody is owed
+ * a reclaim, the window closes again.  Nothing is imported for the other
+ * results.  Asynchronous on vfs_thread; done may run before this returns.
+ */
+enum nfs_recovery_failover {
+    NFS_RECOVERY_NOT_FAILOVER = 0,
+    NFS_RECOVERY_FAILOVER,
+    NFS_RECOVERY_STORE_ERROR,
+    NFS_RECOVERY_LIVENESS_PENDING,
+};
+
+void
+nfs_recovery_import_peer(
+    struct chimera_vfs_thread *vfs_thread,
+    struct nfs_recovery       *rec,
+    uint16_t                   peer,
+    const void                *owner,
+    uint16_t                   owner_len,
+    uint64_t                   record_boot_id,
+    uint64_t                   seen_ns,
+    void (                    *done )(
+        enum nfs_recovery_failover result,
+        uint64_t                   observed_ns,
+        void                      *arg),
+    void                      *arg);
+
+/*
+ * Look up which node owns `owner`'s stored recovery record, and which boot of
+ * it wrote the record.  A record that
+ * cannot be read or decoded is OWNER_ERROR, not OWNER_ABSENT: the caller must
+ * not treat it as a client with no previous node.  Persistence off is
+ * OWNER_ABSENT.  Asynchronous on vfs_thread.
+ */
+enum nfs_recovery_owner {
+    NFS_RECOVERY_OWNER_ABSENT = 0,
+    NFS_RECOVERY_OWNER_FOUND,
+    NFS_RECOVERY_OWNER_ERROR,
+};
+
+void
+nfs_recovery_lookup_owner(
+    struct chimera_vfs_thread *vfs_thread,
+    struct nfs_recovery       *rec,
+    const void                *owner,
+    uint16_t                   owner_len,
+    void (                    *done )(
+        enum nfs_recovery_owner result,
+        uint16_t                node,
+        uint64_t                boot_id,
+        void                   *arg),
+    void                      *arg);
 
 /*
  * Gate for OPEN during recovery:
@@ -295,17 +378,23 @@ nfs_recovery_note_returned(
 
 struct nfs_client;
 
+/* `boot_id` is the boot of the node writing the record. */
 uint32_t
 nfs_recovery_serialize(
     uint8_t                 *buf,
     uint32_t                 buf_size,
-    const struct nfs_client *c);
+    const struct nfs_client *c,
+    uint16_t                 owner_node,
+    uint64_t                 boot_id);
 
+/* Deserialize a recovery value.  A legacy value (NFR1/NFR2) carries no owning
+ * node and comes back with owner_node = `legacy_owner`. */
 int
 nfs_recovery_deserialize(
     const uint8_t              *buf,
     uint32_t                    len,
-    struct nfs_recovery_record *out);
+    struct nfs_recovery_record *out,
+    uint16_t                    legacy_owner);
 
 /*
  * True when the record's client had provably lost its lease before the

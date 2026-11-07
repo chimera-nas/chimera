@@ -68,9 +68,8 @@ chimera_nfs3_decode_fh2(
 {
     struct chimera_server_nfs_shared *shared = req->thread->shared;
 
-    if (chimera_nfs_fh_unwrap(fhdata, fhlen, export_id,
-                              req->saved_fh, &req->saved_fhlen,
-                              shared->fh_key, shared->fh_sign) !=
+    if (chimera_nfs_fh_verify(shared, fhdata, fhlen, export_id,
+                              req->saved_fh, &req->saved_fhlen) !=
         CHIMERA_NFS_FH_OK) {
         return NFS3ERR_BADHANDLE;
     }

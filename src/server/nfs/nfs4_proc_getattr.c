@@ -115,8 +115,7 @@ chimera_nfs4_getattr_finish(
                                     req->thread->shared->config),
                                 req->thread->shared->nfs_lease_time_s,
                                 req->export_id,
-                                req->thread->shared->fh_key,
-                                req->thread->shared->fh_sign,
+                                req->thread->shared,
                                 type_override);
 
     if (req->handle) {
