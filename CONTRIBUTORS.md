@@ -15,5 +15,6 @@ Kanaga Shanmugam
 Joshua Lugo-Mclellan
 Ilya Mirsky
 Jihyeon Gim
+Partha Sarathi
 Quantum Corporation
 Nasuni Corporation
