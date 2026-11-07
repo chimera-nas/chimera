@@ -1902,6 +1902,162 @@ test_ack_before_requeue(void)
     chimera_vfs_state_destroy(state);
 } /* test_ack_before_requeue */
 
+/* A revoked holder is inert ------------------------------------------- */
+
+/* Owner liveness plus revocation count, shared by the two claim callbacks
+ * the NFSv4 protocol installs (both take the same cb_private). */
+struct holder_liveness {
+    bool alive;
+    int  revokes;
+};
+
+static bool
+holder_alive(
+    const struct chimera_vfs_claim *claim,
+    void                           *priv)
+{
+    (void) claim;
+
+    return ((struct holder_liveness *) priv)->alive;
+} /* holder_alive */
+
+static void
+holder_revoked(
+    struct chimera_vfs_claim *claim,
+    void                     *priv)
+{
+    (void) claim;
+
+    ((struct holder_liveness *) priv)->revokes++;
+} /* holder_revoked */
+
+/* An expired client's exclusive BRL must be reclaimed exactly once by a
+ * conflicting lock, which is then granted, and the same must hold for the
+ * next generation when that client's lease lapses in turn.  Before the fix
+ * the revoked claim kept denying LW, so the acquire re-reclaimed it forever.
+ * Holders are deliberately left linked, as the protocol owns the object. */
+static void
+test_revoked_brl_takeover(void)
+{
+    struct chimera_vfs_state         *state;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_claim          a, b, c;
+    struct chimera_claim_owner        owner;
+    enum chimera_vfs_claim_result     r;
+    struct chimera_vfs_claim_conflict conflict;
+    struct holder_liveness            la = { .alive = true };
+    struct holder_liveness            lb = { .alive = true };
+
+    fprintf(stderr, "\ntest_revoked_brl_takeover\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    /* Client A holds an exclusive byte-range lock. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xA, 1);
+    chimera_vfs_claim_init_range(&a, true, false, 100, 100, &owner);
+    a.is_alive_cb = holder_alive;
+    a.revoked_cb  = holder_revoked;
+    a.cb_private  = &la;
+
+    r = chimera_vfs_claim_try_acquire(state, file, &a, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "first client's exclusive lock granted");
+
+    /* A's lease lapses: the claim stays linked but reports dead. */
+    la.alive = false;
+
+    /* Client B's overlapping exclusive lock takes the range over. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xB, 2);
+    chimera_vfs_claim_init_range(&b, true, false, 100, 100, &owner);
+    b.is_alive_cb = holder_alive;
+    b.revoked_cb  = holder_revoked;
+    b.cb_private  = &lb;
+
+    r = chimera_vfs_claim_try_acquire(state, file, &b, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED,
+          "conflicting lock reclaims the dead holder and is granted");
+    CHECK(a.break_state == CHIMERA_CLAIM_BREAK_REVOKED && a.used == 0,
+          "dead holder left REVOKED with no mode");
+    CHECK(a.file == file, "revoked claim stays linked for protocol cleanup");
+    CHECK(la.revokes == 1,
+          "revoked_cb fired exactly once (with no claim, by contract)");
+
+    /* Ignoring the dead holder must not let a third client bypass the live
+     * one that took its place. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xC, 3);
+    chimera_vfs_claim_init_range(&c, true, false, 100, 100, &owner);
+
+    r = chimera_vfs_claim_try_acquire(state, file, &c, &conflict);
+    CHECK(r == CHIMERA_CLAIM_DENIED, "live holder still denies a third client");
+    CHECK(conflict.owner.client_key == 0xB, "denial names the live holder");
+
+    /* The second generation expires too: the same takeover must work with
+     * two revoked claims already on the list. */
+    lb.alive = false;
+
+    r = chimera_vfs_claim_try_acquire(state, file, &c, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED,
+          "second-generation takeover reclaims the lapsed holder");
+    CHECK(b.break_state == CHIMERA_CLAIM_BREAK_REVOKED && b.used == 0,
+          "second holder left REVOKED with no mode");
+    CHECK(a.break_state == CHIMERA_CLAIM_BREAK_REVOKED,
+          "first revoked holder is untouched by the later takeover");
+    CHECK(lb.revokes == 1, "second holder revoked exactly once");
+
+    chimera_vfs_claim_release(state, file, &a);
+    chimera_vfs_claim_release(state, file, &b);
+    chimera_vfs_claim_release(state, file, &c);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_revoked_brl_takeover */
+
+/* A revoked BRL must contribute nothing at all: not to LOCKT, and not to
+ * fresh cache admission through its admit-only CR|CW row. */
+static void
+test_revoked_brl_denies_nothing(void)
+{
+    struct chimera_vfs_state         *state;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_claim          a, probe, cache;
+    struct chimera_claim_owner        owner;
+    enum chimera_vfs_claim_result     r;
+    struct chimera_vfs_claim_conflict conflict;
+
+    fprintf(stderr, "\ntest_revoked_brl_denies_nothing\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xA, 1);
+    chimera_vfs_claim_init_range(&a, true, false, 100, 100, &owner);
+
+    r = chimera_vfs_claim_try_acquire(state, file, &a, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "live exclusive lock granted");
+
+    /* Revoke in place: linked, but logically dead. */
+    chimera_vfs_claim_revoke(&a);
+    CHECK(a.break_state == CHIMERA_CLAIM_BREAK_REVOKED,
+          "lock moved to REVOKED while still linked");
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xB, 2);
+    chimera_vfs_claim_init_range(&probe, true, false, 100, 100, &owner);
+
+    r = chimera_vfs_claim_test(file, &probe, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "LOCKT sees no lock on a revoked holder");
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 0xC, 3);
+    chimera_vfs_claim_init_oplock(&cache, CHIMERA_CLAIM_CR, &owner);
+
+    r = chimera_vfs_claim_try_acquire(state, file, &cache, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "revoked BRL denies no fresh cache");
+
+    chimera_vfs_claim_release(state, file, &a);
+    chimera_vfs_claim_release(state, file, &cache);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_revoked_brl_denies_nothing */
+
+
 /* Main ---------------------------------------------------------------- */
 int
 main(
@@ -1927,6 +2083,8 @@ main(
     test_caching_w_breaks_r();
     test_smb_lease_key_coalesces();
     test_caching_break_revoke();
+    test_revoked_brl_takeover();
+    test_revoked_brl_denies_nothing();
     test_range_breaks_caching();
     test_nfs4_lock_vs_own_delegation();
     test_async_acquire_immediate();

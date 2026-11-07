@@ -691,10 +691,21 @@ chimera_vfs_claim_deny_rows(
     const struct chimera_vfs_claim *claim,
     struct chimera_claim_deny_row   rows[CHIMERA_CLAIM_MAX_DENY_ROWS])
 {
-    uint8_t adv = chimera_vfs_claim_advertised(claim);
-    uint8_t raw = (claim->break_state == CHIMERA_CLAIM_BREAK_REVOKED)
-        ? 0 : claim->used;
+    uint8_t adv;
+    uint8_t raw;
     int     n = 0;
+
+    /* Revoked is inert: a forcibly revoked claim holds no rights and must
+     * deny nothing, even while its owner keeps the object linked for
+     * protocol cleanup.  Without this the lock arm derives a "shared lock"
+     * from the zeroed mode and keeps denying LW -- and fresh caches --
+     * forever. */
+    if (claim->break_state == CHIMERA_CLAIM_BREAK_REVOKED) {
+        return 0;
+    }
+
+    adv = chimera_vfs_claim_advertised(claim);
+    raw = claim->used;
 
     switch (claim->construct) {
         case CHIMERA_CONSTRUCT_SMB_OPEN:
@@ -916,6 +927,13 @@ chimera_vfs_claim_conflicts(
     uint8_t hc_adv;
 
     if (hc == pc) {
+        return false;
+    }
+    /* A standing revoked holder is dead: it cannot block or displace an
+     * acquirer, whatever the deny-row table derives from its cleared mode.
+     * Probe-side twin of the revoked rule in
+     * chimera_vfs_claim_deny_rows(). */
+    if (hc->break_state == CHIMERA_CLAIM_BREAK_REVOKED) {
         return false;
     }
     if (!chimera_vfs_claim_claims_overlap(hc, pc)) {
@@ -1147,7 +1165,7 @@ chimera_vfs_claim_admit_locked(
                         waiting_on = cur;
                     }
                 }
-                /* REVOKED contributes nothing and never conflicts. */
+                /* REVOKED is rejected by chimera_vfs_claim_conflicts(). */
                 continue;
             }
 
@@ -1400,9 +1418,13 @@ chimera_vfs_claim_try_acquire(
              * freed memory. */
             if (conflict &&
                 chimera_vfs_claim_holder_reclaimable(conflict, claim)) {
+                /* Progress is the transition into REVOKED, not the call:
+                 * revoking a holder that is already REVOKED changes nothing,
+                 * and retrying on it would spin this loop forever. */
+                reclaimed = conflict->break_state !=
+                    CHIMERA_CLAIM_BREAK_REVOKED;
                 chimera_vfs_claim_revoke_locked(file, conflict,
                                                 &revoked_cb, &cb_private);
-                reclaimed = true;
             }
             evpl_mutex_unlock(&file->lock);
 
@@ -1462,10 +1484,12 @@ chimera_vfs_claim_try_acquire(
             iter_pin = chimera_vfs_claim_pin_grant(conflict);
 
             if (chimera_vfs_claim_holder_reclaimable(conflict, claim)) {
+                /* Same progress rule as the DENIED arm above. */
+                revoked_now = conflict->break_state !=
+                    CHIMERA_CLAIM_BREAK_REVOKED;
                 chimera_vfs_claim_revoke_locked(file, conflict,
                                                 &revoked_cb, &cb_private);
-                revoked_any = true;
-                revoked_now = true;
+                revoked_any |= revoked_now;
             } else if (conflict->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
                        conflict->break_state == CHIMERA_CLAIM_BREAK_ACKED) {
                 deadline_ms =
