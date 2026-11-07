@@ -403,7 +403,8 @@ chimera_smb_reparse_setattr_cb(
 } /* chimera_smb_reparse_setattr_cb */
 
 /* Set or clear FILE_ATTRIBUTE_REPARSE_POINT in the persisted DOS attributes; a
- * data file is also marked ARCHIVE (MS-FSA 2.1.5.10.37 / 2.1.5.10.3). */
+ * data file is also marked ARCHIVE (MS-FSA 2.1.5.10.37 FSCTL_SET_REPARSE_POINT
+ * / 2.1.5.10.3 FSCTL_DELETE_REPARSE_POINT). */
 static void
 chimera_smb_reparse_set_dos(
     struct chimera_smb_request *request,
@@ -611,7 +612,8 @@ chimera_smb_reparse_set_getattr_cb(
     chimera_smb_reparse_set_check_existing(request);
 } /* chimera_smb_reparse_set_getattr_cb */
 
-/* MS-FSA 2.1.5.10.37 for a reparse point kept verbatim. */
+/* MS-FSA 2.1.5.10.37 FSCTL_SET_REPARSE_POINT for a reparse point kept
+ * verbatim. */
 static void
 chimera_smb_reparse_generic_set(struct chimera_smb_request *request)
 {
@@ -777,9 +779,9 @@ chimera_smb_ioctl_delete_reparse(struct chimera_smb_request *request)
 
 /* ---- GET_REPARSE_POINT of a reparse point kept verbatim ---- */
 
-/* Fit a built GET response to the caller's buffer (MS-FSA 2.1.5.10.14): not
- * even the header -> BUFFER_TOO_SMALL; part of the data -> BUFFER_OVERFLOW
- * with what fits, as NTFS answers. */
+/* Fit a built GET response to the caller's buffer (MS-FSA 2.1.5.10.14
+ * FSCTL_GET_REPARSE_POINT): not even the header -> BUFFER_TOO_SMALL; part of
+ * the data -> BUFFER_OVERFLOW with what fits, as NTFS answers. */
 static void
 chimera_smb_get_reparse_finish(struct chimera_smb_request *request)
 {

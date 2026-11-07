@@ -316,7 +316,8 @@ chimera_smb_set_info_allocation_getattr_callback(
     cur_size = attr->va_size;
 
     /* The allocation becomes the request rounded to whole clusters (MS-FSA
-    * 2.1.5.15.1); the backend keeps the part past EOF as a reservation. */
+     * 2.1.5.15.1 FileAllocationInformation); the backend keeps the part past
+     * EOF as a reservation. */
     request->set_info.vfs_attrs.va_req_mask   = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE;
     request->set_info.vfs_attrs.va_set_mask   = CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_ALLOC_SIZE;
     request->set_info.vfs_attrs.va_alloc_size = chimera_smb_round_cluster(alloc_size);
@@ -648,11 +649,12 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         break;
                     }
 
-                    /* MS-FSA 2.1.5.14.2: a FileBasicInformation timestamp is
-                     * either a valid (non-negative) FILETIME or one of the
-                     * sentinels 0 (omit), -1 (freeze) or -2 (thaw); any value
-                     * below -2 is rejected with STATUS_INVALID_PARAMETER (WPTS
-                     * MS-FSAModel SetFileBasicInformation {Creation,LastAccess,
+                    /* MS-FSA 2.1.5.15.2 FileBasicInformation: a
+                     * FileBasicInformation timestamp is either a valid
+                     * (non-negative) FILETIME or one of the sentinels 0 (omit),
+                     * -1 (freeze) or -2 (thaw); any value below -2 is rejected
+                     * with STATUS_INVALID_PARAMETER (WPTS MS-FSAModel
+                     * SetFileBasicInformation {Creation,LastAccess,
                      * LastWrite,Change}TimeLessthanM1). */
                     if ((int64_t) request->set_info.attrs.smb_crttime < -2 ||
                         (int64_t) request->set_info.attrs.smb_atime < -2 ||
@@ -715,7 +717,7 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     /* EndOfFile/Allocation apply to a data stream; a directory
                      * has none, so Windows fails the set with
                      * STATUS_INVALID_PARAMETER (MS-FSCC 2.4.14 / MS-FSA
-                     * 2.1.5.14.13; issue #1261). */
+                     * 2.1.5.15.5 FileEndOfFileInformation; issue #1261). */
                     if (request->set_info.open_file->flags &
                         CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
                         chimera_smb_open_file_release(request, request->set_info.open_file);
@@ -724,12 +726,13 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         break;
                     }
 
-                    /* MS-FSA 2.1.5.16: a SetEndOfFile whose size exceeds the
-                     * maximum supported file size is rejected with
-                     * STATUS_INVALID_PARAMETER -- the same bound the write path
-                     * enforces, which also covers every value that is negative
-                     * when read as a signed LONGLONG (WPTS MS-FSAModel
-                     * SetFileEndOfFileInformation isEndOfFileGreatThanMaxSize). */
+                    /* MS-FSA 2.1.5.15.5 FileEndOfFileInformation: a
+                     * SetEndOfFile whose size exceeds the maximum supported
+                     * file size is rejected with STATUS_INVALID_PARAMETER --
+                     * the same bound the write path enforces, which also covers
+                     * every value that is negative when read as a signed
+                     * LONGLONG (WPTS MS-FSAModel SetFileEndOfFileInformation
+                     * isEndOfFileGreatThanMaxSize). */
                     if (request->set_info.attrs.smb_size > CHIMERA_SMB_MAX_FILE_SIZE) {
                         chimera_smb_open_file_release(request, request->set_info.open_file);
                         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
@@ -786,10 +789,11 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                      * advances LastWriteTime; a grow/hint only touches
                      * ChangeTime.  Both need the current size to decide, so this
                      * is resolved in the getattr callback. */
-                    /* MS-FSA 2.1.5.13: a SetAllocation whose size exceeds the
-                     * maximum supported file size is rejected with
-                     * STATUS_INVALID_PARAMETER (also covers every value negative
-                     * when read as a signed LONGLONG) -- WPTS MS-FSAModel
+                    /* MS-FSA 2.1.5.15.1 FileAllocationInformation: a
+                     * SetAllocation whose size exceeds the maximum supported
+                     * file size is rejected with STATUS_INVALID_PARAMETER (also
+                     * covers every value negative when read as a signed
+                     * LONGLONG) -- WPTS MS-FSAModel
                      * SetFileAllocOrObjIdInformation. */
                     if (request->set_info.attrs.smb_size > CHIMERA_SMB_MAX_FILE_SIZE) {
                         chimera_smb_open_file_release(request, request->set_info.open_file);
@@ -892,9 +896,10 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     chimera_smb_set_ea(request);
                     break;
                 case SMB2_FILE_POSITION_INFO:
-                    /* MS-FSA 2.1.5.20: CurrentByteOffset is a signed LONGLONG; a
-                     * negative value is rejected with STATUS_INVALID_PARAMETER
-                     * (WPTS MS-FSAModel SetFilePositionInformation). */
+                    /* MS-FSA 2.1.5.15.10 FilePositionInformation:
+                     * CurrentByteOffset is a signed LONGLONG; a negative value
+                     * is rejected with STATUS_INVALID_PARAMETER (WPTS
+                     * MS-FSAModel SetFilePositionInformation). */
                     if ((int64_t) request->set_info.attrs.smb_position < 0) {
                         chimera_smb_open_file_release(request, request->set_info.open_file);
                         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
@@ -982,10 +987,11 @@ chimera_smb_parse_set_info(
         case SMB2_INFO_FILE:
             switch (request->set_info.info_class) {
                 case SMB2_FILE_BASIC_INFO:
-                    /* [MS-FSA] 2.1.5.14.2 / [MS-FSCC] 2.4.7: the input buffer
-                     * must be at least sizeof(FILE_BASIC_INFORMATION) (40 bytes:
-                     * four 8-byte timestamps + 4-byte FileAttributes + 4-byte
-                     * Reserved).  A shorter buffer is rejected with
+                    /* [MS-FSA] 2.1.5.15.2 FileBasicInformation / [MS-FSCC]
+                     * 2.4.7: the input buffer must be at least
+                     * sizeof(FILE_BASIC_INFORMATION) (40 bytes: four 8-byte
+                     * timestamps + 4-byte FileAttributes + 4-byte Reserved).  A
+                     * shorter buffer is rejected with
                      * STATUS_INFO_LENGTH_MISMATCH rather than silently accepted
                      * (WPTS MS-FSAModel SetFileBasicInformation cases). */
                     if (unlikely(request->set_info.buffer_length < SMB2_FILE_BASIC_INFO_SIZE)) {

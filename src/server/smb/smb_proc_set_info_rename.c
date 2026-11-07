@@ -233,8 +233,9 @@ chimera_smb_set_info_rename_emit(struct chimera_smb_request *request)
 /* Resume after the destination-parent share probe resolves.
  * GRANTED: no conflicting open of the dst parent remains (none, or a leased one
  * closed in response to the RH->R break) -> proceed with the rename.  DENIED: a
- * conflicting open stays -> SHARING_VIOLATION (MS-FSA 2.1.5.15.12;
- * dirlease.rename_dst_parent, rename.no_share_delete_no_delete_access). */
+ * conflicting open stays -> SHARING_VIOLATION (MS-FSA 2.1.5.15.12
+ * FileRenameInformation; dirlease.rename_dst_parent,
+ * rename.no_share_delete_no_delete_access). */
 static void
 chimera_smb_set_info_rename_dp_cb(
     enum chimera_vfs_claim_result            result,
@@ -287,18 +288,19 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
     request->set_info.dp_probe_active = 0;
     request->set_info.dp_file_state   = NULL;
 
-    /* MS-FSA 2.1.5.15.12: the rename opens the destination directory for
-     * FILE_ADD_FILE (FILE_ADD_SUBDIRECTORY for a directory) sharing READ|WRITE
-     * (product note <185>: no SHARE_DELETE), and fails with that open's error.
-     * Both access rights are the W share bit, so model the open as a transient
-     * share probe (access=W, deny=D) on the dst parent: it conflicts with an
-     * open of the parent that does not share write
+    /* MS-FSA 2.1.5.15.12 FileRenameInformation: the rename opens the
+     * destination directory for FILE_ADD_FILE (FILE_ADD_SUBDIRECTORY for a
+     * directory) sharing READ|WRITE (product note <185>: no SHARE_DELETE), and
+     * fails with that open's error.  Both access rights are the W share bit, so
+     * model the open as a transient share probe (access=W, deny=D) on the dst
+     * parent: it conflicts with an open of the parent that does not share write
      * (rename.no_share_delete_no_delete_access) or that holds DELETE access.
      * When that open holds a directory lease, the probe breaks its HANDLE
      * caching (RH->R): the holder may close in response and free the rename,
      * else the rename fails SHARING_VIOLATION (dirlease.rename_dst_parent).
      * Opens that share write and hold no DELETE (dirlease.rename holders) do
-     * not conflict.  No dst-parent state => no other open => rename directly. */
+     * not conflict.  No dst-parent state => no other open => rename
+     * directly. */
     fs = dest_parent_oh ? chimera_vfs_state_get(vfs_state, dest_parent_oh->fh,
                                                 dest_parent_oh->fh_len,
                                                 dest_parent_oh->fh_hash, false)
@@ -669,16 +671,17 @@ chimera_smb_set_info_rename_check_dest_callback(
 
     if (error_code == CHIMERA_VFS_OK) {
         /* Destination exists.  Without ReplaceIfExists it is never replaced,
-         * whatever it is: MS-FSA 2.1.5.14.11 answers OBJECT_NAME_COLLISION for
-         * a directory destination too (IFSTest FileInformation:
-         * ConflictingRenameInformationTest; renaming a directory onto an empty
-         * one used to replace it silently).  With the flag, a file destination
-         * is left to rename_at to replace; a directory one is refused below
-         * unless the server runs POSIX rename semantics, where rename_at
-         * enforces rename(2): replace an empty directory, DIRECTORY_NOT_EMPTY
-         * otherwise, and FILE_IS_A_DIRECTORY when the source is not itself a
-         * directory.  (The SMB "rename a file INTO a directory" shell
-         * behaviour is not rename(2) and is deliberately not applied here.) */
+         * whatever it is: MS-FSA 2.1.5.15.12 FileRenameInformation answers
+         * OBJECT_NAME_COLLISION for a directory destination too (IFSTest
+         * FileInformation: ConflictingRenameInformationTest; renaming a
+         * directory onto an empty one used to replace it silently).  With the
+         * flag, a file destination is left to rename_at to replace; a directory
+         * one is refused below unless the server runs POSIX rename semantics,
+         * where rename_at enforces rename(2): replace an empty directory,
+         * DIRECTORY_NOT_EMPTY otherwise, and FILE_IS_A_DIRECTORY when the
+         * source is not itself a directory.  (The SMB "rename a file INTO a
+         * directory" shell behaviour is not rename(2) and is deliberately not
+         * applied here.) */
         uint32_t status = SMB2_STATUS_SUCCESS;
 
         /* A destination that is another link to the source itself (a rename
@@ -698,9 +701,9 @@ chimera_smb_set_info_rename_check_dest_callback(
                    (S_ISDIR(attr->va_mode) ||
                     ((attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
                      (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY)))) {
-            /* Even with ReplaceIfExists, Windows never replaces a directory
-             * or a read-only file (MS-FSA 2.1.5.15.12; IFSTest
-             * ConflictingRenameInformationTest).  POSIX rename(2) would
+            /* Even with ReplaceIfExists, Windows never replaces a directory or
+             * a read-only file (MS-FSA 2.1.5.15.12 FileRenameInformation;
+             * IFSTest ConflictingRenameInformationTest).  POSIX rename(2) would
              * replace an empty directory, so the POSIX rename mode keeps
              * that. */
             status = SMB2_STATUS_ACCESS_DENIED;
@@ -826,9 +829,10 @@ chimera_smb_set_info_rename_open_callback(
 
 /* ---- stream rename (MS-FSA 2.1.5.15.12.1) ----
  *
- * A rename target beginning with ':' names a stream of the same file, not a new
- * path for the file: "<:stream>[:$DATA]".  It renames the stream in place on the
- * base file, which keeps every open of it valid. */
+ * MS-FSA 2.1.5.15.12.1 "Algorithm for Performing Stream Rename".  A rename
+ * target beginning with ':' names a stream of the same file, not a new path for
+ * the file: "<:stream>[:$DATA]".  It renames the stream in place on the base
+ * file, which keeps every open of it valid. */
 
 static void
 chimera_smb_set_info_rename_stream_done(
@@ -1018,7 +1022,7 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
     struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
     struct chimera_smb_open_file   *open_file   = request->set_info.open_file;
 
-    /* MS-FSA 2.1.5.14.11.1 SetInfo(FileRenameInformation): if the handle was
+    /* MS-FSA 2.1.5.15.12 FileRenameInformation: if the handle was
      * not opened with DELETE access, the rename MUST fail with ACCESS_DENIED
      * (the rename removes the old name from its parent and adds a new one, so
      * the source handle's GrantedAccess must include DELETE).  Gate here, ahead

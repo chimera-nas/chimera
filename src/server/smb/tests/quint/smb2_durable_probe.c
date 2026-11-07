@@ -976,10 +976,11 @@ sec_d7(struct smb2_env *env)
     /* D7b -- the converse, and the one the MODEL turns on: an open that breaks
      * nobody must not purge a parked holder either.  An attribute-only,
      * non-truncating open takes no part in share arbitration and triggers no
-     * oplock break (MS-FSA 2.1.5.1; smb_proc_create.c break_for_open's
-     * break_trigger is exactly its inverse), so the parked handle must still be
-     * reclaimable afterwards.  Without this measurement the model's purge rule
-     * would be an inference rather than a fact. */
+     * oplock break (MS-FSA 2.1.5.1 "Server Requests an Open of a File";
+     * smb_proc_create.c break_for_open's break_trigger is exactly its inverse),
+     * so the parked handle must still be reclaimable afterwards.  Without this
+     * measurement the model's purge rule would be an inference rather than a
+     * fact. */
     {
         struct smb2_oplock_req  breq2;
         struct smb2_durable_req dur2;
@@ -1041,8 +1042,9 @@ sec_d7(struct smb2_env *env)
      * (so no sharing violation) but is not attribute-only (so it does trigger a
      * break).  Two things are measured, and the model needs both: what lease
      * state the NEW opener is granted -- i.e. whether the parked holder still
-     * counts for the sole-opener rule of MS-FSA 2.1.5.18.1 -- and whether the
-     * parked handle survives to be reclaimed. */
+     * counts for the sole-opener rule of MS-FSA 2.1.5.18.1 "Algorithm to
+     * Request an Exclusive Oplock" -- and whether the parked handle survives to
+     * be reclaimed. */
     {
         struct smb2_oplock_req  lreq3, lreq3b;
         struct smb2_durable_req dur3;

@@ -182,9 +182,10 @@ sec_o1(
 
     printf("\n== O1: oplock / lease grant to a sole opener ==\n");
 
-    /* O1a: legacy BATCH oplock, sole opener.  MS-FSA 2.1.5.17.1: with no
-     * conflicting opens the requested oplock is granted (whether oplocks are
-     * supported at all is the config-gated discretion -- enabled here). */
+    /* O1a: legacy BATCH oplock, sole opener.  MS-FSA 2.1.5.18.1 "Algorithm to
+     * Request an Exclusive Oplock": with no conflicting opens the requested
+     * oplock is granted (whether oplocks are supported at all is the
+     * config-gated discretion -- enabled here). */
     memset(&req, 0, sizeof(req));
     req.level = SMB2_OPLOCK_LEVEL_BATCH;
     smb2_create(a, "o1a", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD,
@@ -193,7 +194,8 @@ sec_o1(
     NOTE("O1a granted oplock level = %s (0x%02x)", oplock_name(o.oplock),
          o.oplock);
     EXPECT(o.oplock == SMB2_OPLOCK_LEVEL_BATCH,
-           "O1a sole opener granted BATCH (MS-FSA 2.1.5.17.1)");
+           "O1a sole opener granted BATCH (MS-FSA 2.1.5.18.1 Algorithm to "
+           "Request an Exclusive Oplock)");
     smb2_close(a, o.file_id);
 
     /* O1b: RqLs lease RWH, sole opener.  MS-SMB2 3.3.5.9.11: a lease open
@@ -241,8 +243,9 @@ sec_o2(
            "O2 holder A granted BATCH");
 
     /* Opener B does a conflicting read open.  MS-SMB2 3.3.4.6 / MS-FSA
-     * 2.1.5.1.2: the batch oplock MUST break; the holder is notified and the
-     * opener is deferred (STATUS_PENDING) until the holder acks. */
+     * 2.1.5.1.2 "Open of an Existing File": the batch oplock MUST break; the
+     * holder is notified and the opener is deferred (STATUS_PENDING) until the
+     * holder acks. */
     ob.status = conflicting_open(env, b, a, "o2", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS,
                                  MBT_FILE_SHARE_RWD, NULL, &ob, breaks, &nbreaks);
 
@@ -304,11 +307,12 @@ sec_o3(
     NOTE("O3 reader A granted oplock = %s while a writer is open",
          oplock_name(oa.oplock));
 
-    /* B writes.  The mandated invariant (MS-FSA 2.1.5.3 / the SMB2 caching
-     * model): a conflicting write must not leave a stale read cache alive --
-     * so IF A holds a read cache, the write MUST break it away.  This is
-     * asserted as an invariant, independent of the discretionary grant
-     * timing above.  Drive B's write, collecting any break delivered to A. */
+    /* B writes.  The mandated invariant (MS-FSA 2.1.5.4 "Server Requests a
+     * Write" / the SMB2 caching model): a conflicting write must not leave a
+     * stale read cache alive -- so IF A holds a read cache, the write MUST
+     * break it away.  This is asserted as an invariant, independent of the
+     * discretionary grant timing above.  Drive B's write, collecting any break
+     * delivered to A. */
     got_break = 0;
     smb2_write_post(b, ob.file_id, 0, data, (uint32_t) sizeof(data) - 1);
     while (!b->reply_ready) {
@@ -366,7 +370,8 @@ sec_o3(
            "O3 leaves no undelivered break behind (section isolation)");
     if (a_had_read_cache) {
         EXPECT(got_break,
-               "O3 A's read cache is broken by B's write (MS-FSA 2.1.5.3)");
+               "O3 A's read cache is broken by B's write (MS-FSA 2.1.5.4 "
+               "Server Requests a Write)");
         if (got_break && !b0.is_lease) {
             EXPECT(b0.oplock_level == SMB2_OPLOCK_LEVEL_NONE,
                    "O3 break-on-write drives the read cache to NONE");
@@ -434,7 +439,7 @@ sec_o4(
                "downgrades, MS-SMB2 3.3.4.7)");
         EXPECT((lb->new_state & SMB2_LEASE_WRITE) == 0,
                "O4 write caching is stripped by a conflicting read open "
-               "(MS-FSA 2.1.5.x)");
+               "(MS-FSA 2.1.4.12 Algorithm to Check for an Oplock Break)");
         EXPECT(lb->new_epoch > granted_epoch,
                "O4 epoch advances on the break (v2, MS-SMB2 3.3.4.7): %u > %u",
                lb->new_epoch, granted_epoch);
@@ -477,9 +482,10 @@ sec_o5(
                 NULL, &oa);
     EXPECT(oa.status == ST_SUCCESS, "O5 peer A opened (no oplock)");
 
-    /* B requests a BATCH oplock.  MS-FSA 2.1.5.17.1: an exclusive/batch
-     * oplock requires sole access, so with A's open present it MUST NOT be
-     * granted at that level; the server downgrades to at most LEVEL_II. */
+    /* B requests a BATCH oplock.  MS-FSA 2.1.5.18.1 "Algorithm to Request an
+     * Exclusive Oplock": an exclusive/batch oplock requires sole access, so
+     * with A's open present it MUST NOT be granted at that level; the server
+     * downgrades to at most LEVEL_II. */
     memset(&req, 0, sizeof(req));
     req.level = SMB2_OPLOCK_LEVEL_BATCH;
     /* B may itself trigger a break of A -- but A holds no cache, so this is a
@@ -490,19 +496,21 @@ sec_o5(
                      MBT_FILE_SHARE_RWD, &req, &ob, breaks, &nbr);
     EXPECT(ob.status == ST_SUCCESS, "O5 B's CREATE(batch request) succeeds");
     NOTE("O5 B granted oplock = %s while peer A is open", oplock_name(ob.oplock));
-    /* MS-FSA 2.1.5.17.2: an exclusive/batch oplock is granted only when the
-     * requesting Open is the sole Open on the stream.  With A's open present,
-     * B must be refused (granted at most LEVEL_II). */
+    /* MS-FSA 2.1.5.18.1 "Algorithm to Request an Exclusive Oplock": an
+     * exclusive/batch oplock is granted only when the requesting Open is the
+     * sole Open on the stream.  With A's open present, B must be refused
+     * (granted at most LEVEL_II). */
     if (ob.oplock == SMB2_OPLOCK_LEVEL_BATCH ||
         ob.oplock == SMB2_OPLOCK_LEVEL_EXCLUSIVE) {
         DEVIATION("S-1",
                   "batch/exclusive oplock (%s) granted to B while peer A is "
-                  "open; MS-FSA 2.1.5.17.2 requires sole access. chimera caps "
+                  "open; MS-FSA 2.1.5.18.1 Algorithm to Request an Exclusive "
+                  "Oplock requires sole access. chimera caps "
                   "grants against peer CACHES, not peer OPENS (A holds no "
                   "cache). See DEVIATIONS-SMB.md.", oplock_name(ob.oplock));
     } else {
         EXPECT(1, "O5 exclusive/batch refused while a peer open exists "
-               "(MS-FSA 2.1.5.17.2)");
+               "(MS-FSA 2.1.5.18.1 Algorithm to Request an Exclusive Oplock)");
     }
 
     smb2_close(a, oa.file_id);
@@ -597,7 +605,7 @@ sec_o6(
          got_reply, b->ninterim - ninterim0, smb2_conn_nbreaks(a));
     EXPECT(smb2_conn_nbreaks(a) >= 1,
            "O6a the batch oplock is broken by the conflicting open "
-           "(MS-FSA 2.1.5.1.2)");
+           "(MS-FSA 2.1.5.1.2 Open of an Existing File)");
     EXPECT(b->ninterim > ninterim0,
            "O6a the deferred open announces itself with an async interim "
            "STATUS_PENDING (MS-SMB2 3.3.5.9 pending-open)");
@@ -644,8 +652,8 @@ sec_o6(
          got_reply, b->ninterim - ninterim0, smb2_conn_nbreaks(a));
     EXPECT(smb2_conn_nbreaks(a) >= 1,
            "O6b the batch holder is broken BEFORE the share check "
-           "(MS-FSA 2.1.5.1: a batch holder may close and dissolve the "
-           "conflict)");
+           "(MS-FSA 2.1.5.1 Server Requests an Open of a File: a batch "
+           "holder may close and dissolve the conflict)");
     EXPECT(!got_reply,
            "O6b the share-conflicting open WAITS for the batch holder's "
            "answer rather than refusing immediately");
@@ -910,10 +918,11 @@ sec_o10(void)
 /* A generated trace draws DesiredAccess / ShareAccess / CreateDisposition
  * independently of the oplock request, so the model must know the grant rule
  * for the whole matrix, not just for the MBT_FILE_ALL_ACCESS / share-everything
- * corner O1 pins.  Every open here is the SOLE open of a FRESH file, so
- * MS-FSA 2.1.5.17.1 says the requested oplock is grantable in every row; the
- * probe RECORDS what chimera returns (the grant level is discretion --
- * MS-SMB2 3.3.5.9) so the model can be pinned to it rather than to a guess. */
+ * corner O1 pins.  Every open here is the SOLE open of a FRESH file, so MS-FSA
+ * 2.1.5.18 "Server Requests an Oplock" says the requested oplock is grantable
+ * in every row; the probe RECORDS what chimera returns (the grant level is
+ * discretion -- MS-SMB2 3.3.5.9) so the model can be pinned to it rather than
+ * to a guess. */
 static void
 sec_o11(
     struct smb2_env  *env,
@@ -969,7 +978,7 @@ sec_o11(
          * the whole break lifecycle unreachable for this request shape. */
         EXPECT(o.oplock != SMB2_OPLOCK_LEVEL_NONE,
                "O11[%d] a sole opener of a fresh file is granted SOME oplock "
-               "(MS-FSA 2.1.5.17.1)", i);
+               "(MS-FSA 2.1.5.18 Server Requests an Oplock)", i);
         smb2_close(a, o.file_id);
     }
 } /* sec_o11 */
@@ -985,8 +994,7 @@ sec_o11(
  * smb2.qnt), which suppressed exactly the WPTS Oplocks/Leases surface.
  *
  * The mandate being checked is MS-FSA 2.1.5.18.1 "Algorithm to Request an
- * Exclusive Oplock" (numbered 2.1.5.17.2 in the revision this suite's older
- * citations use):
+ * Exclusive Oplock":
  *
  *   "If Open.File.OpenList contains more than one Open whose Stream is the
  *    same as Open.Stream, and NO_OPLOCK is present in Open.Stream.Oplock.State
@@ -1002,9 +1010,10 @@ sec_o11(
  * lease above the FSA layer -- probe O7 / C-6.)
  *
  * WRITE_CACHING is the discriminator: BATCH (R|W|H), EXCLUSIVE (R|W) and an
- * RWH/RW lease are "exclusive oplock" requests routed through 2.1.5.18.1,
- * while LEVEL_II, an R lease and an RH lease are SHARED requests
- * (MS-FSA 2.1.5.18.2), which have no sole-open condition at all.
+ * RWH/RW lease are "exclusive oplock" requests routed through 2.1.5.18.1, while
+ * LEVEL_II, an R lease and an RH lease are SHARED requests (MS-FSA 2.1.5.18.2
+ * "Algorithm to Request a Shared Oplock"), which have no sole-open condition at
+ * all.
  *
  * Granting LESS than was asked for is server discretion (MS-SMB2 3.3.5.9), so
  * a row whose grant merely lands below the request is recorded as policy, not
@@ -1327,12 +1336,12 @@ sec_o12(
         }
 
         /* The MANDATE.  With a peer Open on the stream and no pre-existing
-         * oplock, MS-FSA 2.1.5.18.1 refuses an exclusive request outright, so
-         * no WRITE cache (legacy EXCLUSIVE/BATCH, or a lease carrying W) may be
-         * handed out.  HANDLE caching rides along on the same clause for a
-         * legacy BATCH oplock (BATCH == R|W|H is one exclusive request), while
-         * an RH lease is a SHARED request (2.1.5.18.2) and is unconstrained
-         * here. */
+         * oplock, MS-FSA 2.1.5.18.1 "Algorithm to Request an Exclusive Oplock"
+         * refuses an exclusive request outright, so no WRITE cache (legacy
+         * EXCLUSIVE/BATCH, or a lease carrying W) may be handed out.  HANDLE
+         * caching rides along on the same clause for a legacy BATCH oplock
+         * (BATCH == R|W|H is one exclusive request), while an RH lease is a
+         * SHARED request (2.1.5.18.2) and is unconstrained here. */
         has_w = (o.oplock == SMB2_OPLOCK_LEVEL_LEASE)
             ? ((o.lease_state & SMB2_LEASE_WRITE) != 0)
             : (o.oplock == SMB2_OPLOCK_LEVEL_EXCLUSIVE ||
@@ -1343,7 +1352,8 @@ sec_o12(
                 DEVIATION("S-3",
                           "O12[%d] %s: a %s request was granted a WRITE cache "
                           "(%s %s) while a peer Open is on the stream; "
-                          "MS-FSA 2.1.5.18.1 refuses an exclusive oplock when "
+                          "MS-FSA 2.1.5.18.1 Algorithm to Request an Exclusive "
+                          "Oplock refuses an exclusive oplock when "
                           "Open.File.OpenList holds more than one Open on the "
                           "stream -- that clause has no OplockKey and no "
                           "client-identity exemption. See DEVIATIONS-SMB.md.",
@@ -1354,7 +1364,8 @@ sec_o12(
             } else {
                 EXPECT(1,
                        "O12[%d] no write cache is granted behind a peer Open "
-                       "(MS-FSA 2.1.5.18.1)", i);
+                       "(MS-FSA 2.1.5.18.1 Algorithm to Request an Exclusive "
+                       "Oplock)", i);
             }
         }
 

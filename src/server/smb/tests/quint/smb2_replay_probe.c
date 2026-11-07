@@ -1337,11 +1337,12 @@ sec_r14(struct smb2_env *env)
  * left the more basic question unasked: with a FRESH sequence, does the class
  * check reject the unauthorized set at all?
  *
- * MS-FSA 2.1.5.14 answers it.  Setting file information is gated on the access
- * the class requires -- FileEndOfFileInformation and FileAllocationInformation
- * on FILE_WRITE_DATA -- and the operation MUST be failed with
- * STATUS_ACCESS_DENIED when Open.GrantedAccess does not contain it.  MS-SMB2
- * 3.3.5.21 routes SMB2 SET_INFO straight into that algorithm.
+ * MS-FSA 2.1.5.15 "Server Requests Setting of File Information" answers it.
+ * Setting file information is gated on the access the class requires --
+ * FileEndOfFileInformation and FileAllocationInformation on FILE_WRITE_DATA --
+ * and the operation MUST be failed with STATUS_ACCESS_DENIED when
+ * Open.GrantedAccess does not contain it.  MS-SMB2 3.3.5.21 routes SMB2
+ * SET_INFO straight into that algorithm.
  *
  * Found by the generated exactly-once corpus (smb2Replay/stepReplay), which
  * drew a SET_EOF on a read-only handle at a non-stale sequence and disagreed
@@ -1382,11 +1383,12 @@ sec_r15(struct smb2_env *env)
     st = smb2_set_eof(a, ro.file_id, 8192);
     NOTE("R15 SET_EOF through a read-only handle -> 0x%08x", st);
     if (st == ST_ACCESS_DENIED) {
-        EXPECT(1, "R15 MS-FSA 2.1.5.14: SET_EOF without FILE_WRITE_DATA is "
-               "ACCESS_DENIED");
+        EXPECT(1, "R15 MS-FSA 2.1.5.15.5 FileEndOfFileInformation: SET_EOF "
+               "without FILE_WRITE_DATA is ACCESS_DENIED");
     } else {
         DEVIATION("S-4", "SET_EOF through a handle with no FILE_WRITE_DATA "
-                  "answered 0x%08x; MS-FSA 2.1.5.14 mandates "
+                  "answered 0x%08x; MS-FSA 2.1.5.15.5 "
+                  "FileEndOfFileInformation mandates "
                   "STATUS_ACCESS_DENIED", st);
     }
     st = smb2_create(a, "r15", MBT_FILE_OPEN, MBT_FILE_READ_ACCESS, MBT_FILE_SHARE_RWD,
@@ -1415,7 +1417,8 @@ sec_r15(struct smb2_env *env)
         NOTE("R15 SET_EOF through an attribute-only handle -> 0x%08x", st);
         if (st != ST_ACCESS_DENIED) {
             DEVIATION("S-4", "SET_EOF through an attribute-only handle "
-                      "answered 0x%08x; MS-FSA 2.1.5.14 mandates "
+                      "answered 0x%08x; MS-FSA 2.1.5.15.5 "
+                      "FileEndOfFileInformation mandates "
                       "STATUS_ACCESS_DENIED", st);
         }
         smb2_close(a, at.file_id);

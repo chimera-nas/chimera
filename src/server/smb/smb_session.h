@@ -91,8 +91,9 @@ struct chimera_smb_file_id {
  * (smb2.replay.dhv2-pending2*-vs-{lease,oplock}-{sane,windows}). */
 #define CHIMERA_SMB_OPEN_FILE_PENDING_ORPHANED     0x00000800
 /* A write through this handle has already marked the file ARCHIVE (MS-FSA
- * 2.1.4.17: modifying a data file sets FILE_ATTRIBUTE_ARCHIVE), so its later
- * writes need not ask the backend for the DOS attributes again. */
+ * 2.1.4.17 "Algorithm for Noting That a File Modification Time is Updated":
+ * modifying a data file sets FILE_ATTRIBUTE_ARCHIVE), so its later writes need
+ * not ask the backend for the DOS attributes again. */
 #define CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED        0x00001000
 /* The client explicitly set the LastAccessTime on this handle; reads through
  * it must not advance it (MS-FSA Open.UserSetAccessTime).  The value set is
@@ -183,8 +184,9 @@ struct chimera_smb_open_file {
     uint32_t                         name_len;
     uint32_t                         flags;
     uint64_t                         position;
-    /* Open.NextEaEntry (MS-FSA 2.1.5.12.12): the user.* EA index, 0-based, a
-     * FileFullEaInformation scan without SL_RESTART_SCAN resumes from. */
+    /* Open.NextEaEntry (MS-FSA 2.1.5.12.12 FileFullEaInformation): the user.*
+     * EA index, 0-based, a FileFullEaInformation scan without SL_RESTART_SCAN
+     * resumes from. */
     uint32_t                         next_ea_index;
     /* The LastAccessTime last set explicitly through this handle (valid while
      * CHIMERA_SMB_OPEN_FILE_ACCESS_TIME_STICKY is set). */

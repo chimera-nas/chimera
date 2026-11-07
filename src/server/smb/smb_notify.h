@@ -95,15 +95,16 @@ struct chimera_smb_notify_state {
     struct chimera_vfs_notify_watch *watch;
     /* Outstanding CHANGE_NOTIFY requests on this open, oldest first.
      *
-     * A QUEUE, not one slot.  MS-FSA 2.1.5.9 keeps a handle's outstanding
-     * requests on Open.PendingNotifyChanges and appends to it, and an
-     * overlapped client relies on that: it keeps two or three
-     * ReadDirectoryChangesW calls posted on a directory precisely so there is
-     * never a window with none, and refusing the second would collapse that
-     * into a watch with gaps.  (This used to be a single slot, and the second
-     * request was refused STATUS_INVALID_PARAMETER citing MS-SMB2 3.3.5.10 --
-     * which is Receiving an SMB2 CLOSE Request.  CHANGE_NOTIFY is 3.3.5.19 and
-     * imposes no such limit; Samba queues, and so does Windows.)
+     * A QUEUE, not one slot.  MS-FSA 2.1.5.11 "Server Requests Change
+     * Notifications for a Directory" keeps a handle's outstanding requests on
+     * Open.PendingNotifyChanges and appends to it, and an overlapped client
+     * relies on that: it keeps two or three ReadDirectoryChangesW calls posted
+     * on a directory precisely so there is never a window with none, and
+     * refusing the second would collapse that into a watch with gaps.  (This
+     * used to be a single slot, and the second request was refused
+     * STATUS_INVALID_PARAMETER citing MS-SMB2 3.3.5.10 -- which is Receiving an
+     * SMB2 CLOSE Request.  CHANGE_NOTIFY is 3.3.5.19 and imposes no such limit;
+     * Samba queues, and so does Windows.)
      *
      * They are answered FIFO, one delivery cycle each: a change wakes the
      * OLDEST, which drains the ring and completes; the rest stay for the next

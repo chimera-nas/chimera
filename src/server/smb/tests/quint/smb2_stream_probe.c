@@ -196,10 +196,11 @@ probe_stream_lifecycle(struct smb2_conn *c)
     smb2_close(c, base.file_id);
 } /* probe_stream_lifecycle */
 
-/* Renaming a stream (MS-FSA 2.1.5.15.12.1): the target ":name[:$DATA]" names
- * another stream of the same file, so the stream is renamed in place -- the
- * base file keeps its name -- and a stream of the target name is replaced only
- * with ReplaceIfExists and only while empty. */
+/* Renaming a stream (MS-FSA 2.1.5.15.12.1 "Algorithm for Performing Stream
+ * Rename"): the target ":name[:$DATA]" names another stream of the same file,
+ * so the stream is renamed in place -- the base file keeps its name -- and a
+ * stream of the target name is replaced only with ReplaceIfExists and only
+ * while empty. */
 static void
 probe_stream_rename(struct smb2_conn *c)
 {

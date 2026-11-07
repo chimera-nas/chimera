@@ -415,7 +415,8 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
 
         case SMB2_FSCTL_GET_COMPRESSION:
         case SMB2_FSCTL_SET_COMPRESSION:
-            /* MS-FSA 2.1.5.10.7 / 2.1.5.10.36: an object store without
+            /* MS-FSA 2.1.5.10.9 FSCTL_GET_COMPRESSION /
+             * 2.1.5.10.30 FSCTL_SET_COMPRESSION: an object store without
              * compression (chimera advertises no FILE_FILE_COMPRESSION) fails
              * both with STATUS_INVALID_DEVICE_REQUEST (IFSTest SetCompressionTest,
              * SparseCompressedStreamTest). */
@@ -947,9 +948,10 @@ chimera_smb_parse_ioctl(
 
                 } else {
                     /* Any other tag is a reparse point chimera keeps verbatim
-                    * for the file (MS-FSA 2.1.5.10.37): stage the whole buffer,
-                    * header included, in rp_response.  A Microsoft tag has the
-                    * 8-byte header, any other the 24-byte one with a GUID. */
+                     * for the file (MS-FSA 2.1.5.10.37
+                     * FSCTL_SET_REPARSE_POINT): stage the whole buffer, header
+                     * included, in rp_response.  A Microsoft tag has the 8-byte
+                     * header, any other the 24-byte one with a GUID. */
                     uint32_t tag    = request->ioctl.rp_reparse_tag;
                     uint32_t n      = request->ioctl.input_count;
                     uint32_t header = SMB2_IO_REPARSE_TAG_IS_MICROSOFT(tag) ?
@@ -980,7 +982,8 @@ chimera_smb_parse_ioctl(
             case SMB2_FSCTL_DELETE_REPARSE_POINT:
             {
                 /* A bare REPARSE_[GUID_]DATA_BUFFER header naming the reparse
-                 * point to remove (MS-FSA 2.1.5.10.3). */
+                 * point to remove (MS-FSA 2.1.5.10.3
+                 * FSCTL_DELETE_REPARSE_POINT). */
                 uint16_t reserved;
 
                 if (request->ioctl.input_count < SMB2_REPARSE_DATA_HEADER_SIZE) {
@@ -1002,7 +1005,8 @@ chimera_smb_parse_ioctl(
             {
                 /* A whole FILE_OBJECTID_BUFFER (64 bytes) for SET, just its
                  * 48-byte extended part for SET_EXTENDED; anything else is
-                 * INVALID_PARAMETER (MS-FSA 2.1.5.10.35 / .36). */
+                 * INVALID_PARAMETER (MS-FSA 2.1.5.10.35 FSCTL_SET_OBJECT_ID /
+                 * 2.1.5.10.36 FSCTL_SET_OBJECT_ID_EXTENDED). */
                 uint32_t want = request->ioctl.ctl_code == SMB2_FSCTL_SET_OBJECT_ID ? 64 : 48;
 
                 if (request->ioctl.input_count != want ||

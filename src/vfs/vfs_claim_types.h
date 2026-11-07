@@ -24,10 +24,10 @@
  *   Table 2 (triggers): invalidation events (a write, a lock being taken, a
  *   conflicting open, a namespace op, a directory content change, a flush)
  *   with per-row victim selection, retain floor, exemptions, and completion.
- *   The temporally-asymmetric rules (MS-FSA 2.1.5.18 et al.) live here, not
- *   in the admission predicate -- a symmetric conflict(a,b) provably cannot
- *   express them (a standing R-cache survives a foreign shared lock while a
- *   fresh R-cache behind the same lock is denied).
+ *   The temporally-asymmetric rules (MS-FSA 2.1.5.18 "Server Requests an
+ *   Oplock" et al.) live here, not in the admission predicate -- a symmetric
+ *   conflict(a,b) provably cannot express them (a standing R-cache survives a
+ *   foreign shared lock while a fresh R-cache behind the same lock is denied).
  *
  *   The I/O predicate: mandatory byte-range enforcement, one-directional,
  *   carried by MAND rows on lock claims and consulted only by callers that

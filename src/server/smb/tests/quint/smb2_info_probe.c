@@ -136,8 +136,9 @@ probe_query_sweep(
                   "%s: %s -> 0x%08x (%u bytes, want %u)", what, ic->name, st,
                   len, ic->size);
         } else if (ic->cls == SMB2_FILE_FULL_EA_INFO_T) {
-            /* An object with no EAs answers STATUS_NO_EAS_ON_FILE, as NTFS
-             * does (MS-FSA 2.1.5.12.12); the EA section below reads a list. */
+            /* An object with no EAs answers STATUS_NO_EAS_ON_FILE, as NTFS does
+             * (MS-FSA 2.1.5.12.12 FileFullEaInformation); the EA section below
+             * reads a list. */
             CHECK(st == ST_NO_EAS_ON_FILE, "%s: %s -> 0x%08x (want "
                   "NO_EAS_ON_FILE)", what, ic->name, st);
         } else {
@@ -765,11 +766,11 @@ probe_ntfs_semantics(struct smb2_conn *c)
 
     printf("# --- NTFS file semantics ---\n");
 
-    /* AllocationSize (MS-FSA 2.1.5.15.1 / 2.1.5.15.5): the end of file in
-     * whole 4 KiB clusters whatever the backend allocates, an AllocationSize
-     * set below EOF truncates to it, one above EOF is kept as a reservation,
-     * and a truncation of the end of file gives clusters back only when the
-     * handle closes. */
+    /* AllocationSize (MS-FSA 2.1.5.15.1 FileAllocationInformation / 2.1.5.15.5
+     * FileEndOfFileInformation): the end of file in whole 4 KiB clusters
+     * whatever the backend allocates, an AllocationSize set below EOF truncates
+     * to it, one above EOF is kept as a reservation, and a truncation of the
+     * end of file gives clusters back only when the handle closes. */
     st = smb2_create(c, "alloc.bin", MBT_FILE_OVERWRITE_IF, MBT_FILE_ALL_ACCESS,
                      MBT_FILE_SHARE_RWD, NULL, &a);
     CHECK(st == ST_SUCCESS, "setup: CREATE alloc.bin -> 0x%08x", st);
@@ -825,8 +826,9 @@ probe_ntfs_semantics(struct smb2_conn *c)
     smb2_close(c, a.file_id);
     smb2_close(c, b.file_id);
 
-    /* A write marks a data file ARCHIVE (MS-FSA 2.1.4.17), even after the
-     * client cleared it. */
+    /* A write marks a data file ARCHIVE (MS-FSA 2.1.4.17 "Algorithm for Noting
+     * That a File Modification Time is Updated"), even after the client cleared
+     * it. */
     st = smb2_create(c, "archive.bin", MBT_FILE_OVERWRITE_IF,
                      MBT_FILE_ALL_ACCESS, MBT_FILE_SHARE_RWD, NULL, &a);
     CHECK(st == ST_SUCCESS, "setup: CREATE archive.bin -> 0x%08x", st);
@@ -887,7 +889,7 @@ probe_ntfs_semantics(struct smb2_conn *c)
     }
 
     /* A rename never replaces a directory, even with ReplaceIfExists
-     * (MS-FSA 2.1.5.15.12). */
+     * (MS-FSA 2.1.5.15.12 FileRenameInformation). */
     st = smb2_create_opts(c, "rendir1", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
                           MBT_FILE_SHARE_RWD, MBT_FILE_DIRECTORY_FILE, NULL, &d1);
     CHECK(st == ST_SUCCESS, "setup: CREATE rendir1 -> 0x%08x", st);
@@ -940,12 +942,12 @@ rename_under_held_dir(
     return st;
 } /* rename_under_held_dir */
 
-/* MS-FSA 2.1.5.15.12: the rename opens the destination directory for
- * FILE_ADD_FILE (FILE_ADD_SUBDIRECTORY for a directory) sharing READ|WRITE, and
- * fails with that open's error.  So an open of the directory that does not share
- * write, or that holds DELETE access (product note <185>), fails the rename with
- * SHARING_VIOLATION; an open that shares write and holds no DELETE does not
- * (smb2.rename.no_share_delete_no_delete_access). */
+/* MS-FSA 2.1.5.15.12 FileRenameInformation: the rename opens the destination
+ * directory for FILE_ADD_FILE (FILE_ADD_SUBDIRECTORY for a directory) sharing
+ * READ|WRITE, and fails with that open's error.  So an open of the directory
+ * that does not share write, or that holds DELETE access (product note <185>),
+ * fails the rename with SHARING_VIOLATION; an open that shares write and holds
+ * no DELETE does not (smb2.rename.no_share_delete_no_delete_access). */
 static void
 probe_rename_dst_parent_share(struct smb2_conn *c)
 {

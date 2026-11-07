@@ -108,7 +108,7 @@ The work spans three layers:
 
 ### Outstanding requests per handle
 
-A handle carries a **FIFO of outstanding requests**, not one. MS-FSA 2.1.5.9 keeps them on `Open.PendingNotifyChanges` and appends; an overlapped client keeps two or three `ReadDirectoryChangesW` calls posted on a directory precisely so there is never a window with none. A change wakes the **oldest**, which drains the ring and completes; the rest stay for the next one. A close, tree disconnect or logoff finishes **all** of them; a `CANCEL` ends exactly the one it names.
+A handle carries a **FIFO of outstanding requests**, not one. MS-FSA 2.1.5.11 "Server Requests Change Notifications for a Directory" keeps them on `Open.PendingNotifyChanges` and appends; an overlapped client keeps two or three `ReadDirectoryChangesW` calls posted on a directory precisely so there is never a window with none. A change wakes the **oldest**, which drains the ring and completes; the rest stay for the next one. A close, tree disconnect or logoff finishes **all** of them; a `CANCEL` ends exactly the one it names.
 
 Everything else about the handle — the VFS watch, the ring, the overflow and deleted flags — is shared by all of them, so this decides *which request is answered*, not what is observed.
 
@@ -165,7 +165,7 @@ Everything else about the handle — the VFS watch, the ring, the overflow and d
 - `vfs_proc_rename_at`: raises `RENAMED` or `RENAMED_DIR` according to the renamed object's type, which the caller supplies via `CHIMERA_VFS_RENAME_SRC_IS_DIR` — only the SMB layer knows it, since the open carries the type and the rename request does not. MS-FSCC 2.7.1 scopes `FILE_NOTIFY_CHANGE_FILE_NAME` to file names "including renaming" and `_DIR_NAME` to directory ones, so a `DIR_NAME` watcher must not be woken because a *file* was renamed. A caller that does not set the flag (every NFS and S3 path) raises `RENAMED`, which both name filters see — the conservative answer for a protocol that cannot tell us.
   - Intra-dir: a single event on the dir, carrying `(new_name, old_name)`. The SMB serializer expands this to a `FILE_ACTION_RENAMED_OLD_NAME` + `FILE_ACTION_RENAMED_NEW_NAME` pair.
   - Cross-dir: source dir gets `RENAMED(name=NULL, old_name=src)` (serializes as `RENAMED_OLD_NAME` only); dest dir gets `RENAMED(name=dst, old_name=NULL)` (serializes as `RENAMED_NEW_NAME` only). Matches Windows convention. The source-side `name_len==0` triggers a subtree overflow rather than running the resolver (which would otherwise build a leafless relpath).
-- `smb_proc_create`: keyed on what the open actually DID, not on the disposition it asked for (MS-FSA 2.1.5.1) —
+- `smb_proc_create`: keyed on what the open actually DID, not on the disposition it asked for (MS-FSA 2.1.5.1 "Server Requests an Open of a File") —
   - **created** (`r_created`): `DIR_ADDED` for a directory, `FILE_ADDED | STREAM_NAME` for a regular file (its default `$DATA` stream appears with it).
   - **overwritten/superseded** of a name that already existed: `FILE_MODIFIED | SIZE_CHANGED | ATTRS_CHANGED | STREAM_SIZE` — a MODIFIED, not an ADDED.
   - **opened** an existing file: nothing. Opening a file is not a change to the directory that holds it.

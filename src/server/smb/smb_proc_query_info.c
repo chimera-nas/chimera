@@ -403,13 +403,14 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
  * build the wire EA list, fetching each value with its own get_xattr.
  *
  * Without an EA list the entries come out in the backend's xattr order starting
- * at Open.NextEaEntry (MS-FSA 2.1.5.12.12), or at the 1-based EaIndex the client
- * passes in AdditionalInformation with SL_INDEX_SPECIFIED, or at the first with
- * SL_RESTART_SCAN; SL_RETURN_SINGLE_ENTRY stops after one.  With an EA list the
- * named EAs come out in the list's order, an absent one as an empty value, as
- * NTFS and FastFat answer.  Names go out upper-cased, as Windows file systems
- * return them.  As many entries as fit are returned; if some remain the status
- * is BUFFER_OVERFLOW, and if not even the first fits, BUFFER_TOO_SMALL. ---- */
+ * at Open.NextEaEntry (MS-FSA 2.1.5.12.12 FileFullEaInformation), or at the
+ * 1-based EaIndex the client passes in AdditionalInformation with
+ * SL_INDEX_SPECIFIED, or at the first with SL_RESTART_SCAN;
+ * SL_RETURN_SINGLE_ENTRY stops after one.  With an EA list the named EAs come
+ * out in the list's order, an absent one as an empty value, as NTFS and FastFat
+ * answer.  Names go out upper-cased, as Windows file systems return them.  As
+ * many entries as fit are returned; if some remain the status is
+ * BUFFER_OVERFLOW, and if not even the first fits, BUFFER_TOO_SMALL. ---- */
 
 #define CHIMERA_SMB_EA_QUERY_CAP_MAX (1u << 20)
 
@@ -938,9 +939,10 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     switch (request->query_info.info_type) {
         case SMB2_INFO_FILE:
             /* The attribute-bearing FILE info classes require the handle to
-             * hold FILE_READ_ATTRIBUTES (MS-FSA 2.1.5.11): a handle opened with
-             * only FILE_READ_DATA cannot query FileBasicInformation and friends
-             * -> STATUS_ACCESS_DENIED (smb2.streams.attributes1).  Classes that
+             * hold FILE_READ_ATTRIBUTES (MS-FSA 2.1.5.12 "Server Requests a
+             * Query of File Information"): a handle opened with only
+             * FILE_READ_DATA cannot query FileBasicInformation and friends ->
+             * STATUS_ACCESS_DENIED (smb2.streams.attributes1).  Classes that
              * carry no file attributes (standard sizes, internal id, EA size,
              * position, mode, alignment, access, name) are not gated. */
             switch (request->query_info.info_class) {

@@ -95,7 +95,8 @@ static int               g_park_barriered[MAX_FID];
  * when the request parks is what lets the completion be matched back to the
  * request it belongs to -- and what lets a CANCEL name it.
  *
- * A LIST, not one id: MS-FSA 2.1.5.9 keeps a handle's outstanding requests on
+ * A LIST, not one id: MS-FSA 2.1.5.11 "Server Requests Change Notifications for
+ * a Directory" keeps a handle's outstanding requests on
  * Open.PendingNotifyChanges and they are answered oldest-first, which is what
  * the model's `seq` indexes. */
 #define MAX_NOTIFY_Q 8
@@ -273,17 +274,17 @@ model_size_blocks(const char *name)
  * and only when it is observable (a file already empty cannot be emptied
  * again).
  *
- * This used to be where CD-3 lived: MS-FSA 2.1.5.1.2 runs the sharing check
- * before it modifies anything, chimera truncated first, and the harness
- * recognised the resulting size divergence and then ABANDONED the trace --
- * because the model and the server now held different state and every later
- * command would have reported the consequence rather than a finding.  Then the
- * deviation became a branch in the model (gated on DEVS) so the trace could
- * keep testing, and then it was fixed: the CREATE's content replacement now
- * runs after arbitration (chimera_smb_create_issue_truncate), so a refused
- * CREATE leaves the file alone and no cell declares CD-3 at all.  What is left
- * here is a pure oracle -- any size divergence at a refused CREATE is a
- * mismatch.
+ * This used to be where CD-3 lived: MS-FSA 2.1.5.1.2 "Open of an Existing File"
+ * runs the sharing check before it modifies anything, chimera truncated first,
+ * and the harness recognised the resulting size divergence and then ABANDONED
+ * the trace -- because the model and the server now held different state and
+ * every later command would have reported the consequence rather than a
+ * finding.  Then the deviation became a branch in the model (gated on DEVS) so
+ * the trace could keep testing, and then it was fixed: the CREATE's content
+ * replacement now runs after arbitration (chimera_smb_create_issue_truncate),
+ * so a refused CREATE leaves the file alone and no cell declares CD-3 at all.
+ * What is left here is a pure oracle -- any size divergence at a refused CREATE
+ * is a mismatch.
  *
  * The probe open is attribute-only and non-truncating, so it takes no part in
  * share arbitration in either direction and cannot change what the next
@@ -1789,12 +1790,13 @@ do_flush(
 
 /* ---- LOCK ---------------------------------------------------------------
  *
- * MS-SMB2 2.2.26.  The model's lock space is measured in the same units as
- * its I/O offsets (one model block), so a lock over [lo,hi) is the byte range
+ * MS-SMB2 2.2.26.  The model's lock space is measured in the same units as its
+ * I/O offsets (one model block), so a lock over [lo,hi) is the byte range
  * [lo*BS, hi*BS) on the wire -- the same scaling READ and WRITE use.  Getting
  * that wrong would make every lock disjoint from every I/O and the mandatory-
- * lock rule (MS-FSA 2.1.4.2/2.1.4.3) would go untested while every status
- * still matched. */
+ * lock rule (MS-FSA 2.1.4.10 "Algorithm for Determining If a Range Access
+ * Conflicts with Byte-Range Locks") would go untested while every status still
+ * matched. */
 static void
 do_lock(
     struct smb2_conn *c,

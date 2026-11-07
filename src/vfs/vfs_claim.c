@@ -1256,8 +1256,8 @@ chimera_vfs_claim_contended_floor(
         return 0;
     }
 
-    /* A byte-range lock is incompatible with any caching on the stream
-     * (MS-FSA 2.1.5.18): floor 0. */
+    /* A byte-range lock is incompatible with any caching on the stream (MS-FSA
+     * 2.1.5.8 "Server Requests a Byte-Range Lock"): floor 0. */
     if (probe->klass == CHIMERA_CLAIM_CLASS_RANGE &&
         holder->klass == CHIMERA_CLAIM_CLASS_CACHE) {
         return 0;
