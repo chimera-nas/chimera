@@ -2450,8 +2450,9 @@ cairn_apply_attrs(
         /* A reservation only holds while it exceeds the live data; once EOF is
          * set at/above it the reservation is subsumed and no longer separate.
          * A truncation by more than a 4 KiB cluster releases it too, as NTFS
-         * releases the clusters past the new EOF (MS-FSA 2.1.5.15.5); an
-         * AllocationSize set in the same call is applied after this. */
+         * releases the clusters past the new EOF (MS-FSA 2.1.5.15.5
+         * FileEndOfFileInformation); an AllocationSize set in the same call is
+         * applied after this. */
         if (inode->alloc_size <= inode->size ||
             inode->size + 4096 < ((old_size + 4095) & ~4095ULL)) {
             inode->alloc_size = 0;
@@ -7081,9 +7082,10 @@ cairn_remove_stream(
 } /* cairn_remove_stream */
 
 /* A rename between the unnamed data stream and a named one (MS-FSA
- * 2.1.5.15.12.1): the data moves between the base inode and the stream's.
- * Renaming the unnamed stream leaves the file an empty one; a named stream can
- * only become the unnamed one while that is empty. */
+ * 2.1.5.15.12.1 "Algorithm for Performing Stream Rename"): the data moves
+ * between the base inode and the stream's.  Renaming the unnamed stream leaves
+ * the file an empty one; a named stream can only become the unnamed one while
+ * that is empty. */
 static void
 cairn_rename_stream_default(
     struct cairn_thread        *thread,
@@ -7204,11 +7206,12 @@ cairn_rename_stream_default(
     cairn_queue_request(thread, request);
 } /* cairn_rename_stream_default */
 
-/* Rename a named stream of the file (MS-FSA 2.1.5.15.12.1): its record moves
- * to the new name, so open handles to it -- which name its inode -- stay
- * valid.  An existing stream of the new name is replaced only when asked and
- * only while empty.  Renames to or from the unnamed data stream move the data
- * (cairn_rename_stream_default). */
+/* Rename a named stream of the file (MS-FSA 2.1.5.15.12.1 "Algorithm for
+ * Performing Stream Rename"): its record moves to the new name, so open
+ * handles to it -- which name its inode -- stay valid.  An existing stream of
+ * the new name is replaced only when asked and only while empty.  Renames to
+ * or from the unnamed data stream move the data (cairn_rename_stream_default).
+ * */
 static void
 cairn_rename_stream(
     struct cairn_thread        *thread,

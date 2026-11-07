@@ -129,8 +129,9 @@ chimera_smb_write_callback(
         request->write.restore_attrs.va_mtime     = pre_attr->va_mtime;
     }
 
-    /* Writing a data file marks it for backup (MS-FSA 2.1.4.17): set ARCHIVE
-     * if the first write through this handle found it clear (IFSTest
+    /* Writing a data file marks it for backup (MS-FSA 2.1.4.17 "Algorithm for
+     * Noting That a File Modification Time is Updated"): set ARCHIVE if the
+     * first write through this handle found it clear (IFSTest
      * UpdateOnCloseTest, ArchiveAttributeTest). */
     if (!error_code &&
         !(request->write.open_file->flags & CHIMERA_SMB_OPEN_FILE_ARCHIVE_NOTED)) {
@@ -374,13 +375,13 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
-    /* A zero-length write accesses no byte range: per MS-FSA 2.1.5.3 it
-     * completes immediately with Count 0.  It must take NO byte-range-lock
-     * conflict (a 0-byte write inside another owner's exclusive lock is allowed
-     * -- smb2.lock.allow_zero_byte_write) and break NO oplock/lease (it changes
-     * no data, so cached readers stay valid -- smb2 readwrite write_none_*).
-     * Short-circuit here, before the lock-conflict check and the VFS write that
-     * would otherwise drive a read-cache break. */
+    /* A zero-length write accesses no byte range: per MS-FSA 2.1.5.4 "Server
+     * Requests a Write" it completes immediately with Count 0.  It must take NO
+     * byte-range-lock conflict (a 0-byte write inside another owner's exclusive
+     * lock is allowed -- smb2.lock.allow_zero_byte_write) and break NO
+     * oplock/lease (it changes no data, so cached readers stay valid -- smb2
+     * readwrite write_none_*).  Short-circuit here, before the lock-conflict
+     * check and the VFS write that would otherwise drive a read-cache break. */
     if (request->write.length == 0) {
         evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
         chimera_smb_open_file_release(request, request->write.open_file);

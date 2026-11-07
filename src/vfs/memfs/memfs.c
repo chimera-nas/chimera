@@ -1948,8 +1948,9 @@ memfs_apply_attrs(
         /* A reservation only holds while it exceeds the live data; once EOF is
          * set at/above it the reservation is subsumed and no longer separate.
          * A truncation by more than a 4 KiB cluster releases it too, as NTFS
-         * releases the clusters past the new EOF (MS-FSA 2.1.5.15.5); an
-         * AllocationSize set in the same call is applied after this. */
+         * releases the clusters past the new EOF (MS-FSA 2.1.5.15.5
+         * FileEndOfFileInformation); an AllocationSize set in the same call is
+         * applied after this. */
         if (inode->alloc_size <= inode->size ||
             inode->size + 4096 < ((old_size + 4095) & ~4095ULL)) {
             inode->alloc_size = 0;
@@ -7148,7 +7149,7 @@ memfs_rename_stream(
     if (request->rename_stream.namelen == 0) {
         /* Renaming the unnamed data stream: its data becomes a named stream
          * and the file is left a new, empty unnamed one (MS-FSA
-         * 2.1.5.15.12.1). */
+         * 2.1.5.15.12.1 "Algorithm for Performing Stream Rename"). */
         if (!S_ISREG(inode->mode) || request->rename_stream.new_namelen == 0) {
             evpl_mutex_unlock(&inode->lock);
             request->status = CHIMERA_VFS_EINVAL;
@@ -7209,8 +7210,8 @@ memfs_rename_stream(
         struct memfs_fork fork;
 
         /* Renaming to the unnamed data stream: the stream's data becomes the
-         * file's, which must be empty (MS-FSA 2.1.5.15.12.1), and the named
-         * stream is gone. */
+         * file's, which must be empty (MS-FSA 2.1.5.15.12.1 "Algorithm for
+         * Performing Stream Rename"), and the named stream is gone. */
         if (!S_ISREG(inode->mode) || inode->size) {
             evpl_mutex_unlock(&inode->lock);
             request->status = (!S_ISREG(inode->mode) ||
@@ -7250,7 +7251,8 @@ memfs_rename_stream(
     }
 
     if (target) {
-        /* Only an empty stream may be replaced (MS-FSA 2.1.5.15.12.1). */
+        /* Only an empty stream may be replaced (MS-FSA 2.1.5.15.12.1 "Algorithm
+         * for Performing Stream Rename"). */
         if (!(request->rename_stream.flags & CHIMERA_VFS_RENAME_STREAM_REPLACE)) {
             evpl_mutex_unlock(&inode->lock);
             request->status = CHIMERA_VFS_EEXIST;

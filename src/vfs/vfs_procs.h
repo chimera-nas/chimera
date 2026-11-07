@@ -450,8 +450,9 @@ chimera_vfs_readdir(
     chimera_vfs_readdir_complete_t  complete,
     void                           *private_data);
 
-/* SMB-style directory wildcard match (MS-FSA 2.1.4.4), exposed for callers that
- * filter outside chimera_vfs_readdir.  A NULL/empty pattern matches everything. */
+/* SMB-style directory wildcard match (MS-FSA 2.1.4.4 "Algorithm for Determining
+ * if a FileName Is in an Expression"), exposed for callers that filter outside
+ * chimera_vfs_readdir.  A NULL/empty pattern matches everything. */
 SYMBOL_EXPORT int
 chimera_vfs_dirent_match(
     const char *name,
@@ -1342,9 +1343,10 @@ chimera_vfs_list_streams(
     void                               *private_data);
 
 /* Rename a named stream of the base file referenced by `handle` (MS-FSA
- * 2.1.5.15.12.1).  An existing stream of the new name is replaced only with
- * CHIMERA_VFS_RENAME_STREAM_REPLACE (EEXIST otherwise), and only while it is
- * empty (EINVAL otherwise).  Open handles to the renamed stream stay valid. */
+ * 2.1.5.15.12.1 "Algorithm for Performing Stream Rename").  An existing stream
+ * of the new name is replaced only with CHIMERA_VFS_RENAME_STREAM_REPLACE
+ * (EEXIST otherwise), and only while it is empty (EINVAL otherwise).  Open
+ * handles to the renamed stream stay valid. */
 typedef void (*chimera_vfs_rename_stream_callback_t)(
     enum chimera_vfs_error          error_code,
     const struct chimera_vfs_attrs *pre_attr,

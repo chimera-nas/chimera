@@ -13,11 +13,12 @@
 #include "common/macros.h"
 
 /* -------------------------------------------------------------------------
- * SMB-style directory wildcard matching (MS-FSA 2.1.4.4), applied here in the
- * VFS core so the backends stay oblivious to filtering -- they always readdir
- * every entry and the core drops the non-matching ones before they reach the
- * caller's per-entry callback.  Only SMB QUERY_DIRECTORY passes a pattern;
- * every other caller passes NULL and gets the unfiltered scan.
+ * SMB-style directory wildcard matching (MS-FSA 2.1.4.4 "Algorithm for
+ * Determining if a FileName Is in an Expression"), applied here in the VFS core
+ * so the backends stay oblivious to filtering -- they always readdir every
+ * entry and the core drops the non-matching ones before they reach the caller's
+ * per-entry callback.  Only SMB QUERY_DIRECTORY passes a pattern; every other
+ * caller passes NULL and gets the unfiltered scan.
  *
  * Five metacharacters, case-insensitive (ASCII), modeled on Samba's
  * ms_fnmatch_core: '*' (zero+ of any char), '?' (exactly one), and the DOS

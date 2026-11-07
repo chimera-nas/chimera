@@ -716,10 +716,11 @@ struct chimera_smb_request {
              * SHARING_VIOLATION.  Separate from gen_finish_cb, which every path
              * that can defer its tail now sets. */
             uint8_t                            gen_may_park;
-            /* Deferred content replacement (MS-FSA 2.1.5.1.2: an open is
-             * adjudicated BEFORE the file is modified, so a refused CREATE must
-             * leave it untouched).  A truncating disposition therefore does NOT
-             * carry CHIMERA_VFS_OPEN_TRUNCATE into the VFS open; trunc_deferred
+            /* Deferred content replacement (MS-FSA 2.1.5.1.2 "Open of an
+             * Existing File": an open is adjudicated BEFORE the file is
+             * modified, so a refused CREATE must leave it untouched).  A
+             * truncating disposition therefore does NOT carry
+             * CHIMERA_VFS_OPEN_TRUNCATE into the VFS open; trunc_deferred
              * records that the replacement is still owed, and it is issued from
              * chimera_smb_create_issue_truncate once the share reservation is
              * granted -- while the transient write grant taken for the conflict
@@ -1182,13 +1183,14 @@ struct chimera_smb_request {
             uint32_t                           notify_mask;
             /* Rename information */
             struct chimera_smb_rename_info     rename_info;
-            /* Destination-parent share check (MS-FSA 2.1.5.15.12): a transient
-             * share probe (access=W, deny=D) on the dst parent.  An open of the
-             * parent that does not share write, or that holds DELETE, conflicts
-             * with it; when that open holds a directory lease, the probe
-             * triggers the HANDLE break (RH->R) and parks the rename until the
-             * holder closes (GRANTED -> rename proceeds) or keeps its handle
-             * (DENIED -> SHARING_VIOLATION).  dirlease.rename_dst_parent,
+            /* Destination-parent share check (MS-FSA 2.1.5.15.12
+             * FileRenameInformation): a transient share probe (access=W,
+             * deny=D) on the dst parent.  An open of the parent that does not
+             * share write, or that holds DELETE, conflicts with it; when that
+             * open holds a directory lease, the probe triggers the HANDLE break
+             * (RH->R) and parks the rename until the holder closes (GRANTED ->
+             * rename proceeds) or keeps its handle (DENIED ->
+             * SHARING_VIOLATION).  dirlease.rename_dst_parent,
              * rename.no_share_delete_no_delete_access. */
             struct chimera_vfs_claim           dp_probe;
             struct chimera_vfs_file_state     *dp_file_state;

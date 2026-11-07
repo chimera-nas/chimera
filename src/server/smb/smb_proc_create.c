@@ -1168,14 +1168,15 @@ chimera_smb_create_gen_open_file(
             held_granted = 0;
             held_denied  = 0;
 
-            /* But only a true STAT open -- attribute-only AND non-truncating
-             * -- is exempt from arbitration in the first place.  A truncating
-             * open is going to modify the file, so it asserts the write it
-             * just took AND its ShareAccess, in both directions, exactly like
-             * an ordinary writer.  Zeroing them here discarded the very write
-             * bit added just above, which is the one case where the truncate
-             * is the ONLY source of it (MS-FSA 2.1.5.1.2; found by replaying
-             * the spec corpus against Samba, which refuses these). */
+            /* But only a true STAT open -- attribute-only AND non-truncating --
+             * is exempt from arbitration in the first place.  A truncating open
+             * is going to modify the file, so it asserts the write it just took
+             * AND its ShareAccess, in both directions, exactly like an ordinary
+             * writer.  Zeroing them here discarded the very write bit added
+             * just above, which is the one case where the truncate is the ONLY
+             * source of it (MS-FSA 2.1.5.1.2 "Open of an Existing File"; found
+             * by replaying the spec corpus against Samba, which refuses
+             * these). */
             if (!truncating) {
                 granted = 0;
                 denied  = 0;
@@ -2671,9 +2672,9 @@ chimera_smb_create_open_stream_finish(
     request->create.base_oh = NULL;
 
     /*
-     * A stream that did not exist before now does: MS-FSA 2.1.5.1 raises
-     * FILE_NOTIFY_CHANGE_STREAM_NAME for it, and a client watching the
-     * containing directory expects to be woken (WPTS
+     * A stream that did not exist before now does: MS-FSA 2.1.5.1 "Server
+     * Requests an Open of a File" raises FILE_NOTIFY_CHANGE_STREAM_NAME for it,
+     * and a client watching the containing directory expects to be woken (WPTS
      * BVT_SMB2Basic_ChangeNotify_ChangeStreamName registers exactly that filter
      * on the directory, with WATCH_TREE, and then has a second client create a
      * stream on a file that already existed).
@@ -3169,11 +3170,11 @@ chimera_smb_create_open_at_callback(
             return;
         }
 
-        /* MS-FSA 2.1.5.1.2 "Check Access to an Existing File" (MS-FSA_R53 /
-         * R2422 / R54): the FILE_ATTRIBUTE_READONLY DOS bit is a write/delete
-         * fence separate from the DACL evaluated above.  For an existing
-         * non-directory file marked READONLY: a DesiredAccess asking for
-         * WRITE_DATA/APPEND_DATA is denied with ACCESS_DENIED, and a
+        /* MS-FSA 2.1.5.1.2.1 "Algorithm to Check Access to an Existing File"
+         * (MS-FSA_R53 / R2422 / R54): the FILE_ATTRIBUTE_READONLY DOS bit is a
+         * write/delete fence separate from the DACL evaluated above.  For an
+         * existing non-directory file marked READONLY: a DesiredAccess asking
+         * for WRITE_DATA/APPEND_DATA is denied with ACCESS_DENIED, and a
          * FILE_DELETE_ON_CLOSE with CANNOT_DELETE (a read-only file cannot be
          * deleted).  Truncating dispositions are gated earlier, so this covers
          * the OPEN / OPEN_IF paths.  Skipped for a durable reconnect, whose
@@ -3289,12 +3290,14 @@ chimera_smb_create_open_at_callback(
     }
 
     /* FILE_NON_DIRECTORY_FILE on a target that resolved to a directory is
-     * STATUS_FILE_IS_A_DIRECTORY (MS-SMB2 3.3.5.9 / MS-FSA 2.1.5.1).  chimera
-     * only translates FILE_DIRECTORY_FILE into the VFS open, so without this an
-     * open of a directory with the non-directory option silently succeeded.
-     * Applies only when the base object itself is the target: a named-stream
-     * open ("dir:stream:$DATA") opens a data fork, so the non-directory option
-     * is about the stream, not the directory carrying it (FSA ADS-on-dir). */
+     * STATUS_FILE_IS_A_DIRECTORY (MS-SMB2 3.3.5.9 / MS-FSA 2.1.5.1 "Server
+     * Requests an Open of a File").  chimera only translates
+     * FILE_DIRECTORY_FILE into the VFS open, so without this an open of a
+     * directory with the non-directory option silently succeeded.  Applies
+     * only when the base object itself is the target: a named-stream open
+     * ("dir:stream:$DATA") opens a data fork, so the non-directory option
+     * is about the stream, not the directory carrying it (FSA ADS-on-dir).
+     * */
     if ((request->create.create_options & SMB2_FILE_NON_DIRECTORY_FILE) &&
         !request->create.has_stream && S_ISDIR(attr->va_mode)) {
         chimera_smb_create_release_handle(vfs_thread, oh);
@@ -3688,8 +3691,8 @@ chimera_smb_create_open_finish(
     }
 
     /* What this open reports to watchers of the parent directory (MS-FSA
-     * 2.1.5.1).  Three outcomes, keyed on what the open actually DID rather
-     * than on the disposition it asked for:
+     * 2.1.5.1 "Server Requests an Open of a File").  Three outcomes, keyed on
+     * what the open actually DID rather than on the disposition it asked for:
      *
      *   created      the entry appeared: FILE_ADDED (DIR_ADDED for a
      *                directory), plus STREAM_NAME for a regular file, whose
@@ -4633,14 +4636,15 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
         } /* switch */
 
         /* Replacing an existing file's contents is NOT done here.  MS-FSA
-         * 2.1.5.1.2 adjudicates the open before it modifies the file, and this
-         * open has not been adjudicated yet: the share-mode claim and the
-         * lease-key binding rule can still refuse it, and a refused CREATE must
-         * leave the file untouched.  Carrying CHIMERA_VFS_OPEN_TRUNCATE here
-         * emptied the file first and refused afterwards.  The replacement is
-         * issued from chimera_smb_create_issue_truncate once the share
-         * reservation is granted (a fresh create already starts empty, which is
-         * why trunc_deferred is decided on r_created, not on the disposition
+         * 2.1.5.1.2 "Open of an Existing File" adjudicates the open before it
+         * modifies the file, and this open has not been adjudicated yet: the
+         * share-mode claim and the lease-key binding rule can still refuse it,
+         * and a refused CREATE must leave the file untouched.  Carrying
+         * CHIMERA_VFS_OPEN_TRUNCATE here emptied the file first and refused
+         * afterwards.  The replacement is issued from
+         * chimera_smb_create_issue_truncate once the share reservation is
+         * granted (a fresh create already starts empty, which is why
+         * trunc_deferred is decided on r_created, not on the disposition
          * alone). */
     }
 
@@ -5918,33 +5922,34 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
-        /* MS-SMB2 3.3.5.9 / MS-FSA 2.1.5.1: FILE_DIRECTORY_FILE and
-         * FILE_NON_DIRECTORY_FILE are mutually exclusive; both set together is
-         * STATUS_INVALID_PARAMETER. */
+        /* MS-SMB2 3.3.5.9 / MS-FSA 2.1.5.1 "Server Requests an Open of a File":
+         * FILE_DIRECTORY_FILE and FILE_NON_DIRECTORY_FILE are mutually
+         * exclusive; both set together is STATUS_INVALID_PARAMETER. */
         if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
             (request->create.create_options & SMB2_FILE_NON_DIRECTORY_FILE)) {
             chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
             return;
         }
 
-        /* MS-FSA 2.1.5.1 Phase 1: a directory cannot be temporary, so
-         * FILE_DIRECTORY_FILE with FILE_ATTRIBUTE_TEMPORARY is
-         * STATUS_INVALID_PARAMETER (IFSTEST OpenCreateGeneral:
-         * DirectoryFullPathCreationTest). */
+        /* MS-FSA 2.1.5.1 "Server Requests an Open of a File", Phase 1: a
+         * directory cannot be temporary, so FILE_DIRECTORY_FILE with
+         * FILE_ATTRIBUTE_TEMPORARY is STATUS_INVALID_PARAMETER (IFSTEST
+         * OpenCreateGeneral: DirectoryFullPathCreationTest). */
         if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
             (request->create.file_attributes & SMB2_FILE_ATTRIBUTE_TEMPORARY)) {
             chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
             return;
         }
 
-        /* MS-FSA 2.1.5.1 Phase 1 (MS-FSA_R2374 / R2376): a CreateOptions of
-         * FILE_DIRECTORY_FILE combined with a destructive CreateDisposition is
-         * a contradiction -- SUPERSEDE/OVERWRITE/OVERWRITE_IF replace the data
-         * of a target that, as a directory, has none -- so the open MUST fail
-         * with STATUS_INVALID_PARAMETER.  This validation runs in Phase 1,
-         * BEFORE the open reaches the backend and resolves a directory-vs-file
-         * type mismatch (which would otherwise surface as NOT_A_DIRECTORY and
-         * mask the parameter error).  FSAModel CreateFileTestCaseS24/S26,
+        /* MS-FSA 2.1.5.1 "Server Requests an Open of a File", Phase 1
+         * (MS-FSA_R2374 / R2376): a CreateOptions of FILE_DIRECTORY_FILE
+         * combined with a destructive CreateDisposition is a contradiction --
+         * SUPERSEDE/OVERWRITE/OVERWRITE_IF replace the data of a target that,
+         * as a directory, has none -- so the open MUST fail with
+         * STATUS_INVALID_PARAMETER.  This validation runs in Phase 1, BEFORE
+         * the open reaches the backend and resolves a directory-vs-file type
+         * mismatch (which would otherwise surface as NOT_A_DIRECTORY and mask
+         * the parameter error).  FSAModel CreateFileTestCaseS24/S26,
          * OpenFileTestCaseS22/S24. */
         if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
             (request->create.create_disposition == SMB2_FILE_SUPERSEDE ||
@@ -5962,13 +5967,13 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
-        /* A read-only file cannot be deleted, so a create that would make a
-         * new READONLY file and mark it delete-on-close is refused before
-         * anything is created: STATUS_CANNOT_DELETE (MS-FSA 2.1.5.1.1; IFSTest
-         * OpenCreateParameters:ReadOnlyAttributeTest).  Only the dispositions
-         * that apply this request's FileAttributes to a new instance; opening
-         * an existing read-only file with delete-on-close is fenced later,
-         * against the file's stored attributes. */
+        /* A read-only file cannot be deleted, so a create that would make a new
+         * READONLY file and mark it delete-on-close is refused before anything
+         * is created: STATUS_CANNOT_DELETE (MS-FSA 2.1.5.1.1 "Creation of a New
+         * File"; IFSTest OpenCreateParameters:ReadOnlyAttributeTest).  Only the
+         * dispositions that apply this request's FileAttributes to a new
+         * instance; opening an existing read-only file with delete-on-close is
+         * fenced later, against the file's stored attributes. */
         if ((request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) &&
             (request->create.file_attributes & SMB2_FILE_ATTRIBUTE_READONLY) &&
             (request->create.create_disposition == SMB2_FILE_CREATE ||
@@ -5990,18 +5995,20 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
-        /* MS-FSA 2.1.5.1 Phase 1 - Parameter Validation (MS-FSA_R376): when
-         * CreateOptions carries FILE_NO_INTERMEDIATE_BUFFERING the server MUST
-         * clear FILE_APPEND_DATA from DesiredAccess (unbuffered I/O cannot
-         * append).  Strip it before the zero-DesiredAccess check so the residual
-         * mask is what gets validated (FSAModel OpenFileTestCaseS28). */
+        /* MS-FSA 2.1.5.1 "Server Requests an Open of a File", Phase 1 -
+         * Parameter Validation (MS-FSA_R376): when CreateOptions carries
+         * FILE_NO_INTERMEDIATE_BUFFERING the server MUST clear FILE_APPEND_DATA
+         * from DesiredAccess (unbuffered I/O cannot append).  Strip it before
+         * the zero-DesiredAccess check so the residual mask is what gets
+         * validated (FSAModel OpenFileTestCaseS28). */
         if (request->create.create_options & SMB2_FILE_NO_INTERMEDIATE_BUFFERING) {
             request->create.desired_access &= ~SMB2_FILE_APPEND_DATA;
         }
 
-        /* MS-FSA 2.1.5.1 Phase 1 - Parameter Validation (MS-FSA_R377): a
-         * DesiredAccess of zero is not a valid open and MUST be failed with
-         * STATUS_ACCESS_DENIED (FSAModel OpenFileTestCaseS0/S28). */
+        /* MS-FSA 2.1.5.1 "Server Requests an Open of a File", Phase 1 -
+         * Parameter Validation (MS-FSA_R377): a DesiredAccess of zero is not a
+         * valid open and MUST be failed with STATUS_ACCESS_DENIED (FSAModel
+         * OpenFileTestCaseS0/S28). */
         if (request->create.desired_access == 0) {
             chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
             return;

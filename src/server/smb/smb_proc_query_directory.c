@@ -395,9 +395,10 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
      * crash the server on a QUERY_DIRECTORY against a pipe FID, the same crash
      * class already closed on QUERY_INFO and SET_INFO.
      *
-     * A pipe is not a DirectoryFile, so MS-FSA 2.1.5.5.3 fails the enumeration
-     * with STATUS_INVALID_PARAMETER.  Check before the position resets below so
-     * a rejected query leaves the open's enumeration state untouched. */
+     * A pipe is not a DirectoryFile, so MS-FSA 2.1.5.6.3 "Directory Information
+     * Queries" fails the enumeration with STATUS_INVALID_PARAMETER.  Check
+     * before the position resets below so a rejected query leaves the open's
+     * enumeration state untouched. */
     if (unlikely(request->query_directory.open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_PIPE)) {
         chimera_smb_open_file_release(request, request->query_directory.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
@@ -462,12 +463,13 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         request->query_directory.max_output_length = CHIMERA_SMB_MAX_TRANSACT_SIZE;
     }
 
-    /* MS-FSA 2.1.5.5.3: if OutputBufferLength is too small to hold even the
-     * fixed header of one entry of the requested FileInformationClass, the
-     * query is failed with STATUS_INFO_LENGTH_MISMATCH -- regardless of whether
-     * the directory has matching entries (WPTS MS-FSAModel QueryDirectory
-     * tiny-buffer cases).  The header sizes match the per-class expected_length
-     * base in the readdir callback below. */
+    /* MS-FSA 2.1.5.6.3 "Directory Information Queries": if OutputBufferLength
+     * is too small to hold even the fixed header of one entry of the requested
+     * FileInformationClass, the query is failed with
+     * STATUS_INFO_LENGTH_MISMATCH -- regardless of whether the directory has
+     * matching entries (WPTS MS-FSAModel QueryDirectory tiny-buffer cases).
+     * The header sizes match the per-class expected_length base in the readdir
+     * callback below. */
     uint32_t qd_header_len;
     switch (request->query_directory.info_class) {
         case SMB2_FILE_DIRECTORY_INFORMATION:         qd_header_len = 64;  break;

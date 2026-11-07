@@ -272,13 +272,14 @@ chimera_smb_round_cluster(uint64_t bytes)
     return (bytes + CHIMERA_SMB_CLUSTER_SIZE - 1) & ~(CHIMERA_SMB_CLUSTER_SIZE - 1);
 } /* chimera_smb_round_cluster */
 
-/* AllocationSize as a Windows file system reports it (MS-FSA 2.1.5.15.1 /
- * 2.1.5.15.5): a whole number of the clusters the volume advertises, covering
- * the end of file and any AllocationSize reservation past it.  A non-sparse
- * file is allocated through EOF whether or not it was written, so its backend
- * usage -- memfs counts 64 KiB chunks, diskfs keeps blocks a truncation left
- * behind -- does not enter into it.  A sparse file reports what the backend
- * actually holds, capped at what the non-sparse rule would give. */
+/* AllocationSize as a Windows file system reports it (MS-FSA 2.1.5.15.1
+ * FileAllocationInformation / 2.1.5.15.5 FileEndOfFileInformation): a whole
+ * number of the clusters the volume advertises, covering the end of file and
+ * any AllocationSize reservation past it.  A non-sparse file is allocated
+ * through EOF whether or not it was written, so its backend usage -- memfs
+ * counts 64 KiB chunks, diskfs keeps blocks a truncation left behind -- does
+ * not enter into it.  A sparse file reports what the backend actually holds,
+ * capped at what the non-sparse rule would give. */
 static inline uint64_t
 chimera_smb_alloc_size(const struct chimera_vfs_attrs *attr)
 {

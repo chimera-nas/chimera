@@ -681,7 +681,8 @@ probe_reparse(struct smb2_conn *c)
         smb2_close(c, ro.file_id);
     }
 
-    /* A mount point can only be set on a directory (MS-FSA 2.1.5.10.37). */
+    /* A mount point can only be set on a directory (MS-FSA 2.1.5.10.37
+     * FSCTL_SET_REPARSE_POINT). */
     make_file(c, "rp_other.bin", 0, 0, &co);
     memset(in, 0, sizeof(in));
     p32(in, 0, 0xA0000003u);          /* IO_REPARSE_TAG_MOUNT_POINT */
@@ -695,10 +696,12 @@ probe_reparse(struct smb2_conn *c)
     probe_reparse_generic(c);
 } /* probe_reparse */
 
-/* A tag chimera does not turn into a special file is kept verbatim: the
- * buffer round-trips, the file reports FILE_ATTRIBUTE_REPARSE_POINT, a plain
- * open is refused because no filter handles the tag, and a SET or DELETE has
- * to name the same tag and GUID (MS-FSA 2.1.5.10.3 / .14 / .37). */
+/* A tag chimera does not turn into a special file is kept verbatim: the buffer
+ * round-trips, the file reports FILE_ATTRIBUTE_REPARSE_POINT, a plain open is
+ * refused because no filter handles the tag, and a SET or DELETE has to name
+ * the same tag and GUID (MS-FSA 2.1.5.10.3 FSCTL_DELETE_REPARSE_POINT,
+ * 2.1.5.10.14 FSCTL_GET_REPARSE_POINT, 2.1.5.10.37 FSCTL_SET_REPARSE_POINT).
+ * */
 static int
 build_guid_reparse(
     uint8_t    *buf,
@@ -783,8 +786,10 @@ probe_reparse_generic(struct smb2_conn *c)
     smb2_close(c, ro.file_id);
 } /* probe_reparse_generic */
 
-/* Object IDs (MS-FSA 2.1.5.10.1/.2/.13/.35/.36): stored per file, unique on
- * the volume. */
+/* Object IDs (MS-FSA 2.1.5.10.1 FSCTL_CREATE_OR_GET_OBJECT_ID, 2.1.5.10.2
+ * FSCTL_DELETE_OBJECT_ID, 2.1.5.10.13 FSCTL_GET_OBJECT_ID, 2.1.5.10.35
+ * FSCTL_SET_OBJECT_ID, 2.1.5.10.36 FSCTL_SET_OBJECT_ID_EXTENDED): stored per
+ * file, unique on the volume. */
 static void
 probe_object_id(struct smb2_conn *c)
 {

@@ -233,9 +233,10 @@ void chimera_smb_parse_sd_to_attrs(
     struct chimera_vfs_attrs *attrs);
 
 /* SECURITY_INFORMATION bits (MS-DTYP 2.4.7): the AdditionalInformation of a
- * security QUERY_INFO / SET_INFO names the descriptor components the client
- * is reading or replacing.  Everything else in the descriptor it sends is
- * context the server MUST leave alone (MS-FSA 2.1.5.16). */
+ * security QUERY_INFO / SET_INFO names the descriptor components the client is
+ * reading or replacing.  Everything else in the descriptor it sends is context
+ * the server MUST leave alone (MS-FSA 2.1.5.17 "Server Requests Setting of
+ * Security Information"). */
 #define SMB_OWNER_SECURITY_INFORMATION               0x00000001
 #define SMB_GROUP_SECURITY_INFORMATION               0x00000002
 #define SMB_DACL_SECURITY_INFORMATION                0x00000004

@@ -157,10 +157,11 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
 
     /* A request already outstanding on this handle owns the ring until it is
      * answered, so this one parks behind it rather than draining ahead of it.
-     * MS-FSA 2.1.5.9 keeps the requests on a list and serves them in order;
-     * there is no one-at-a-time rule to enforce here (this used to refuse the
-     * second with STATUS_INVALID_PARAMETER, citing MS-SMB2 3.3.5.10 -- which
-     * is Receiving an SMB2 CLOSE Request). */
+     * MS-FSA 2.1.5.11 "Server Requests Change Notifications for a Directory"
+     * keeps the requests on a list and serves them in order; there is no
+     * one-at-a-time rule to enforce here (this used to refuse the second with
+     * STATUS_INVALID_PARAMETER, citing MS-SMB2 3.3.5.10 -- which is Receiving
+     * an SMB2 CLOSE Request). */
     if (state->q_head) {
         goto park;
     }

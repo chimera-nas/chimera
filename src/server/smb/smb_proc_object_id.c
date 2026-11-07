@@ -13,7 +13,10 @@
 #include "vfs/vfs_release.h"
 
 /*
- * Object IDs (MS-FSA 2.1.5.10.1/.2/.13/.35/.36; MS-FSCC 2.1.3).
+ * Object IDs (MS-FSA 2.1.5.10.1 FSCTL_CREATE_OR_GET_OBJECT_ID, 2.1.5.10.2
+ * FSCTL_DELETE_OBJECT_ID, 2.1.5.10.13 FSCTL_GET_OBJECT_ID, 2.1.5.10.35
+ * FSCTL_SET_OBJECT_ID, 2.1.5.10.36 FSCTL_SET_OBJECT_ID_EXTENDED; MS-FSCC
+ * 2.1.3).
  *
  * A file's FILE_OBJECTID_BUFFER -- ObjectId, BirthVolumeId, BirthObjectId and
  * DomainId, 16 bytes each -- is its chimera.objectid xattr, outside the user.
@@ -378,7 +381,8 @@ chimera_smb_oid_current_cb(
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
         default:
             if (have) {
-                /* Fill birth IDs a bare SET left empty (MS-FSA 2.1.5.10.1). */
+                /* Fill birth IDs a bare SET left empty (MS-FSA 2.1.5.10.1
+                 * FSCTL_CREATE_OR_GET_OBJECT_ID). */
                 if (memcmp(request->ioctl.oid_buffer + 16, chimera_smb_oid_zero, 16) == 0 &&
                     memcmp(request->ioctl.oid_buffer + 32, chimera_smb_oid_zero, 16) == 0) {
                     memcpy(request->ioctl.oid_buffer + 16,

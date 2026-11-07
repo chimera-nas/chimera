@@ -797,12 +797,12 @@ diskfs_remove_stream(
 /* RENAME_STREAM                                                       */
 /* ------------------------------------------------------------------ */
 
-/* Rename a named stream of the file (MS-FSA 2.1.5.15.12.1): its record moves
-* to the new name, so open handles to it -- which name its inode -- stay
-* valid.  An existing stream of the new name is replaced only when asked and
-* only while empty.
-*
-* inode_stash[0] = base file, inode_stash[2] = the replaced stream's inode */
+/* Rename a named stream of the file (MS-FSA 2.1.5.15.12.1 "Algorithm for
+ * Performing Stream Rename"): its record moves to the new name, so open handles
+ * to it -- which name its inode -- stay valid.  An existing stream of the new
+ * name is replaced only when asked and only while empty.
+ *
+ * inode_stash[0] = base file, inode_stash[2] = the replaced stream's inode */
 
 static void
 diskfs_rename_stream_inserted_cb(

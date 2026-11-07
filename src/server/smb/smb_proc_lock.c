@@ -936,15 +936,16 @@ chimera_smb_lock(struct chimera_smb_request *request)
         }
     }
 
-    /* MS-SMB2 3.3.4.x / [MS-FSA] 2.1.5.1.2: requesting a byte-range lock revokes
-     * READ caching on every OTHER holder's lease -- a cached reader cannot be
-     * trusted once another open coordinates access via locks.  This is the same
-     * read-cache revocation a write performs (break to NONE; no acknowledgment
-     * required), so reuse it.  The locker self-exempts via its own grant identity
-     * (RqLs lease key, or file id for a legacy oplock), mirroring the WRITE path,
-     * so a client locking through its own caching handle does not break itself.
-     * (WPTS MS-SMB2Model BreakRead*HandleLease: after the handle break settles the
-     * holder to R, a peer RANGE_LOCK must then break that R lease to NONE.) */
+    /* MS-SMB2 3.3.4.x / [MS-FSA] 2.1.5.8 "Server Requests a Byte-Range Lock":
+     * requesting a byte-range lock revokes READ caching on every OTHER holder's
+     * lease -- a cached reader cannot be trusted once another open coordinates
+     * access via locks.  This is the same read-cache revocation a write
+     * performs (break to NONE; no acknowledgment required), so reuse it.  The
+     * locker self-exempts via its own grant identity (RqLs lease key, or file
+     * id for a legacy oplock), mirroring the WRITE path, so a client locking
+     * through its own caching handle does not break itself.  (WPTS MS-SMB2Model
+     * BreakRead*HandleLease: after the handle break settles the holder to R, a
+     * peer RANGE_LOCK must then break that R lease to NONE.) */
     {
         struct chimera_claim_actor brk_actor;
         memset(&brk_actor, 0, sizeof(brk_actor));

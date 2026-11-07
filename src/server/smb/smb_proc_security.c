@@ -908,12 +908,13 @@ chimera_smb_set_decode_sd(
     vfs_attrs->va_owner_sid = NULL;
     vfs_attrs->va_group_sid = NULL;
 
-    /* Only the components AdditionalInformation names are being set
-     * (MS-FSA 2.1.5.16); the owner, group or DACL a client also carries in
-     * the descriptor for a SACL / label / attribute class set is context, not
-     * a request to replace them.  A Windows copy replays the source file's
-     * resource-attribute class that way, with an Administrators-only DACL
-     * alongside: applying it locked the owner out of its own new file. */
+    /* Only the components AdditionalInformation names are being set (MS-FSA
+     * 2.1.5.17 "Server Requests Setting of Security Information"); the owner,
+     * group or DACL a client also carries in the descriptor for a SACL / label
+     * / attribute class set is context, not a request to replace them.  A
+     * Windows copy replays the source file's resource-attribute class that way,
+     * with an Administrators-only DACL alongside: applying it locked the owner
+     * out of its own new file. */
     chimera_smb_sd_to_acl(request->set_info.sec_buf,
                           request->set_info.sec_buf_len,
                           request->set_info.addl_info,
@@ -994,7 +995,7 @@ chimera_smb_set_security(struct chimera_smb_request *request)
     uint32_t                   required  = 0;
     int                        i;
 
-    /* MS-FSA 2.1.5.16 (Server Requests Setting of Security Information): the
+    /* MS-FSA 2.1.5.17 "Server Requests Setting of Security Information": the
      * handle's GrantedAccess must permit each SecurityInformation component
      * being set, else the whole SET fails with STATUS_ACCESS_DENIED and no part
      * of the descriptor is applied (WPTS MS-FSAModel SetSecurityInformation):

@@ -546,16 +546,16 @@ chimera_vfs_claim_trigger_row(
     switch (trigger) {
         case CHIMERA_TRIGGER_WRITE:
         case CHIMERA_TRIGGER_SMB_LOCK:
-            /* A write (or an SMB byte-range lock, MS-FSA 2.1.5.18) stales
-             * every read cache to 0.  RqLs and W-coherent holders
-             * self-exempt by owner/KEY; a legacy oplock WITHOUT the write
-             * cache (a LEVEL_II grant, or an exclusive/batch already
-             * downgraded to a read cache) confers no write coherence and
-             * NEVER self-exempts (batch6: a write by one LEVEL_II holder
-             * breaks BOTH LEVEL_II oplocks, including the writer's own).
-             * An exclusive/batch holder still holding CW is coherent and
-             * self-exempts like a lease.  (Mode-scored, not construct-
-             * scored: the old rule was is_oplock && !(granted & W).) */
+            /* A write (or an SMB byte-range lock, MS-FSA 2.1.4.12 "Algorithm to
+             * Check for an Oplock Break") stales every read cache to 0.  RqLs
+             * and W-coherent holders self-exempt by owner/KEY; a legacy oplock
+             * WITHOUT the write cache (a LEVEL_II grant, or an exclusive/batch
+             * already downgraded to a read cache) confers no write coherence
+             * and NEVER self-exempts (batch6: a write by one LEVEL_II holder
+             * breaks BOTH LEVEL_II oplocks, including the writer's own).  An
+             * exclusive/batch holder still holding CW is coherent and
+             * self-exempts like a lease.  (Mode-scored, not construct-scored:
+             * the old rule was is_oplock && !(granted & W).) */
             if (!(victim->used & CHIMERA_CLAIM_CR)) {
                 return;
             }
