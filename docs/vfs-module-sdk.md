@@ -154,9 +154,10 @@ Version 6 carries the windows-identity ACL capability
 64-bit capability word):
 the core-owned `acl_windows` block in `struct chimera_vfs_request` (the
 completion wrapper that resolves SID-only ACL principals on a
-windows-identity mount); the readdir warm-dedup fields
-(`readdir.acl_warmed_n` / `acl_warmed`) and the bounce-buffer
-`readdir.bounce_status` in the request's readdir block;
+windows-identity mount); in the request's readdir block, the mount flag
+`readdir.acl_windows`, the warm-dedup fields `readdir.acl_warmed_n` /
+`acl_warmed` (sized by `CHIMERA_VFS_ACL_WARM_MAX`) and the bounce-buffer
+`readdir.bounce_status`;
 `CHIMERA_VFS_ATTR_ACL_WITHHELD` (attribute bit 32), set on readdir entries
 whose ACL the core withheld; and a new obligation on modules, namely that
 on such a mount the core rewrites the reply ACL in place, so the module
@@ -187,26 +188,35 @@ The contract:
   place, so a module on such a mount must return its reply ACL in private,
   writable storage.  Request-owned memory (`chimera_vfs_request_alloc_memory`)
   always qualifies.  Module thread-local scratch qualifies only for an op the
-  module completes on the thread that dispatched it: a blocking op's reply is
-  rewritten after its completion has crossed back to the dispatching thread,
-  when the delegation thread may be reusing its scratch, so it needs request
-  memory, as any pointer-valued reply of a blocking op does.  Memory shared
-  with a cache or other replies never qualifies.
+  module completes on the thread that dispatched it, never for one the core
+  runs on a delegation thread -- a blocking op, or any op when async
+  delegation threads are configured.  Such an op's reply is rewritten after
+  its completion has crossed back to the dispatching thread, when the
+  delegation thread may be reusing its scratch, so it needs request memory,
+  as any pointer-valued reply of a delegated op does.  Memory shared with a
+  cache or other replies never qualifies.
 
 Behaviour operators and protocol authors can rely on:
 
 * **Fail closed without a SID-capable identity handler.**  A flagged mount
   with no SID-capable identity handler (winbind absent) fails fetches of
   ACLs bearing native SIDs.  This is by design: guessing an identity would
-  grant or deny wrongly.
+  grant or deny wrongly.  Each such failure is logged at error level,
+  rate-limited, naming the cause.
+* **A failed fetch can follow a completed change.**  When an op that
+  creates an object or sets its attributes asks for the ACL in its reply
+  (an SMB CREATE does), the EIO comes after the module has made the change:
+  the object exists although the caller saw the op fail, and the op's
+  change notification and cache updates are skipped.
 * **Unknown SIDs.**  A SID the authority positively reports as unknown
   stays in the ACL as an opaque principal that matches no caller.
 * **What winbind can report as an outage.**  libwbclient gives an
   unreachable domain controller or idmap backend the same error code as an
-  identity that does not exist, so while winbindd is running such a SID is
-  treated as unknown -- opaque, and cached as a miss for 60 seconds --
-  rather than failing the fetch.  Only winbindd itself being down, or a
-  failure local to the lookup, fails closed.
+  identity that does not exist, so while winbindd is running such an outage
+  is not failed closed: reads treat the SID as unknown, and writes store an
+  algorithmic SID for a domain user.  Only winbindd itself being down is
+  reliably an outage.  `src/server/smb/smb_wbclient_status.h` states the
+  limit and its consequences in full.
 * **Readdir is cache-only.**  Directory listings never block on the
   resolver; entries whose ACL needs a cold resolution are queued for
   warming and their ACL is withheld (`CHIMERA_VFS_ATTR_ACL_WITHHELD`).

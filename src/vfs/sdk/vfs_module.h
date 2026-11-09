@@ -274,8 +274,9 @@ struct chimera_vfs_handle_state {
  *    module must return that ACL in private, writable storage: request
  *    memory (chimera_vfs_request_alloc_memory) always qualifies; module
  *    thread-local scratch only for an op completed on the dispatching
- *    thread, never for a blocking op; memory shared with a cache or with
- *    other replies never.
+ *    thread, never for one the core runs on a delegation thread (a blocking
+ *    op, or any op when async delegation threads are configured); memory
+ *    shared with a cache or with other replies never.
  *  - The module's own access gates see the stored SID-only ACL, not the
  *    resolved one; docs/vfs-module-sdk.md says what that does and does not
  *    enforce.
@@ -285,8 +286,8 @@ struct chimera_vfs_handle_state {
  * with CHIMERA_VFS_EINVAL.  The same mount-time check refuses the
  * "windows_acl" mount option on a module without ACL_NATIVE.
  *
- * The bit lives above bit 31 because the 32-bit capability space is full;
- * capabilities is a uint64_t. */
+ * The bit lives above bit 31 because no unretired bit is left below it
+ * (retired bits are not reused); capabilities is a uint64_t. */
 #define CHIMERA_VFS_CAP_ACL_WINDOWS           (1ULL << 32)
 
 /* If set, the module delegates discretionary access control to a real

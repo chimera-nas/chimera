@@ -35,7 +35,8 @@ main(void)
 {
     expect(WBC_ERR_SUCCESS, CHIMERA_VFS_IDENTITY_OK);
 
-    /* Winbind answered that the identity does not exist. */
+    /* Winbind answered that the identity does not exist, or the SID string
+     * is too malformed to name anyone. */
     expect(WBC_ERR_INVALID_SID, CHIMERA_VFS_IDENTITY_NOT_FOUND);
     expect(WBC_ERR_DOMAIN_NOT_FOUND, CHIMERA_VFS_IDENTITY_NOT_FOUND);
     expect(WBC_ERR_UNKNOWN_USER, CHIMERA_VFS_IDENTITY_NOT_FOUND);
