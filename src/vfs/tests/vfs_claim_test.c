@@ -26,6 +26,7 @@
 #include <assert.h>
 
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_claim_owner.h"
 #include "vfs/vfs_internal.h"
 #include "common/logging.h"
 
@@ -1691,6 +1692,35 @@ test_midbreak_deepen_one_epoch(void)
     chimera_vfs_state_destroy(state);
 } /* test_midbreak_deepen_one_epoch */
 
+/* The trigger engine pins a grant-less claim through its registered owner
+ * before dispatching begin_break unlocked (see chimera_vfs_claim_ref_take).
+ * The real FUSE grant owner is registered by chimera_fuse_coherence_register(),
+ * which this standalone claim-core test does not link; stand in with a
+ * trivial always-live probe so the pin succeeds. */
+static bool
+fuse_grant_test_try_get(
+    struct chimera_vfs_claim *claim,
+    void                     *private_data)
+{
+    (void) claim;
+    (void) private_data;
+    return true;
+} /* fuse_grant_test_try_get */
+
+static void
+fuse_grant_test_put(
+    void                     *private_data,
+    struct chimera_vfs_state *state)
+{
+    (void) private_data;
+    (void) state;
+} /* fuse_grant_test_put */
+
+static const struct chimera_vfs_claim_owner_ops fuse_grant_test_ops = {
+    .try_get = fuse_grant_test_try_get,
+    .put     = fuse_grant_test_put,
+};
+
 /* FUSE sync grant: DELEG_R-shaped admission, ADVERTISE_NEVER at
  * break-begin (a conflicting writer keeps waiting for the real ack, the
  * coherence=sync contract), CLIENT-circle self-exemption, and WRITE
@@ -1708,6 +1738,10 @@ test_fuse_grant_sync_semantics(void)
     struct break_recorder             rec = { 0 };
 
     fprintf(stderr, "\ntest_fuse_grant_sync_semantics\n");
+
+    chimera_vfs_claim_owner_register(CHIMERA_CONSTRUCT_FUSE_GRANT,
+                                     CHIMERA_CLAIM_PROTO_FUSE,
+                                     &fuse_grant_test_ops);
 
     state = chimera_vfs_state_init();
     file  = get_file(state, 1);
@@ -2154,6 +2188,178 @@ test_revoked_holder_raced_breaking(void)
     chimera_vfs_state_destroy(state);
 } /* test_revoked_holder_raced_breaking */
 
+/* Owner pins ---------------------------------------------------------- */
+
+/* Stand-in for a protocol owner's lifetime primitive: counts the references
+ * and can refuse them, as an owner whose teardown has committed will. */
+struct owner_pin_probe {
+    int  gets;
+    int  puts;
+    bool refuse;
+};
+
+static bool
+probe_try_get(
+    struct chimera_vfs_claim *claim,
+    void                     *private_data)
+{
+    struct owner_pin_probe *p = private_data;
+
+    (void) claim;
+
+    p->gets++;
+
+    return !p->refuse;
+} /* probe_try_get */
+
+static void
+probe_put(
+    void                     *private_data,
+    struct chimera_vfs_state *state)
+{
+    struct owner_pin_probe *p = private_data;
+
+    (void) state;
+
+    p->puts++;
+} /* probe_put */
+
+static const struct chimera_vfs_claim_owner_ops probe_owner_ops = {
+    .try_get = probe_try_get,
+    .put     = probe_put,
+};
+
+/* A claim the core does not own is protected by the owner's pin, taken while
+ * the selection lock is held and dropped after the dispatch.  An owner that
+ * has committed to teardown refuses the pin rather than handing out a
+ * reference to an object it is about to free. */
+static void
+test_claim_owner_pin(void)
+{
+    struct chimera_vfs_claim     claim;
+    struct chimera_vfs_claim     unowned;
+    struct chimera_vfs_claim_ref ref;
+    struct chimera_claim_owner   owner;
+    struct owner_pin_probe       probe = { 0 };
+
+    fprintf(stderr, "\ntest_claim_owner_pin\n");
+
+    chimera_vfs_claim_owner_register(CHIMERA_CONSTRUCT_DELEG_W,
+                                     CHIMERA_CLAIM_PROTO_INTERNAL,
+                                     &probe_owner_ops);
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_INTERNAL, 0xA, 1);
+    chimera_vfs_claim_init_delegation(&claim, true, &owner);
+    claim.cb_private = &probe;
+
+    CHECK(chimera_vfs_claim_ref_take(&claim, &ref),
+          "owner pin taken for a claim with no grant");
+    CHECK(ref.grant == NULL && ref.ops == &probe_owner_ops,
+          "pin records the owner ops it took the reference with");
+    CHECK(probe.gets == 1 && probe.puts == 0, "one reference outstanding");
+
+    chimera_vfs_claim_ref_drop(NULL, &ref);
+    CHECK(probe.puts == 1, "drop hands the reference back exactly once");
+    CHECK(ref.claim == NULL && ref.ops == NULL, "dropped pin is inert");
+
+    probe.refuse = true;
+    CHECK(!chimera_vfs_claim_ref_take(&claim, &ref),
+          "pin refused once the owner has committed to teardown");
+    CHECK(probe.gets == 2 && probe.puts == 1,
+          "a refused pin takes no reference");
+
+    /* No registration for this kind: the claim is caller-managed (the
+     * pre-existing assumption for every claim before this pin mechanism
+     * existed), so the core treats it as always safely pinnable. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_POSIX, 0xB, 2);
+    chimera_vfs_claim_init_delegation(&unowned, true, &owner);
+
+    CHECK(chimera_vfs_claim_ref_take(&unowned, &ref),
+          "unregistered owner kind is treated as caller-managed and pinned");
+    CHECK(ref.grant == NULL && ref.ops == NULL,
+          "caller-managed pin records no owner ops");
+} /* test_claim_owner_pin */
+
+/* No-op break callback: used solely to make a claim revocable (per
+ * chimera_vfs_claim_revocable(), which keys off break_cb != NULL) without
+ * tying the claim's cb_private to a break_recorder, since cb_private here
+ * is doing double duty as the owner_pin_probe private data.  The pin is
+ * refused before begin_break_ex is ever reached in this test, so this is
+ * never actually invoked. */
+static void
+noop_break_cb(
+    struct chimera_vfs_claim *claim,
+    uint8_t                   needed_mode,
+    void                     *priv)
+{
+    (void) claim;
+    (void) needed_mode;
+    (void) priv;
+} /* noop_break_cb */
+
+/* Regression test for the selection-to-pin race fixed alongside the owner
+ * pin mechanism: try_acquire's BREAKING loop re-admits a conflict and pins
+ * it with chimera_vfs_claim_ref_take() in the same critical section, before
+ * ever touching it again.  A refused pin means a concurrent teardown won
+ * the race for that holder -- e.g. DELEGRETURN/CLOSE freed it in what used
+ * to be the unlocked gap between selection and pin -- so try_acquire must
+ * back off onto the holder's own pump rather than dereferencing it. */
+static void
+test_try_acquire_breaking_conflict_pin_refused(void)
+{
+    struct chimera_vfs_state         *state;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_claim          a, b;
+    struct chimera_claim_owner        owner;
+    enum chimera_vfs_claim_result     r;
+    struct chimera_vfs_claim_conflict conflict;
+    struct owner_pin_probe            probe = { 0 };
+
+    fprintf(stderr, "\ntest_try_acquire_breaking_conflict_pin_refused\n");
+
+    chimera_vfs_claim_owner_register(CHIMERA_CONSTRUCT_OPLOCK_II,
+                                     CHIMERA_CLAIM_PROTO_INTERNAL,
+                                     &probe_owner_ops);
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    /* Client A holds an R-cache oplock whose owner is pinnable -- until its
+     * teardown commits.  A non-NULL break_cb is required for the holder to
+     * be revocable at all (chimera_vfs_claim_revocable()); without it the
+     * admission predicate treats the conflict as hard and denies B outright,
+     * never reaching the BREAKING loop's pin attempt this test targets. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_INTERNAL, 0xA, 1);
+    chimera_vfs_claim_init_oplock(&a, CHIMERA_CLAIM_CR, &owner);
+    a.break_cb   = noop_break_cb;
+    a.cb_private = &probe;
+
+    r = chimera_vfs_claim_try_acquire(state, file, &a, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "R-cache granted");
+
+    /* Simulate a's owner having already committed to teardown by the time
+     * B's request reaches the BREAKING loop: every pin attempt on a is
+     * refused from here on, exactly as a freed/freeing holder's owner
+     * would refuse. */
+    probe.refuse = true;
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_SMB2, 0xB, 2);
+    chimera_vfs_claim_init_oplock(&b, CHIMERA_CLAIM_CW, &owner);
+
+    r = chimera_vfs_claim_try_acquire(state, file, &b, &conflict);
+    CHECK(r == CHIMERA_CLAIM_BREAKING,
+          "W-cache request reports BREAKING instead of touching a refused pin");
+    CHECK(probe.gets >= 1, "the core attempted to pin the selected conflict");
+    CHECK(probe.puts == 0,
+          "a refused pin is never paired with a drop -- no reference was taken");
+    CHECK(a.break_state != CHIMERA_CLAIM_BREAK_BREAKING,
+          "the refused holder was never dispatched a break");
+
+    chimera_vfs_claim_release(state, file, &a);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_try_acquire_breaking_conflict_pin_refused */
+
 
 /* Main ---------------------------------------------------------------- */
 int
@@ -2200,6 +2406,8 @@ main(
     test_write_trigger_legacy_self_break();
     test_midbreak_deepen_one_epoch();
     test_fuse_grant_sync_semantics();
+    test_claim_owner_pin();
+    test_try_acquire_breaking_conflict_pin_refused();
 
     fprintf(stderr, "\n========================================\n");
     fprintf(stderr, "Results: %d passed, %d failed\n", passed, failed);

@@ -18,6 +18,13 @@
 #include "server/server.h"
 #include "vfs/vfs_release.h"
 
+/* Implemented in fuse_coherence.c: registers the claim owner pin for cache
+ * grants with the claim core, so a break/revoke dispatch can hold a grant
+ * across the unlock. */
+void
+chimera_fuse_coherence_register(
+    void);
+
 static void *
 fuse_server_init(
     const struct chimera_server_config *config,
@@ -56,6 +63,8 @@ fuse_server_init(
     evpl_mutex_init(&shared->lock, NULL);
     evpl_mutex_init(&shared->notifier_lock, NULL);
     evpl_cond_init(&shared->notifier_cond, NULL);
+
+    chimera_fuse_coherence_register();
 
     return shared;
 } /* fuse_server_init */
