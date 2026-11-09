@@ -16,6 +16,7 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdio.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -264,6 +265,44 @@ chimera_vfs_identity_run_handlers(
     return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
 } /* chimera_vfs_identity_run_handlers */
 
+/* A warm that no identity service could answer leaves its identity
+ * unresolved, and the directory listings that issued it go on withholding
+ * the ACLs that name it.  Nothing else reports that, so say it -- and the
+ * likely cause -- at error level, at most every ten seconds.  Only readdir
+ * on a windows-identity mount issues warms, so this never fires elsewhere. */
+static void
+chimera_vfs_identity_report_warm_unavailable(const struct chimera_vfs_identity_request *req)
+{
+    static struct chimera_ratelimit rl;
+    uint64_t                        held_back;
+    char                            what[sizeof(req->name) + 16];
+
+    if (!chimera_ratelimit_allow(&rl, 10ULL * 1000000000ULL, &held_back)) {
+        return;
+    }
+
+    switch (req->key) {
+        case CHIMERA_VFS_IDENTITY_BY_UID:
+            snprintf(what, sizeof(what), "uid %u", req->id);
+            break;
+        case CHIMERA_VFS_IDENTITY_BY_GID:
+            snprintf(what, sizeof(what), "gid %u", req->id);
+            break;
+        case CHIMERA_VFS_IDENTITY_BY_SID:
+            snprintf(what, sizeof(what), "SID %s", req->name);
+            break;
+        default:
+            snprintf(what, sizeof(what), "name %s", req->name);
+            break;
+    } /* switch */
+
+    chimera_vfs_error("identity: %s could not be resolved: no identity service "
+                      "answered (winbind down, or none such as winbind "
+                      "configured); directory listings withhold the ACLs that "
+                      "name it (%" PRIu64 " more since the last report)",
+                      what, held_back);
+} /* chimera_vfs_identity_report_warm_unavailable */
+
 static void *
 chimera_vfs_identity_worker(void *arg)
 {
@@ -292,6 +331,14 @@ chimera_vfs_identity_worker(void *arg)
 
         req = identity->queue;
         DL_DELETE(identity->queue, req);
+
+        /* Shutting down: nobody waits on a warm, so it is dropped rather than
+         * run.  An outage can leave many queued, and each would block in the
+         * handlers before the worker could exit. */
+        if (identity->shutdown && !req->origin) {
+            free(req);
+            continue;
+        }
 
         evpl_mutex_unlock(&identity->lock);
 
@@ -327,16 +374,11 @@ chimera_vfs_identity_worker(void *arg)
         /* A warm has no origin: nobody waits on it, and the thread that
          * issued it may already be gone. */
         if (!req->origin) {
+            if (req->status == CHIMERA_VFS_IDENTITY_UNAVAILABLE) {
+                chimera_vfs_identity_report_warm_unavailable(req);
+            }
             free(req);
             evpl_mutex_lock(&identity->lock);
-            continue;
-        }
-
-        /* Shutting down: nobody waits on a warm, so it is dropped rather than
-         * run.  An outage can leave many queued, and each would block in the
-         * handlers before the worker could exit. */
-        if (identity->shutdown && !req->origin) {
-            free(req);
             continue;
         }
 
@@ -640,6 +682,11 @@ chimera_vfs_identity_enqueue(
 {
     struct chimera_vfs_identity_request *req;
 
+    /* The worker tells the two kinds apart by origin alone. */
+    chimera_vfs_abort_if((origin == NULL) != (callback == NULL),
+                         "identity: a warm takes neither an origin thread nor a "
+                         "callback, a resolve takes both");
+
     req               = calloc(1, sizeof(*req));
     req->origin       = origin;
     req->key          = key;
@@ -682,11 +729,6 @@ chimera_vfs_identity_resolve(
     chimera_vfs_identity_enqueue(thread->vfs->identity, thread, key, id, name,
                                  callback, private_data);
 } /* chimera_vfs_identity_resolve */
-    /* The worker tells the two kinds apart by origin alone. */
-    chimera_vfs_abort_if((origin == NULL) != (callback == NULL),
-                         "identity: a warm takes neither an origin thread nor a "
-                         "callback, a resolve takes both");
-
 
 SYMBOL_EXPORT void
 chimera_vfs_identity_warm(

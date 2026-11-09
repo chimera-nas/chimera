@@ -2525,8 +2525,47 @@ test_readdir_bounce_own_acl(struct test_ctx *ctx)
     TEST_PASS("readdir: bounced entries each carry their own ACL");
 } /* test_readdir_bounce_own_acl */
 
-/* An ACL larger than a 64 KiB bounce page still reaches the caller whole:
- * the buffer has room for the largest ACL a module may return. */
+/* While no identity service can answer, an entry stays withheld on every
+ * pass: each pass's warm is answered UNAVAILABLE (and reported), is never
+ * cached as an answer, and the next pass withholds again rather than deliver
+ * a partly resolved ACL. */
+static void
+test_readdir_unavailable_stays_withheld(struct test_ctx *ctx)
+{
+    const char                     *sid = "S-1-5-21-70-71-72-7201";
+    struct fixture_sid             *f   = fixture_sid_add(sid, CHIMERA_VFS_IDENTITY_UNAVAILABLE, 0, 7201);
+    struct chimera_vfs_open_handle *dir = rd_make_dir(ctx, "rdunavail");
+    struct rd_result                r;
+    struct rd_entry                *a;
+
+    rd_make_file_sid(ctx, dir, "a", sid);
+
+    for (int pass = 0; pass < 2; pass++) {
+        int calls = fixture_calls(f);
+
+        rd_run(ctx, dir, &r);
+        a = rd_find(&r, "a");
+        assert(a && !a->has_acl);
+        assert(!(a->mask & CHIMERA_VFS_ATTR_ACL));
+        assert(a->mask & CHIMERA_VFS_ATTR_ACL_WITHHELD);
+
+        /* The warm is detached: poll for its answer, not the event loop. */
+        for (int i = 0; i < 2000 && fixture_calls(f) == calls; i++) {
+            usleep(1000);
+        }
+        assert(fixture_calls(f) == calls + 1);
+        assert(!chimera_vfs_identity_cached(ctx->vfs,
+                                            CHIMERA_VFS_IDENTITY_BY_SID, 0,
+                                            sid));
+    }
+
+    chimera_vfs_release(ctx->vfs_thread, dir);
+    TEST_PASS("readdir: an unanswerable SID stays withheld, never cached");
+} /* test_readdir_unavailable_stays_withheld */
+
+/* An ACL at the cap, larger than a 64 KiB bounce page, still reaches the
+ * caller whole: the buffer has room for the largest ACL a module may return
+ * on top of an entry's name. */
 static void
 test_readdir_bounce_large_acl(struct test_ctx *ctx)
 {
@@ -2661,6 +2700,7 @@ main(
     test_readdir_cold_withholds_acl(&ctx);
     test_readdir_warm_enriches(&ctx);
     test_readdir_algorithmic_passes(&ctx);
+    test_readdir_unavailable_stays_withheld(&ctx);
 
     /* The blocking-bounce readdir branch, on a mount of its own. */
     assert(mount_status(&ctx, "wblk", "memblk", "fs_wblk", "windows_acl") ==

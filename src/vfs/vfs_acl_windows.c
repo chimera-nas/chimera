@@ -303,8 +303,8 @@ acl_windows_abandon_open(struct chimera_vfs_request *request)
 } /* acl_windows_abandon_open */
 
 /* A fail-closed outcome comes in floods while the identity service is down:
- * each site reports at error level, at most once per interval, with a count
- * of the reports it held back. */
+ * each site and cause has its own limiter and reports at error level, at most
+ * once per interval, with a count of the reports it held back. */
 #define ACL_WINDOWS_LOG_INTERVAL_NS (10ULL * 1000000000ULL)
 
 #define acl_windows_error_limited(rl, fmt, ...) do { \
@@ -323,11 +323,10 @@ static void
 acl_windows_fail(
     struct chimera_vfs_request *request,
     struct chimera_vfs_attrs   *attr,
+    struct chimera_ratelimit   *rl,
     const char                 *why)
 {
-    static struct chimera_ratelimit rl;
-
-    acl_windows_error_limited(&rl, "acl_windows: op %u: the reply ACL could "
+    acl_windows_error_limited(rl, "acl_windows: op %u: the reply ACL could "
                               "not be resolved to unix identities (%s); "
                               "failing with EIO", request->opcode, why);
 
@@ -342,8 +341,11 @@ static void
 acl_windows_finish(struct chimera_vfs_request *request)
 {
     if (request->acl_windows.failed) {
+        static struct chimera_ratelimit rl;
+
         acl_windows_fail(request, chimera_vfs_acl_windows_reply_attrs(request),
-                         "identity service unavailable");
+                         &rl, "no identity service answered: winbind down, or "
+                         "none such as winbind configured");
     }
 
     request->complete(request);
@@ -488,7 +490,9 @@ acl_windows_complete(struct chimera_vfs_request *request)
 
     res = acl_windows_preserve(request, attr, remaining);
     if (!res) {
-        acl_windows_fail(request, attr, "out of request memory");
+        static struct chimera_ratelimit rl;
+
+        acl_windows_fail(request, attr, &rl, "out of request memory");
         request->complete(request);
         return;
     }
@@ -749,8 +753,9 @@ acl_windows_normalize_done(
 
         acl_windows_error_limited(&rl, "acl_windows: op %u: a uid/gid in the "
                                   "set_attr could not be resolved to a SID "
-                                  "(identity service unavailable); failing "
-                                  "with EIO", request->opcode);
+                                  "(no identity service answered: winbind "
+                                  "down, or none such as winbind configured); "
+                                  "failing with EIO", request->opcode);
 
         acl_windows_restore_set_attr(request);
         request->status = CHIMERA_VFS_EIO;
