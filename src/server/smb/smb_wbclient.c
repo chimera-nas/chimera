@@ -358,7 +358,8 @@ smb_wbclient_map_principal(
 
 /* Classify a wbc error for the identity resolver (smb_wbclient_status.h), and
  * report an outage at error level -- at most every ten seconds, as it comes
- * in floods -- in winbind's own words. */
+ * in floods -- in winbind's own words.  Every wbc call shares the one
+ * limiter: a report names whichever call failed first in its interval. */
 static enum chimera_vfs_identity_status
 wbc_status(
     wbcErr      wbc_err,

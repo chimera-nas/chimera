@@ -67,6 +67,14 @@ chimera_vfs_acl_windows_reply_attrs(
  *     never a partially resolved ACL -- releasing the backend open first when
  *     the op is one that opened something.
  *
+ * That EIO comes after the module has done the op.  For a create (open_at,
+ * mkdir_at, mknod_at, symlink_at, link_at, create_unlinked, open_stream) or a
+ * setattr, the change is on disk although the caller sees it fail, and the
+ * op's success-only follow-up is skipped: no change notification, no parent
+ * attr-cache refresh, no name-cache insert (a stale negative entry can
+ * outlive the create).  An SMB CREATE asks for the ACL, so it is the usual
+ * way in.
+ *
  * Otherwise the request is left untouched: a mount without the flag costs a
  * pointer test, an opcode switch and a mask test, and only an op that asked
  * for the ACL pays the mount-attrs lookup.  Idempotent across re-dispatch.
@@ -82,8 +90,8 @@ chimera_vfs_acl_windows_gate_install(
  * request->acl_windows.saved_set_attr non-NULL marking the normalized state
  * so re-entry falls through.  Applies to ops carrying a set_attr:
  * setattr/fsetattr, open_at (create or truncate), mkdir_at, mknod_at,
- * symlink_at, create_unlinked -- and open_stream, whose set_attr a module
- * applies to the base file -- on a mount with
+ * symlink_at, create_unlinked -- and open_stream (create or truncate),
+ * whose set_attr a module applies to the base file -- on a mount with
  * CHIMERA_VFS_MOUNT_ATTR_WINDOWS_ACL whose set_attr carries an ACL, a uid or
  * a gid.
  *

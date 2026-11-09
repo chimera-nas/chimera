@@ -295,10 +295,10 @@ chimera_vfs_readdir_bounce_size(uint64_t attr_mask)
  * the bounce buffer after the entry's name and the stored attrs repointed at
  * the copies.  An entry whose copies do not fit the space left stops the
  * scan (it is the first of the next page).  One that would not fit even an
- * empty buffer is outside what a module may return (an ACL past
- * CHIMERA_ACL_MAX_ACES): it can never be delivered, and neither a stale
- * pointer nor an entry without its ACL may stand in for it, so the readdir
- * fails with EIO. */
+ * empty buffer carries an ACL far past CHIMERA_ACL_MAX_ACES, which no in-tree
+ * module stores: it can never be delivered, and neither a stale pointer nor
+ * an entry without its ACL may stand in for it, so the readdir fails with
+ * EIO. */
 static int
 chimera_vfs_readdir_bounce_result_callback(
     uint64_t                        inum,
@@ -319,8 +319,8 @@ chimera_vfs_readdir_bounce_result_callback(
 
     if (entry_size > request->readdir.bounce_iov.length) {
         chimera_vfs_error("readdir: entry %.*s (inum %" PRIu64 ") needs %zu "
-                          "bytes, more than a module may return (ACL of %u "
-                          "ACEs); failing the readdir with EIO",
+                          "bytes, more than an empty bounce buffer holds "
+                          "(ACL of %u ACEs); failing the readdir with EIO",
                           namelen, name, inum, entry_size,
                           ((attrs->va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
                            attrs->va_acl) ?

@@ -512,8 +512,10 @@ acl_windows_complete(struct chimera_vfs_request *request)
         const struct chimera_principal *who = &acl->aces[i].who;
         int                             dup = 0;
 
-        /* An inline UNAVAILABLE has already decided the outcome; asking
-         * about the rest would only load a resolver that is down. */
+        /* Defensive: a resolve answers inline only from the cache (OK or a
+        * cached NOT_FOUND), so failed cannot be set mid-loop today.  Were an
+        * inline UNAVAILABLE possible, it would have decided the outcome, and
+        * asking about the rest would only load a resolver that is down. */
         if (request->acl_windows.failed) {
             break;
         }
@@ -965,7 +967,8 @@ chimera_vfs_acl_windows_pre_dispatch(struct chimera_vfs_request *request)
         for (unsigned i = 0; i < norm->attrs.va_acl->num_aces; i++) {
             const struct chimera_principal *who = &norm->attrs.va_acl->aces[i].who;
 
-            /* An inline UNAVAILABLE has already decided the outcome. */
+            /* Defensive, as in the read path: no inline answer is
+             * UNAVAILABLE today.  The owner/group checks below are too. */
             if (request->acl_windows.failed) {
                 break;
             }

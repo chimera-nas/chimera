@@ -15,7 +15,10 @@
  * zero-initialised struct chimera_ratelimit (a static is fine: it is
  * lock-free).  chimera_ratelimit_allow() returns 1 at most once per
  * `interval_ns`, setting *suppressed to how many calls it refused since the
- * last one it allowed, so the message can say how many it stands for.
+ * last one it allowed, so the message can say how many it stands for; it
+ * writes *suppressed only when it returns 1.  Under contention a refusal
+ * racing an allow may be counted in that report instead of the next, but
+ * none is lost or counted twice.
  */
 struct chimera_ratelimit {
     uint64_t next_ns;

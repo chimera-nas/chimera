@@ -16,10 +16,11 @@
 
 /*
  * Classify a wbc error for the identity resolver.  Winbind answering that an
- * identity does not exist is authoritative (NOT_FOUND).  Anything suggesting
- * the lookup did not really run -- the daemon missing, out of memory, a
- * garbled response, a bad request, or a code this table does not know -- is
- * UNAVAILABLE, so it is never cached as an answer.
+ * identity does not exist, or a SID string too malformed to name anyone, is
+ * authoritative (NOT_FOUND).  Anything suggesting the lookup did not really
+ * run -- the daemon missing, out of memory, a garbled response, a bad
+ * request, or a code this table does not know -- is UNAVAILABLE, so it is
+ * never cached as an answer.
  *
  * One limit is libwbclient's.  It reports every failure winbindd returns as
  * WBC_ERR_DOMAIN_NOT_FOUND (wb_common.c turns any result other than
@@ -28,9 +29,17 @@
  * itself reports an idmap backend that failed as "not mapped"
  * (wb_sids2xids.c).  So while winbindd is up, a domain controller or idmap
  * backend it cannot reach looks here exactly like an identity that does not
- * exist, and is classified NOT_FOUND: an unresolved SID stays opaque, and is
- * negatively cached, for up to CHIMERA_VFS_IDENTITY_NEGATIVE_TTL.  Only
- * winbindd itself being down is reliably UNAVAILABLE.
+ * exist, and is classified NOT_FOUND.  On a windows-identity mount that means:
+ *
+ *  - reads: an unresolved SID stays an opaque principal, negatively cached
+ *    for up to CHIMERA_VFS_IDENTITY_NEGATIVE_TTL;
+ *  - writes: a uid/gid whose domain SID cannot be looked up is stored as its
+ *    algorithmic S-1-5-88 SID, on disk and for good; and if NSS knows the
+ *    id, its SID-less answer is cached as positive, for the user cache's
+ *    full TTL, rather than as a short-lived miss.
+ *
+ * Only winbindd itself being down is reliably UNAVAILABLE.  This is the
+ * canonical statement of the limit; docs/vfs-module-sdk.md points here.
  */
 static inline enum chimera_vfs_identity_status
 smb_wbclient_err_to_status(wbcErr wbc_err)

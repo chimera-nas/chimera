@@ -187,9 +187,9 @@ chimera_vfs_identity_result_has_sid(const struct chimera_vfs_identity_result *re
  *
  * Statuses aggregate on top of that.  A provisional answer stands only if no
  * other handler, before it or after, came back UNAVAILABLE: that handler might
- * have supplied the
- * SID, so the answer is incomplete and is reported UNAVAILABLE and kept out of
- * the cache (req->cacheable stays 0) rather than pinning a SID-less identity.
+ * have supplied the SID, so the answer is incomplete and is reported
+ * UNAVAILABLE and kept out of the cache (req->cacheable stays 0) rather than
+ * pinning a SID-less identity.
  * Without an OK, any UNAVAILABLE beats NOT_FOUND, and a walk where every
  * handler PASSed is UNAVAILABLE too -- nothing could even try.
  */
