@@ -10,7 +10,8 @@
  * registered, blocking miss handlers (NSS by default; the SMB server registers
  * a winbind handler), populate the user cache, then hand the result back to the
  * originating evpl thread by appending it to that thread's pending-identity
- * queue and ringing its doorbell.
+ * queue and ringing its doorbell.  A warm (chimera_vfs_identity_warm) has no
+ * originating thread: the worker caches its outcome and frees it.
  */
 
 #define _GNU_SOURCE
@@ -331,6 +332,14 @@ chimera_vfs_identity_worker(void *arg)
             continue;
         }
 
+        /* Shutting down: nobody waits on a warm, so it is dropped rather than
+         * run.  An outage can leave many queued, and each would block in the
+         * handlers before the worker could exit. */
+        if (identity->shutdown && !req->origin) {
+            free(req);
+            continue;
+        }
+
         /* Hand the completed job back to the originating evpl thread.
          *
          * Read the origin out of the job FIRST.  Appending it publishes it:
@@ -557,7 +566,9 @@ chimera_vfs_identity_destroy(struct chimera_vfs_identity *identity)
         evpl_native_thread_join(identity->workers[i], NULL);
     }
 
-    /* Any jobs still queued at shutdown are dropped (their callers are gone). */
+    /* Running workers empty the queue before they exit (resolves run to
+     * completion, warms are dropped), so this frees only what a pool without
+     * workers left queued. */
     while (identity->queue) {
         req = identity->queue;
         DL_DELETE(identity->queue, req);
@@ -671,6 +682,11 @@ chimera_vfs_identity_resolve(
     chimera_vfs_identity_enqueue(thread->vfs->identity, thread, key, id, name,
                                  callback, private_data);
 } /* chimera_vfs_identity_resolve */
+    /* The worker tells the two kinds apart by origin alone. */
+    chimera_vfs_abort_if((origin == NULL) != (callback == NULL),
+                         "identity: a warm takes neither an origin thread nor a "
+                         "callback, a resolve takes both");
+
 
 SYMBOL_EXPORT void
 chimera_vfs_identity_warm(
