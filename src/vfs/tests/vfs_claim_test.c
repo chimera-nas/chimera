@@ -1909,16 +1909,33 @@ test_ack_before_requeue(void)
 struct holder_liveness {
     bool alive;
     int  revokes;
+    int  dead_queries;
+    bool spun;
 };
 
+/* A faulty retry loop that keeps re-probing a dead holder without ever
+ * making progress would otherwise spin until ctest's 30-second timeout
+ * kills the whole suite.  Past a generous number of dead-holder queries,
+ * report alive=true instead so the loop terminates and the test can fail
+ * on a specific assertion rather than hang. */
 static bool
 holder_alive(
     const struct chimera_vfs_claim *claim,
     void                           *priv)
 {
+    struct holder_liveness *l = priv;
+
     (void) claim;
 
-    return ((struct holder_liveness *) priv)->alive;
+    if (!l->alive) {
+        l->dead_queries++;
+        if (l->dead_queries > 8) {
+            l->spun = true;
+            return true;
+        }
+    }
+
+    return l->alive;
 } /* holder_alive */
 
 static void
@@ -1979,8 +1996,8 @@ test_revoked_brl_takeover(void)
     CHECK(a.break_state == CHIMERA_CLAIM_BREAK_REVOKED && a.used == 0,
           "dead holder left REVOKED with no mode");
     CHECK(a.file == file, "revoked claim stays linked for protocol cleanup");
-    CHECK(la.revokes == 1,
-          "revoked_cb fired exactly once (with no claim, by contract)");
+    CHECK(la.revokes == 1, "revoked_cb fired exactly once");
+    CHECK(!la.spun, "takeover made progress without spinning on the dead holder");
 
     /* Ignoring the dead holder must not let a third client bypass the live
      * one that took its place. */
@@ -1991,8 +2008,9 @@ test_revoked_brl_takeover(void)
     CHECK(r == CHIMERA_CLAIM_DENIED, "live holder still denies a third client");
     CHECK(conflict.owner.client_key == 0xB, "denial names the live holder");
 
-    /* The second generation expires too: the same takeover must work with
-     * two revoked claims already on the list. */
+    /* The second generation expires too: only the first holder (A) is
+     * revoked at this point; this takeover must reclaim the second (B)
+     * with A's already-revoked claim still on the list. */
     lb.alive = false;
 
     r = chimera_vfs_claim_try_acquire(state, file, &c, &conflict);
@@ -2003,6 +2021,9 @@ test_revoked_brl_takeover(void)
     CHECK(a.break_state == CHIMERA_CLAIM_BREAK_REVOKED,
           "first revoked holder is untouched by the later takeover");
     CHECK(lb.revokes == 1, "second holder revoked exactly once");
+    CHECK(!lb.spun, "second takeover made progress without spinning");
+    CHECK(a.file == file && b.file == file,
+          "both revoked holders stay linked for protocol cleanup");
 
     chimera_vfs_claim_release(state, file, &a);
     chimera_vfs_claim_release(state, file, &b);
@@ -2036,7 +2057,8 @@ test_revoked_brl_denies_nothing(void)
 
     /* Revoke in place: linked, but logically dead. */
     chimera_vfs_claim_revoke(&a);
-    CHECK(a.break_state == CHIMERA_CLAIM_BREAK_REVOKED,
+    CHECK(a.break_state == CHIMERA_CLAIM_BREAK_REVOKED &&
+          a.file == file,
           "lock moved to REVOKED while still linked");
 
     init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xB, 2);
@@ -2056,6 +2078,81 @@ test_revoked_brl_denies_nothing(void)
     chimera_vfs_state_put(state, file);
     chimera_vfs_state_destroy(state);
 } /* test_revoked_brl_denies_nothing */
+
+/* Simulates another thread revoking the BREAKING holder while file->lock
+ * was released between the admission probe and the reclaim check, racing
+ * chimera_vfs_claim_try_acquire()'s own holder_reclaimable() test.  The
+ * holder's is_alive_cb plays the racing thread: it drives the claim to
+ * REVOKED directly (try_acquire already holds file->lock at that call
+ * site, so going through chimera_vfs_claim_revoke() here would deadlock)
+ * and reports dead, so holder_reclaimable() finds a holder that is already
+ * REVOKED -- revoked_now is therefore false, but revoked_any must still be
+ * set so the outer loop retries admission instead of returning stale
+ * BREAKING. */
+static bool
+raced_revoke_alive_cb(
+    const struct chimera_vfs_claim *claim,
+    void                           *priv)
+{
+    struct chimera_vfs_claim *mut = (struct chimera_vfs_claim *) claim;
+
+    (void) priv;
+
+    mut->used        = 0;
+    mut->advertised  = 0;
+    mut->denied      = 0;
+    mut->break_state = CHIMERA_CLAIM_BREAK_REVOKED;
+
+    return false;
+} /* raced_revoke_alive_cb */
+
+static void
+test_revoked_holder_raced_breaking(void)
+{
+    struct chimera_vfs_state         *state;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_claim          a, b;
+    struct chimera_claim_owner        owner;
+    enum chimera_vfs_claim_result     r;
+    struct chimera_vfs_claim_conflict conflict;
+    struct holder_liveness            la = { .alive = true };
+
+    fprintf(stderr, "\ntest_revoked_holder_raced_breaking\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    /* Client A holds a breakable exclusive lock. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xA, 1);
+    chimera_vfs_claim_init_range(&a, true, false, 100, 100, &owner);
+    a.break_cb    = recording_break_cb;
+    a.is_alive_cb = raced_revoke_alive_cb;
+    a.revoked_cb  = holder_revoked;
+    a.cb_private  = &la;
+
+    r = chimera_vfs_claim_try_acquire(state, file, &a, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "first client's exclusive lock granted");
+
+    /* Client B's overlapping exclusive lock finds A already revoked by the
+     * racing thread (simulated by raced_revoke_alive_cb) on the very first
+     * reclaim check. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xB, 2);
+    chimera_vfs_claim_init_range(&b, true, false, 100, 100, &owner);
+
+    r = chimera_vfs_claim_try_acquire(state, file, &b, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED,
+          "takeover retries and is granted despite the raced revoke");
+    CHECK(a.break_state == CHIMERA_CLAIM_BREAK_REVOKED && a.used == 0,
+          "raced holder left REVOKED with no mode");
+    CHECK(la.revokes == 0,
+          "revoked_cb does not fire: the raced revoke, not try_acquire's own "
+          "call, is what transitioned the claim");
+
+    chimera_vfs_claim_release(state, file, &a);
+    chimera_vfs_claim_release(state, file, &b);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_revoked_holder_raced_breaking */
 
 
 /* Main ---------------------------------------------------------------- */
@@ -2085,6 +2182,7 @@ main(
     test_caching_break_revoke();
     test_revoked_brl_takeover();
     test_revoked_brl_denies_nothing();
+    test_revoked_holder_raced_breaking();
     test_range_breaks_caching();
     test_nfs4_lock_vs_own_delegation();
     test_async_acquire_immediate();
