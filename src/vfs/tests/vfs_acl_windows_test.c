@@ -2386,11 +2386,12 @@ test_readdir_cold_withholds_acl(struct test_ctx *ctx)
 
     /* The fire-and-forget warm resolves the SID in the background; wait
      * until its result is in the cache (the handler's call counter moves
-     * before the worker publishes, so it is not a safe signal). */
+     * before the worker publishes, so it is not a safe signal).  A warm is
+     * detached and never wakes this thread's event loop, so this polls
+     * rather than running the loop, which would block. */
     for (int i = 0; i < 2000 &&
          !chimera_vfs_identity_cached(ctx->vfs, CHIMERA_VFS_IDENTITY_BY_SID,
                                       0, sid); i++) {
-        evpl_continue(ctx->evpl);
         usleep(1000);
     }
     assert(chimera_vfs_identity_cached(ctx->vfs, CHIMERA_VFS_IDENTITY_BY_SID,
