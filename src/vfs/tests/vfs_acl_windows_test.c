@@ -2570,7 +2570,7 @@ test_readdir_unavailable_stays_withheld(struct test_ctx *ctx)
 static void
 test_readdir_bounce_large_acl(struct test_ctx *ctx)
 {
-    const unsigned                  n   = 800;
+    const unsigned                  n   = CHIMERA_ACL_MAX_ACES;
     struct chimera_vfs_open_handle *dir = rd_make_dir(ctx, "rdbig");
     struct chimera_vfs_open_handle *h;
     struct chimera_acl             *acl;
@@ -2599,7 +2599,7 @@ test_readdir_bounce_large_acl(struct test_ctx *ctx)
 
     free(acl);
     chimera_vfs_release(ctx->vfs_thread, dir);
-    TEST_PASS("readdir: a bounced entry carries an ACL past 64 KiB whole");
+    TEST_PASS("readdir: a bounced entry carries an ACL at the cap whole");
 } /* test_readdir_bounce_large_acl */
 
 int
