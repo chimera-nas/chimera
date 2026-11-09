@@ -697,9 +697,13 @@ chimera_vfs_claim_deny_rows(
 
     /* Revoked is inert: a forcibly revoked claim holds no rights and must
      * deny nothing, even while its owner keeps the object linked for
-     * protocol cleanup.  Without this the lock arm derives a "shared lock"
-     * from the zeroed mode and keeps denying LW -- and fresh caches --
-     * forever. */
+     * protocol cleanup.  Without this the lock arm's zeroed `used` mode
+     * would be misread as a shared lock, deriving an incorrect LW deny row
+     * plus an admit-only cache deny row.  This guard and
+     * chimera_vfs_claim_conflicts()'s independent exclusion of revoked
+     * holders are both kept: deny_rows() must produce no rows for a
+     * revoked claim, and conflicts() must separately ignore a revoked
+     * standing holder. */
     if (claim->break_state == CHIMERA_CLAIM_BREAK_REVOKED) {
         return 0;
     }
@@ -929,10 +933,12 @@ chimera_vfs_claim_conflicts(
     if (hc == pc) {
         return false;
     }
-    /* A standing revoked holder is dead: it cannot block or displace an
-     * acquirer, whatever the deny-row table derives from its cleared mode.
-     * Probe-side twin of the revoked rule in
-     * chimera_vfs_claim_deny_rows(). */
+    /* `hc` is the standing holder being tested against probe `pc`, not the
+     * probe itself.  A revoked holder is dead: it neither blocks `pc` nor
+     * needs to be displaced by it, whatever the deny-row table would derive
+     * from its cleared mode.  This mirrors the revoked rule applied to
+     * `claim` in chimera_vfs_claim_deny_rows(), here applied to the
+     * standing holder `hc`. */
     if (hc->break_state == CHIMERA_CLAIM_BREAK_REVOKED) {
         return false;
     }
@@ -1418,9 +1424,15 @@ chimera_vfs_claim_try_acquire(
              * freed memory. */
             if (conflict &&
                 chimera_vfs_claim_holder_reclaimable(conflict, claim)) {
-                /* Progress is the transition into REVOKED, not the call:
-                 * revoking a holder that is already REVOKED changes nothing,
-                 * and retrying on it would spin this loop forever. */
+                /* Defensive backstop: chimera_vfs_claim_conflicts() already
+                 * excludes revoked holders, so normal admission should
+                 * never hand back an already-REVOKED `conflict` here, and
+                 * this arm should not normally be reached with one.  It is
+                 * kept as a guard in case that invariant is ever violated:
+                 * progress is the transition into REVOKED, not the call,
+                 * since revoking a holder that is already REVOKED changes
+                 * nothing, and retrying on it would spin this loop
+                 * forever. */
                 reclaimed = conflict->break_state !=
                     CHIMERA_CLAIM_BREAK_REVOKED;
                 chimera_vfs_claim_revoke_locked(file, conflict,
@@ -1484,12 +1496,21 @@ chimera_vfs_claim_try_acquire(
             iter_pin = chimera_vfs_claim_pin_grant(conflict);
 
             if (chimera_vfs_claim_holder_reclaimable(conflict, claim)) {
-                /* Same progress rule as the DENIED arm above. */
+                /* Same progress rule as the DENIED arm above: revoked_now
+                 * tracks whether THIS iteration performed the REVOKED
+                 * transition, and only that gates the callback/pump below.
+                 * But another acquirer may have raced us and already
+                 * revoked this holder while file->lock was released; its
+                 * stale state still needs to be re-admitted against, so
+                 * revoked_any is set unconditionally here rather than
+                 * depending on revoked_now -- otherwise the outer loop
+                 * would fall through to BREAKING with no break in
+                 * progress. */
                 revoked_now = conflict->break_state !=
                     CHIMERA_CLAIM_BREAK_REVOKED;
                 chimera_vfs_claim_revoke_locked(file, conflict,
                                                 &revoked_cb, &cb_private);
-                revoked_any |= revoked_now;
+                revoked_any = true;
             } else if (conflict->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
                        conflict->break_state == CHIMERA_CLAIM_BREAK_ACKED) {
                 deadline_ms =
