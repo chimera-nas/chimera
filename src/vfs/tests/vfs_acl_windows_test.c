@@ -694,14 +694,14 @@ fixture_id_answer(
                 snprintf(out->group.groupname, sizeof(out->group.groupname),
                          "waclg%u", id);
                 out->group.groupname_len = (int) strlen(out->group.groupname);
-                snprintf(out->group.sid, sizeof(out->group.sid), "%s", f->sid);
+                memcpy(out->group.sid, f->sid, sizeof(out->group.sid));
             } else {
                 out->user.uid = id;
                 out->user.gid = id;
                 snprintf(out->user.username, sizeof(out->user.username),
                          "waclu%u", id);
                 out->user.username_len = (int) strlen(out->user.username);
-                snprintf(out->user.sid, sizeof(out->user.sid), "%s", f->sid);
+                memcpy(out->user.sid, f->sid, sizeof(out->user.sid));
             }
         }
         return f->mode;
@@ -746,14 +746,14 @@ fixture_sid_handler(
                 snprintf(out->group.groupname, sizeof(out->group.groupname),
                          "waclg%u", f->id);
                 out->group.groupname_len = (int) strlen(out->group.groupname);
-                snprintf(out->group.sid, sizeof(out->group.sid), "%s", f->sid);
+                memcpy(out->group.sid, f->sid, sizeof(out->group.sid));
             } else {
                 out->user.uid = f->id;
                 out->user.gid = f->id;
                 snprintf(out->user.username, sizeof(out->user.username),
                          "waclu%u", f->id);
                 out->user.username_len = (int) strlen(out->user.username);
-                snprintf(out->user.sid, sizeof(out->user.sid), "%s", f->sid);
+                memcpy(out->user.sid, f->sid, sizeof(out->user.sid));
             }
         }
         return f->mode;
@@ -2196,12 +2196,12 @@ test_write_create_paths(struct test_ctx *ctx)
 #define RD_MAX 16
 
 struct rd_entry {
-    char     name[64];
-    uint64_t mask;
-    int      has_acl;
-    uint32_t num_aces;
-    uint64_t aces_hash; /* rd_hash of the delivered ACEs, however many */
-    uint8_t  acl_buf[sizeof(struct chimera_acl) + 4 * sizeof(struct chimera_ace)];
+    char               name[64];
+    uint64_t           mask;
+    int                has_acl;
+    uint32_t           num_aces;
+    uint64_t           aces_hash; /* rd_hash of the delivered ACEs, however many */
+    struct chimera_ace aces[4]; /* a copy of the ACEs when num_aces <= 4 */
 };
 
 /* FNV-1a, to compare an ACL too large to keep a copy of. */
@@ -2250,7 +2250,8 @@ rd_entry_cb(
         e->aces_hash = rd_hash(attrs->va_acl->aces,
                                e->num_aces * sizeof(struct chimera_ace));
         if (e->num_aces <= 4) {
-            memcpy(e->acl_buf, attrs->va_acl, chimera_acl_size(e->num_aces));
+            memcpy(e->aces, attrs->va_acl->aces,
+                   e->num_aces * sizeof(struct chimera_ace));
         }
         e->has_acl = 1;
     }
@@ -2374,8 +2375,7 @@ test_readdir_cold_withholds_acl(struct test_ctx *ctx)
     for (struct rd_entry *e = a; e; e = (e == a) ? b : NULL) {
         if (e->has_acl) {
             assert(e->mask & CHIMERA_VFS_ATTR_ACL);
-            assert(principal_eq(&((struct chimera_acl *) e->acl_buf)->aces[0].who,
-                                &expect));
+            assert(principal_eq(&e->aces[0].who, &expect));
         } else {
             assert(!(e->mask & CHIMERA_VFS_ATTR_ACL));
             assert(e->mask & CHIMERA_VFS_ATTR_ACL_WITHHELD);
@@ -2401,8 +2401,7 @@ test_readdir_cold_withholds_acl(struct test_ctx *ctx)
     rd_run(ctx, dir, &r);
     a = rd_find(&r, "a");
     assert(a && a->has_acl);
-    assert(principal_eq(&((struct chimera_acl *) a->acl_buf)->aces[0].who,
-                        &expect));
+    assert(principal_eq(&a->aces[0].who, &expect));
     /* One warm for the whole directory: the second entry either found the
      * SID cached already or was deduped within the pass, and the second
      * pass found it cached. */
@@ -2422,7 +2421,6 @@ test_readdir_warm_enriches(struct test_ctx *ctx)
     struct rd_result                r;
     struct rd_entry                *e;
     struct chimera_principal        expect;
-    struct chimera_acl             *acl;
 
     rd_make_file_sid(ctx, dir, "w", sid);
 
@@ -2435,11 +2433,10 @@ test_readdir_warm_enriches(struct test_ctx *ctx)
     rd_run(ctx, dir, &r);
     e = rd_find(&r, "w");
     assert(e && e->has_acl && (e->mask & CHIMERA_VFS_ATTR_ACL));
-    acl    = (struct chimera_acl *) e->acl_buf;
     expect = make_id_principal(CHIMERA_PRINCIPAL_USER, 7002, sid);
-    assert(acl->num_aces == 1);
-    assert(principal_eq(&acl->aces[0].who, &expect));
-    assert(!(acl->aces[0].flags & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP));
+    assert(e->num_aces == 1);
+    assert(principal_eq(&e->aces[0].who, &expect));
+    assert(!(e->aces[0].flags & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP));
     assert(fixture_calls(f) == 1);
 
     chimera_vfs_release(ctx->vfs_thread, dir);
@@ -2471,13 +2468,12 @@ test_readdir_algorithmic_passes(struct test_ctx *ctx)
     rd_run(ctx, dir, &r);
     e = rd_find(&r, "g");
     assert(e && e->has_acl);
-    acl = (struct chimera_acl *) e->acl_buf;
-    eu  = make_id_principal(CHIMERA_PRINCIPAL_USER, 7003, NULL);
-    eg  = make_id_principal(CHIMERA_PRINCIPAL_GROUP, 7004, NULL);
-    assert(acl->num_aces == 2);
-    assert(principal_eq(&acl->aces[0].who, &eu));
-    assert(principal_eq(&acl->aces[1].who, &eg));
-    assert(acl->aces[1].flags & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP);
+    eu = make_id_principal(CHIMERA_PRINCIPAL_USER, 7003, NULL);
+    eg = make_id_principal(CHIMERA_PRINCIPAL_GROUP, 7004, NULL);
+    assert(e->num_aces == 2);
+    assert(principal_eq(&e->aces[0].who, &eu));
+    assert(principal_eq(&e->aces[1].who, &eg));
+    assert(e->aces[1].flags & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP);
     assert(chimera_atomic_load_n(&fixture_sid_calls,
                                  CHIMERA_MEMORY_RELAXED) == calls);
 
@@ -2519,8 +2515,8 @@ test_readdir_bounce_own_acl(struct test_ctx *ctx)
     e1 = make_id_principal(CHIMERA_PRINCIPAL_USER, 7101, sid1);
     e2 = make_id_principal(CHIMERA_PRINCIPAL_USER, 7102, sid2);
     assert(a && b && a->has_acl && b->has_acl);
-    assert(principal_eq(&((struct chimera_acl *) a->acl_buf)->aces[0].who, &e1));
-    assert(principal_eq(&((struct chimera_acl *) b->acl_buf)->aces[0].who, &e2));
+    assert(principal_eq(&a->aces[0].who, &e1));
+    assert(principal_eq(&b->aces[0].who, &e2));
 
     chimera_vfs_release(ctx->vfs_thread, dir);
     TEST_PASS("readdir: bounced entries each carry their own ACL");
