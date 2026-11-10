@@ -277,9 +277,12 @@ struct chimera_vfs_handle_state {
  *    thread, never for one the core runs on a delegation thread (a blocking
  *    op, or any op when async delegation threads are configured); memory
  *    shared with a cache or with other replies never.
- *  - The module's own access gates see the stored SID-only ACL, not the
- *    resolved one; docs/vfs-module-sdk.md says what that does and does not
- *    enforce.
+ *  - The engine makes the parent traverse and create decisions for open_at
+ *    against the resolved ACL and sets CHIMERA_VFS_OPEN_PARENT_CHECKED on
+ *    the opens it checked.  A module should honor that flag: ignoring it is
+ *    fail-closed, but the module's own parent checks (traverse and create
+ *    alike) are SID-blind here and may refuse what the engine granted;
+ *    docs/vfs-module-sdk.md has the full contract.
  *
  * Meaningful only alongside CHIMERA_VFS_CAP_ACL_NATIVE: a module declaring
  * this bit without it is a module bug, and a mount of such a module fails

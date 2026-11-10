@@ -159,11 +159,15 @@ windows-identity mount); in the request's readdir block, the mount flag
 `acl_warmed` (sized by `CHIMERA_VFS_ACL_WARM_MAX`) and the bounce-buffer
 `readdir.bounce_status`;
 `CHIMERA_VFS_ATTR_ACL_WITHHELD` (attribute bit 32), set on readdir entries
-whose ACL the core withheld; and a new obligation on modules, namely that
+whose ACL the core withheld; the open flag `CHIMERA_VFS_OPEN_PARENT_CHECKED`
+(bit 13), which tells a module the engine already evaluated the parent
+access for that open, and the engine-internal `CHIMERA_VFS_OPEN_CREATE_REFUSED`
+(bit 14); and a new obligation on modules, namely that
 on such a mount the core rewrites the reply ACL in place, so the module
 must return it in private, writable storage (see below).  The request
 layout changes, so modules built against earlier SDK versions must be
-rebuilt.
+rebuilt.  The open flags change no layout and ignoring them is fail-closed
+(see the open parent gate contract below), so they need no further bump.
 
 ## Windows-identity ACLs (`CHIMERA_VFS_CAP_ACL_WINDOWS`)
 
@@ -226,16 +230,41 @@ Behaviour operators and protocol authors can rely on:
   SMB access-based enumeration hides entries whose ACLs are cold until the
   cache warms.
 
-Known limitation: module-internal access gates (the memfs, cairn and
-diskfs parent EXECUTE-traverse and WRITE_DATA-at-create checks) evaluate
-the stored SID-only ACL directly, where opaque principals match no caller.
-On a flagged mount, named-ACE grants therefore fail closed at those gates
-for non-root creates and traversal, and named-ACE DENYs are not enforced at
-creates.  The engine's own gates see enriched ACLs and are unaffected.  The
-limit is confined to the `windows_acl` mount option on engine-authoritative
-backends.  An engine-side parent create/traverse gate for windows-identity
-mounts would lift it; until one lands there is no extended-tier smbtorture
-share on a `windows_acl` mount.
+Open parent gate.  The engine evaluates open_at parent access, both
+traverse and create, itself and sets `CHIMERA_VFS_OPEN_PARENT_CHECKED` on
+every open it checked.  It gates all creating opens on engine-DAC mounts
+(every credential flavor: AUTH_UNIX needs parent EXECUTE then WRITE_DATA,
+AUTH_ATTR needs WRITE_DATA only) and non-creating AUTH_UNIX opens on
+windows-identity mounts (EXECUTE).  Root (uid 0), AUTH_NONE and
+DELEGATES_DAC modules are exempt, and AUTH_ATTR non-creating opens are not
+engine-checked (Windows traverse-bypass semantics).  On a windows-identity
+mount the engine's check sees the resolved ACL, so named-ACE grants and
+DENYs are enforced at create and traverse.
+
+A module that sees `CHIMERA_VFS_OPEN_PARENT_CHECKED` should skip its own
+parent-directory checks for that open, for all credential flavors.
+Honoring the flag is what lets a named-ACE grant admit a caller on a
+windows-identity mount; a module that ignores it stays safe but can only
+refuse, never admit: its own checks double-check or fail closed, and on a
+windows-identity mount they evaluate the stored SID-only ACL, where opaque
+principals match no caller.  The engine's decision is made on a parent
+attribute snapshot, not under the module's parent lock, so a concurrent
+permission change can order either way against the open.  Modules must
+ignore `CHIMERA_VFS_OPEN_CREATE_REFUSED`, which is engine-internal.  A
+refused create is dispatched without the create right and answers EACCES
+if the name is missing; a refused exclusive create answers EEXIST or
+EACCES from an engine existence check of the literal name in the gated
+parent, without a create ever being dispatched.
+
+On a mount whose module takes whole paths (`CAP_FS_PATH_OP` -- in-tree
+the only such module the gate runs on is the path-only smb proxy,
+`CAP_FS_PATH_OP` without `CAP_FS_RELATIVE_OP`) the gate evaluates the
+final parent component only: the prefix resolves in a single lookup, so
+an AUTH_UNIX caller's missing search permission on an intermediate prefix
+component is enforced by neither the engine nor the module.  This is a
+known limit of the path-only leg, pinned by its test.  On every other
+mount the parent the gate evaluates is the handle itself, and a slash is
+a byte in the name, to the gate and to its existence probe alike.
 
 The `struct chimera_vfs_request` layout is exposed in full and is
 therefore ABI-stable only within an SDK version.  A public-head /
