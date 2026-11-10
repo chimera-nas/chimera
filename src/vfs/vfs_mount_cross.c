@@ -127,7 +127,8 @@ chimera_vfs_cross_open_at_getattr_cb(
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_release(ctx->thread, handle);
-        ctx->callback(error_code, NULL, NULL, NULL, NULL, NULL, ctx->private_data);
+        ctx->callback(error_code, NULL, ctx->set_attr, NULL, NULL, NULL,
+                      ctx->private_data);
         free(ctx);
         return;
     }
@@ -151,7 +152,8 @@ chimera_vfs_cross_open_at_open_cb(
     struct chimera_vfs_cross_open_ctx *ctx = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
-        ctx->callback(error_code, NULL, NULL, NULL, NULL, NULL, ctx->private_data);
+        ctx->callback(error_code, NULL, ctx->set_attr, NULL, NULL, NULL,
+                      ctx->private_data);
         free(ctx);
         return;
     }
@@ -181,14 +183,18 @@ chimera_vfs_open_at_redirect(
      * as it would on the directory underneath, and nothing is created or
      * truncated: what opens is the mounted filesystem's root directory. */
     if ((flags & CHIMERA_VFS_OPEN_CREATE) && (flags & CHIMERA_VFS_OPEN_EXCLUSIVE)) {
-        callback(CHIMERA_VFS_EEXIST, NULL, NULL, NULL, NULL, NULL, private_data);
+        /* The caller's set_attr rides the completion as on any open_at: the
+         * NFS servers reuse it for the EXCLUSIVE verifier re-open. */
+        callback(CHIMERA_VFS_EEXIST, NULL, set_attr, NULL, NULL, NULL, private_data);
         return;
     }
 
     ctx = calloc(1, sizeof(*ctx));
 
     if (!ctx) {
-        callback(CHIMERA_VFS_EIO, NULL, NULL, NULL, NULL, NULL, private_data);
+        chimera_vfs_error("open_at: mount-point redirect context allocation "
+                          "failed; failing the open with EIO");
+        callback(CHIMERA_VFS_EIO, NULL, set_attr, NULL, NULL, NULL, private_data);
         return;
     }
 

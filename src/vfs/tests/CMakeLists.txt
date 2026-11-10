@@ -237,6 +237,22 @@ if(CAIRN_ENABLED)
     add_test(NAME chimera/vfs/open_acl_cairn COMMAND vfs_open_acl_test cairn)
 endif()
 
+# The engine checks the parent of every creating open_at by a non-exempt
+# caller (POSIX and SMB callers alike), parameterized by the engine-DAC
+# backends.
+add_executable(vfs_open_create_gate_test vfs_open_create_gate_test.c)
+target_link_libraries(vfs_open_create_gate_test chimera_vfs evpl)
+add_test(NAME chimera/vfs/open_create_gate_memfs COMMAND vfs_open_create_gate_test memfs)
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/vfs/open_create_gate_diskfs_aio COMMAND vfs_open_create_gate_test diskfs_aio)
+endif()
+if(CHIMERA_VFS_IO_URING)
+    add_test(NAME chimera/vfs/open_create_gate_diskfs_io_uring COMMAND vfs_open_create_gate_test diskfs_io_uring)
+endif()
+if(CAIRN_ENABLED)
+    add_test(NAME chimera/vfs/open_create_gate_cairn COMMAND vfs_open_create_gate_test cairn)
+endif()
+
 # Tag every test registered above with the 'vfs' label so the suite can be run
 # independently via `ctest -L vfs`.
 get_property(_vfs_tests DIRECTORY PROPERTY TESTS)
