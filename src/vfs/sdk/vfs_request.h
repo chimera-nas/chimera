@@ -192,6 +192,20 @@ _Static_assert(CHIMERA_VFS_OP_NUM <= 64,
  * apply to it. */
 #define CHIMERA_VFS_OPEN_REGULAR_ONLY           (1U << 12)
 
+/* SDK contract: the engine has evaluated this open's parent-directory access;
+ * a module that sees it skips its own parent checks (EXECUTE and WRITE_DATA,
+ * every credential flavor) for this open.  The engine never sets it on an open
+ * it did not check, so a module that ignores it checks the parent a second
+ * time -- fail closed: on a windows-identity mount that duplicate check is
+ * SID-blind and may refuse what the engine granted (docs/vfs-module-sdk.md). */
+#define CHIMERA_VFS_OPEN_PARENT_CHECKED         (1U << 13)
+
+/* Engine-internal: this open asked to create, the engine refused the create
+ * right, and the open was dispatched without CHIMERA_VFS_OPEN_CREATE; the
+ * completion maps an ENOENT from the module to EACCES.  Modules must ignore
+ * it. */
+#define CHIMERA_VFS_OPEN_CREATE_REFUSED         (1U << 14)
+
 /* remove_at flags: an optional assertion about the target's type, letting the
  * single VFS remove op express the rmdir(2)/RMDIR vs unlink(2)/REMOVE
  * distinction the callers know but the op otherwise loses.  Enforcing backends
