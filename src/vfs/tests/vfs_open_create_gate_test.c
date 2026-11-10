@@ -35,6 +35,8 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_identity.h"
+#include "vfs/sdk/vfs_sid.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
@@ -49,6 +51,12 @@
 #define UID_OWNER      1000 /* owns the parent directories */
 #define UID_A          2000 /* the caller under test */
 #define UID_B          3000 /* a second caller no ACE names */
+#define UID_STRANGER   9000 /* the uid S-B resolves to */
+
+/* The scripted identities of the windows_acl mount's cases. */
+#define SID_A          "S-1-5-21-60-61-62-2000"
+#define SID_B          "S-1-5-21-60-61-62-9000"
+#define SID_DOWN       "S-1-5-21-60-61-62-7000"
 
 /* A sized stand-in for struct chimera_acl, whose flexible array member MSVC
  * refuses to embed in another struct (C2229).  The hdr mirror keeps the real
@@ -380,6 +388,65 @@ acl_add(
         ace->who.special = CHIMERA_WHO_EVERYONE;
     }
 } /* acl_add */
+
+/* Append one ACE naming the native SID `sid` to `acl`. */
+static void
+acl_add_sid(
+    struct test_acl *acl,
+    uint16_t         type,
+    uint32_t         mask,
+    const char      *sid)
+{
+    struct chimera_ace *ace;
+
+    assert(acl->hdr.num_aces < TEST_ACL_MAX);
+    ace = &acl->aces[acl->hdr.num_aces++];
+    memset(ace, 0, sizeof(*ace));
+    memset(&ace->who, 0, sizeof(ace->who));
+    ace->type        = type;
+    ace->access_mask = mask;
+    ace->who.type    = CHIMERA_PRINCIPAL_SID;
+    assert(chimera_sid_from_str(&ace->who.sid, sid) == 0);
+} /* acl_add_sid */
+
+/* The scripted identity handler: S-A is uid UID_A, S-B a stranger, S-DOWN is
+ * an infrastructure outage.  Runs on the resolver's worker threads. */
+static enum chimera_vfs_identity_status
+sid_handler(
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out,
+    void                               *private_data)
+{
+    uint32_t uid;
+
+    (void) id;
+    (void) private_data;
+
+    if (key != CHIMERA_VFS_IDENTITY_BY_SID || !name) {
+        return CHIMERA_VFS_IDENTITY_PASS;
+    }
+
+    if (strcmp(name, SID_DOWN) == 0) {
+        return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+    }
+
+    if (strcmp(name, SID_A) == 0) {
+        uid = UID_A;
+    } else if (strcmp(name, SID_B) == 0) {
+        uid = UID_STRANGER;
+    } else {
+        return CHIMERA_VFS_IDENTITY_PASS;
+    }
+
+    out->user.uid = uid;
+    out->user.gid = uid;
+    snprintf(out->user.username, sizeof(out->user.username), "wgu%u", uid);
+    out->user.username_len = (int) strlen(out->user.username);
+    snprintf(out->user.sid, sizeof(out->user.sid), "%s", name);
+    return CHIMERA_VFS_IDENTITY_OK;
+} /* sid_handler */
 
 /* open_at `name` in `dir` as `cred` with `flags`; a set_attr asking for size
  * 0 when `trunc` is set, an empty one otherwise.  Releases any handle and
@@ -1139,6 +1206,130 @@ test_mount_point_collision_returns_set_attr(
     }
 } /* test_mount_point_collision_returns_set_attr */
 
+/* W1: on a windows_acl mount a named-SID grant admits the create -- the
+ * module's own check sees only mode bits, so the engine's must decide. */
+static void
+test_wacl_named_grant_create(struct test_env *env)
+{
+    const char                     *t     = "test_wacl_named_grant_create";
+    int                             start = env->failures;
+    struct chimera_vfs_open_handle *dir;
+    struct test_acl                 acl;
+
+    dir = parent_make(env, "w1");
+    set_mode(env, dir, 0700);
+
+    memset(&acl, 0, sizeof(acl));
+    acl_add_sid(&acl, CHIMERA_ACE_ALLOWED,
+                CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE, SID_A);
+    acl_add(&acl, CHIMERA_ACE_DENIED, CHIMERA_ACE_MASK_ALL, -1);
+    set_acl(env, dir, &acl);
+
+    expect(env, t, "named-SID create",
+           open_as(env, &env->unix_a, dir, "f",
+                   CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_WRITE_ONLY, 0),
+           CHIMERA_VFS_OK);
+    expect(env, t, "root lookup of the create",
+           root_lookup(env, dir, "f"), CHIMERA_VFS_OK);
+
+    chimera_vfs_release(env->ctx.vfs_thread, dir);
+    if (env->failures == start) {
+        TEST_PASS(t);
+    }
+} /* test_wacl_named_grant_create */
+
+/* W2: a named-SID DENY of ADD_FILE refuses the create for either flavor. */
+static void
+test_wacl_named_deny_create(struct test_env *env)
+{
+    const char                     *t     = "test_wacl_named_deny_create";
+    int                             start = env->failures;
+    struct chimera_vfs_open_handle *dir;
+    struct test_acl                 acl;
+
+    dir = parent_make(env, "w2");
+    set_mode(env, dir, 0777);
+
+    memset(&acl, 0, sizeof(acl));
+    acl_add_sid(&acl, CHIMERA_ACE_DENIED, CHIMERA_ACE_WRITE_DATA, SID_A);
+    acl_add(&acl, CHIMERA_ACE_ALLOWED,
+            CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE, -1);
+    set_acl(env, dir, &acl);
+
+    expect(env, t, "denied POSIX create",
+           open_as(env, &env->unix_a, dir, "f",
+                   CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_WRITE_ONLY, 0),
+           CHIMERA_VFS_EACCES);
+    expect(env, t, "root lookup after the denied create",
+           root_lookup(env, dir, "f"), CHIMERA_VFS_ENOENT);
+    expect(env, t, "denied SMB create",
+           open_as(env, &env->attr_a, dir, "g",
+                   CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_WRITE_ONLY, 0),
+           CHIMERA_VFS_EACCES);
+
+    chimera_vfs_release(env->ctx.vfs_thread, dir);
+    if (env->failures == start) {
+        TEST_PASS(t);
+    }
+} /* test_wacl_named_deny_create */
+
+/* W3: an SMB caller owes no traverse: ADD_FILE alone admits its create. */
+static void
+test_wacl_attr_addfile_no_exec(struct test_env *env)
+{
+    const char                     *t     = "test_wacl_attr_addfile_no_exec";
+    int                             start = env->failures;
+    struct chimera_vfs_open_handle *dir;
+    struct test_acl                 acl;
+
+    dir = parent_make(env, "w3");
+    set_mode(env, dir, 0700);
+
+    memset(&acl, 0, sizeof(acl));
+    acl_add_sid(&acl, CHIMERA_ACE_ALLOWED, CHIMERA_ACE_WRITE_DATA, SID_A);
+    set_acl(env, dir, &acl);
+
+    expect(env, t, "SMB create with ADD_FILE only",
+           open_as(env, &env->attr_a, dir, "f",
+                   CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_WRITE_ONLY, 0),
+           CHIMERA_VFS_OK);
+
+    chimera_vfs_release(env->ctx.vfs_thread, dir);
+    if (env->failures == start) {
+        TEST_PASS(t);
+    }
+} /* test_wacl_attr_addfile_no_exec */
+
+/* W4: an ACE whose SID cannot be resolved fails the create closed, EIO. */
+static void
+test_wacl_unavailable_eio(struct test_env *env)
+{
+    const char                     *t     = "test_wacl_unavailable_eio";
+    int                             start = env->failures;
+    struct chimera_vfs_open_handle *dir;
+    struct test_acl                 acl;
+
+    dir = parent_make(env, "w4");
+    set_mode(env, dir, 0777);
+
+    memset(&acl, 0, sizeof(acl));
+    acl_add_sid(&acl, CHIMERA_ACE_ALLOWED,
+                CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE, SID_DOWN);
+    acl_add(&acl, CHIMERA_ACE_ALLOWED,
+            CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE, -1);
+    set_acl(env, dir, &acl);
+
+    expect(env, t, "create under an unresolvable ACE",
+           open_as(env, &env->unix_a, dir, "f",
+                   CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_WRITE_ONLY, 0),
+           CHIMERA_VFS_EIO);
+
+    chimera_vfs_release(env->ctx.vfs_thread, dir);
+    if (env->failures == start) {
+        TEST_PASS(t);
+    }
+} /* test_wacl_unavailable_eio */
+
 int
 main(
     int    argc,
@@ -1179,6 +1370,8 @@ main(
     ctx->vfs = chimera_vfs_init(0, 0, module_cfgs, spec.ncfg, "memkv", 60, 1, 1,
                                 0, metrics);
     assert(ctx->vfs != NULL);
+
+    chimera_vfs_identity_register_handler(ctx->vfs, sid_handler, NULL);
 
     ctx->vfs_thread = chimera_vfs_thread_init(ctx->evpl, ctx->vfs);
     assert(ctx->vfs_thread != NULL);
@@ -1242,9 +1435,40 @@ main(
         chimera_vfs_release(ctx->vfs_thread, vroot);
     }
 
+    /* The flagged mount: the same filesystem, remounted resolving ACL
+     * principals (windows_acl), where the modules' mode-bit checks are blind
+     * to a named SID and the engine's must decide. */
+    chimera_vfs_release(ctx->vfs_thread, env.mnt);
+    chimera_vfs_umount(ctx->vfs_thread, NULL, "/test", mount_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    chimera_vfs_mount(ctx->vfs_thread, NULL, "/wtest", spec.mount_module, "fs0",
+                      "windows_acl", mount_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    chimera_vfs_lookup(ctx->vfs_thread, &env.root, vroot_fh, vroot_fh_len,
+                       "wtest", 5,
+                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
+                       lookup_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    chimera_vfs_open_fh(ctx->vfs_thread, &env.root, ctx->fh, ctx->fh_len,
+                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    env.mnt = ctx->handle;
+
+    test_wacl_named_grant_create(&env);
+    test_wacl_named_deny_create(&env);
+    test_wacl_attr_addfile_no_exec(&env);
+    test_wacl_unavailable_eio(&env);
+
     chimera_vfs_release(ctx->vfs_thread, env.mnt);
 
-    chimera_vfs_umount(ctx->vfs_thread, NULL, "/test", mount_cb, ctx);
+    chimera_vfs_umount(ctx->vfs_thread, NULL, "/wtest", mount_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
 
