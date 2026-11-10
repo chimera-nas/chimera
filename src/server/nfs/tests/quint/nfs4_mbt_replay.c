@@ -3312,6 +3312,22 @@ check_result(
             o->confirm_known[tok] = 1;
         }
         if (client >= 0 && client < V4_MAX_CLIENTS) {
+            int c;
+
+            /* Distinct model clientids must be distinct on the wire.  The
+             * model hands back the SAME clientid only for a callback update
+             * of a live confirmed record; a new record (first registration,
+             * reboot, or re-registration after a cancelled lease, RFC 7530
+             * 9.6.3.2) gets a new one. */
+            for (c = 0; c < V4_MAX_CLIENTS; c++) {
+                if (c != client && o->clientid_known[c] &&
+                    o->clientid[c] == r->clientid) {
+                    mism_add(m, "setclientid: model client %" PRId64 " is a "
+                             "new clientid but the server returned model "
+                             "client %d's clientid 0x%llx", client, c,
+                             (unsigned long long) r->clientid);
+                }
+            }
             o->clientid[client]       = r->clientid;
             o->clientid_known[client] = 1;
         }
@@ -4338,6 +4354,92 @@ v4_send_raw(
     }
 } /* v4_send_raw */
 
+/* ---- environment event: lease loss (LLeaseLost) -------------------------- */
+
+/* The server's lease and courtesy period are fixed when the shared server
+ * starts, so a lease-loss trace can only be replayed by a run started with a
+ * short lease (MBT_NFS4_LEASE_S + MBT_NFS4_COURTESY_S, at most 30 s
+ * together).  Anything else skips it. */
+#define V4_LEASE_LOST_MAX_WAIT_S 30
+/* Sweeper runs (1 Hz) allowed past lease + courtesy before the reap is
+ * assumed done: one to enter courtesy late, one to reap, one spare. */
+#define V4_LEASE_LOST_SWEEPS_S   3
+#define V4_LEASE_KEEPALIVE_US    (250 * 1000)
+
+static int
+v4_lease_short(void)
+{
+    int lsec, csec;
+
+    if (!mbt_env_seconds("MBT_NFS4_LEASE_S", &lsec) ||
+        !mbt_env_seconds("MBT_NFS4_COURTESY_S", &csec)) {
+        return 0;
+    }
+    return lsec + csec <= V4_LEASE_LOST_MAX_WAIT_S;
+} /* v4_lease_short */
+
+/* The model cancelled `lost`'s lease and released its state.  Make the real
+ * server do it the way it does in production: stop touching that client and
+ * let the lease sweeper move it into courtesy and then reap it.  Every other
+ * known clientid is RENEWed every 250 ms meanwhile so only `lost` lapses.
+ *
+ * Nothing on the wire can confirm the reap without touching `lost` (any op
+ * from a courtesy client revives it), so the wait is by the clock: lease +
+ * courtesy + V4_LEASE_LOST_SWEEPS_S on CLOCK_MONOTONIC, not a count of
+ * sleeps.  The sweeper is a timer on the same event loop that answers the
+ * keepalive RENEWs, so a round of answered RENEWs also shows the loop -- and
+ * with it the sweeper -- kept running.  If a keepalive round stalls for a
+ * whole lease (a starved host), the other clients may have lapsed too and
+ * the reap may be late, so the outcome is unreliable either way: return -1
+ * and let the caller skip the trace instead of reporting a false
+ * divergence.  Returns 0 once the wait completed with every gap under a
+ * lease. */
+static int
+v4_lease_lost(
+    struct oracle *o,
+    int            lost)
+{
+    int    lsec = 0, csec = 0;
+    double start, until, last, now, gap, worst = 0;
+    int    c;
+
+    (void) mbt_env_seconds("MBT_NFS4_LEASE_S", &lsec);
+    (void) mbt_env_seconds("MBT_NFS4_COURTESY_S", &csec);
+
+    start = now_seconds();
+    until = start + lsec + csec + V4_LEASE_LOST_SWEEPS_S;
+    last  = start;
+    do {
+        for (c = 0; c < V4_MAX_CLIENTS; c++) {
+            struct nfs_argop4 arg[1];
+
+            if (c == lost || !o->clientid_known[c] ||
+                o->clientid[c] == o->clientid[lost]) {
+                continue;
+            }
+            memset(&arg[0], 0, sizeof(arg[0]));
+            arg[0].argop            = OP_RENEW;
+            arg[0].oprenew.clientid = o->clientid[c];
+            v4_send_raw(o, conn_for(o, c), arg, 1, NULL);
+        }
+        now   = now_seconds();
+        gap   = now - last;
+        last  = now;
+        worst = gap > worst ? gap : worst;
+        if (worst >= lsec) {
+            printf("lease-lost wait: a keepalive round took %.2f s, at least "
+                   "a %d s lease; the host is too loaded for this timing\n",
+                   worst, lsec);
+            return -1;
+        }
+        usleep(V4_LEASE_KEEPALIVE_US);
+    } while (now_seconds() < until);
+    printf("lease-lost wait: %.2f s, worst keepalive gap %.2f s (lease %d s, "
+           "courtesy %d s)\n", now_seconds() - start, worst, lsec, csec);
+    return 0;
+} /* v4_lease_lost */
+
+
 /* Locate the sdb map field of a state (its key may be module-qualified). */
 static json_t *
 v4_sdb_field(
@@ -4680,6 +4782,25 @@ run_trace(
     init  = jf_val(lastop);
     minor = (int) jf_i64(init, "minor");
 
+    /* A lease-loss trace needs a server started with a short lease. */
+    if (!dry_run && !v4_lease_short()) {
+        for (idx = 1; idx < nstates; idx++) {
+            json_object_foreach(json_array_get(states, idx), k, jv)
+            {
+                const char *base = strrchr(k, ':');
+
+                if (strcmp(base ? base + 1 : k, "lastOp") == 0 &&
+                    strcmp(jf_tag(jv), "LLeaseLost") == 0) {
+                    printf("%s: SKIP (not applicable): lease loss needs "
+                           "MBT_NFS4_LEASE_S + MBT_NFS4_COURTESY_S <= %d\n",
+                           trace_path, V4_LEASE_LOST_MAX_WAIT_S);
+                    json_decref(root);
+                    return 77;
+                }
+            }
+        }
+    }
+
     /* Where this cell's filesystem sits in the server's NFSv4 namespace
      * (P_ROOT_EXPORT / Caps.rootExport): the "/" export, or a named entry in
      * the pseudo-filesystem.  It decides how the filesystem is exported below
@@ -4802,6 +4923,23 @@ run_trace(
             if (strcmp(base ? base + 1 : k, "lastOp") == 0) {
                 lastop = jv;
             }
+        }
+        if (lastop && strcmp(jf_tag(lastop), "LLeaseLost") == 0) {
+            int lost = (int) jf_i64(jf_val(lastop), "client");
+
+            mbt_watchdog_at(trace_path, (int) idx, "lease-lost");
+            printf("%s: step %zu: lease lost for model client %d "
+                   "(wire clientid 0x%llx), waiting for the sweeper\n",
+                   trace_path, idx, lost,
+                   (unsigned long long) o->clientid[lost]);
+            if (v4_lease_lost(o, lost) < 0) {
+                printf("%s: SKIP (not applicable): step %zu: lease-loss "
+                       "timing unreliable under this load\n", trace_path, idx);
+                failed    = 77;
+                sweep_idx = idx;
+                goto out;
+            }
+            continue;
         }
         if (!lastop || strcmp(jf_tag(lastop), "LCompound") != 0) {
             fprintf(stderr, "%s: step %zu: unexpected state shape\n",
