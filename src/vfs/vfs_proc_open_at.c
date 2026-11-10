@@ -12,6 +12,7 @@
 #include "vfs_internal.h"
 #include "vfs_mount_table.h"
 #include "vfs_release.h"
+#include "vfs_acl_windows.h"
 #include "sdk/vfs_access.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
@@ -484,8 +485,9 @@ struct chimera_vfs_open_at_pre_ctx {
  * Whether the engine checks this open's parent directory itself: every
  * creating open by a caller the access gate does not exempt (not root, not
  * AUTH_NONE) on a backend that does not delegate DAC to a real enforcer.  An
- * open that cannot create stays with the module's own traversal check, so it
- * costs no extra round trip.
+ * open that cannot create is checked too only for a POSIX caller on a
+ * windows-identity mount; elsewhere it stays with the module's own traversal
+ * check, so it costs no extra round trip.
  */
 static int
 chimera_vfs_open_at_parent_gate_needed(
@@ -494,8 +496,22 @@ chimera_vfs_open_at_parent_gate_needed(
     struct chimera_vfs_open_handle *handle,
     unsigned int                    flags)
 {
-    return chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred) &&
-           (flags & CHIMERA_VFS_OPEN_CREATE);
+    if (!chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+        return 0;
+    }
+
+    if (flags & CHIMERA_VFS_OPEN_CREATE) {
+        return 1;
+    }
+
+    /* A non-creating open owes the parent EXECUTE only to a POSIX caller, and
+     * only on a windows-identity mount, where the module's own check is blind
+     * to the ACL's named principals.  An SMB caller bypasses traverse, and an
+     * unflagged mount's module check is already right: neither pays the
+     * round trip. */
+    return cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+           chimera_vfs_acl_windows_fh_flagged(thread, handle->fh,
+                                              handle->fh_len);
 } /* chimera_vfs_open_at_parent_gate_needed */
 
 static void chimera_vfs_open_at_hs_dispatch(

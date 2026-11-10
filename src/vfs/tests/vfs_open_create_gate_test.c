@@ -1330,6 +1330,163 @@ test_wacl_unavailable_eio(struct test_env *env)
     }
 } /* test_wacl_unavailable_eio */
 
+/* W5: a named-SID EXECUTE grant admits a non-creating open -- the module's
+ * own EXECUTE check is SID-blind here, so the engine's must decide. */
+static void
+test_wacl_exec_grant_open(struct test_env *env)
+{
+    const char                     *t     = "test_wacl_exec_grant_open";
+    int                             start = env->failures;
+    struct chimera_vfs_open_handle *dir;
+    struct test_acl                 acl;
+
+    dir = parent_make(env, "w5");
+    root_create(env, dir, "f", 0644, 0);
+    set_mode(env, dir, 0700);
+
+    memset(&acl, 0, sizeof(acl));
+    acl_add_sid(&acl, CHIMERA_ACE_ALLOWED, CHIMERA_ACE_EXECUTE, SID_A);
+    set_acl(env, dir, &acl);
+
+    expect(env, t, "named-SID EXECUTE open",
+           open_as(env, &env->unix_a, dir, "f",
+                   CHIMERA_VFS_OPEN_READ_ONLY, 0),
+           CHIMERA_VFS_OK);
+
+    chimera_vfs_release(env->ctx.vfs_thread, dir);
+    if (env->failures == start) {
+        TEST_PASS(t);
+    }
+} /* test_wacl_exec_grant_open */
+
+/* W6: a named-SID DENY of EXECUTE refuses a non-creating open. */
+static void
+test_wacl_exec_deny_open(struct test_env *env)
+{
+    const char                     *t     = "test_wacl_exec_deny_open";
+    int                             start = env->failures;
+    struct chimera_vfs_open_handle *dir;
+    struct test_acl                 acl;
+
+    dir = parent_make(env, "w6");
+    root_create(env, dir, "f", 0644, 0);
+    set_mode(env, dir, 0777);
+
+    memset(&acl, 0, sizeof(acl));
+    acl_add_sid(&acl, CHIMERA_ACE_DENIED, CHIMERA_ACE_EXECUTE, SID_A);
+    acl_add(&acl, CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL, -1);
+    set_acl(env, dir, &acl);
+
+    expect(env, t, "named-SID EXECUTE deny",
+           open_as(env, &env->unix_a, dir, "f",
+                   CHIMERA_VFS_OPEN_READ_ONLY, 0),
+           CHIMERA_VFS_EACCES);
+
+    chimera_vfs_release(env->ctx.vfs_thread, dir);
+    if (env->failures == start) {
+        TEST_PASS(t);
+    }
+} /* test_wacl_exec_deny_open */
+
+/* W7: no EXECUTE for the caller refuses before any existence probe, so an
+ * existing and a missing name answer alike and EXCLUSIVE never says EEXIST. */
+static void
+test_wacl_no_exec_no_leak(struct test_env *env)
+{
+    const char                     *t     = "test_wacl_no_exec_no_leak";
+    int                             start = env->failures;
+    struct chimera_vfs_open_handle *dir;
+    struct test_acl                 acl;
+
+    dir = parent_make(env, "w7");
+    root_create(env, dir, "f", 0644, 0);
+    set_mode(env, dir, 0777);
+
+    memset(&acl, 0, sizeof(acl));
+    acl_add_sid(&acl, CHIMERA_ACE_ALLOWED,
+                CHIMERA_ACE_EXECUTE | CHIMERA_ACE_WRITE_DATA, SID_B);
+    set_acl(env, dir, &acl);
+
+    expect(env, t, "open of an existing name",
+           open_as(env, &env->unix_a, dir, "f",
+                   CHIMERA_VFS_OPEN_READ_ONLY, 0),
+           CHIMERA_VFS_EACCES);
+    expect(env, t, "open of a missing name",
+           open_as(env, &env->unix_a, dir, "g",
+                   CHIMERA_VFS_OPEN_READ_ONLY, 0),
+           CHIMERA_VFS_EACCES);
+    expect(env, t, "exclusive create of an existing name",
+           open_as(env, &env->unix_a, dir, "f",
+                   CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_EXCLUSIVE |
+                   CHIMERA_VFS_OPEN_READ_ONLY, 0),
+           CHIMERA_VFS_EACCES);
+
+    chimera_vfs_release(env->ctx.vfs_thread, dir);
+    if (env->failures == start) {
+        TEST_PASS(t);
+    }
+} /* test_wacl_no_exec_no_leak */
+
+/* W8: the NFS3 CREATE shape (CREATE | INFERRED) is admitted by W1's grant. */
+static void
+test_wacl_inferred_create(struct test_env *env)
+{
+    const char                     *t     = "test_wacl_inferred_create";
+    int                             start = env->failures;
+    struct chimera_vfs_open_handle *dir;
+    struct test_acl                 acl;
+
+    dir = parent_make(env, "w8");
+    set_mode(env, dir, 0700);
+
+    memset(&acl, 0, sizeof(acl));
+    acl_add_sid(&acl, CHIMERA_ACE_ALLOWED,
+                CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE, SID_A);
+    acl_add(&acl, CHIMERA_ACE_DENIED, CHIMERA_ACE_MASK_ALL, -1);
+    set_acl(env, dir, &acl);
+
+    expect(env, t, "inferred create",
+           open_as(env, &env->unix_a, dir, "g",
+                   CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_INFERRED |
+                   CHIMERA_VFS_OPEN_READ_ONLY, 0),
+           CHIMERA_VFS_OK);
+
+    chimera_vfs_release(env->ctx.vfs_thread, dir);
+    if (env->failures == start) {
+        TEST_PASS(t);
+    }
+} /* test_wacl_inferred_create */
+
+/* W9: an SMB caller's non-creating open owes no traverse, so W7's ACL does
+ * not stop it. */
+static void
+test_wacl_attr_noncreate_unchecked(struct test_env *env)
+{
+    const char                     *t     = "test_wacl_attr_noncreate_unchecked";
+    int                             start = env->failures;
+    struct chimera_vfs_open_handle *dir;
+    struct test_acl                 acl;
+
+    dir = parent_make(env, "w9");
+    root_create(env, dir, "f", 0644, 0);
+    set_mode(env, dir, 0777);
+
+    memset(&acl, 0, sizeof(acl));
+    acl_add_sid(&acl, CHIMERA_ACE_ALLOWED,
+                CHIMERA_ACE_EXECUTE | CHIMERA_ACE_WRITE_DATA, SID_B);
+    set_acl(env, dir, &acl);
+
+    expect(env, t, "SMB non-creating open",
+           open_as(env, &env->attr_a, dir, "f",
+                   CHIMERA_VFS_OPEN_READ_ONLY, 0),
+           CHIMERA_VFS_OK);
+
+    chimera_vfs_release(env->ctx.vfs_thread, dir);
+    if (env->failures == start) {
+        TEST_PASS(t);
+    }
+} /* test_wacl_attr_noncreate_unchecked */
+
 int
 main(
     int    argc,
@@ -1465,6 +1622,11 @@ main(
     test_wacl_named_deny_create(&env);
     test_wacl_attr_addfile_no_exec(&env);
     test_wacl_unavailable_eio(&env);
+    test_wacl_exec_grant_open(&env);
+    test_wacl_exec_deny_open(&env);
+    test_wacl_no_exec_no_leak(&env);
+    test_wacl_inferred_create(&env);
+    test_wacl_attr_noncreate_unchecked(&env);
 
     chimera_vfs_release(ctx->vfs_thread, env.mnt);
 
