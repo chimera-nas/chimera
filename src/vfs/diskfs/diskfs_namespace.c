@@ -2051,8 +2051,12 @@ diskfs_open_at_check_cb(
      * existing entry's presence and type leak to a caller who may not search
      * the directory (chimera #1771).  The create branch below adds WRITE_DATA
      * on top for a fresh name.  AUTH_ATTR (SMB/Windows) callers are authorized
-     * by the engine and bypass traverse checking by default. */
-    if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+     * by the engine and bypass traverse checking by default.  The engine sets
+     * CHIMERA_VFS_OPEN_PARENT_CHECKED when it has evaluated the parent itself
+     * (resolved-ACL mounts and engine-gated creates); both checks are then
+     * skipped. */
+    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_PARENT_CHECKED) &&
+        request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
         request->cred->uid != 0 &&
         !diskfs_inode_access(thread, p->inode_stash[0], request->cred,
                              CHIMERA_ACE_EXECUTE)) {
@@ -2067,13 +2071,16 @@ diskfs_open_at_check_cb(
         }
 
         /* Creating a new file requires add-file (WRITE_DATA) permission on the
-        * parent directory, on top of the search permission already required
-        * above.  On the NFSv4/Windows ACL model WRITE_DATA == ADD_FILE and
-        * APPEND_DATA == ADD_SUBDIRECTORY, so a plain file create is gated by
-        * WRITE_DATA (mkdir is gated by APPEND_DATA in the VFS-core mkdir_at
-        * path).  Enforce POSIX semantics for AUTH_UNIX callers (root is
-        * exempt); SMB/ACL (AUTH_ATTR) callers are authorized by the engine. */
-        if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+         * parent directory, on top of the search permission already required
+         * above.  On the NFSv4/Windows ACL model WRITE_DATA == ADD_FILE and
+         * APPEND_DATA == ADD_SUBDIRECTORY, so a plain file create is gated by
+         * WRITE_DATA (mkdir is gated by APPEND_DATA in the VFS-core mkdir_at
+         * path).  Enforce POSIX semantics for AUTH_UNIX callers (root is
+         * exempt); SMB/ACL (AUTH_ATTR) callers are authorized by the engine.
+         * Skipped when the engine has already checked the parent
+         * (CHIMERA_VFS_OPEN_PARENT_CHECKED). */
+        if (!(request->open_at.flags & CHIMERA_VFS_OPEN_PARENT_CHECKED) &&
+            request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
             request->cred->uid != 0 &&
             !diskfs_inode_access(thread, p->inode_stash[0], request->cred,
                                  CHIMERA_ACE_WRITE_DATA)) {

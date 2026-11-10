@@ -3699,8 +3699,12 @@ memfs_open_at(
      * WRITE_DATA on top for a fresh name.  AUTH_ATTR (SMB/Windows) is exempt:
      * traverse checking is bypassed by default there
      * (SeChangeNotifyPrivilege), which is why the existing create gate asks
-     * for EXECUTE only on the AUTH_UNIX arm. */
-    if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+     * for EXECUTE only on the AUTH_UNIX arm.  The engine sets
+     * CHIMERA_VFS_OPEN_PARENT_CHECKED when it has evaluated the parent itself
+     * (resolved-ACL mounts and engine-gated creates); both checks are then
+     * skipped. */
+    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_PARENT_CHECKED) &&
+        request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
         request->cred->uid != 0 &&
         !memfs_inode_access(parent_inode, request->cred, CHIMERA_ACE_EXECUTE)) {
         evpl_mutex_unlock(&parent_inode->lock);
@@ -3740,7 +3744,9 @@ memfs_open_at(
          * ADD_FILE (WRITE_DATA) only -- traverse (EXECUTE) is bypassed by default
          * on Windows (SeChangeNotifyPrivilege), so a directory whose DACL grants
          * ADD_FILE without EXECUTE must still permit the create (smb2.acls.DYNAMIC),
-         * while an explicit deny-ADD_FILE ace still blocks it (smb2.create.mkdir-visible). */
+         * while an explicit deny-ADD_FILE ace still blocks it (smb2.create.mkdir-visible).
+         * Skipped when the engine has already checked the parent
+         * (CHIMERA_VFS_OPEN_PARENT_CHECKED). */
         uint32_t create_access = 0;
 
         if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
@@ -3752,7 +3758,8 @@ memfs_open_at(
             create_access = CHIMERA_ACE_WRITE_DATA;
         }
 
-        if (create_access &&
+        if (!(request->open_at.flags & CHIMERA_VFS_OPEN_PARENT_CHECKED) &&
+            create_access &&
             !memfs_inode_access(parent_inode, request->cred, create_access)) {
             evpl_mutex_unlock(&parent_inode->lock);
             request->status = CHIMERA_VFS_EACCES;
