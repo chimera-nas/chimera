@@ -961,6 +961,38 @@ mbt_pnfs_proxy_start(struct mbt_env *env)
     chimera_server_start(env->proxy_server);
 } /* mbt_pnfs_proxy_start */
 
+/* Upper bound for the MBT lease and courtesy knobs: an hour is already far
+ * longer than any replay would wait. */
+#define MBT_ENV_SECONDS_MAX 3600
+
+/* Read a whole-seconds knob from the environment.  Unset or empty: returns 0
+ * and leaves *out alone.  A plain decimal in [1, MBT_ENV_SECONDS_MAX]: sets
+ * *out and returns 1.  Anything else (a sign, spaces, trailing junk, zero,
+ * out of range) is a configuration error, reported and fatal, rather than
+ * an unexpected lease. */
+static inline int
+mbt_env_seconds(
+    const char *name,
+    int        *out)
+{
+    const char *v = getenv(name);
+    char       *end;
+    long        n;
+
+    if (!v || !*v) {
+        return 0;
+    }
+    errno = 0;
+    n     = (v[0] >= '0' && v[0] <= '9') ? strtol(v, &end, 10) : -1;
+    if (n < 1 || errno || *end != '\0' || n > MBT_ENV_SECONDS_MAX) {
+        fprintf(stderr, "%s=\"%s\": expected whole seconds in [1, %d]\n",
+                name, v, MBT_ENV_SECONDS_MAX);
+        exit(2);
+    }
+    *out = (int) n;
+    return 1;
+} /* mbt_env_seconds */
+
 static inline void
 mbt_env_open_opts(
     struct mbt_env            *env,
@@ -1030,6 +1062,18 @@ mbt_env_open_opts(
     }
 
     config = chimera_server_config_init();
+    /* MBT lease-loss traces (LLeaseLost): a short lease and courtesy period
+     * so the replayer can let the real lease sweeper reap a client. */
+    {
+        int secs;
+
+        if (mbt_env_seconds("MBT_NFS4_LEASE_S", &secs)) {
+            chimera_server_config_set_nfs4_lease_time(config, secs);
+        }
+        if (mbt_env_seconds("MBT_NFS4_COURTESY_S", &secs)) {
+            chimera_server_config_set_nfs4_courtesy_time(config, secs);
+        }
+    }
     chimera_server_config_set_state_dir(config, env->session_dir);
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_nfs_enabled(config, 1);

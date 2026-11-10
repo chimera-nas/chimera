@@ -995,6 +995,26 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
 
+# Lease-loss scenarios (LLeaseLost): the model cancels a 4.0 client's lease
+# and the replayer lets the real lease sweeper reap it, which takes lease +
+# courtesy + 3 s of 1 Hz sweeps on a monotonic clock (about 7 s here).  The
+# batches above run with the default lease (90 s, 24 h courtesy) and skip
+# these traces; this test replays them against a server started with a 2 s
+# lease and 2 s courtesy period.  The other clients are RENEWed every 250 ms,
+# so a keepalive has to stall for a whole lease before timing matters; if it
+# does, the replay cannot tell a late reap from the bug, and it skips (77)
+# rather than fail or pass on a guess.
+# expiredClientRecoveryRegression: after the lease is lost, SETCLIENTID with
+# the same verifier must yield a new clientid (RFC 7530 9.6.3.2).
+add_test(NAME chimera/server/nfs/mbt4/lease_lost_memfs
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay>
+            --trace ${NFS4_MEMFS40_TRACES}/nfs4Memfs40_leaseLost_scenario_expiredClientRecoveryRegression_0.itf.json)
+set_tests_properties(chimera/server/nfs/mbt4/lease_lost_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_lease_lost_memfs;MBT_NFS4_LEASE_S=2;MBT_NFS4_COURTESY_S=2"
+    LABELS "quint;nfs4_mbt;memfs"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120)
+
 # The same corpus -- every minor version instance it carries (4.0, 4.1 and
 # 4.2) -- against the other named-filesystem backends, as the NFS3 suite runs
 # above: diskfs/cairn self-provision scratch under their mkdtemp session dirs,
