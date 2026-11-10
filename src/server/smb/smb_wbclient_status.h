@@ -50,7 +50,12 @@ smb_wbclient_err_to_status(wbcErr wbc_err)
         case WBC_ERR_DOMAIN_NOT_FOUND:
         case WBC_ERR_UNKNOWN_USER:
         case WBC_ERR_UNKNOWN_GROUP:
+#ifdef HAVE_WBC_ERR_NOT_MAPPED
+        /* Newer than the Samba in Ubuntu 24.04; cmake probes for it.  An
+         * older libwbclient reports the not-mapped answer as
+         * WBC_ERR_DOMAIN_NOT_FOUND, classified above. */
         case WBC_ERR_NOT_MAPPED:
+#endif // ifdef HAVE_WBC_ERR_NOT_MAPPED
         case WBC_ERR_INVALID_SID:
             return CHIMERA_VFS_IDENTITY_NOT_FOUND;
         default:

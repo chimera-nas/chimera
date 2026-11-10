@@ -887,6 +887,23 @@ if(PKG_CONFIG_FOUND)
     if(WBCLIENT_FOUND)
         message(STATUS "libwbclient found - Winbind integration enabled")
         add_definitions(-DHAVE_WBCLIENT=1)
+        # WBC_ERR_NOT_MAPPED is newer than the Samba in Ubuntu 24.04, and an
+        # enum constant cannot be #ifdef'd, so probe for it.  wbclient.h uses
+        # bool and the fixed-width types without including them.
+        include(CheckCSourceCompiles)
+        set(CMAKE_REQUIRED_INCLUDES ${WBCLIENT_INCLUDE_DIRS})
+        check_c_source_compiles("
+            #include <stdbool.h>
+            #include <stdint.h>
+            #include <stddef.h>
+            #include <time.h>
+            #include <wbclient.h>
+            int main(void) { return (int) WBC_ERR_NOT_MAPPED; }
+        " HAVE_WBC_ERR_NOT_MAPPED)
+        unset(CMAKE_REQUIRED_INCLUDES)
+        if(HAVE_WBC_ERR_NOT_MAPPED)
+            add_definitions(-DHAVE_WBC_ERR_NOT_MAPPED=1)
+        endif()
     else()
         message(STATUS "libwbclient not found - Winbind integration disabled")
     endif()
