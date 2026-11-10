@@ -16,3 +16,16 @@ if(CHIMERA_LIMITS_TESTING)
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh
                 ${CMAKE_CURRENT_BINARY_DIR}/smb_mount_test)
 endif()
+
+# The engine's create gate on the path-only backend: non-root creating opens
+# through vfs_smb over a loopback SMB server, decided by the engine from the
+# modefromsid mode/uid/gid the proxy reports.
+add_executable(smb_create_gate_test smb_create_gate_test.c)
+target_link_libraries(smb_create_gate_test chimera_server chimera_metrics)
+target_include_directories(smb_create_gate_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+if(CHIMERA_LIMITS_TESTING)
+    add_test(NAME chimera/vfs/smb/create_gate
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/smb_create_gate_test)
+endif()
