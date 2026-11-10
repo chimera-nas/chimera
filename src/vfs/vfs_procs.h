@@ -951,7 +951,7 @@ chimera_vfs_put_key(
  * exists, and OK only when this call created it.  A backend retry may report
  * EEXIST for this caller's own write, so a caller that needs the stored value
  * reads it back. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_put_key_if_absent(
     struct chimera_vfs_thread     *thread,
     const void                    *key,
