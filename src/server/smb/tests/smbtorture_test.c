@@ -14,8 +14,8 @@
  *   smbtorture_test [options] TEST1 [TEST2 ...]
  *
  * Options:
- *   -b <backend>   VFS backend (memfs, linux, io_uring, diskfs_io_uring,
- *                  diskfs_aio, cairn) - default: memfs
+ *   -b <backend>   VFS backend (memfs, memfs_wacl, linux, io_uring,
+ *                  diskfs_io_uring, diskfs_aio, cairn) - default: memfs
  */
 
 #define _GNU_SOURCE
@@ -447,7 +447,7 @@ print_usage(const char *prog)
     fprintf(stderr, "Usage: %s [options] TEST1 [TEST2 ...]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  -b <backend>   VFS backend (memfs, linux, io_uring,\n");
+    fprintf(stderr, "  -b <backend>   VFS backend (memfs, memfs_wacl, linux, io_uring,\n");
     fprintf(stderr, "                 diskfs_io_uring, diskfs_aio, cairn)\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "Positional arguments are smbtorture test names, e.g.:\n");
@@ -810,20 +810,26 @@ main(
     int mount_rc;
 
     if (strcmp(backend, "memfs") == 0 ||
+        strcmp(backend, "memfs_wacl") == 0 ||
         strcmp(backend, "cairn") == 0 ||
         strcmp(backend, "diskfs_io_uring") == 0 ||
         strcmp(backend, "diskfs_aio") == 0) {
         const char *server_module = "memfs";
+        const char *mount_opts    = NULL;
 
         if (strcmp(backend, "cairn") == 0) {
             server_module = "cairn";
+        } else if (strcmp(backend, "memfs_wacl") == 0) {
+            /* memfs mounted with the windows_acl option: the engine decides
+             * parent access against the resolved ACL. */
+            mount_opts = "windows_acl";
         } else if (strcmp(backend, "memfs") != 0) {
             server_module = "diskfs";
         }
 
         mount_rc = chimera_server_mkfs(env.server, server_module, "fs0", NULL);
         if (mount_rc == 0) {
-            mount_rc = chimera_server_mount(env.server, "share", server_module, "fs0", NULL);
+            mount_rc = chimera_server_mount(env.server, "share", server_module, "fs0", mount_opts);
         }
     } else if (strcmp(backend, "linux") == 0) {
         mount_rc = chimera_server_mount(env.server, "share", "linux", env.session_dir, NULL);

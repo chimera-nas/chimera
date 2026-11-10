@@ -1449,6 +1449,27 @@ set(SMBTORTURE_SUITES
     smb2.zero-data-ioctl
 )
 
+# memfs mounted with the windows_acl option: the engine makes the parent
+# decisions against the resolved ACL.  Only the ACL and create-gate families are
+# enabled; there is deliberately no explore registration for this backend.
+set(SMBTORTURE_ENABLED_memfs_wacl
+    smb2.acls.ACCESSBASED
+    smb2.acls.CREATOR
+    smb2.acls.DENY1
+    smb2.acls.DYNAMIC
+    smb2.acls.GENERIC
+    smb2.acls.INHERITANCE
+    smb2.acls.INHERITFLAGS
+    smb2.acls.MXAC-NOT-GRANTED
+    smb2.acls.OVERWRITE_READ_ONLY_FILE
+    smb2.acls.OWNER
+    smb2.acls.OWNER-RIGHTS
+    smb2.acls.OWNER-RIGHTS-DENY
+    smb2.acls.OWNER-RIGHTS-DENY1
+    smb2.acls.SDFLAGSVSCHOWN
+    smb2.create.mkdir-visible
+)
+
 set(SMBTORTURE_ENABLED_memfs
     # smb2.acls
     smb2.acls.ACCESSBASED
@@ -3267,6 +3288,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
+    smb2.create.mkdir-visible
     smb2.create.multi
     smb2.create.open
     smb2.create.path-length
@@ -3891,6 +3913,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
+    smb2.create.mkdir-visible
     smb2.create.multi
     smb2.create.open
     smb2.create.path-length
@@ -4520,6 +4543,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
+    smb2.create.mkdir-visible
     smb2.create.multi
     smb2.create.open
     smb2.create.path-length
@@ -5426,6 +5450,7 @@ if(CHIMERA_NETNS_TESTING AND SMBTORTURE_EXECUTABLE)
     endforeach()
 
     add_smbtorture_backend_tests(memfs)
+    add_smbtorture_backend_tests(memfs_wacl)
     add_smbtorture_backend_tests(linux)
     add_smbtorture_backend_tests(diskfs_io_uring)
     if(HAVE_LIBAIO)
