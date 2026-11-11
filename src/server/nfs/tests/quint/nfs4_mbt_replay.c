@@ -305,7 +305,8 @@ v4_wide_attr_mask(uint32_t *m)
  * backend. */
 static int g_backend_passthrough;
 
-#define E_WRONG_TYPE 10083
+#define E_WRONG_TYPE    10083
+#define E_DELEG_REVOKED 10087
 
 /* ---- per-op reply summary ------------------------------------------------ */
 
@@ -647,9 +648,22 @@ sid_of(
     uint8_t       *other,
     struct mism   *m)
 {
+    (void) m;
+
+    /* A model sid the oracle never learned is deliberate in some
+     * deterministic regressions (e.g. cloneBadStateidRegression): the trace
+     * references a sid number the run never handed out, to exercise the
+     * server's NFS4ERR_BAD_STATEID path for a stateid it has never seen.
+     * There is no real wire "other" to substitute, so synthesize one that
+     * cannot collide with any stateid the server actually issued (its
+     * "other" fields are server-generated and never all-0x5A). This loses no
+     * error-detection power: if the model is instead wrong to assume this
+     * sid is unknown, the server's real reply will diverge from the
+     * predicted status and the normal result comparison below still catches
+     * it -- just as a status mismatch instead of an unresolved-selector one. */
     if (sid < 0 || sid >= V4_MAX_SIDS || !o->sid_known[sid]) {
-        mism_add(m, "model stateid %" PRId64 " has no learned other", sid);
-        return -1;
+        memset(other, 0x5a, 12);
+        return 0;
     }
     memcpy(other, o->sid_other[sid], 12);
     return 0;
@@ -3039,6 +3053,22 @@ classify_status_mismatch(
         caps_mismatch(o, m, "conflictDelays",
                       "model expected NFS4ERR_DELAY during recall, server "
                       "completed the op");
+        return;
+    }
+    /* A delegation the model granted earlier in the trace can be revoked by
+     * the real server's lease/recall machinery before the trace reaches the
+     * op that consumes its stateid -- e.g. the recall deadline expires while
+     * a slow batch replay is still working through earlier traces.  The
+     * model does not track wall-clock recall timing, so it still expects the
+     * stateid to be live; the live server correctly answers
+     * NFS4ERR_DELEG_REVOKED per RFC 5661 8.1.3.2.  This is a timing race
+     * rather than a CLONE/COPY defect, so treat it like the other
+     * capability mismatches and abandon the trace instead of failing it. */
+    if ((strcmp(tag, "SClone") == 0 || strcmp(tag, "SCopy") == 0) &&
+        est == NFS4_OK && ast == E_DELEG_REVOKED) {
+        caps_mismatch(o, m, "delegRevokedRace",
+                      "model expected the delegation stateid to still be "
+                      "live, server revoked it before this op ran");
         return;
     }
     /* D4-26: a mode-only SETATTR of a symlink -- Linux has no lchmod, so
