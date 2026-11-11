@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "nfs3_drc.h"
+#include "nfs3_drc_test_gate.h"
 #include "prometheus-c.h"
 #include "nfs_common.h"
 #include "nfs_internal.h"
@@ -880,9 +881,16 @@ nfs3_drc_addr_mark_hydrated(
 *  execution                                                         *
 * ------------------------------------------------------------------ */
 
-/* Test only: a request parked for drc->test_delay_ms before it runs.  Kept on
- * its thread's drc_parked list, so a disconnect or a thread shutdown cancels
- * it like any other request still waiting on this cache. */
+/* Test-only seam (nfs3_drc_test_gate.h); never armed unless a test arms it. */
+SYMBOL_EXPORT struct chimera_nfs3_drc_test_gate chimera_nfs3_drc_test_gate;
+
+/* How often a request parked by the test gate looks for its release. */
+#define NFS3_DRC_GATE_POLL_US 1000
+
+/* Test only: a request parked for drc->test_delay_ms, or until the test gate
+ * releases it, before it runs.  Kept on its thread's drc_parked list, so a
+ * thread shutdown cancels it like any other request still waiting on this
+ * cache; a disconnect cancels a delayed one, but not a gated one. */
 struct nfs3_drc_delay_ctx {
     struct evpl_timer                 timer;
     struct chimera_server_nfs_thread *thread;
@@ -898,6 +906,8 @@ struct nfs3_drc_delay_ctx {
     int                               niov;
     int                               length;
     void                             *private_data;
+    int                               gated;    /* parked by the test gate */
+    unsigned int                      gate_seq; /* `released` when parked  */
     struct nfs3_drc_delay_ctx        *prev, *next;  /* thread->drc_parked */
 };
 
@@ -939,7 +949,14 @@ nfs3_drc_delay_fire(
     struct nfs3_drc_delay_ctx *dc = container_of(timer, struct nfs3_drc_delay_ctx,
                                                  timer);
 
-    (void) evpl;
+    if (dc->gated) {
+        if (atomic_load(&chimera_nfs3_drc_test_gate.released) == dc->gate_seq) {
+            evpl_add_oneshot_timer(evpl, &dc->timer, nfs3_drc_delay_fire,
+                                   NFS3_DRC_GATE_POLL_US);
+            return;
+        }
+        atomic_fetch_sub(&chimera_nfs3_drc_test_gate.parked, 1);
+    }
 
     NFS3_DRC_DL_UNLINK(dc->thread->drc_parked, dc, prev, next);
     nfs3_drc_execute(dc->drc, 1, dc->evpl, dc->conn, dc->encoding, dc->proc,
@@ -956,6 +973,9 @@ nfs3_drc_delay_cancel(
     struct nfs3_drc_delay_ctx        *dc)
 {
     evpl_remove_timer(thread->evpl, &dc->timer);
+    if (dc->gated) {
+        atomic_fetch_sub(&chimera_nfs3_drc_test_gate.parked, 1);
+    }
     NFS3_DRC_DL_UNLINK(thread->drc_parked, dc, prev, next);
     evpl_rpc2_discard_request(thread->evpl, dc->encoding);
     free(dc);
@@ -1029,6 +1049,7 @@ nfs3_drc_lookup_or_forward(
     struct nfs3_drc_capture_ctx *cctx;
     struct nfs3_drc_delay_ctx   *dc;
     enum nfs3_drc_reserve_result res;
+    int                          gated;
 
     /* A waiter lives in the request's own dbuf (a bump allocation, no malloc);
      * without one (exhausted dbuf, or a thread without the waiter machinery)
@@ -1099,7 +1120,12 @@ nfs3_drc_lookup_or_forward(
         nfs3_drc_cache_abandon(drc, key);
     }
 
-    if (drc->test_delay_ms && !deferred) {
+    /* Test only: the gate takes the first request reserved once it is armed. */
+    gated = !deferred && res == NFS3_DRC_RESERVED &&
+        atomic_load(&chimera_nfs3_drc_test_gate.armed) &&
+        atomic_exchange(&chimera_nfs3_drc_test_gate.armed, 0);
+
+    if ((drc->test_delay_ms || gated) && !deferred) {
         dc = calloc(1, sizeof(*dc));
         if (dc) {
             dc->thread       = thread;
@@ -1117,9 +1143,17 @@ nfs3_drc_lookup_or_forward(
             dc->niov         = niov;
             dc->length       = length;
             dc->private_data = private_data;
+            dc->gated        = gated;
             DL_APPEND2(thread->drc_parked, dc, prev, next);
-            evpl_add_oneshot_timer(evpl, &dc->timer, nfs3_drc_delay_fire,
-                                   (uint64_t) drc->test_delay_ms * 1000);
+            if (gated) {
+                dc->gate_seq = atomic_load(&chimera_nfs3_drc_test_gate.released);
+                atomic_fetch_add(&chimera_nfs3_drc_test_gate.parked, 1);
+                evpl_add_oneshot_timer(evpl, &dc->timer, nfs3_drc_delay_fire,
+                                       NFS3_DRC_GATE_POLL_US);
+            } else {
+                evpl_add_oneshot_timer(evpl, &dc->timer, nfs3_drc_delay_fire,
+                                       (uint64_t) drc->test_delay_ms * 1000);
+            }
             return 0;
         }
     }
@@ -1392,7 +1426,9 @@ nfs3_drc_conn_close(
     }
     DL_FOREACH_SAFE2(thread->drc_parked, dc, dtmp, next)
     {
-        if (dc->conn == conn) {
+        /* A gated original keeps running without its client; see
+         * nfs3_drc_test_gate.h. */
+        if (dc->conn == conn && !dc->gated) {
             nfs3_drc_delay_cancel(thread, dc);
         }
     }

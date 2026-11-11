@@ -318,11 +318,12 @@ foreach(dback memfs diskfs cairn linux io_uring)
         TIMEOUT 120)
 endforeach()
 
-# A retransmit that arrives while its original is still executing (#1375).  The
-# server holds each request that reserves a cache identity for a fixed delay,
-# so retransmits can be sent inside that window on other connections: held and
-# answered with the original's reply (default), or dropped once held past a
-# deliberately short deadline (--hold-expiry).  Needs no corpus.
+# The edges of the NFSv3 cache's in-progress window (#1375) that the nfsdrc
+# model cannot express: an original that ends without a reply (default), a held
+# retransmit dropped at its deadline (--hold-expiry), the in-progress ceiling
+# answered with JUKEBOX (--ceiling), and server shutdown with work outstanding
+# (--shutdown).  The window itself is replayed from the corpus by
+# nfs_drc_mbt_replay.  Needs no corpus.
 add_test(NAME chimera/server/nfs/mbtdrc/inprog_probe_memfs
     COMMAND $<TARGET_FILE:nfs_drc_inprog_probe>)
 set_tests_properties(chimera/server/nfs/mbtdrc/inprog_probe_memfs PROPERTIES

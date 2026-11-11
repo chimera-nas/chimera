@@ -3,35 +3,23 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 /*
- * A retransmit that arrives while its original is still executing
- * (chimera#1375).
+ * The edges of the NFSv3 cache's in-progress window (chimera#1375) that the
+ * nfsdrc model cannot express.
  *
- * The client lost the connection its non-idempotent request went out on,
- * reconnected and sent the request again under the same XID -- while the
- * server was still working on the first copy.  The duplicate-request cache
- * used to create its entry only when the original's reply was captured, so the
- * retransmit missed, executed a second time, and got the second execution's
- * answer (NOENT for a REMOVE that succeeded, EXIST for a MKDIR that did),
- * which then also replaced the cached reply.
+ * The window itself -- a retransmit that arrives while its original is still
+ * executing is held for the original's reply or dropped, never executed -- is
+ * the model's: its traces park an original inside the server through the test
+ * gate (nfs3_drc_test_gate.h), send retransmits on every connection and
+ * incarnation, and replay on every backend, transport and security flavor.
+ * What is left here is what a trace cannot say, because it is about time, the
+ * server's own resources, or a request ending in a way the protocol never
+ * shows:
  *
- * nfs_drc_probe drives one RPC at a time and so can never put a retransmit
- * inside that window.  This probe can: the server is told to hold every
- * request that reserves a cache identity for a fixed delay before executing it
- * (CHIMERA_NFS3_DRC_TEST_DELAY_MS), and the retransmits are sent on other
- * connections while the original is held.  Under the in-process transport
- * every connection has the same source address, so those connections are the
- * same client to the address-scoped NFSv3 cache -- exactly a client that
- * reconnected.
- *
- * Every check is decided by what the directory holds afterwards as well as by
- * the replies: a cache that answered correctly but let a duplicate execute is
- * caught by the directory, and one that kept the directory right but answered
- * a retransmit with the wrong reply is caught by the status.
- *
- * Modes:
- *   (default)       the retransmits are held, and answered when the original
- *                   completes; an original that is cancelled releases its
- *                   held retransmit unanswered.
+ *   (default)       an original that ends without a reply -- its connection
+ *                   closes while it is still parked, so it is released unrun --
+ *                   abandons its entry, and the retransmit held on it is
+ *                   released unanswered rather than given a reply that never
+ *                   existed; the next retransmit executes, once.
  *   --hold-expiry   the hold is shorter than the original takes, so a held
  *                   retransmit is dropped unanswered; the client's next
  *                   retransmit, after the original is done, replays the cache.
@@ -47,8 +35,12 @@
  *                   nothing is leaked or touched afterwards.
  *   --rdma          any of the above over RPC-over-RDMA framing.
  *
- * After each mode the cache's own account -- the chimera_nfs3_drc metrics the
- * server exports -- is checked against what the probe did.
+ * The originals are parked for a fixed delay (CHIMERA_NFS3_DRC_TEST_DELAY_MS)
+ * rather than by the gate: every request the cache reserves is held that long,
+ * and a parked request whose connection closes is cancelled, which is how an
+ * original comes to end without a reply.  After each mode the cache's own
+ * account -- the chimera_nfs3_drc metrics the server exports -- is checked
+ * against what the probe did.
  */
 
 #include "nfs_drc_mbt_common.h"
@@ -122,40 +114,6 @@ ip_mkdir_cb(
 } /* ip_mkdir_cb */
 
 static void
-ip_rmdir_cb(
-    struct evpl                 *evpl,
-    const struct evpl_rpc2_verf *verf,
-    struct RMDIR3res            *reply,
-    int                          status,
-    void                        *private_data)
-{
-    struct ip_call *call = private_data;
-
-    call->rpc_err = status;
-    if (status == 0) {
-        call->status = reply->status;
-    }
-    call->done = 1;
-} /* ip_rmdir_cb */
-
-static void
-ip_rename_cb(
-    struct evpl                 *evpl,
-    const struct evpl_rpc2_verf *verf,
-    struct RENAME3res           *reply,
-    int                          status,
-    void                        *private_data)
-{
-    struct ip_call *call = private_data;
-
-    call->rpc_err = status;
-    if (status == 0) {
-        call->status = reply->status;
-    }
-    call->done = 1;
-} /* ip_rename_cb */
-
-static void
 ip_mkdir(
     struct drc_ctx              *c,
     int                          conn_id,
@@ -181,59 +139,6 @@ ip_mkdir(
                                             conn, cred, &args, 0, 0, NULL, 0, 0,
                                             ip_mkdir_cb, call);
 } /* ip_mkdir */
-
-static void
-ip_rmdir(
-    struct drc_ctx              *c,
-    int                          conn_id,
-    const struct evpl_rpc2_cred *cred,
-    uint32_t                     xid,
-    const char                  *name,
-    struct ip_call              *call)
-{
-    struct evpl_rpc2_conn *conn = drc_conn(c, conn_id);
-    struct RMDIR3args      args;
-
-    memset(call, 0, sizeof(*call));
-    args.object.dir.data.data = (void *) c->dir_fh.data;
-    args.object.dir.data.len  = c->dir_fh.len;
-    args.object.name.str      = (char *) name;
-    args.object.name.len      = (uint32_t) strlen(name);
-
-    evpl_rpc2_conn_set_next_xid(conn, xid);
-    c->env->nfs_v3.send_call_NFSPROC3_RMDIR(&c->env->nfs_v3.rpc2, c->env->evpl,
-                                            conn, cred, &args, 0, 0, NULL, 0, 0,
-                                            ip_rmdir_cb, call);
-} /* ip_rmdir */
-
-static void
-ip_rename(
-    struct drc_ctx              *c,
-    int                          conn_id,
-    const struct evpl_rpc2_cred *cred,
-    uint32_t                     xid,
-    const char                  *from,
-    const char                  *to,
-    struct ip_call              *call)
-{
-    struct evpl_rpc2_conn *conn = drc_conn(c, conn_id);
-    struct RENAME3args     args;
-
-    memset(call, 0, sizeof(*call));
-    args.from.dir.data.data = (void *) c->dir_fh.data;
-    args.from.dir.data.len  = c->dir_fh.len;
-    args.from.name.str      = (char *) from;
-    args.from.name.len      = (uint32_t) strlen(from);
-    args.to.dir.data.data   = (void *) c->dir_fh.data;
-    args.to.dir.data.len    = c->dir_fh.len;
-    args.to.name.str        = (char *) to;
-    args.to.name.len        = (uint32_t) strlen(to);
-
-    evpl_rpc2_conn_set_next_xid(conn, xid);
-    c->env->nfs_v3.send_call_NFSPROC3_RENAME(&c->env->nfs_v3.rpc2, c->env->evpl,
-                                             conn, cred, &args, 0, 0, NULL, 0, 0,
-                                             ip_rename_cb, call);
-} /* ip_rename */
 
 /* ---- pumping ------------------------------------------------------------ */
 
@@ -397,132 +302,22 @@ ip_check_state(
            "expected %lld", state, got, want);
 } /* ip_check_state */
 
-/* ---- the held path (default mode) --------------------------------------- */
+/* ---- an original abandoned (default mode) ------------------------------- */
 
 static void
-run_held(
+run_abandon(
     struct drc_ctx              *c,
     const struct evpl_rpc2_cred *u1)
 {
-    /* Static: a call left unanswered on purpose (scenario 6) completes only
-     * when its connection closes, after this function has returned. */
-    static struct ip_call orig, re1, re2, other;
-    struct ip_call       *all[4];
+    /* Static: a call left unanswered on purpose completes only when its
+     * connection closes, after this function has returned. */
+    static struct ip_call orig, re1, re2;
+    struct ip_call       *all[1];
     int                   finished;
 
-    /* ------------------------------------------------------------------ *
-    * 1. The case #1375 reports: a retransmit on a new connection while   *
-    *    the original executes.  A second execution would answer EXIST.   *
-    * ------------------------------------------------------------------ */
-    ip_mkdir(c, 0, u1, 1000, "a", &orig);
-    ip_settle(c, 50);
-    ip_mkdir(c, 1, u1, 1000, "a", &re1);
-    ip_settle(c, 50);
-    report("inprog/retransmit-not-answered-early", !re1.done,
-           "the retransmit was answered (%s) while its original was still "
-           "executing", ip_err(&re1));
-
-    all[0]   = &orig;
-    all[1]   = &re1;
-    finished = ip_wait(c, all, 2);
-    report("inprog/mkdir-original", finished && ip_ok(&orig, NFS3_OK),
-           "original MKDIR: %s", ip_err(&orig));
-    report("inprog/mkdir-retransmit-replays", finished && ip_ok(&re1, NFS3_OK),
-           "retransmitted MKDIR: %s (status %u would mean it executed twice)",
-           ip_err(&re1), NFS3ERR_EXIST);
-    report("inprog/mkdir-directory", ip_dir_has(c, "a"),
-           "the directory MKDIR created is missing");
-
-    /* ------------------------------------------------------------------ *
-    * 2. One retransmit held per connection, several connections: every   *
-    *    one of them is answered with the original's reply.  A second     *
-    *    execution of the RMDIR would answer NOENT.                        *
-    * ------------------------------------------------------------------ */
-    ip_rmdir(c, 0, u1, 1100, "a", &orig);
-    ip_settle(c, 50);
-    ip_rmdir(c, 1, u1, 1100, "a", &re1);
-    ip_rmdir(c, 2, u1, 1100, "a", &re2);
-    all[0]   = &orig;
-    all[1]   = &re1;
-    all[2]   = &re2;
-    finished = ip_wait(c, all, 3);
-    (void) finished;
-    report("inprog/rmdir-original", ip_ok(&orig, NFS3_OK),
-           "original RMDIR: %s", ip_err(&orig));
-    report("inprog/rmdir-held-on-two-connections",
-           ip_ok(&re1, NFS3_OK) && ip_ok(&re2, NFS3_OK),
-           "retransmits: %s and %s (status %u would mean one executed again)",
-           ip_err(&re1), ip_err(&re2), NFS3ERR_NOENT);
-
-    /* ------------------------------------------------------------------ *
-    * 3. An error is a reply like any other.  The original RMDIR fails    *
-    *    (nothing there); while it runs, the name is created; the held    *
-    *    retransmit must get the original's NOENT, not execute and remove *
-    *    the new directory.                                               *
-    * ------------------------------------------------------------------ */
-    ip_rmdir(c, 0, u1, 1200, "d", &orig);
-    ip_settle(c, 50);
-    ip_mkdir(c, 3, u1, 1201, "d", &other);
-    ip_settle(c, 50);
-    ip_rmdir(c, 1, u1, 1200, "d", &re1);
-    all[0]   = &orig;
-    all[1]   = &other;
-    all[2]   = &re1;
-    finished = ip_wait(c, all, 3);
-    (void) finished;
-    report("inprog/error-original", ip_ok(&orig, NFS3ERR_NOENT),
-           "original RMDIR of an absent name: %s", ip_err(&orig));
-    report("inprog/error-replayed", ip_ok(&re1, NFS3ERR_NOENT),
-           "retransmit: %s (status %u would mean it executed and removed the "
-           "object created meanwhile)", ip_err(&re1), NFS3_OK);
-    report("inprog/error-did-not-execute",
-           ip_ok(&other, NFS3_OK) && ip_dir_has(c, "d"),
-           "the directory created while the RMDIR was in progress is gone "
-           "(MKDIR %s)", ip_err(&other));
-
-    /* ------------------------------------------------------------------ *
-    * 4. A held retransmit whose connection closes is released by the     *
-    *    server (and must not be touched again -- AddressSanitizer        *
-    *    watches); a retransmit on the next connection is held instead    *
-    *    and answered.  RENAME executed twice would answer NOENT.          *
-    * ------------------------------------------------------------------ */
-    ip_rename(c, 0, u1, 1300, "d", "e", &orig);
-    ip_settle(c, 50);
-    ip_rename(c, 1, u1, 1300, "d", "e", &re1);
-    ip_settle(c, 50);
-    drc_reconnect(c, 1);
-    report("inprog/closed-connection-call-lost", re1.done && re1.rpc_err != 0,
-           "the retransmit on the closed connection: %s", ip_err(&re1));
-    ip_rename(c, 1, u1, 1300, "d", "e", &re2);
-    all[0]   = &orig;
-    all[1]   = &re2;
-    finished = ip_wait(c, all, 2);
-    (void) finished;
-    report("inprog/rename-original", ip_ok(&orig, NFS3_OK),
-           "original RENAME: %s", ip_err(&orig));
-    report("inprog/rename-held-after-reconnect", ip_ok(&re2, NFS3_OK),
-           "retransmit after the held one's connection closed: %s",
-           ip_err(&re2));
-    report("inprog/rename-directory", ip_dir_has(c, "e") && !ip_dir_has(c, "d"),
-           "the directory does not show exactly one RENAME");
-
-    /* ------------------------------------------------------------------ *
-    * 5. Once completed, the entry is an ordinary cached one.             *
-    * ------------------------------------------------------------------ */
-    ip_rename(c, 2, u1, 1300, "d", "e", &re1);
-    all[0]   = &re1;
-    finished = ip_wait(c, all, 1);
-    (void) finished;
-    report("inprog/later-retransmit-replays", ip_ok(&re1, NFS3_OK),
-           "a retransmit after completion: %s", ip_err(&re1));
-
-    /* ------------------------------------------------------------------ *
-    * 6. An original that ends without a reply -- here its connection     *
-    *    closes while it is still parked, so it is released unrun --       *
-    *    abandons its entry.  The retransmit held on it is released        *
-    *    unanswered (it was never going to get a cached reply), and the   *
-    *    client's next retransmit is a fresh request that executes once.  *
-    * ------------------------------------------------------------------ */
+    /* The original's connection closes while it is still parked, so it is
+     * released unrun and ends with no reply: its entry is abandoned.  The
+     * retransmit held on it was never going to get a cached reply. */
     ip_mkdir(c, 2, u1, 1400, "g", &orig);
     ip_settle(c, 50);
     ip_mkdir(c, 1, u1, 1400, "g", &re1);
@@ -537,6 +332,8 @@ run_held(
            ip_err(&re1));
     report("abandon/original-never-ran", !ip_dir_has(c, "g"),
            "the cancelled MKDIR created its directory");
+
+    /* The client's next retransmit is a fresh request that executes once. */
     ip_mkdir(c, 3, u1, 1400, "g", &re2);
     all[0]   = &re2;
     finished = ip_wait(c, all, 1);
@@ -545,21 +342,15 @@ run_held(
            ip_ok(&re2, NFS3_OK) && ip_dir_has(c, "g"),
            "the next retransmit: %s", ip_err(&re2));
 
-    /* ------------------------------------------------------------------ *
-    * 7. The cache's own account of all of the above.                     *
-    * ------------------------------------------------------------------ */
-    ip_check_event(c, "held", 7);
-    ip_check_event(c, "answered", 5);
-    ip_check_event(c, "replayed", 1);
-    ip_check_event(c, "drop_disconnect", 1);
+    ip_check_event(c, "held", 1);
+    ip_check_event(c, "answered", 0);
+    ip_check_event(c, "drop_disconnect", 0);
     ip_check_event(c, "abandoned", 1);
     ip_check_event(c, "drop_abandoned", 1);
-    ip_check_event(c, "drop_deadline", 0);
-    ip_check_event(c, "drop_origin_conn", 0);
     ip_check_event(c, "jukebox", 0);
     ip_check_state(c, "in_progress", 0);
     ip_check_state(c, "held", 0);
-} /* run_held */
+} /* run_abandon */
 
 /* ---- the expiry path (--hold-expiry) ------------------------------------ */
 
@@ -808,7 +599,7 @@ main(
         } else if (ceiling) {
             run_ceiling(&c, &u1);
         } else {
-            run_held(&c, &u1);
+            run_abandon(&c, &u1);
         }
         drc_conns_close(&c);
         mbt_env_fs_teardown(&env, "fs0");
