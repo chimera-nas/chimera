@@ -329,7 +329,7 @@ set_tests_properties(chimera/server/nfs/mbtdrc/inprog_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_inprog_probe_memfs"
     LABELS "functional;probe;nfsdrc_mbt;memfs"
     TIMEOUT 120)
-foreach(_ipmode hold_expiry shutdown rdma)
+foreach(_ipmode hold_expiry ceiling shutdown rdma)
     string(REPLACE "_" "-" _ipflag "--${_ipmode}")
     add_test(NAME chimera/server/nfs/mbtdrc/inprog_probe_memfs_${_ipmode}
         COMMAND $<TARGET_FILE:nfs_drc_inprog_probe> ${_ipflag})
