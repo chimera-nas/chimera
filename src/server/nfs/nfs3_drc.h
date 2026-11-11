@@ -146,7 +146,7 @@ struct nfs3_drc_waiter {
  * event is counted under the cache lock. */
 enum nfs3_drc_event {
     NFS3_DRC_EV_RESERVED = 0,                /* first arrival, entry now in progress */
-    NFS3_DRC_EV_UNTRACKED,                   /* executed without an entry (ceiling) */
+    NFS3_DRC_EV_JUKEBOX,                     /* first arrival refused with JUKEBOX (ceiling) */
     NFS3_DRC_EV_REPLAYED,                    /* answered from a cached reply */
     NFS3_DRC_EV_HELD,                        /* retransmit held on an entry in progress */
     NFS3_DRC_EV_ANSWERED,                    /* held retransmit given the original's reply */
@@ -202,6 +202,9 @@ struct nfs3_drc {
     struct nfs3_drc_hydra  *hydrated;        /* uthash: addrs hydrated from KV  */
     uint64_t                bytes;
     uint32_t                inprog;          /* entries in NFS3_DRC_INPROG       */
+    /* NFS3_DRC_MAX_INPROG; lowered only by a test, through
+     * CHIMERA_NFS3_DRC_TEST_MAX_INPROG, to reach the ceiling. */
+    uint32_t                max_inprog;
     uint32_t                held;            /* waiters in NFS3_DRC_WAITER_HELD  */
     uint64_t                hold_ns;         /* how long a waiter may be held    */
     uint64_t                last_stuck_report; /* ns; rate-limits the stuck log   */
@@ -382,18 +385,22 @@ enum nfs3_drc_reserve_result {
     /* No entry: one was created in progress for the caller, who must now
      * execute the request and end it -- the request-end hook abandons the
      * entry if no reply was captured by then. */
-    NFS3_DRC_RESERVED  = 0,
-    /* No entry, and none created (too many in progress): execute untracked. */
-    NFS3_DRC_UNTRACKED = 1,
+    NFS3_DRC_RESERVED = 0,
+    /* No entry, and none created (too many in progress, or no memory).  The
+     * request has not run: the caller answers NFS3ERR_JUKEBOX, and the client
+     * sends it again later.  Running it without an entry would leave a
+     * retransmit racing it free to execute it a second time; dropping it would
+     * stall the client for a whole RPC timeout. */
+    NFS3_DRC_BUSY     = 1,
     /* Cached: *out_reply holds a reference to the reply to replay, which the
      * caller drops with nfs3_drc_reply_put. */
-    NFS3_DRC_HIT       = 2,
+    NFS3_DRC_HIT      = 2,
     /* In progress, and the caller's waiter is now held on it. */
-    NFS3_DRC_HELD      = 3,
+    NFS3_DRC_HELD     = 3,
     /* In progress, and the request must go unanswered: it arrived on the
      * original's own connection, its connection already has a waiter, the
      * held ceiling is reached, or no waiter was given. */
-    NFS3_DRC_DROP      = 4,
+    NFS3_DRC_DROP     = 4,
 };
 
 /* A reply holding a copy of body, with one reference (NULL on allocation

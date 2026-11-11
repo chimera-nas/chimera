@@ -498,7 +498,7 @@ nfs3_drc_cache_reserve(
     HASH_FIND(hh, drc->table, key, sizeof(*key), e);
 
     if (!e) {
-        if (fresh && drc->inprog < NFS3_DRC_MAX_INPROG) {
+        if (fresh && drc->inprog < drc->max_inprog) {
             fresh->key         = *key;
             fresh->ts          = now;
             fresh->state       = NFS3_DRC_INPROG;
@@ -510,8 +510,8 @@ nfs3_drc_cache_reserve(
             nfs3_drc_gauges_locked(drc);
             rc = NFS3_DRC_RESERVED;
         } else {
-            nfs3_drc_count_locked(drc, NFS3_DRC_EV_UNTRACKED);
-            rc = NFS3_DRC_UNTRACKED;
+            nfs3_drc_count_locked(drc, NFS3_DRC_EV_JUKEBOX);
+            rc = NFS3_DRC_BUSY;
         }
     } else if (e->state == NFS3_DRC_DONE) {
         *out_reply = nfs3_drc_reply_get(e->reply);
@@ -589,15 +589,15 @@ nfs3_drc_cache_complete(
 
     *nevicted = 0;
 
-    /* For the untracked case below; allocated before the lock. */
+    /* For the no-entry case below; allocated before the lock. */
     fresh = calloc(1, sizeof(*fresh));
 
     evpl_mutex_lock(&drc->lock);
     HASH_FIND(hh, drc->table, key, sizeof(*key), e);
 
     if (!e) {
-        /* Executed untracked (the in-progress ceiling was reached when it
-         * arrived): cache it now. */
+        /* Executed without an entry -- its reservation was given up, see
+         * nfs3_drc_lookup_or_forward: cache it now. */
         if (fresh) {
             *nevicted = nfs3_drc_evict_locked(drc, reply->len, evicted,
                                               max_evicted);
@@ -965,6 +965,45 @@ static void
 nfs3_drc_timer_arm(
     struct chimera_server_nfs_thread *thread);
 
+/* Answer a request the cache could not reserve with NFS3ERR_JUKEBOX.  Every
+ * cacheable result is a status and, on failure, weak cache consistency data,
+ * which zeroed says that no attributes follow. */
+/* *INDENT-OFF* */
+#define NFS3_DRC_JUKEBOX_CASE(PROC, RES)                                    \
+    case NFS3PROC_ ## PROC: {                                               \
+        struct RES res;                                                     \
+        memset(&res, 0, sizeof(res));                                       \
+        res.status = NFS3ERR_JUKEBOX;                                       \
+        return shared->nfs_v3.send_reply_NFSPROC3_ ## PROC(                 \
+            thread->evpl, NULL, &res, encoding);                            \
+    }
+/* *INDENT-ON* */
+
+static int
+nfs3_drc_send_jukebox(
+    struct chimera_server_nfs_thread *thread,
+    struct evpl_rpc2_encoding        *encoding,
+    uint32_t                          proc)
+{
+    struct chimera_server_nfs_shared *shared = thread->shared;
+
+    switch (proc) {
+    NFS3_DRC_JUKEBOX_CASE(SETATTR, SETATTR3res)
+    NFS3_DRC_JUKEBOX_CASE(CREATE, CREATE3res)
+    NFS3_DRC_JUKEBOX_CASE(MKDIR, MKDIR3res)
+    NFS3_DRC_JUKEBOX_CASE(SYMLINK, SYMLINK3res)
+    NFS3_DRC_JUKEBOX_CASE(MKNOD, MKNOD3res)
+    NFS3_DRC_JUKEBOX_CASE(REMOVE, REMOVE3res)
+    NFS3_DRC_JUKEBOX_CASE(RMDIR, RMDIR3res)
+    NFS3_DRC_JUKEBOX_CASE(RENAME, RENAME3res)
+    NFS3_DRC_JUKEBOX_CASE(LINK, LINK3res)
+        default:
+            return -1;
+    } /* switch */
+} /* nfs3_drc_send_jukebox */
+
+#undef NFS3_DRC_JUKEBOX_CASE
+
 /* Answer, hold, drop or execute one cacheable request.  Used directly on the
  * hydrated path and again (deferred) to resume a request once its client's
  * band has loaded. */
@@ -1029,8 +1068,13 @@ nfs3_drc_lookup_or_forward(
             evpl_rpc2_discard_request(evpl, encoding);
             return 0;
 
+        case NFS3_DRC_BUSY:
+            if (nfs3_drc_send_jukebox(thread, encoding, proc) != 0) {
+                evpl_rpc2_discard_request(evpl, encoding);
+            }
+            return 0;
+
         case NFS3_DRC_RESERVED:
-        case NFS3_DRC_UNTRACKED:
         default:
             break;
     } /* switch */
@@ -1550,13 +1594,14 @@ nfs3_drc_init(
     uint8_t          kv_type)
 {
     evpl_mutex_init(&drc->lock, NULL);
-    drc->table    = NULL;
-    drc->hydrated = NULL;
-    drc->bytes    = 0;
-    drc->inprog   = 0;
-    drc->held     = 0;
-    drc->hold_ns  = (uint64_t) (NFS4_LEASE_TIME_DEFAULT_S +
-                                NFS3_DRC_HOLD_SLACK_S) * 1000000000ULL;
+    drc->table      = NULL;
+    drc->hydrated   = NULL;
+    drc->bytes      = 0;
+    drc->inprog     = 0;
+    drc->max_inprog = NFS3_DRC_MAX_INPROG;
+    drc->held       = 0;
+    drc->hold_ns    = (uint64_t) (NFS4_LEASE_TIME_DEFAULT_S +
+                                  NFS3_DRC_HOLD_SLACK_S) * 1000000000ULL;
     drc->last_stuck_report    = 0;
     drc->test_delay_ms        = 0;
     drc->kv_type              = kv_type;
@@ -1569,7 +1614,7 @@ nfs3_drc_init(
 /* The event label each counter series carries, by enum nfs3_drc_event. */
 static const char *const nfs3_drc_event_names[NFS3_DRC_EV_COUNT] = {
     [NFS3_DRC_EV_RESERVED]             = "reserved",
-    [NFS3_DRC_EV_UNTRACKED]            = "untracked",
+    [NFS3_DRC_EV_JUKEBOX]              = "jukebox",
     [NFS3_DRC_EV_REPLAYED]             = "replayed",
     [NFS3_DRC_EV_HELD]                 = "held",
     [NFS3_DRC_EV_ANSWERED]             = "answered",
@@ -1698,6 +1743,11 @@ nfs3_drc_install(
 
         if (d && atoi(d) > 0) {
             drc->test_delay_ms = (uint32_t) atoi(d);
+        }
+
+        d = getenv("CHIMERA_NFS3_DRC_TEST_MAX_INPROG");
+        if (d && atoi(d) > 0) {
+            drc->max_inprog = (uint32_t) atoi(d);
         }
     }
 

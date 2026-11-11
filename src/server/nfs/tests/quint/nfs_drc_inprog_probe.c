@@ -35,6 +35,10 @@
  *   --hold-expiry   the hold is shorter than the original takes, so a held
  *                   retransmit is dropped unanswered; the client's next
  *                   retransmit, after the original is done, replays the cache.
+ *   --ceiling       the cache may hold only one entry in progress, so a new
+ *                   request that arrives while the original runs is answered
+ *                   NFS3ERR_JUKEBOX without executing; sent again later
+ *                   under a new XID, it executes once.
  *   --shutdown      the server stops -- before its client, with the client's
  *                   connections still open -- while an original is parked and
  *                   a retransmit is held on it.  Server stop closes those
@@ -552,7 +556,7 @@ run_held(
     ip_check_event(c, "drop_abandoned", 1);
     ip_check_event(c, "drop_deadline", 0);
     ip_check_event(c, "drop_origin_conn", 0);
-    ip_check_event(c, "untracked", 0);
+    ip_check_event(c, "jukebox", 0);
     ip_check_state(c, "in_progress", 0);
     ip_check_state(c, "held", 0);
 } /* run_held */
@@ -606,6 +610,59 @@ run_hold_expiry(
     ip_check_state(c, "in_progress", 0);
     ip_check_state(c, "held", 0);
 } /* run_hold_expiry */
+
+/* ---- the in-progress ceiling (--ceiling) -------------------------------- */
+
+static void
+run_ceiling(
+    struct drc_ctx              *c,
+    const struct evpl_rpc2_cred *u1)
+{
+    static struct ip_call orig, busy, again;
+    struct ip_call       *all[1];
+
+    /* The original takes the only entry the cache may have in progress. */
+    ip_mkdir(c, 0, u1, 4000, "h", &orig);
+    ip_settle(c, 50);
+
+    /* A different request now finds no room.  It is refused straight away,
+     * while the original is still parked, and does not run. */
+    ip_mkdir(c, 1, u1, 4001, "i", &busy);
+    all[0] = &busy;
+    (void) ip_wait(c, all, 1);
+    report("ceiling/refused-with-jukebox",
+           ip_ok(&busy, NFS3ERR_JUKEBOX) && !orig.done,
+           "a new request at the ceiling: %s, original %s", ip_err(&busy),
+           ip_err(&orig));
+    report("ceiling/refused-did-not-execute", !ip_dir_has(c, "i"),
+           "the refused MKDIR created its directory");
+
+    all[0] = &orig;
+    (void) ip_wait(c, all, 1);
+    report("ceiling/original", ip_ok(&orig, NFS3_OK), "original MKDIR: %s",
+           ip_err(&orig));
+
+    /* The client sends it again once there is room, under a new XID, as an
+     * NFSv3 client does after NFS3ERR_JUKEBOX (RFC 1813 Section 2.6): it
+     * executes -- exactly once.  The refusal is not recorded, so a delayed
+     * duplicate of the refused XID itself could still execute after this;
+     * that case is not covered here. */
+    ip_mkdir(c, 1, u1, 4002, "i", &again);
+    all[0] = &again;
+    (void) ip_wait(c, all, 1);
+    report("ceiling/sent-again-executes",
+           ip_ok(&again, NFS3_OK) && ip_dir_has(c, "i"),
+           "the request sent again under a new XID: %s (status %u would mean "
+           "the refused one had run)", ip_err(&again), NFS3ERR_EXIST);
+
+    ip_check_event(c, "jukebox", 1);
+    /* The harness's own MKDIR of the test directory, the original, and the
+     * request sent again. */
+    ip_check_event(c, "reserved", 3);
+    ip_check_event(c, "replayed", 0);
+    ip_check_event(c, "held", 0);
+    ip_check_state(c, "in_progress", 0);
+} /* run_ceiling */
 
 /* ---- server shutdown with work outstanding (--shutdown) ----------------- */
 
@@ -684,6 +741,7 @@ main(
     const char           *backend     = NULL;
     int                   hold_expiry = 0;
     int                   shutdown    = 0;
+    int                   ceiling     = 0;
     int                   rdma        = 0;
     char                  num[16];
     int                   i;
@@ -695,6 +753,8 @@ main(
             backend = argv[++i];
         } else if (strcmp(argv[i], "--hold-expiry") == 0) {
             hold_expiry = 1;
+        } else if (strcmp(argv[i], "--ceiling") == 0) {
+            ceiling = 1;
         } else if (strcmp(argv[i], "--shutdown") == 0) {
             shutdown = 1;
         } else if (strcmp(argv[i], "--rdma") == 0) {
@@ -709,6 +769,9 @@ main(
     if (hold_expiry) {
         snprintf(num, sizeof(num), "%d", IP_SHORT_HOLD_MS);
         setenv("CHIMERA_NFS3_DRC_TEST_HOLD_MS", num, 1);
+    }
+    if (ceiling) {
+        setenv("CHIMERA_NFS3_DRC_TEST_MAX_INPROG", "1", 1);
     }
 
     umask(0);
@@ -742,6 +805,8 @@ main(
     } else {
         if (hold_expiry) {
             run_hold_expiry(&c, &u1);
+        } else if (ceiling) {
+            run_ceiling(&c, &u1);
         } else {
             run_held(&c, &u1);
         }
