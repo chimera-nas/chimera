@@ -90,6 +90,13 @@ void nfs4_cb_conn_lost(
 void nfs4_cb_backchannel_lost(
     struct nfs4_session *session);
 
+/* Whether the client's callback path is to be reported down (RENEW's
+ * NFS4ERR_CB_PATH_DOWN): stored down, or registered with no callback program,
+ * which no probe ever records -- nfs4_cb_probe_drive answers DOWN for it
+ * without storing anything. */
+bool nfs4_cb_path_reported_down(
+    struct nfs_client *client);
+
 struct nfs4_cb_path;
 
 /* Tear down a client's callback channel (free the channel struct, disconnect a

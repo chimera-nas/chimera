@@ -6,6 +6,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
+#include "nfs4_callback.h"
 
 /* RFC 7530 §16.28: RENEW refreshes the lease for the given client. Chimera
  * does enforce lease expiry (nfs4_lease.c sweeps expired leases at ~1 Hz), so
@@ -43,8 +44,7 @@ chimera_nfs4_renew(
             res->status = NFS4_OK;
             nfs_client_touch(client);
 
-            if (atomic_load_explicit(&client->cb_path.cb_state,
-                                     memory_order_acquire) == NFS4_CB_DOWN) {
+            if (nfs4_cb_path_reported_down(client)) {
                 bool has_deleg;
 
                 evpl_mutex_lock(&client->lock);
