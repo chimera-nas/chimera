@@ -75,6 +75,7 @@ struct chimera_server_config {
     int                                   fuse_enabled;
     int                                   fuse_io_uring;
     int                                   nfs_data_server;
+    int                                   nfs3_disabled;
     uint64_t                              nfs_server_scope;
     int                                   external_portmap;
     char                                  portmap_hostname[256];

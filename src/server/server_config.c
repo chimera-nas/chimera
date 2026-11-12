@@ -238,6 +238,7 @@ chimera_server_config_init(void)
     config->s3_anon_gid     = CHIMERA_S3_ANON_GID;
     config->smb_port        = 445;
     config->nfs_data_server = 0;
+    config->nfs3_disabled   = 0;
 
     /* NFSv4.1 server identity (EXCHANGE_ID eir_server_scope).  Clients treat two
      * server addresses returning the same scope as the same server (shared
@@ -1115,6 +1116,20 @@ chimera_server_config_get_nfs_data_server(const struct chimera_server_config *co
 {
     return config->nfs_data_server;
 } /* chimera_server_config_get_nfs_data_server */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs3_disabled(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->nfs3_disabled = enable;
+} /* chimera_server_config_set_nfs3_disabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs3_disabled(const struct chimera_server_config *config)
+{
+    return config->nfs3_disabled;
+} /* chimera_server_config_get_nfs3_disabled */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_server_scope(
