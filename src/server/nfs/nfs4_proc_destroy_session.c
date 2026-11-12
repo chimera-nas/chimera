@@ -20,10 +20,15 @@ chimera_nfs4_destroy_session(
     struct DESTROY_SESSION4res       *res    = &resop->opdestroy_session;
     struct nfs4_session              *session;
 
-    /* RFC 8881 §18.37.3: when preceded by SEQUENCE, DESTROY_SESSION must be
-     * the final operation; otherwise it must be the sole operation. */
+    /* RFC 8881 §18.37.3: after a SEQUENCE for the same session,
+     * DESTROY_SESSION must be the final operation; after a SEQUENCE for
+     * another session it may sit anywhere but first; without SEQUENCE it must
+     * be the sole operation. */
     if (req->seen_sequence) {
-        if (req->index != req->args_compound->num_argarray - 1) {
+        if (req->index != req->args_compound->num_argarray - 1 &&
+            req->session &&
+            memcmp(req->session->nfs4_session_id, args->dsa_sessionid,
+                   NFS4_SESSIONID_SIZE) == 0) {
             res->dsr_status = NFS4ERR_NOT_ONLY_OP;
             chimera_nfs4_compound_complete(req, res->dsr_status);
             return;
