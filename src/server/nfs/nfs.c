@@ -185,6 +185,8 @@ nfs_server_init(
     int                               nfs_portmap_port;
     int                               nfs_port;
     int                               data_server;
+    int                               nfs3_disabled;
+    int                               nprogs;
     int                               external_portmap;
     const char                       *portmap_hostname;
     enum chimera_tcp_flavor           tcp_flavor;
@@ -196,6 +198,7 @@ nfs_server_init(
 
     nfs_port          = chimera_server_config_get_nfs_port(config);
     data_server       = chimera_server_config_get_nfs_data_server(config);
+    nfs3_disabled     = chimera_server_config_get_nfs3_disabled(config);
     nfs_rdma          = chimera_server_config_get_nfs_rdma(config);
     nfs_rdma_hostname = chimera_server_config_get_nfs_rdma_hostname(config);
     nfs_rdma_port     = chimera_server_config_get_nfs_rdma_port(config);
@@ -243,11 +246,13 @@ nfs_server_init(
                              "external_portmap is enabled",
                              portmap_hostname);
         } else {
-            chimera_server_resolve_ipv4(portmap_hostname,
-                                        shared->portmap_hostname,
-                                        sizeof(shared->portmap_hostname));
-            chimera_nfs_debug("Portmap hostname '%s' resolved to %s",
-                              portmap_hostname, shared->portmap_hostname);
+            if (!data_server && !nfs3_disabled) {
+                chimera_server_resolve_ipv4(portmap_hostname,
+                                            shared->portmap_hostname,
+                                            sizeof(shared->portmap_hostname));
+                chimera_nfs_debug("Portmap hostname '%s' resolved to %s",
+                                  portmap_hostname, shared->portmap_hostname);
+            }
         }
     }
 
@@ -517,11 +522,16 @@ nfs_server_init(
 
     shared->nfs_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", nfs_port);
 
-    /* A pNFS data server only needs the NFSv4 service (clients reach it by
-     * file handle for READ/WRITE); skip portmap/mountd/NLM so it can share a
-     * host with the metadata server. */
-    if (data_server) {
-        chimera_nfs_info("NFS data-server mode: binding only the NFS service on port %d", nfs_port);
+    /* A pNFS data server (clients reach it by file handle for READ/WRITE) and an
+     * NFSv4-only server (nfs3_disabled) needs only the NFS service; skip portmap/mountd/NLM/NSM
+     * so neither collides with a co-located metadata server or host rpc.statd/lockd. */
+    if (data_server || nfs3_disabled) {
+        if (data_server) {
+            chimera_nfs_info("NFS data-server mode: binding only the NFS service on port %d", nfs_port);
+        }
+        if (nfs3_disabled) {
+            chimera_nfs_info("NFSv3 disabled: serving only NFSv4 on port %d", nfs_port);
+        }
         shared->mount_endpoint   = NULL;
         shared->mount_server     = NULL;
         shared->nlm_endpoint     = NULL;
@@ -532,7 +542,12 @@ nfs_server_init(
         shared->portmap_server   = NULL;
     }
 
-    if (!data_server) {
+    if (data_server && nfs3_disabled) {
+        chimera_nfs_info("NFSv3 disabled with data-server mode: a pNFS data server's"
+                         " version defaults to 3 which can result in failed IO");
+    }
+
+    if (!data_server && !nfs3_disabled) {
         shared->mount_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", nfs_mount_port);
     }
 
@@ -544,7 +559,7 @@ nfs_server_init(
         /* Native RDMA enabled */
         shared->nfs_rdma_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, nfs_rdma_hostname, nfs_rdma_port);
     }
-    if (!data_server) {
+    if (!data_server && !nfs3_disabled) {
         if (external_portmap) {
             chimera_nfs_debug("Using external portmap/rpcbind services");
             shared->portmap_server   = NULL;
@@ -566,13 +581,16 @@ nfs_server_init(
     }
 
     chimera_nfs_debug("Initializing NFS server");
-    programs[0] = &shared->nfs_v3.rpc2;
-    programs[1] = &shared->nfs_v4.rpc2;
-    programs[2] = &shared->nfs_v4_cb.rpc2;
+    nprogs = 0;
+    if (!nfs3_disabled) {
+        programs[nprogs++] = &shared->nfs_v3.rpc2;
+    }
+    programs[nprogs++] = &shared->nfs_v4.rpc2;
+    programs[nprogs++] = &shared->nfs_v4_cb.rpc2;
 
-    shared->nfs_server = evpl_rpc2_server_init(programs, 3);
+    shared->nfs_server = evpl_rpc2_server_init(programs, nprogs);
 
-    if (!data_server) {
+    if (!data_server && !nfs3_disabled) {
         chimera_nfs_debug("Initializing NFS lock manager server on port %d", nfs_lockmgr_port);
         shared->nlm_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", nfs_lockmgr_port);
         programs[0]          = &shared->nlm_v4.rpc2;
@@ -598,7 +616,7 @@ nfs_server_init(
      * ends NLM_GRACE_SETTLE_SECS after every reloaded host answered the
      * reboot notify (nsm_cold_notify_done); otherwise it runs its full
      * length. */
-    if (!data_server && !shared->nsm_state.persistence_disabled) {
+    if (!data_server && !shared->nsm_state.persistence_disabled && !nfs3_disabled) {
         nlm_state_begin_grace(&shared->nlm_state);
         chimera_nfs_info("NLM entering %d-second grace period for lock reclaim",
                          NLM_GRACE_PERIOD_SECS);
@@ -686,9 +704,10 @@ nfs_server_start(void *arg)
         chimera_nfs_abort_if(rc, "failed to start the NSM server");
     }
 
-    /* A data server registers no portmap services (it skips the auxiliary
+    /* A data server or nfs3_disabled server registers no portmap services (it skips the auxiliary
      * protocols entirely). */
-    if (!chimera_server_config_get_nfs_data_server(shared->config)) {
+    if (!chimera_server_config_get_nfs_data_server(shared->config) &&
+        !chimera_server_config_get_nfs3_disabled(shared->config)) {
         if (shared->portmap_server) {
             rc = evpl_rpc2_server_start(shared->portmap_server, stream_protocol, shared->portmap_endpoint);
             chimera_nfs_abort_if(rc, "failed to start the PORTMAP server");
@@ -720,11 +739,17 @@ nfs_server_stop(void *arg)
     if (shared->nsm_server) {
         evpl_rpc2_server_stop(shared->nsm_server);
     }
-    if (shared->portmap_server) {
-        evpl_rpc2_server_stop(shared->portmap_server);
-    } else {
-        unregister_nfs_rpc_services(chimera_server_config_get_nfs_lockmgr_port(shared->config),
-                                    chimera_server_config_get_nfs_nsm_port(shared->config));
+
+    /* Mirror server start. A data server or nfs3_disabled server never registers
+     * portmap services, unregister only what start registered */
+    if (!chimera_server_config_get_nfs_data_server(shared->config) &&
+        !chimera_server_config_get_nfs3_disabled(shared->config)) {
+        if (shared->portmap_server) {
+            evpl_rpc2_server_stop(shared->portmap_server);
+        } else {
+            unregister_nfs_rpc_services(chimera_server_config_get_nfs_lockmgr_port(shared->config),
+                                        chimera_server_config_get_nfs_nsm_port(shared->config));
+        }
     }
 
 } /* nfs_server_stop */
@@ -780,9 +805,9 @@ nfs_server_destroy(void *data)
 
     /* The portmap programs' per-proc metrics are allocated whenever an internal
      * portmap was configured, which is not the same as ending up with a portmap
-     * *server*: a data server initializes the programs and then discards the
-     * server, because it binds only the NFS service.  Free on the condition
-     * they were allocated under, not on the server pointer. */
+     * *server*: a data server or a nfs3_disabled server initializes the programs
+     * and then discards the server, because it binds only the NFS service.
+     * Free on the condition they were allocated under, not on the server pointer. */
     if (!chimera_server_config_get_external_portmap(shared->config)) {
         free(shared->portmap_v2.rpc2.metrics);
         free(shared->portmap_v3.rpc2.metrics);

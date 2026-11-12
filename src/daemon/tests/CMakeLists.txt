@@ -11,6 +11,16 @@ set_tests_properties(chimera/daemon/config_test PROPERTIES
     TIMEOUT 600
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/src/server/smb/tests/suppressions.txt")
 
+# nfs3_disabled serves NFSv4 alone: no MOUNT/NLM/NSM listener, no portmap
+# traffic, NFSv3 answered PROG_MISMATCH.  Needs its own netns: it binds the
+# portmap port and probes the default MOUNT/NLM/NSM ports.
+if(CHIMERA_NETNS_TESTING)
+    chimera_add_netns_test(chimera/daemon/nfs3_disabled ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/daemon_nfs3_disabled_test.py
+                $<TARGET_FILE:chimera>)
+    set_tests_properties(chimera/daemon/nfs3_disabled PROPERTIES TIMEOUT 120)
+endif()
+
 # The configs the project ships must start: the installed default config
 # everywhere, and the Docker image's config on Linux, where its linux
 # passthrough mount exists.

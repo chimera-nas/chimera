@@ -975,6 +975,24 @@ apply_protocol_enabled_config(
     if (json_is_true(json_value)) {
         chimera_server_config_set_nfs_data_server(server_config, 1);
     }
+
+    /* NFSv4-only mode: serve NFSv4.x on the NFS port, NFSv3 is disabled -- no
+     * NFSv3 program, no MOUNT/NLM/NSM listeners and no portmap/rpcbind
+     * registration -- so the server neither exposes NFSv3 nor conflicts with
+     * a host rpc.statd/lockd. With the default external_portmap: false,
+     * this also stops the built-in portmapper from binding 111 */
+    json_value = json_object_get(server_params, "nfs3_disabled");
+    if (json_value) {
+        if (!json_is_boolean(json_value)) {
+            chimera_server_error("\"nfs3_disabled\" must be a boolean");
+            startup_validation_fail();
+        }
+
+        if (json_is_true(json_value)) {
+            chimera_server_info("NFSv3 disabled: portmap/rpcbind, MOUNT, NLM and NSM settings are ignored");
+            chimera_server_config_set_nfs3_disabled(server_config, 1);
+        }
+    }
 } /* apply_protocol_enabled_config */
 
 /* pNFS layout configuration (disabled unless "enabled": true). */

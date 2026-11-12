@@ -109,7 +109,7 @@ the canonical place to set them.
 | `sync_delegation_threads` | int | `8` | Synchronous delegation pool size. |
 | `async_delegation` | bool | `false` | Enable the asynchronous delegation pool. |
 | `async_delegation_threads` | int | `8` | Asynchronous delegation pool size. |
-| `nfs_port` | int | `2049` | NFS (v3/v4) listen port. |
+| `nfs_port` | int | `2049` | NFS (v3/v4) listen port, NFSv4 only with `nfs3_disabled` |
 | `lockmgr_port` | int | `32803` | NLM (NFSv3 lock manager) port. |
 | `rdma` | bool | `false` | Enable NFS-over-RDMA. |
 | `rdma_hostname` | string | - | Address to bind the RDMA listener to. |
@@ -125,6 +125,7 @@ the canonical place to set them.
 | `nfs_server_scope` | int | `42` | NFSv4.1 `EXCHANGE_ID` server scope. Give independent servers (e.g. an MDS and a co-located DS) distinct values so clients don't coalesce them. |
 | `nfs_max_exports` | int | `4096` | Maximum number of NFS exports that may exist at once (1..65535). Distinct from the export id space, which is always 1..65535; creating an export past this cap fails. |
 | `data_server` | bool | `false` | pNFS data-server mode: bind only the NFSv4 service (no portmap/mount/NLM) so a DS can share a host with its MDS. |
+| `nfs3_disabled` | bool | `false` | NFSv4 only mode, disables NFSv3: bind only the NFSv4 service (no portmap/mount/NLM/NSM). NFSv3 calls get PROG_MISMATCH. Do not combine with `data_server` that clients reach over NFSv3 (a pNFS data server's version defaults to 3).|
 | `fuse_enabled` | bool | `false` | Serve the `fuse_mounts` section as local kernel FUSE mounts. Linux only; the daemon must run as root to issue the mounts. |
 | `fuse_io_uring` | bool | `true` | Carry FUSE requests over io_uring (FUSE-over-io_uring) whenever the kernel offers it: Linux 6.14+ with the `fuse` module's `enable_uring` parameter set. Otherwise, or when `false`, mounts use plain `/dev/fuse` reads and writes. |
 | `kv_module` | string | - | Key-value module used to persist server state. |

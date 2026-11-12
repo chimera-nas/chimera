@@ -575,6 +575,15 @@ chimera_server_config_get_nfs_data_server(
     const struct chimera_server_config *config);
 
 SYMBOL_EXPORT void
+chimera_server_config_set_nfs3_disabled(
+    struct chimera_server_config *config,
+    int                           enable);
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs3_disabled(
+    const struct chimera_server_config *config);
+
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_server_scope(
     struct chimera_server_config *config,
     uint64_t                      scope);
