@@ -255,8 +255,11 @@ chimera_nfs4_create_session(
      * the session's own minorversion: a 4.2 client rejects a CB_COMPOUND
      * tagged minorversion 1 with NFS4ERR_MINOR_VERS_MISMATCH.  No separate
      * netid/addr -- the backchannel is the fore conn. */
+    /* The program belongs to the session whether or not this connection is
+     * its backchannel: one bound later (BIND_CONN_TO_SESSION) carries it. */
+    session->nfs4_session_cb_program = args->csa_cb_program;
+
     if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
-        session->nfs4_session_cb_program       = args->csa_cb_program;
         session->nfs4_session_backchannel_conn = conn;
         /* This compound runs on conn's owner thread; record it so cross-thread
          * callbacks (CB_RECALL / CB_LAYOUTRECALL) marshal their send here. */

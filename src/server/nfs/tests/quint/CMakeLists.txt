@@ -112,6 +112,13 @@ target_link_libraries(nfs4_deleg_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs4_deleg_probe)
 
+add_executable(nfs4_cb_path_probe nfs4_cb_path_probe.c)
+target_include_directories(nfs4_cb_path_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_cb_path_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_cb_path_probe)
+
 add_executable(nfs4_named_attr_probe nfs4_named_attr_probe.c)
 target_include_directories(nfs4_named_attr_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
@@ -318,6 +325,18 @@ add_test(NAME chimera/server/nfs/mbt4/deleg_probe_memfs
 set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_deleg_probe_memfs"
     LABELS "functional;probe;nfs4_mbt;multiproto;memfs"
+    TIMEOUT 90)
+
+# Callback path health probe: a lost backchannel is reported and stops
+# delegation grants, a rebind on a fresh connection restores both, and a
+# backchannel bound after CREATE_SESSION works (see nfs4_cb_path_probe.c).
+# Needs no corpus.
+add_test(NAME chimera/server/nfs/mbt4/cb_path_probe_memfs
+    COMMAND $<TARGET_FILE:nfs4_cb_path_probe>)
+set_tests_properties(chimera/server/nfs/mbt4/cb_path_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_cb_path_probe_memfs"
+    LABELS "functional;probe;nfs4_mbt;memfs"
+    SKIP_RETURN_CODE 77
     TIMEOUT 90)
 
 # Named-attribute (OPENATTR) probe: pins the full NFSv4 named-attribute

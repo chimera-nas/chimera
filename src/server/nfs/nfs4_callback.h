@@ -82,6 +82,14 @@ struct nfs4_cb_client {
 void nfs4_cb_conn_lost(
     struct nfs4_cb_client *chan);
 
+/* A 4.1 session's backchannel connection has gone.  If the client's callback
+ * channel rides that session, store its path NFS4_CB_DOWN: no delegation is
+ * granted without a way to recall it, and SEQUENCE reports
+ * SEQ4_STATUS_CB_PATH_DOWN so the client binds a backchannel again, which
+ * re-probes the path (nfs4_cb_resend_recalls_on_rebind). */
+void nfs4_cb_backchannel_lost(
+    struct nfs4_session *session);
+
 struct nfs4_cb_path;
 
 /* Tear down a client's callback channel (free the channel struct, disconnect a

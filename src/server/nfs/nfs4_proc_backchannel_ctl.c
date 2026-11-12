@@ -46,6 +46,12 @@ chimera_nfs4_backchannel_ctl(
         nfs4_client_set_cb_sec(&thread->shared->nfs4_shared_clients,
                                clientid, args->bca_cb_program,
                                flavor, uid, gid);
+        nfs4_client_note_backchannel(&thread->shared->nfs4_shared_clients,
+                                     clientid, args->bca_cb_program,
+                                     req->minorversion);
+        if (args->bca_cb_program) {
+            req->session->nfs4_session_cb_program = args->bca_cb_program;
+        }
     }
 
     res->bcr_status = NFS4_OK;

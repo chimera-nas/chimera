@@ -376,6 +376,25 @@ nfs4_cb_probe_drive(
                                 memory_order_acquire);
 } /* nfs4_cb_probe_drive */
 
+void
+nfs4_cb_backchannel_lost(struct nfs4_session *session)
+{
+    struct nfs_client     *u = session->client_unified;
+    struct nfs4_cb_client *chan;
+
+    if (!u) {
+        return;
+    }
+
+    evpl_mutex_lock(&u->lock);
+    chan = u->cb_path.cb_client;
+    if (chan && chan->minorversion >= 1 && chan->session == session) {
+        atomic_store_explicit(&u->cb_path.cb_state, NFS4_CB_DOWN,
+                              memory_order_release);
+    }
+    evpl_mutex_unlock(&u->lock);
+} /* nfs4_cb_backchannel_lost */
+
 bool
 nfs4_cb_ensure_probe(
     struct chimera_server_nfs_thread *thread,

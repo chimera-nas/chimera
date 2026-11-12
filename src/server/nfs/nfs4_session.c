@@ -1794,9 +1794,14 @@ nfs4_session_unbind_conn(struct evpl_rpc2_conn *conn)
 
     session = (struct nfs4_session *) existing;
     /* Drop the backchannel pointer if this was the conn carrying it, so a
-     * later recall does not send on a dead connection. */
+     * later recall does not send on a dead connection, and mark the client's
+     * callback path down if it rode this session (nfs4_cb_backchannel_lost).
+     * Only the session the connection was last bound to is seen here: a
+     * backchannel left on a connection since bound to another session is not
+     * noticed until a recall over it fails. */
     if (session->nfs4_session_backchannel_conn == conn) {
         session->nfs4_session_backchannel_conn = NULL;
+        nfs4_cb_backchannel_lost(session);
     }
     evpl_rpc2_conn_set_private_data(conn, NULL);
     nfs4_session_put(session);
@@ -2593,3 +2598,39 @@ nfs4_client_set_cb_sec(
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_set_cb_sec */
+
+void
+nfs4_client_note_backchannel(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    uint32_t                  cb_program,
+    uint8_t                   minorversion)
+{
+    struct nfs4_client *c;
+    struct nfs_client  *u;
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &client_id, sizeof(client_id), c);
+
+    if (!c || !c->unified) {
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
+        return;
+    }
+
+    u = c->unified;
+
+    /* Without this a backchannel first registered here kept the minor version
+     * zero a client record starts with, and nfs4_cb_channel_open took it for
+     * a 4.0 callback address that does not exist: no delegation was ever
+     * granted over it. */
+    evpl_mutex_lock(&u->lock);
+    u->cb_path.cb_minorversion = minorversion;
+    if (cb_program) {
+        u->cb_path.cb_program = cb_program;
+    }
+    evpl_mutex_unlock(&u->lock);
+
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_note_backchannel */
