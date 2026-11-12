@@ -115,7 +115,8 @@ chimera_nfs4_delegpurge(
             .machinename_len = req->principal_machinename_len,
         };
 
-        if (!nfs4_client_mach_cred_ok(req->session->nfs4_session_client, &p)) {
+        if (!nfs4_session_mach_cred_ok(&thread->shared->nfs4_shared_clients,
+                                       req->session, &p)) {
             res->status = NFS4ERR_WRONG_CRED;
             chimera_nfs4_compound_complete(req, NFS4ERR_WRONG_CRED);
             return;

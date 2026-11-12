@@ -107,6 +107,22 @@ chimera_nfs4_sequence(
         return;
     }
 
+    /* RFC 8881 Section 18.46.3: with connection association enforced, a
+     * SEQUENCE on a connection not associated with the session is refused,
+     * and the client associates it with BIND_CONN_TO_SESSION, which checks
+     * the machine credential.  Enforcement is on when spo_must_enforce holds
+     * BIND_CONN_TO_SESSION (Section 18.35.3), which chimera always puts there
+     * under SP4_MACH_CRED.  Binding the connection here instead would let any
+     * principal that knows a session id attach a connection to it. */
+    if (!nfs4_session_conn_associated(req->conn, session) &&
+        nfs4_session_mach_cred_enforced(&thread->shared->nfs4_shared_clients,
+                                        session)) {
+        nfs4_session_put(session);
+        res->sr_status = NFS4ERR_CONN_NOT_BOUND_TO_SESSION;
+        chimera_nfs4_compound_complete(req, NFS4ERR_CONN_NOT_BOUND_TO_SESSION);
+        return;
+    }
+
     /* Bind this session to the conn (idempotent if already bound) and
      * drop the +1 ref returned by nfs4_session_lookup -- the conn's ref
      * keeps the session alive for the rest of this compound. */

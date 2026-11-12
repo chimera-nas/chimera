@@ -85,7 +85,8 @@ chimera_nfs4_bind_conn_to_session(
             .machinename     = req->principal_machinename,
             .machinename_len = req->principal_machinename_len,
         };
-        if (!nfs4_client_mach_cred_ok(session->nfs4_session_client, &p)) {
+        if (!nfs4_session_mach_cred_ok(&thread->shared->nfs4_shared_clients,
+                                       session, &p)) {
             nfs4_session_put(session);
             res->bctsr_status = NFS4ERR_WRONG_CRED;
             chimera_nfs4_compound_complete(req, NFS4ERR_WRONG_CRED);
