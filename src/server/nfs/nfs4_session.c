@@ -264,6 +264,41 @@ nfs4_client_mach_cred_ok(
     return nfs4_principal_matches(c, p);
 } /* nfs4_client_mach_cred_ok */
 
+bool
+nfs4_session_mach_cred_enforced(
+    struct nfs4_client_table  *table,
+    const struct nfs4_session *session)
+{
+    struct nfs4_client *c;
+    bool                enforced;
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &session->nfs4_session_clientid,
+              sizeof(session->nfs4_session_clientid), c);
+    enforced = c && c->nfs4_client_sp_how == SP4_MACH_CRED;
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+    return enforced;
+} /* nfs4_session_mach_cred_enforced */
+
+bool
+nfs4_session_mach_cred_ok(
+    struct nfs4_client_table           *table,
+    const struct nfs4_session          *session,
+    const struct nfs4_client_principal *p)
+{
+    struct nfs4_client *c;
+    bool                ok;
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &session->nfs4_session_clientid,
+              sizeof(session->nfs4_session_clientid), c);
+    ok = nfs4_client_mach_cred_ok(c, p);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+    return ok;
+} /* nfs4_session_mach_cred_ok */
+
 /* Caller must hold table->nfs4_ct_lock.  Add a client to the by-owner table
  * unless it is already there. */
 static inline void
@@ -1801,6 +1836,31 @@ nfs4_session_unbind_conn(struct evpl_rpc2_conn *conn)
     evpl_rpc2_conn_set_private_data(conn, NULL);
     nfs4_session_put(session);
 } /* nfs4_session_unbind_conn */
+
+/*
+ * Whether conn is associated with session (RFC 8881 Section 2.10.3.1): through
+ * the CREATE_SESSION that arrived on it, a BIND_CONN_TO_SESSION, or a SEQUENCE
+ * the server let bind it.
+ *
+ * A connection records only the session it was last bound to, so a connection
+ * associated with two sessions of one client remembers just one of them.  This
+ * therefore answers for the client: a connection bound to any live session of
+ * the session's client counts.  That is wider than the RFC by exactly the case
+ * of a connection associated with one session of a client being used for
+ * another session of the same client, which needs the same principal to have
+ * associated it in the first place.  A connection never associated with the
+ * client -- a fresh one, or one bound to another client's session -- is not.
+ */
+bool
+nfs4_session_conn_associated(
+    struct evpl_rpc2_conn *conn,
+    struct nfs4_session   *session)
+{
+    struct nfs4_session *bound = evpl_rpc2_conn_get_private_data(conn);
+
+    return nfs4_session_is_live(bound) &&
+           bound->nfs4_session_clientid == session->nfs4_session_clientid;
+} /* nfs4_session_conn_associated */
 
 /*
  * Reply-capture callback invoked from inside evpl_rpc2_send_reply, just
