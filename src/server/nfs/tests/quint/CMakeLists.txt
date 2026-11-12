@@ -328,9 +328,9 @@ set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs PROPERTIES
     TIMEOUT 90)
 
 # Connection/session association probe: SEQUENCE on a connection the session
-# was never associated with under SP4_MACH_CRED, and the machine credential on
-# BIND_CONN_TO_SESSION and DESTROY_SESSION (see nfs4_session_binding_probe.c).
-# Needs no corpus.
+# was never associated with under SP4_MACH_CRED, the machine credential on
+# BIND_CONN_TO_SESSION and DESTROY_SESSION, and where DESTROY_SESSION may sit in
+# a COMPOUND (see nfs4_session_binding_probe.c).  Needs no corpus.
 add_test(NAME chimera/server/nfs/mbt4/session_binding_probe_memfs
     COMMAND $<TARGET_FILE:nfs4_session_binding_probe>)
 set_tests_properties(chimera/server/nfs/mbt4/session_binding_probe_memfs PROPERTIES

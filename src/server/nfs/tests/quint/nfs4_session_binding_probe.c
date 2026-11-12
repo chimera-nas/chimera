@@ -25,6 +25,11 @@
  *   B4  SP4_MACH_CRED, two sessions created over one connection: the
  *       connection is associated with both (CREATE_SESSION associates the
  *       connection it arrives on), so SEQUENCE on either succeeds.
+ *   D1  SEQUENCE(S1) + DESTROY_SESSION(S2) + PUTROOTFH: DESTROY_SESSION of a
+ *       session other than the SEQUENCE's may sit anywhere after the first
+ *       operation (Section 18.37.3), so the COMPOUND succeeds and S2 is gone.
+ *   D2  SEQUENCE(S1) + DESTROY_SESSION(S1) + PUTROOTFH: the same session, so
+ *       DESTROY_SESSION must be last: NFS4ERR_NOT_ONLY_OP, and S1 survives.
  *
  * AUTH_SYS only: the machine credential here is the harness's AUTH_SYS one.
  */
@@ -423,6 +428,46 @@ check_two_sessions_one_conn(struct mbt_env *env)
     evpl_rpc2_client_disconnect(env->rpc2_thread, a);
 } /* check_two_sessions_one_conn */
 
+static void
+check_destroy_session_position(struct mbt_env *env)
+{
+    struct evpl_rpc2_conn *a = sb_connect(env);
+    struct sb_session      s1, s2;
+    struct nfs_argop4      ops[2];
+    struct sb_reply        r;
+    uint64_t               clientid;
+    uint32_t               csa_seq, st;
+
+    printf("DESTROY_SESSION position (RFC 8881 Section 18.37.3)\n");
+    clientid = sb_exchange_id(env, a, "sb-destroy", SP4_NONE, &csa_seq);
+    sb_create_session(env, a, clientid, &csa_seq, &s1);
+    sb_create_session(env, a, clientid, &csa_seq, &s2);
+
+    memset(ops, 0, sizeof(ops));
+    ops[0].argop = OP_DESTROY_SESSION;
+    memcpy(ops[0].opdestroy_session.dsa_sessionid, s2.id, NFS4_SESSIONID_SIZE);
+    ops[1].argop = OP_PUTROOTFH;
+    r            = sb_compound(env, a, &s1, ops, 2);
+    expect("D1", r.status == NFS4_OK && r.nres == 3 && r.st[1] == NFS4_OK,
+           "SEQUENCE(S1) + DESTROY_SESSION(S2) + PUTROOTFH: compound %u, "
+           "%d results, DESTROY_SESSION %u", r.status, r.nres, r.st[1]);
+    st = sb_sequence(env, a, &s2);
+    expect("D1", st == NFS4ERR_BADSESSION, "S2 is gone: SEQUENCE(S2) %u", st);
+
+    memset(ops, 0, sizeof(ops));
+    ops[0].argop = OP_DESTROY_SESSION;
+    memcpy(ops[0].opdestroy_session.dsa_sessionid, s1.id, NFS4_SESSIONID_SIZE);
+    ops[1].argop = OP_PUTROOTFH;
+    r            = sb_compound(env, a, &s1, ops, 2);
+    expect("D2", r.status == NFS4ERR_NOT_ONLY_OP,
+           "SEQUENCE(S1) + DESTROY_SESSION(S1) + PUTROOTFH: %u (want %u)",
+           r.status, NFS4ERR_NOT_ONLY_OP);
+    st = sb_sequence(env, a, &s1);
+    expect("D2", st == NFS4_OK, "S1 survives: SEQUENCE(S1) %u", st);
+
+    evpl_rpc2_client_disconnect(env->rpc2_thread, a);
+} /* check_destroy_session_position */
+
 int
 main(
     int    argc,
@@ -445,6 +490,7 @@ main(
     check_mach_cred_binding(env);
     check_none_binding(env);
     check_two_sessions_one_conn(env);
+    check_destroy_session_position(env);
 
     mbt_env_stop(env);
     free(env);
