@@ -396,6 +396,22 @@ nfs4_cb_backchannel_lost(struct nfs4_session *session)
 } /* nfs4_cb_backchannel_lost */
 
 bool
+nfs4_cb_path_reported_down(struct nfs_client *client)
+{
+    bool down;
+
+    if (atomic_load_explicit(&client->cb_path.cb_state,
+                             memory_order_acquire) == NFS4_CB_DOWN) {
+        return true;
+    }
+
+    evpl_mutex_lock(&client->lock);
+    down = client->cb_path.cb_program == 0;
+    evpl_mutex_unlock(&client->lock);
+    return down;
+} /* nfs4_cb_path_reported_down */
+
+bool
 nfs4_cb_ensure_probe(
     struct chimera_server_nfs_thread *thread,
     struct nfs_client                *client,

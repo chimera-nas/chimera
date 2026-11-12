@@ -34,6 +34,7 @@
 #include "evpl/evpl.h"
 #include "nfs4_state.h"
 #include "nfs_kv_keys.h"
+#include "nfs4_callback.h"
 
 #define CHECK(cond) do { \
             if (!(cond)) { \
@@ -2558,6 +2559,61 @@ test_nfs3_drc_persist_switch(void)
     free(shared);
 } /* test_nfs3_drc_persist_switch */
 
+/*
+ * RENEW answers NFS4ERR_CB_PATH_DOWN to a client holding delegations whose
+ * callback path is down (RFC 7530 Section 16.30).  A registration with no
+ * callback program is one: nothing can be recalled over it.  But no probe ever
+ * records it -- nfs4_cb_probe_drive answers DOWN for it without storing
+ * anything, and every registration resets the stored state to UNINIT -- so a
+ * client that re-registered with program zero while holding delegations was
+ * told its path was fine.
+ */
+static void
+test_cb_path_reported_down(void)
+{
+    struct nfs4_client_table table;
+    struct nfs4_client      *c;
+    struct nfs_client       *u;
+    static const uint8_t     owner[] = "co_owner_cb_path";
+    static const char        netid[] = "tcp";
+    static const char        addr[]  = "127.0.0.1.8.1";
+    uint64_t                 clientid;
+
+    nfs4_client_table_init(&table,1);
+    clientid = nfs4_client_register(&table,owner,(int) sizeof(owner) - 1,
+                                    0x6666ULL,40,NULL,NULL);
+    evpl_mutex_lock(&table.nfs4_ct_lock);
+    HASH_FIND(nfs4_client_hh_by_id,table.nfs4_ct_clients_by_id,
+              &clientid,sizeof(clientid),c);
+    evpl_mutex_unlock(&table.nfs4_ct_lock);
+    CHECK(c != NULL && c->unified != NULL);
+    u = c->unified;
+
+    /* Registered with a program: not down, whatever the probe later finds. */
+    nfs4_client_set_cb_path(&table,clientid,0x40000000,1,0,netid,3,addr,
+                            (int) sizeof(addr) - 1);
+    CHECK(atomic_load(&u->cb_path.cb_state) == NFS4_CB_UNINIT);
+    CHECK(!nfs4_cb_path_reported_down(u));
+
+    /* Re-registered with none: still UNINIT as stored, but down. */
+    nfs4_client_set_cb_path(&table,clientid,0,1,0,netid,3,addr,
+                            (int) sizeof(addr) - 1);
+    CHECK(atomic_load(&u->cb_path.cb_state) == NFS4_CB_UNINIT);
+    CHECK(nfs4_cb_path_reported_down(u));
+
+    /* A program again, and a probe that failed: down. */
+    nfs4_client_set_cb_path(&table,clientid,0x40000000,1,0,netid,3,addr,
+                            (int) sizeof(addr) - 1);
+    CHECK(!nfs4_cb_path_reported_down(u));
+    atomic_store(&u->cb_path.cb_state,NFS4_CB_DOWN);
+    CHECK(nfs4_cb_path_reported_down(u));
+
+    nfs4_client_table_destroy_unified(&table,NULL,NULL);
+    nfs4_client_table_free(&table);
+
+    printf("ok: cb_path_reported_down\n");
+} /* test_cb_path_reported_down */
+
 int
 main(void)
 {
@@ -2566,6 +2622,7 @@ main(void)
     chimera_log_init();
 
     test_key_encoding();
+    test_cb_path_reported_down();
     test_recovery_record_roundtrip();
     test_recovery_record_legacy_v1();
     test_recovery_record_legacy_v2();
