@@ -331,13 +331,15 @@ set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs PROPERTIES
 # was never associated with under SP4_MACH_CRED, the machine credential on
 # BIND_CONN_TO_SESSION and DESTROY_SESSION, and where DESTROY_SESSION may sit in
 # a COMPOUND (see nfs4_session_binding_probe.c).  Needs no corpus.
-add_test(NAME chimera/server/nfs/mbt4/session_binding_probe_memfs
-    COMMAND $<TARGET_FILE:nfs4_session_binding_probe>)
-set_tests_properties(chimera/server/nfs/mbt4/session_binding_probe_memfs PROPERTIES
-    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_session_binding_probe_memfs"
-    LABELS "functional;probe;nfs4_mbt;memfs"
-    SKIP_RETURN_CODE 77
-    TIMEOUT 60)
+foreach(sbback memfs diskfs)
+    add_test(NAME chimera/server/nfs/mbt4/session_binding_probe_${sbback}
+        COMMAND $<TARGET_FILE:nfs4_session_binding_probe> --backend ${sbback})
+    set_tests_properties(chimera/server/nfs/mbt4/session_binding_probe_${sbback} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_session_binding_probe_${sbback}"
+        LABELS "functional;probe;nfs4_mbt;${sbback}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 60)
+endforeach()
 
 # Named-attribute (OPENATTR) probe: pins the full NFSv4 named-attribute
 # lifecycle the corpus never drives -- OPENATTR, OPEN-create/WRITE/READ of an
