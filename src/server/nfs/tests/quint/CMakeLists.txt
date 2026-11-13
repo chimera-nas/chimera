@@ -589,6 +589,16 @@ if(CAIRN_ENABLED)
         TIMEOUT 300)
 endif()
 
+if(CHIMERA_DAOS_ENGINE)
+    add_test(NAME chimera/server/nfs/mbt/batch_daos
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${NFS3_TRACES}
+                --backend daos)
+    set_tests_properties(chimera/server/nfs/mbt/batch_daos PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_daos"
+        LABELS "quint;nfs3_mbt;daos"
+        TIMEOUT 300)
+endif()
+
 # The corpus against the passthrough backends (scratch/skip semantics as for
 # the deviation probes above).  --max-attr-skip-rate is raised: NFS3 post-op
 # attributes are RFC-optional, and the passthrough backends omit them where
@@ -1039,6 +1049,17 @@ if(CAIRN_ENABLED)
     set_tests_properties(chimera/server/nfs/mbt4/batch_cairn PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_cairn"
         LABELS "quint;nfs4_mbt;cairn"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
+
+if(CHIMERA_DAOS_ENGINE)
+    add_test(NAME chimera/server/nfs/mbt4/batch_daos
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_TRACE_ARGS}
+                --backend daos)
+    set_tests_properties(chimera/server/nfs/mbt4/batch_daos PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_daos"
+        LABELS "quint;nfs4_mbt;daos"
         SKIP_RETURN_CODE 77
         TIMEOUT 600)
 endif()

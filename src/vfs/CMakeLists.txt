@@ -137,6 +137,20 @@ else ()
     message(STATUS "sqlite3 not found; skipping chimera_vfs_sqlite")
 endif()
 
+# DAOS POSIX backend: Linux only, and only when the client headers and
+# libraries are installed.
+if (CHIMERA_LINUX)
+    find_path(DAOS_FS_INCLUDE_DIR daos_fs.h)
+    find_library(DAOS_DFS_LIBRARY NAMES dfs)
+    find_library(DAOS_CLIENT_LIBRARY NAMES daos_client daos)
+    if (DAOS_FS_INCLUDE_DIR AND DAOS_DFS_LIBRARY AND DAOS_CLIENT_LIBRARY)
+        message(STATUS "DAOS client found (${DAOS_DFS_LIBRARY}); building chimera_vfs_daos")
+        add_subdirectory(daos)
+    else ()
+        message(STATUS "DAOS client not found; skipping chimera_vfs_daos")
+    endif()
+endif()
+
 get_property(CHIMERA_VFS_MODULE_TARGETS GLOBAL PROPERTY CHIMERA_VFS_MODULE_TARGETS)
 
 target_link_libraries(chimera_vfs

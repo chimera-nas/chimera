@@ -583,6 +583,56 @@ s3_mbt_module_is_passthrough(const char *module)
     return strcmp(module, "linux") == 0 || strcmp(module, "io_uring") == 0;
 } /* s3_mbt_module_is_passthrough */
 
+/* The module connects to an existing container. It does not create one, and
+ * its mount path must be empty. reset drops the previous trace's namespace
+ * on the next mount. */
+static inline int
+daos_module_config(
+    char  *buf,
+    size_t len)
+{
+    const char *pool      = getenv("CHIMERA_DAOS_POOL");
+    const char *container = getenv("CHIMERA_DAOS_CONTAINER");
+    const char *uuid      = getenv("CHIMERA_DAOS_UUID");
+    const char *system    = getenv("CHIMERA_DAOS_SYSTEM");
+    const char *fields[4];
+    int         n;
+
+    if (!pool || !pool[0] || !container || !container[0] ||
+        !uuid || strlen(uuid) != 36) {
+        fprintf(stderr,
+                "SKIP: DAOS replay needs CHIMERA_DAOS_POOL, "
+                "CHIMERA_DAOS_CONTAINER, and CHIMERA_DAOS_UUID\n");
+        exit(77);
+    }
+    fields[0] = pool;
+    fields[1] = container;
+    fields[2] = uuid;
+    fields[3] = system ? system : "";
+    for (int i = 0; i < 4; i++) {
+        if (strpbrk(fields[i], "\\\"\n")) {
+            fprintf(stderr, "DAOS setting contains an unsafe character\n");
+            return 1;
+        }
+    }
+    if (system && system[0]) {
+        n = snprintf(buf, len,
+                     "{\"pool\":\"%s\",\"container\":\"%s\","
+                     "\"mount_uuid\":\"%s\",\"system\":\"%s\",\"reset\":true}",
+                     pool, container, uuid, system);
+    } else {
+        n = snprintf(buf, len,
+                     "{\"pool\":\"%s\",\"container\":\"%s\","
+                     "\"mount_uuid\":\"%s\",\"reset\":true}",
+                     pool, container, uuid);
+    }
+    if (n < 0 || (size_t) n >= len) {
+        fprintf(stderr, "DAOS config does not fit\n");
+        return 1;
+    }
+    return 0;
+} /* daos_module_config */
+
 static inline void
 s3_mbt_env_open_module(
     struct s3_mbt_env *env,
@@ -658,6 +708,15 @@ s3_mbt_env_open_module(
         snprintf(cfg, sizeof(cfg), "{\"initialize\":true,\"path\":\"%s\"}",
                  dir);
         chimera_server_config_add_module(config, "cairn", NULL, cfg);
+    } else if (strcmp(env->module, "daos") == 0) {
+        char cfg[512];
+
+        if (daos_module_config(cfg, sizeof(cfg)) != 0) {
+            exit(1);
+        }
+        chimera_server_config_add_module(config, "daos", NULL, cfg);
+        chimera_server_config_set_sync_delegation(config, 1);
+        chimera_server_config_set_sync_delegation_threads(config, 4);
     }
 
     /* Passthrough backends store their trees on a real host filesystem that
@@ -774,6 +833,17 @@ s3_mbt_env_fs_setup(
         return;
     }
 
+    if (strcmp(env->module, "daos") == 0) {
+        int mrc = chimera_server_mount(env->server, "share", env->module,
+                                       "", NULL);
+
+        if (mrc != 0) {
+            fprintf(stderr, "mount daos at share failed: status=%d\n", mrc);
+            exit(1);
+        }
+        return;
+    }
+
     if (chimera_server_mkfs(env->server, env->module, fsname, NULL) != 0) {
         fprintf(stderr, "failed to create %s filesystem %s\n", env->module,
                 fsname);
@@ -823,7 +893,8 @@ s3_mbt_env_fs_teardown(
     /* Passthrough backends have no filesystem to remove; the unmounted host
      * dir is intentionally left in place (its inode must not be reused
      * mid-run) and is reaped with the scratch dir. */
-    if (s3_mbt_module_is_passthrough(env->module)) {
+    if (s3_mbt_module_is_passthrough(env->module) ||
+        strcmp(env->module, "daos") == 0) {
         return;
     }
 
