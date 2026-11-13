@@ -132,6 +132,17 @@ chimera_nfs4_bind_conn_to_session(
         /* This compound runs on req->conn's owner thread; record it so
          * cross-thread callbacks marshal their send to the new owner. */
         session->nfs4_session_backchannel_owner = thread;
+        /* A backchannel first bound here is a 4.1 one: record it as such, with
+         * the program the session was created with. */
+        nfs4_client_note_backchannel(&thread->shared->nfs4_shared_clients,
+                                     session->nfs4_session_clientid,
+                                     session->nfs4_session_cb_program,
+                                     req->minorversion);
+        /* The rebind rebuilds the channel on req->session, which is the
+         * session the connection was bound to when this COMPOUND arrived --
+         * none, on a fresh connection, so the path was stored DOWN.  It is the
+         * session just bound, as SEQUENCE sets it. */
+        req->session = session;
         nfs4_cb_resend_recalls_on_rebind(thread, session->client_unified, req);
     }
 

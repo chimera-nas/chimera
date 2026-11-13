@@ -761,6 +761,17 @@ nfs4_client_set_cb_sec(
     uint32_t                  uid,
     uint32_t                  gid);
 
+/* A 4.1 backchannel registered after CREATE_SESSION (BIND_CONN_TO_SESSION
+ * with a back direction, or BACKCHANNEL_CTL): record the minor version it
+ * speaks, and cb_program unless it is zero.  The path's state is left to the
+ * caller, whose rebind forces a fresh probe. */
+void
+nfs4_client_note_backchannel(
+    struct nfs4_client_table *table,
+    uint64_t                  client_id,
+    uint32_t                  cb_program,
+    uint8_t                   minorversion);
+
 struct nfs4_session *
 nfs4_session_lookup(
     struct nfs4_client_table *table,
