@@ -411,6 +411,43 @@ chimera_acl_from_mode(
 } /* chimera_acl_from_mode */
 
 SYMBOL_EXPORT int
+chimera_ace_is_from_mode(const struct chimera_ace *ace)
+{
+    const uint32_t perm = CHIMERA_ACE_PERM_R | CHIMERA_ACE_PERM_W |
+        CHIMERA_ACE_PERM_X;
+    uint32_t       m = ace->access_mask;
+    uint32_t       p = m & perm;
+
+    if (ace->flags || ace->who.type != CHIMERA_PRINCIPAL_SPECIAL) {
+        return 0;
+    }
+    if (ace->who.special != CHIMERA_WHO_OWNER &&
+        ace->who.special != CHIMERA_WHO_GROUP &&
+        ace->who.special != CHIMERA_WHO_EVERYONE) {
+        return 0;
+    }
+
+    /* Whole permission classes only (WRITE_DATA comes with APPEND_DATA). */
+    if (p != perm_class_to_mask(!!(p & CHIMERA_ACE_PERM_R),
+                                !!(p & CHIMERA_ACE_PERM_W),
+                                !!(p & CHIMERA_ACE_PERM_X))) {
+        return 0;
+    }
+
+    switch (ace->type) {
+        case CHIMERA_ACE_ALLOWED:
+            return (m & ~perm) == (ace->who.special == CHIMERA_WHO_OWNER ?
+                                   ACE_BASELINE | ACE_OWNER_EXTRA : ACE_BASELINE);
+        case CHIMERA_ACE_DENIED:
+            /* The owner's and the group's cumulative deny entries. */
+            return p && (m & ~perm) == 0 &&
+                   ace->who.special != CHIMERA_WHO_EVERYONE;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_ace_is_from_mode */
+
+SYMBOL_EXPORT int
 chimera_acl_default_acl(
     uint32_t            mode,
     struct chimera_acl *out,

@@ -509,6 +509,25 @@ static inline bool
 chimera_smb_disposition_overwrites(
     uint32_t disposition);
 
+/* The rights an overwrite of an existing file's unnamed stream needs, and is
+ * granted, whatever it asked for, beyond FILE_WRITE_DATA: FILE_WRITE_ATTRIBUTES
+ * and FILE_WRITE_EA, which MS-FSA 2.1.5.1.2 adds to its desired access before
+ * the access check, because the overwrite replaces the file's attributes.  A
+ * named stream's overwrite leaves them as they are, and an open that creates
+ * the file is not an overwrite (2.1.5.1.1), so neither adds them.  `created`:
+ * this CREATE made the object. */
+static inline uint32_t
+chimera_smb_create_overwrite_access(
+    const struct chimera_smb_request *request,
+    int                               created)
+{
+    if (created || request->create.has_stream ||
+        !chimera_smb_disposition_overwrites(request->create.create_disposition)) {
+        return 0;
+    }
+    return CHIMERA_ACE_WRITE_ATTRIBUTES | CHIMERA_ACE_WRITE_NAMED_ATTRS;
+} /* chimera_smb_create_overwrite_access */
+
 /* The open's tail once the share reservation is held; shared by the
  * synchronous grant, the share-park resume and the deferred-truncate
  * completion. */
@@ -2273,15 +2292,30 @@ chimera_smb_create_issue_truncate(struct chimera_smb_request *request)
     chimera_vfs_attrs_drop_owner_sid(&request->create.trunc_attr);
     chimera_vfs_attrs_drop_group_sid(&request->create.trunc_attr);
 
+    /* A named stream's overwrite replaces only that stream's contents and
+     * leaves the file's DOS attributes as they are, as a write through a
+     * stream handle does (chimera_smb_write_post_attr_mask): the ARCHIVE a
+     * create-capable stream open carries is not applied here.  MS-FSA
+     * 2.1.5.1.2 replaces the file's attributes only for the unnamed stream;
+     * its note of the modification (2.1.4.17) would set ARCHIVE for any
+     * stream, which this server does not do for a stream's writes either. */
+    if (request->create.has_stream) {
+        request->create.trunc_attr.va_req_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        request->create.trunc_attr.va_set_mask &= ~(uint64_t) CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+    }
+
     request->create.trunc_attr.va_size      = 0;
     request->create.trunc_attr.va_req_mask |= CHIMERA_VFS_ATTR_SIZE;
     request->create.trunc_attr.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
 
-    /* fsetattr, not setattr: this is a descriptor-originated mutation through
-     * the handle the create just opened and had adjudicated, so it is
-     * authorized by that open's grant (POSIX rights retention) rather than
-     * re-evaluated against the file's current mode -- which is what riding
-     * inside the open used to give it for free. */
+    /* A descriptor-originated mutation through the handle the create just
+     * opened and had adjudicated, so it is authorized by that open's grant
+     * rather than re-evaluated against the file's current mode -- which is
+     * what riding inside the open used to give it for free: the size change
+     * by the handle's FILE_WRITE_DATA (POSIX rights retention, fd_rights),
+     * the attribute stamp by its FILE_WRITE_ATTRIBUTES, which the overwrite's
+     * own access check required and granted, in the server's Windows-terms
+     * view (MS-FSA 2.1.5.1.2). */
     struct chimera_claim_actor actor = {
         .owner          = {
             .proto      = CHIMERA_CLAIM_PROTO_SMB2,
@@ -2294,14 +2328,17 @@ chimera_smb_create_issue_truncate(struct chimera_smb_request *request)
     if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
         memcpy(actor.owner.key, request->create.rqls.key, 16);
     }
-    chimera_vfs_fsetattr_owned(vfs_thread,
-                               &request->session_handle->session->cred,
-                               open_file->handle,
-                               &request->create.trunc_attr,
-                               0,
-                               CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
-                               chimera_smb_create_truncate_cb,
-                               request, &actor);
+    chimera_vfs_setattr_granted(vfs_thread,
+                                &request->session_handle->session->cred,
+                                open_file->handle,
+                                &request->create.trunc_attr,
+                                0,
+                                CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
+                                1,
+                                chimera_smb_setattr_rights(request->create.r_granted_access,
+                                                           request->create.r_maximal_access),
+                                chimera_smb_create_truncate_cb,
+                                request, &actor);
 } /* chimera_smb_create_issue_truncate */
 
 /* Abandon a CREATE that is parked on a share-acquire ticket because its
@@ -2345,8 +2382,9 @@ chimera_smb_create_abandon_share_park(struct chimera_smb_request *request)
 
 static inline uint32_t
 chimera_smb_create_granted_access(
-    struct chimera_smb_request     *request,
-    const struct chimera_vfs_attrs *attr);
+    struct chimera_smb_request *request,
+    uint32_t                    maximal,
+    int                         created);
 
 static inline void
 chimera_smb_create_mkdir_open_callback(
@@ -2416,7 +2454,8 @@ chimera_smb_create_mkdir_open_callback(
     if (request->create.desired_access & SMB2_MAXIMUM_ALLOWED) {
         open_file->granted_access = CHIMERA_ACE_MASK_ALL;
     } else {
-        open_file->granted_access = chimera_smb_create_granted_access(request, NULL);
+        open_file->granted_access = chimera_smb_create_granted_access(request,
+                                                                      CHIMERA_ACE_MASK_ALL, 1);
     }
     open_file->maximal_access = CHIMERA_ACE_MASK_ALL;
 
@@ -2438,12 +2477,15 @@ chimera_smb_create_open_at_callback(
 static inline uint32_t
 chimera_smb_create_check_access(
     struct chimera_smb_request     *request,
-    const struct chimera_vfs_attrs *attr);
+    const struct chimera_vfs_attrs *attr,
+    int                             created,
+    uint32_t                       *missing);
 
 static inline uint32_t
 chimera_smb_create_granted_access(
-    struct chimera_smb_request     *request,
-    const struct chimera_vfs_attrs *attr);
+    struct chimera_smb_request *request,
+    uint32_t                    maximal,
+    int                         created);
 
 static inline int
 chimera_smb_create_access_deny_transient(
@@ -2754,12 +2796,13 @@ chimera_smb_create_open_stream_callback(
     /* Computed up front, exactly as the base-file path does: `attr` is not
      * available to the finish callback, which may be reached across a deferred
      * content replacement.  attr carries the base file's metadata with the
-     * stream's size/alloc. */
+     * stream's size/alloc.  It need not carry the base file's ACL (cairn's does
+     * not), so the access comes from the maximal access the base file's own
+     * open computed (chimera_smb_create_open_at_callback). */
     request->create.r_is_directory   = 0;
-    request->create.r_granted_access = chimera_smb_create_granted_access(request, attr);
-    request->create.r_maximal_access =
-        chimera_vfs_access_check(attr, &request->session_handle->session->cred,
-                                 CHIMERA_ACE_MASK_ALL);
+    request->create.r_granted_access =
+        chimera_smb_create_granted_access(request, request->create.r_maximal_access,
+                                          request->create.r_created);
     chimera_smb_marshal_attrs(attr, &request->create.r_attrs);
 
     /* A truncating disposition owes the stream a content replacement, deferred
@@ -3131,13 +3174,18 @@ chimera_smb_create_open_at_callback(
     }
 
     /* Enforce the requested access against the object's ACL for every
-     * disposition that can open an existing object.  Pure FILE_CREATE always
-     * makes a new object (and fails with a collision otherwise), so the creator
-     * implicitly holds it and we do not gate it here.  A newly-created object
-     * reached via OPEN_IF/OVERWRITE_IF/SUPERSEDE carries the owner-full-control
-     * default (or inherited) ACL, so the creator passes this check naturally. */
+     * disposition that can open an existing object.  A FILE_CREATE of a file
+     * makes a new object (and fails with a collision otherwise), so it is not
+     * gated here.  The FILE_CREATE of a named stream opens its base file,
+     * which may already exist, and is not gated either.  An object that
+     * OPEN_IF, OVERWRITE_IF or SUPERSEDE just created is checked against its
+     * inherited ACL, except for SYNCHRONIZE (oh->r_created; see
+     * chimera_smb_create_check_access). */
     if (request->create.create_disposition != SMB2_FILE_CREATE) {
-        uint32_t access_status = chimera_smb_create_check_access(request, attr);
+        uint32_t access_missing = 0;
+        uint32_t access_status  = chimera_smb_create_check_access(request, attr,
+                                                                  oh->r_created,
+                                                                  &access_missing);
 
         /* A CREATE that loses a same-name race can observe a half-constructed
          * object: the passthrough backends (linux/io_uring) execute an SMB
@@ -3152,8 +3200,14 @@ chimera_smb_create_open_at_callback(
          * mask includes ATTR_ACL, which is never attr-cache-served, so each
          * retry reaches the backend and sees the racing creator's chown once
          * it lands.  A genuinely server-owned object still denies after the
-         * budget, and the extra getattrs run only on an already-failing path. */
+         * budget, and the extra getattrs run only on an already-failing path.
+         * A denial whose only missing right is SYNCHRONIZE is not retried: it
+         * is the ordinary answer to a caller the mode gives no r, w or x (an
+         * attribute query of another user's 0600 file), and each retry costs
+         * a getattr.  An open racing a create that asks for little more than
+         * SYNCHRONIZE is therefore refused rather than retried. */
         if (access_status == SMB2_STATUS_ACCESS_DENIED &&
+            (access_missing & ~(uint32_t) SMB2_SYNCHRONIZE) &&
             request->create.access_retries < CHIMERA_SMB_CREATE_ACCESS_RETRIES &&
             chimera_smb_create_access_deny_transient(request, attr)) {
             request->create.access_retries++;
@@ -3312,6 +3366,13 @@ chimera_smb_create_open_at_callback(
         return;
     }
 
+    /* The caller's maximal access to the object, from the attributes this open
+     * returned, which carry its ACL.  A named stream's open takes its access
+     * from it too: the stream open's own reply need not carry the ACL. */
+    request->create.r_maximal_access =
+        chimera_smb_access_check(attr, &request->session_handle->session->cred,
+                                 CHIMERA_ACE_MASK_ALL);
+
     /* Named-stream open: the base file is now open; open the stream on it and
      * build the SMB open_file around the stream handle. */
     if (request->create.has_stream) {
@@ -3339,10 +3400,9 @@ chimera_smb_create_open_at_callback(
          !request->create.r_created &&
          !request->create.r_is_directory) ? 1 : 0;
 
-    request->create.r_granted_access = chimera_smb_create_granted_access(request, attr);
-    request->create.r_maximal_access =
-        chimera_vfs_access_check(attr, &request->session_handle->session->cred,
-                                 CHIMERA_ACE_MASK_ALL);
+    request->create.r_granted_access =
+        chimera_smb_create_granted_access(request, request->create.r_maximal_access,
+                                          request->create.r_created);
     chimera_smb_marshal_attrs(attr, &request->create.r_attrs);
 
     /* MS-SMB2 2.2.13.2 AlSi: for creates, overwrites, and supersedes (not
@@ -4127,21 +4187,33 @@ chimera_smb_create_resume_parked_broadcast(struct chimera_server_smb_thread *ori
 
 /*
  * Map the CREATE DesiredAccess to canonical access-mask bits and evaluate it
- * against the opened object's ACL via the shared engine.  Returns
- * SMB2_STATUS_SUCCESS when every requested right is granted, otherwise
- * SMB2_STATUS_ACCESS_DENIED.  The SMB2 specific + standard access bits share
- * the canonical ACE mask layout exactly, so they map straight through; the four
- * NT generic bits are expanded.  MAXIMUM_ALLOWED / ACCESS_SYSTEM_SECURITY are
- * not gated here.  `attr` must carry the ACL (request CHIMERA_VFS_ATTR_ACL).
+ * against the opened object's security descriptor in Windows terms
+ * (chimera_smb_access_check).  Returns SMB2_STATUS_SUCCESS when every requested
+ * right is granted, otherwise SMB2_STATUS_ACCESS_DENIED.  The SMB2 specific +
+ * standard access bits share the canonical ACE mask layout exactly, so they map
+ * straight through; the four NT generic bits are expanded.  MAXIMUM_ALLOWED /
+ * ACCESS_SYSTEM_SECURITY are not gated here.  `created` is set when this CREATE
+ * made the object: its open is not required to hold SYNCHRONIZE, which the
+ * new object's inherited ACL need not grant.  An overwrite of an existing file's
+ * unnamed stream also requires the rights that replacing its attributes needs
+ * (chimera_smb_create_overwrite_access).  `attr` must carry the ACL (request
+ * CHIMERA_VFS_ATTR_ACL).  On an access denial, `missing`, when not NULL, is
+ * set to the requested rights the object does not grant (0 otherwise).
  */
 static inline uint32_t
 chimera_smb_create_check_access(
     struct chimera_smb_request     *request,
-    const struct chimera_vfs_attrs *attr)
+    const struct chimera_vfs_attrs *attr,
+    int                             created,
+    uint32_t                       *missing)
 {
     uint32_t da = request->create.desired_access;
     uint32_t req;
     uint32_t granted;
+
+    if (missing) {
+        *missing = 0;
+    }
 
     /* ACCESS_SYSTEM_SECURITY (open a handle to the SACL) requires
      * SeSecurityPrivilege.  chimera has no privilege model and grants it to no
@@ -4164,14 +4236,12 @@ chimera_smb_create_check_access(
      * the file-open level here -- doing so would wrongly deny an owner removing
      * a child whose inherited ACL omits DELETE.  (Full parent DELETE_CHILD
      * evaluation is a follow-up.) */
-    /* SYNCHRONIZE is not a meaningful open-time access gate: Windows includes it
-     * in every generic right and clients request it on essentially every open,
-     * so it is always grantable on a successful open.  Treat it like
-     * MAXIMUM_ALLOWED and do not require an explicit ACE for it (otherwise a
-     * plain mode-derived object such as a freshly mounted share root, whose
-     * synthesised ACEs carry no SYNCHRONIZE bit, would deny every open). */
+    /* SYNCHRONIZE, explicit or from a generic right, is required like any
+     * other bit (MS-FSA 2.1.5.1): an object whose access comes from its mode
+     * is evaluated in Windows terms (chimera_smb_access_check), where every
+     * r, w and x grant carries it. */
     req = da & ~(SMB2_MAXIMUM_ALLOWED | SMB2_ACCESS_SYSTEM_SECURITY |
-                 SMB2_DELETE | SMB2_SYNCHRONIZE |
+                 SMB2_DELETE |
                  SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
                  SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL);
 
@@ -4195,11 +4265,20 @@ chimera_smb_create_check_access(
 
     /* Truncating dispositions implicitly require write access to the existing
      * data, regardless of what the caller asked for: overwriting a read-only
-     * file is denied even for a read-only open. */
-    if (request->create.create_disposition == SMB2_FILE_SUPERSEDE ||
-        request->create.create_disposition == SMB2_FILE_OVERWRITE ||
-        request->create.create_disposition == SMB2_FILE_OVERWRITE_IF) {
+     * file is denied even for a read-only open.  An overwrite of an existing
+     * file's unnamed stream also requires, and is granted
+     * (chimera_smb_create_granted_access), the rights that replacing the
+     * file's attributes needs (chimera_smb_create_overwrite_access). */
+    if (chimera_smb_disposition_overwrites(request->create.create_disposition)) {
         req |= CHIMERA_ACE_WRITE_DATA;
+    }
+    req |= chimera_smb_create_overwrite_access(request, created);
+
+    /* The open that creates a file is not refused SYNCHRONIZE by the new
+     * file's inherited ACL, whose entries need not carry it: MS-FSA 2.1.5.1.1
+     * does not evaluate that ACL for the open that creates the file. */
+    if (created) {
+        req &= ~(uint32_t) SMB2_SYNCHRONIZE;
     }
 
     if (!req) {
@@ -4211,10 +4290,10 @@ chimera_smb_create_check_access(
      * and is therefore granted the access it asks for over its own object.  The
      * engine backends (e.g. memfs) encode this as an owner-full-control default
      * DACL stamped on an SMB-created object, so this check passes naturally
-     * there.  The mode-only backends (linux/io_uring/cairn/diskfs) report only
-     * the POSIX mode and no explicit ACL; under POSIX mode evaluation the owner
-     * is NOT granted the WRITE_OWNER / WRITE_ATTRIBUTES / SYNCHRONIZE / EXECUTE
-     * bits a Windows CREATE routinely requests with FILE_ALL_ACCESS, so an owner
+     * there.  The backends that cannot store an ACL (linux/io_uring) report
+     * only the POSIX mode and no ACL; under mode evaluation, even in Windows
+     * terms, the owner of a file is NOT granted the EXECUTE / DELETE_CHILD bits
+     * a Windows CREATE routinely requests with FILE_ALL_ACCESS, so an owner
      * opening its own file would be wrongly denied.  Recognise the owner of a
      * no-explicit-ACL object here and grant it, matching the owner-full-control
      * default DACL the engine backends materialise.  POSIX (NFS/S3) evaluation
@@ -4238,13 +4317,15 @@ chimera_smb_create_check_access(
     /* Evaluate the full grantable universe and require every requested bit to
      * be present; a requested right outside what the ACL grants (e.g. an
      * undefined specific bit) is therefore denied. */
-    granted = chimera_vfs_access_check(
+    granted = chimera_smb_access_check(
         attr, &request->session_handle->session->cred, CHIMERA_ACE_MASK_ALL);
 
     if (req & ~granted) {
         chimera_smb_debug(
-            "CREATE access denied: requested %08x granted %08x missing %08x "
+            "CREATE access denied: desired %08x disposition %u requested %08x "
+            "granted %08x missing %08x "
             "(attr mask %" PRIx64 " mode %o uid %" PRIu64 " gid %" PRIu64 " aces %d; caller uid %u)",
+            da, request->create.create_disposition,
             req, granted, req & ~granted, attr->va_set_mask,
             (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) ? (unsigned) attr->va_mode : 0,
             (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ? attr->va_uid : 0,
@@ -4252,6 +4333,9 @@ chimera_smb_create_check_access(
             ((attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) && attr->va_acl) ?
             (int) attr->va_acl->num_aces : -1,
             request->session_handle->session->cred.uid);
+        if (missing) {
+            *missing = req & ~granted;
+        }
         return SMB2_STATUS_ACCESS_DENIED;
     }
 
@@ -4287,22 +4371,22 @@ chimera_smb_create_access_deny_transient(
 
 /*
  * Resolve the access mask granted on a successful open, for the open handle's
- * FileAccessInformation / MxAc reporting.  A MAXIMUM_ALLOWED open is granted the
- * full set the caller's ACL evaluation yields; a specific-bits open is granted
- * exactly the bits it asked for (the open already passed the access check).
+ * FileAccessInformation / MxAc reporting.  A MAXIMUM_ALLOWED open is granted
+ * `maximal`, the full set the caller's evaluation of the object's security
+ * descriptor yields; a specific-bits open is granted exactly the bits it asked
+ * for (the open already passed the access check).
  */
 static inline uint32_t
 chimera_smb_create_granted_access(
-    struct chimera_smb_request     *request,
-    const struct chimera_vfs_attrs *attr)
+    struct chimera_smb_request *request,
+    uint32_t                    maximal,
+    int                         created)
 {
     uint32_t da = request->create.desired_access;
     uint32_t g;
 
     if (da & SMB2_MAXIMUM_ALLOWED) {
-        return chimera_vfs_access_check(
-            attr, &request->session_handle->session->cred,
-            CHIMERA_ACE_MASK_ALL);
+        return maximal;
     }
 
     /* GrantedAccess is reported in resolved specific rights, never the NT
@@ -4324,6 +4408,11 @@ chimera_smb_create_granted_access(
     if (da & SMB2_GENERIC_ALL) {
         g |= CHIMERA_ACE_MASK_ALL;
     }
+
+    /* An overwrite of an existing file's unnamed stream was checked for the
+     * rights that replacing the file's attributes needs
+     * (chimera_smb_create_check_access), and holds them. */
+    g |= chimera_smb_create_overwrite_access(request, created);
 
     return g;
 } /* chimera_smb_create_granted_access */
@@ -4352,7 +4441,7 @@ chimera_smb_create_open_getattr_callback(
      * (MS-SMB2 3.3.5.9.7/.12), so do not re-run the ACL check or recompute the
      * granted/maximal access — the surviving open carries them already. */
     if (!request->create.reconnect) {
-        uint32_t access_status = chimera_smb_create_check_access(request, attr);
+        uint32_t access_status = chimera_smb_create_check_access(request, attr, 0, NULL);
 
         if (access_status != SMB2_STATUS_SUCCESS) {
             chimera_smb_open_file_release(request, request->create.r_open_file);
@@ -4360,11 +4449,12 @@ chimera_smb_create_open_getattr_callback(
             return;
         }
 
-        request->create.r_open_file->granted_access =
-            chimera_smb_create_granted_access(request, attr);
         request->create.r_open_file->maximal_access =
-            chimera_vfs_access_check(attr, &request->session_handle->session->cred,
+            chimera_smb_access_check(attr, &request->session_handle->session->cred,
                                      CHIMERA_ACE_MASK_ALL);
+        request->create.r_open_file->granted_access =
+            chimera_smb_create_granted_access(request,
+                                              request->create.r_open_file->maximal_access, 0);
     }
 
     chimera_smb_open_file_release(request, request->create.r_open_file);

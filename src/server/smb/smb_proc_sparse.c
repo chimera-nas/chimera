@@ -86,15 +86,19 @@ chimera_smb_set_sparse_getattr_cb(
     request->ioctl.sp_set_attr.va_set_mask       = CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
     request->ioctl.sp_set_attr.va_dos_attributes = dos;
 
-    chimera_vfs_setattr(
+    chimera_vfs_setattr_granted(
         vfs_thread,
         &request->session_handle->session->cred,
         request->ioctl.sp_open_file->handle,
         &request->ioctl.sp_set_attr,
         0,
         0,
+        0,
+        chimera_smb_setattr_rights(request->ioctl.sp_open_file->granted_access,
+                                   request->ioctl.sp_open_file->maximal_access),
         chimera_smb_set_sparse_setattr_cb,
-        request);
+        request,
+        NULL);
 } /* chimera_smb_set_sparse_getattr_cb */
 
 void

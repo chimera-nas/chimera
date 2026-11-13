@@ -95,11 +95,18 @@ set(CHIMERA_TEST_TIER "${_claim_saved_tier}")
 
 add_executable(vfs_acl_test vfs_acl_test.c)
 target_link_libraries(vfs_acl_test chimera_vfs)
-add_test(chimera/vfs/acl_test vfs_acl_test)
 
 add_executable(vfs_enforce_test vfs_enforce_test.c)
 target_link_libraries(vfs_enforce_test chimera_vfs evpl)
+
+# The engine's ACL rules (which entries are mode-derived, among them) and the
+# setattr gate's handling of a protocol's grant are not exercised by the
+# protocol models; both run in well under a second, so keep them quick.
+set(_acl_saved_tier "${CHIMERA_TEST_TIER}")
+set(CHIMERA_TEST_TIER quick)
+add_test(chimera/vfs/acl_test vfs_acl_test)
 add_test(chimera/vfs/enforce_test vfs_enforce_test)
+set(CHIMERA_TEST_TIER "${_acl_saved_tier}")
 
 # The attrstrip shim module lives in the test binary (wrapping an embedded
 # memfs) and is found by chimera_vfs_init in the executable's own exports

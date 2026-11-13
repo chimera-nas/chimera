@@ -340,6 +340,74 @@ test_chmod_preserves_named(void)
     TEST_PASS("chmod preserves named ACEs, regenerates special-who");
 } /* test_chmod_preserves_named */
 
+/*
+ * Every entry chimera_acl_from_mode() emits, for every mode, is recognised as
+ * mode-derived; an entry with any other mask, any flag or another principal is
+ * not.
+ */
+static void
+test_ace_is_from_mode(void)
+{
+    ACL_BUF(acl, 8);
+    struct chimera_ace ace;
+
+    for (uint32_t mode = 0; mode <= 0777; mode++) {
+        int n = chimera_acl_from_mode(mode, acl, 8);
+
+        assert(n >= 3);
+        for (int i = 0; i < n; i++) {
+            assert(chimera_ace_is_from_mode(&acl->aces[i]));
+        }
+    }
+
+    /* 0604: OWNER@ allow rw, GROUP@ allow, GROUP@ deny r, EVERYONE@ allow r. */
+    assert(chimera_acl_from_mode(0604, acl, 8) == 4);
+    assert(acl->aces[2].type == CHIMERA_ACE_DENIED);
+
+    /* A grant beyond the mode's: SYNCHRONIZE, as a Windows-written entry
+     * carries it. */
+    ace              = acl->aces[3];
+    ace.access_mask |= CHIMERA_ACE_SYNCHRONIZE;
+    assert(!chimera_ace_is_from_mode(&ace));
+
+    /* Part of a permission class: WRITE_DATA without APPEND_DATA. */
+    ace              = acl->aces[3];
+    ace.access_mask |= CHIMERA_ACE_WRITE_DATA;
+    assert(!chimera_ace_is_from_mode(&ace));
+
+    /* The owner's extra rights on another principal, or missing on OWNER@. */
+    ace              = acl->aces[3];
+    ace.access_mask |= CHIMERA_ACE_WRITE_ATTRIBUTES;
+    assert(!chimera_ace_is_from_mode(&ace));
+    ace              = acl->aces[0];
+    ace.access_mask &= ~CHIMERA_ACE_WRITE_OWNER;
+    assert(!chimera_ace_is_from_mode(&ace));
+
+    /* An inheritance flag. */
+    ace       = acl->aces[3];
+    ace.flags = CHIMERA_ACE_FLAG_FILE_INHERIT;
+    assert(!chimera_ace_is_from_mode(&ace));
+
+    /* A deny of anything but whole permission classes, an empty deny, and a
+     * deny on EVERYONE@, which the mode never makes. */
+    ace              = acl->aces[2];
+    ace.access_mask |= CHIMERA_ACE_READ_ATTRIBUTES;
+    assert(!chimera_ace_is_from_mode(&ace));
+    ace.access_mask = 0;
+    assert(!chimera_ace_is_from_mode(&ace));
+    ace             = acl->aces[2];
+    ace.who.special = CHIMERA_WHO_EVERYONE;
+    assert(!chimera_ace_is_from_mode(&ace));
+
+    /* A named user with a mode-shaped mask. */
+    ace          = acl->aces[3];
+    ace.who.type = CHIMERA_PRINCIPAL_USER;
+    ace.who.id   = 1000;
+    assert(!chimera_ace_is_from_mode(&ace));
+
+    TEST_PASS("mode-derived entries are recognised by their shape");
+} /* test_ace_is_from_mode */
+
 /* Inheritance: a FILE_INHERIT ACE lands as an effective ACE on a new file. */
 static void
 test_inherit_file(void)
@@ -908,6 +976,7 @@ main(
     test_owner_rights_survive_deny();
     test_owner_rights_inherit_only();
     test_chmod_preserves_named();
+    test_ace_is_from_mode();
     test_inherit_file();
     test_inherit_fallback();
     test_serialize_roundtrip();
