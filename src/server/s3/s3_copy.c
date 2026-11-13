@@ -520,6 +520,7 @@ chimera_s3_copy_step(struct chimera_s3_copy_ctx *ctx)
                 ctx->offset,
                 remaining,
                 0, 0,
+                NULL, NULL,
                 chimera_s3_copy_clone_callback,
                 ctx);
             break;

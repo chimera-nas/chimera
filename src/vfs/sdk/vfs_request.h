@@ -1294,6 +1294,12 @@ struct chimera_vfs_request {
             uint64_t                        length;
             struct chimera_vfs_attrs        r_pre_attr;
             struct chimera_vfs_attrs        r_post_attr;
+            /* Destination-side claim actor, stashed here because the
+             * generic request->io_owner slot is in use mediating the source
+             * side first (chimera_vfs_clone_range mediates src then dst,
+             * each through its own actor, before issuing the reflink). */
+            struct chimera_claim_actor      dst_io_owner;
+            uint8_t                         dst_io_owner_valid;
         } clone_range;
 
         struct {

@@ -8,7 +8,32 @@
   },
   "scenarios": [
     {
-      "run": "cloneDelegSourceCrash",
+      "run": "typeCoverageRegression",
+      "flavor": "stepTypes"
+    },
+    {
+      "run": "copyCoverageRegression",
+      "flavor": "stepData42"
+    },
+    {
+      "run": "cloneBadStateidRegression",
+      "flavor": "stepData42"
+    },
+    {
+      "module": "nfs4Test42",
+      "run": "cloneCrossClientDenyTest",
+      "flavor": "stepData42"
+    },
+    {
+      "run": "secinfoNameTooLongRegression",
+      "flavor": "stepNamespace"
+    },
+    {
+      "run": "exclusiveCreateAttrsetRegression",
+      "flavor": "step"
+    },
+    {
+      "run": "cloneDelegSourceZeroCount",
       "flavor": "stepDeleg"
     },
     {
