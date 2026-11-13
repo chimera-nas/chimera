@@ -264,6 +264,49 @@ test_owner_rights_survive_deny(void)
     TEST_PASS("owner keeps READ_CONTROL/WRITE_DAC under a DENY unless OWNER RIGHTS");
 } /* test_owner_rights_survive_deny */
 
+/* An INHERIT_ONLY OWNER RIGHTS ACE does not apply to the object it sits on, so
+ * it leaves the owner rights in place there. */
+static void
+test_owner_rights_inherit_only(void)
+{
+    ACL_BUF(acl, 4);
+    struct chimera_vfs_cred owner  = mkcred(1000, 2000);
+    uint32_t                rights = CHIMERA_ACE_READ_ACL | CHIMERA_ACE_WRITE_ACL;
+    uint32_t                g;
+
+    acl->ctrl_flags = 0;
+    acl->num_aces   = 3;
+    set_ace(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_PERM_R,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_OWNER_RIGHTS);
+    acl->aces[0].flags = CHIMERA_ACE_FLAG_FILE_INHERIT |
+        CHIMERA_ACE_FLAG_DIR_INHERIT |
+        CHIMERA_ACE_FLAG_INHERIT_ONLY;
+    set_ace(&acl->aces[1], CHIMERA_ACE_DENIED, CHIMERA_ACE_WRITE_ACL,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_OWNER);
+    set_ace(&acl->aces[2], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_EVERYONE);
+
+    /* The owner keeps WRITE_DAC on the directory despite the deny. */
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner,
+                                 CHIMERA_ACE_WRITE_ACL, 1);
+    assert(g == CHIMERA_ACE_WRITE_ACL);
+
+    /* And both owner rights under a deny of both. */
+    set_ace(&acl->aces[1], CHIMERA_ACE_DENIED, rights,
+            CHIMERA_PRINCIPAL_USER, 1000);
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner, rights, 1);
+    assert(g == rights);
+
+    /* Without INHERIT_ONLY the OWNER RIGHTS ACE applies, and the deny holds. */
+    acl->aces[0].flags = 0;
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner, rights, 1);
+    assert(g == 0);
+
+    TEST_PASS("an INHERIT_ONLY OWNER RIGHTS ACE leaves the owner rights in place");
+} /* test_owner_rights_inherit_only */
+
 /* chmod preserves named ACEs and regenerates special-who from the new mode. */
 static void
 test_chmod_preserves_named(void)
@@ -863,6 +906,7 @@ main(
     test_root_bypass();
     test_explicit_deny_precedence();
     test_owner_rights_survive_deny();
+    test_owner_rights_inherit_only();
     test_chmod_preserves_named();
     test_inherit_file();
     test_inherit_fallback();
