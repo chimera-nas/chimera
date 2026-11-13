@@ -12,9 +12,18 @@
 #include "nfs4_session.h"
 #include "nfs4_layout_table.h"
 #include "nfs_internal.h"
+#include "vfs/vfs_claim_owner.h"
 #include "vfs/vfs_release.h"
 
 #define NFS4_SHARD_INITIAL_CAPACITY 64
+
+/* Registered by nfs_state_table_init(); defined with the delegation
+ * lifetime helpers below. */
+static const struct chimera_vfs_claim_owner_ops nfs_delegation_claim_ops;
+
+/* Registered by nfs_state_table_init(); defined with the nfs_client claim
+ * pin helpers below. */
+static const struct chimera_vfs_claim_owner_ops nfs_client_claim_ops;
 
 static void
 shard_init(struct nfs_state_shard *shard)
@@ -138,6 +147,27 @@ nfs_state_table_init(
 
     table->epoch = ((uint32_t) node_id << 16) |
         ((boot & 0x7FFFu) << 1) | 1u;
+
+    /* A delegation claim is selected under file->lock and dispatched with
+     * that lock dropped, so the core needs a way to keep the delegation
+     * alive across the dispatch.  Registration is idempotent, keyed by
+     * (construct, owner proto). */
+    chimera_vfs_claim_owner_register(CHIMERA_CONSTRUCT_DELEG_R,
+                                     CHIMERA_CLAIM_PROTO_NFSV4,
+                                     &nfs_delegation_claim_ops);
+    chimera_vfs_claim_owner_register(CHIMERA_CONSTRUCT_DELEG_W,
+                                     CHIMERA_CLAIM_PROTO_NFSV4,
+                                     &nfs_delegation_claim_ops);
+
+    /* NFSv4 OPEN share reservations and byte-range locks set cb_private
+     * directly to the owning nfs_client, with the same selected-then-
+     * dispatched-unlocked exposure as a delegation. */
+    chimera_vfs_claim_owner_register(CHIMERA_CONSTRUCT_NFS4_OPEN,
+                                     CHIMERA_CLAIM_PROTO_NFSV4,
+                                     &nfs_client_claim_ops);
+    chimera_vfs_claim_owner_register(CHIMERA_CONSTRUCT_LOCK_ADVISORY,
+                                     CHIMERA_CLAIM_PROTO_NFSV4,
+                                     &nfs_client_claim_ops);
 } /* nfs_state_table_init */
 
 void
@@ -541,8 +571,15 @@ lock_state_cleanup(
     struct chimera_vfs_thread *vfs_thread);
 static void
 delegation_cleanup(
-    struct nfs_delegation     *deleg,
-    struct chimera_vfs_thread *vfs_thread);
+    struct nfs_delegation    *deleg,
+    struct chimera_vfs_state *vfs_state);
+static bool
+nfs_delegation_try_get(
+    struct nfs_delegation *deleg);
+static void
+nfs_delegation_put(
+    struct nfs_delegation    *deleg,
+    struct chimera_vfs_state *vfs_state);
 static void
 delegation_destroy_common(
     struct nfs_delegation     *deleg,
@@ -581,15 +618,8 @@ nfs_state_table_release(
             lock_state_cleanup(s, table, vfs_thread);
         }
     } else if (type == NFS4_SLOT_TYPE_DELEG) {
-        struct nfs_delegation *d = state;
-        prev = atomic_fetch_sub_explicit(&d->refcount, 1,
-                                         memory_order_acq_rel);
-        chimera_nfs_abort_if(prev == 0,
-                             "delegation refcount underflow on %p", d);
-        if (prev == 1 && atomic_load_explicit(&d->destroyed,
-                                              memory_order_acquire)) {
-            delegation_cleanup(d, vfs_thread);
-        }
+        nfs_delegation_put(state,
+                           vfs_thread ? vfs_thread->vfs->vfs_state : NULL);
     } else if (type == NFS4_SLOT_TYPE_LAYOUT) {
         struct nfs_layout_state *s = state;
         prev = atomic_fetch_sub_explicit(&s->refcount, 1,
@@ -2007,7 +2037,16 @@ nfs_delegation_create(
     rc = nfs_state_table_alloc(table, NFS4_SLOT_TYPE_DELEG, &shard, &slot_idx, &gen);
     chimera_nfs_abort_if(rc != 0, "state table exhausted");
 
-    deleg->client = client;
+    /* Hold a reference on the client for the delegation's entire lifetime,
+     * not just while it is linked on client->delegations: an owner pin on
+     * this delegation (nfs_delegation_try_get) keeps `deleg` itself alive
+     * across an unlocked break/revoke dispatch, but nfs4_cb_recall() and
+     * friends reach the client through deleg->client, which the core's pin
+     * does not protect.  Without this, destroying the client while a recall
+     * is in flight on a pinned delegation can free the client out from under
+     * it. Dropped in delegation_cleanup(), which only runs once the owner
+     * pin is gone and the claim has been released. */
+    deleg->client = nfs_client_get(client);
     deleg->type   = deleg_type;
     memcpy(deleg->fh, fh, fh_len);
     deleg->fh_len     = fh_len;
@@ -2044,12 +2083,9 @@ nfs_delegation_create(
 
 static void
 delegation_cleanup(
-    struct nfs_delegation     *deleg,
-    struct chimera_vfs_thread *vfs_thread)
+    struct nfs_delegation    *deleg,
+    struct chimera_vfs_state *vfs_state)
 {
-    struct chimera_vfs_state *vfs_state =
-        vfs_thread ? vfs_thread->vfs->vfs_state : NULL;
-
     if (vfs_state && deleg->lease_held) {
         chimera_vfs_claim_release(vfs_state, deleg->file_state, &deleg->claim);
         deleg->lease_held = false;
@@ -2058,9 +2094,136 @@ delegation_cleanup(
         chimera_vfs_state_put(vfs_state, deleg->file_state);
         deleg->file_state = NULL;
     }
+    /* Matches the nfs_client_get() in nfs_delegation_create(): the
+     * delegation's own client reference, held for its whole lifetime
+     * independent of the owner pin above. */
+    nfs_client_put(deleg->client);
+    deleg->client = NULL;
     evpl_mutex_destroy(&deleg->combine_lock);
     free(deleg);
 } /* delegation_cleanup */
+
+/* Take a reference on `deleg` for the claim core's break/revoke dispatch.
+ * The caller holds file->lock and has just selected &deleg->claim from that
+ * file's claim list.  delegation_destroy_common() publishes `destroyed`
+ * before it unlinks the claim, and that unlink runs under the same lock, so
+ * a selected claim with `destroyed` clear still holds the lifetime
+ * reference: this increment cannot race the final release. */
+static bool
+nfs_delegation_try_get(struct nfs_delegation *deleg)
+{
+    uint32_t cur = atomic_load_explicit(&deleg->refcount, memory_order_relaxed);
+
+    /* A separate load-then-add would let the destructor's own refcount drop
+     * to zero (and free `deleg`) in the gap between this function's
+     * `destroyed` check and its increment.  A nonzero-only CAS closes that:
+     * the increment only commits against a refcount snapshot taken before
+     * re-checking `destroyed`, so a losing racer never touches a freed
+     * object -- it either wins the CAS against a still-live refcount or
+     * observes `destroyed`/zero and backs off. */
+    for ( ; ; ) {
+        if (cur == 0 ||
+            atomic_load_explicit(&deleg->destroyed, memory_order_acquire)) {
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(
+                &deleg->refcount, &cur, cur + 1,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            return true;
+        }
+    }
+} /* nfs_delegation_try_get */
+
+/* Drop a reference.  The last one completes the teardown: by then
+ * delegation_destroy_common() has published `destroyed` and dropped the
+ * lifetime reference, leaving the claim release and the free to us. */
+static void
+nfs_delegation_put(
+    struct nfs_delegation    *deleg,
+    struct chimera_vfs_state *vfs_state)
+{
+    uint32_t prev;
+
+    prev = atomic_fetch_sub_explicit(&deleg->refcount, 1, memory_order_acq_rel);
+    chimera_nfs_abort_if(prev == 0, "delegation refcount underflow on %p",
+                         deleg);
+
+    if (prev == 1 && atomic_load_explicit(&deleg->destroyed,
+                                          memory_order_acquire)) {
+        delegation_cleanup(deleg, vfs_state);
+    }
+} /* nfs_delegation_put */
+
+/* Claim owner pin: the core dispatches a break or a revoke on a selected
+ * delegation claim with file->lock dropped, so the delegation has to outlive
+ * that dispatch. */
+static bool
+nfs_delegation_claim_try_get(
+    struct chimera_vfs_claim *claim,
+    void                     *private_data)
+{
+    (void) claim;
+
+    return nfs_delegation_try_get(private_data);
+} /* nfs_delegation_claim_try_get */
+
+static void
+nfs_delegation_claim_put(
+    void                     *private_data,
+    struct chimera_vfs_state *state)
+{
+    nfs_delegation_put(private_data, state);
+} /* nfs_delegation_claim_put */
+
+static const struct chimera_vfs_claim_owner_ops nfs_delegation_claim_ops = {
+    .try_get = nfs_delegation_claim_try_get,
+    .put     = nfs_delegation_claim_put,
+};
+
+/* Claim owner pin for NFSv4 OPEN share reservations and byte-range locks:
+ * private_data is the owning struct nfs_client *, set directly on the claim
+ * (no intermediate object of its own), and the core dispatches a break or a
+ * revoke on a selected claim with file->lock dropped.  The nonzero-only CAS
+ * mirrors nfs_delegation_try_get: a losing racer either wins against a
+ * still-live refcount or observes zero and backs off, so it never touches a
+ * freed client. */
+static bool
+nfs_client_claim_try_get(
+    struct chimera_vfs_claim *claim,
+    void                     *private_data)
+{
+    struct nfs_client *client = private_data;
+    uint32_t           cur    = atomic_load_explicit(&client->refcount,
+                                                     memory_order_relaxed);
+
+    (void) claim;
+
+    for ( ; ; ) {
+        if (cur == 0) {
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(
+                &client->refcount, &cur, cur + 1,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            return true;
+        }
+    }
+} /* nfs_client_claim_try_get */
+
+static void
+nfs_client_claim_put(
+    void                     *private_data,
+    struct chimera_vfs_state *state)
+{
+    (void) state;
+
+    nfs_client_put(private_data);
+} /* nfs_client_claim_put */
+
+static const struct chimera_vfs_claim_owner_ops nfs_client_claim_ops = {
+    .try_get = nfs_client_claim_try_get,
+    .put     = nfs_client_claim_put,
+};
 
 /* Mark a delegation for destruction and drop its lifetime ref.  Unlinks it
  * from the owning client first so no new lookup finds it.  `expire` marks the
@@ -2074,8 +2237,7 @@ delegation_destroy_common(
     bool                       expire,
     bool                       unlink_client)
 {
-    uint8_t  prev_destroyed;
-    uint32_t prev;
+    uint8_t prev_destroyed;
 
     prev_destroyed = atomic_exchange_explicit(&deleg->destroyed, 1,
                                               memory_order_acq_rel);
@@ -2103,10 +2265,7 @@ delegation_destroy_common(
         nfs_state_table_free_slot(table, deleg->shard, deleg->slot_idx);
     }
 
-    prev = atomic_fetch_sub_explicit(&deleg->refcount, 1, memory_order_acq_rel);
-    if (prev == 1) {
-        delegation_cleanup(deleg, vfs_thread);
-    }
+    nfs_delegation_put(deleg, vfs_thread ? vfs_thread->vfs->vfs_state : NULL);
 } /* delegation_destroy_common */
 
 void

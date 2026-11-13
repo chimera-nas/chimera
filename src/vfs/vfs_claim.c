@@ -8,6 +8,7 @@
 
 #include "vfs_claim.h"
 #include "vfs_claim_internal.h"
+#include "vfs_claim_owner.h"
 #include "vfs_internal.h"
 #include "vfs_procs.h"
 #include "common/macros.h"
@@ -1413,6 +1414,8 @@ chimera_vfs_claim_try_acquire(
             chimera_vfs_claim_revoked_cb_t revoked_cb = NULL;
             void *cb_private                          = NULL;
             bool reclaimed                            = false;
+            struct chimera_vfs_claim_ref ref;
+            bool have_ref = false;
 
             /* Reclaim a courtesy holder while the lock is still held.
              * `conflict` is borrowed, not owned: ACCESS and RANGE claims
@@ -1421,7 +1424,11 @@ chimera_vfs_claim_try_acquire(
              * revoking afterwards races the holder's owner tearing it down --
              * the NFSv4 lease sweeper frees a lock-owner's range leases
              * outright in lock_state_cleanup -- and the revoke then reads
-             * freed memory. */
+             * freed memory.  The revoked_cb itself (e.g.
+             * nfs_client_lease_revoked_cb) also dereferences cb_private --
+             * typically the owning struct nfs_client * -- past the unlock,
+             * so pin it here the same way the BREAKING loop below pins
+             * `conflict` before dispatching off-lock. */
             if (conflict &&
                 chimera_vfs_claim_holder_reclaimable(conflict, claim)) {
                 /* Defensive backstop: chimera_vfs_claim_conflicts() already
@@ -1433,10 +1440,16 @@ chimera_vfs_claim_try_acquire(
                  * since revoking a holder that is already REVOKED changes
                  * nothing, and retrying on it would spin this loop
                  * forever. */
-                reclaimed = conflict->break_state !=
-                    CHIMERA_CLAIM_BREAK_REVOKED;
-                chimera_vfs_claim_revoke_locked(file, conflict,
-                                                &revoked_cb, &cb_private);
+                have_ref = chimera_vfs_claim_ref_take(conflict, &ref);
+                if (have_ref) {
+                    reclaimed = conflict->break_state !=
+                        CHIMERA_CLAIM_BREAK_REVOKED;
+                    chimera_vfs_claim_revoke_locked(file, conflict,
+                                                    &revoked_cb, &cb_private);
+                }
+                /* A refused pin means the owner has already committed to
+                 * tearing this holder down; its own teardown path pumps
+                 * this file, so just fall through to DENIED below. */
             }
             evpl_mutex_unlock(&file->lock);
 
@@ -1445,6 +1458,10 @@ chimera_vfs_claim_try_acquire(
                  * not passed on; every revoked callback works from its
                  * cb_private (see chimera_vfs_claim_revoke_locked). */
                 revoked_cb(NULL, cb_private);
+            }
+
+            if (have_ref) {
+                chimera_vfs_claim_ref_drop(state, &ref);
             }
 
             if (reclaimed) {
@@ -1462,9 +1479,19 @@ chimera_vfs_claim_try_acquire(
 
         /* BREAKING: kick a break on EVERY breakable conflicting holder
          * (R50), revoking dead/expired ones, then re-probe until no IDLE
-         * conflict remains. */
-        while (conflict) {
-            struct chimera_vfs_claim_grant *iter_pin = NULL;
+         * conflict remains.
+         *
+         * `conflict` as selected above (and at the bottom of each prior
+         * iteration) is a bare pointer read under a lock we no longer hold:
+         * nothing stops its owner from unlinking and freeing it in the
+         * window between that unlock and here.  So every iteration --
+         * including the first -- re-admits under a freshly-held lock and
+         * pins the result in the SAME critical section before touching it
+         * again; a pointer is never dereferenced across an unlock without
+         * first being validated and pinned under the lock that follows. */
+        for ( ; ; ) {
+            struct chimera_vfs_claim_ref iter_ref;
+            bool have_iter_ref                        = false;
             chimera_vfs_claim_revoked_cb_t revoked_cb = NULL;
             void *cb_private                          = NULL;
             bool revoked_now                          = false;
@@ -1473,27 +1500,38 @@ chimera_vfs_claim_try_acquire(
             uint32_t deadline_ms                      = 0;
             uint8_t floor                             = 0;
 
-            /* Classify (and, for a revoke, mutate) with the lock held.
-             * `conflict` is borrowed: a courtesy holder may be a grant-less
-             * claim -- a byte-range lease -- for which pin_grant returns
-             * NULL, and its owner, the NFSv4 lease sweeper, frees it
-             * outright in lock_state_cleanup.  Deciding after unlocking
-             * races that teardown and reads freed memory.
+            /* Re-select AND pin under the same lock acquisition: a
+             * conflict pointer from a previous unlocked window is never
+             * trusted, so every pass starts from a fresh admission. */
+            evpl_mutex_lock(&file->lock);
+            if (chimera_vfs_claim_admit_locked(file, claim, &conflict) !=
+                CHIMERA_CLAIM_BREAKING) {
+                evpl_mutex_unlock(&file->lock);
+                conflict = NULL;
+                break;
+            }
+
+            /* Classify (and, for a revoke, mutate) with the lock held, and
+             * pin the holder before any unlocked use: a courtesy holder may
+             * be a grant-less claim -- a byte-range lease, an NFSv4
+             * delegation, or a FUSE grant -- whose owner can free it the
+             * instant the lock is dropped (the NFSv4 lease sweeper frees a
+             * lock-owner's range leases outright in lock_state_cleanup).
+             * chimera_vfs_claim_ref_take() covers both the grant-bearing and
+             * the owner-managed cases uniformly.
              *
              * The arm order is load-bearing and matches the original: a
              * never-broken holder sits at break_deadline 0, so the
              * deadline test must stay *after* the IDLE/ACKED arm or every
-             * idle holder is revoked instead of broken.
-             *
-             * begin_break still runs unlocked below.  That is safe for a
-             * grant-bearing holder, which iter_pin keeps alive; an NFSv4
-             * delegation carries a break_cb with no grant, and closing that
-             * window needs a refcount for grant-less claims rather than a
-             * lock discipline.  Left alone deliberately: no failure has been
-             * observed through it, and a break callback cannot be deferred
-             * the way a revoke's can. */
-            evpl_mutex_lock(&file->lock);
-            iter_pin = chimera_vfs_claim_pin_grant(conflict);
+             * idle holder is revoked instead of broken. */
+            have_iter_ref = chimera_vfs_claim_ref_take(conflict, &iter_ref);
+
+            if (!have_iter_ref) {
+                /* Teardown has committed: its own release will pump us. */
+                evpl_mutex_unlock(&file->lock);
+                began_live_break = true;
+                break;
+            }
 
             if (chimera_vfs_claim_holder_reclaimable(conflict, claim)) {
                 /* Same progress rule as the DENIED arm above: revoked_now
@@ -1530,8 +1568,9 @@ chimera_vfs_claim_try_acquire(
 
             if (revoked_now) {
                 if (revoked_cb) {
-                    /* The claim may already be freed; see
-                     * chimera_vfs_claim_revoke_locked. */
+                    /* The claim may already be unlinked by revoke_locked,
+                     * but iter_ref keeps its memory alive; the callback
+                     * still works from its cb_private, not the claim. */
                     revoked_cb(NULL, cb_private);
                 }
                 if (file->state) {
@@ -1544,28 +1583,20 @@ chimera_vfs_claim_try_acquire(
                  * notification (see begin_break); the one_shot argument is
                  * retained for signature stability but no longer alters that. */
                 chimera_vfs_claim_begin_break_ex(
-                    state, conflict, floor, deadline_ms, false);
+                    state, file, conflict, floor, deadline_ms, false);
                 began_live_break = true;
             } else if (do_wait) {
                 /* Mid-break, deadline pending: the caller waits. */
-                if (iter_pin) {
-                    chimera_vfs_claim_grant_release(state, iter_pin, false);
-                }
+                chimera_vfs_claim_ref_drop(state, &iter_ref);
                 began_live_break = true;
                 break;
             }
 
-            if (iter_pin) {
-                chimera_vfs_claim_grant_release(state, iter_pin, false);
-            }
+            chimera_vfs_claim_ref_drop(state, &iter_ref);
 
+            /* Next pass re-admits and re-pins from scratch at the top of
+             * this loop; `conflict` is never carried across this point. */
             conflict = NULL;
-            evpl_mutex_lock(&file->lock);
-            if (chimera_vfs_claim_admit_locked(file, claim, &conflict) !=
-                CHIMERA_CLAIM_BREAKING) {
-                conflict = NULL;
-            }
-            evpl_mutex_unlock(&file->lock);
         }
 
         if (began_live_break) {
@@ -1649,6 +1680,8 @@ chimera_vfs_claim_acquire_or_queue(
 {
     enum chimera_vfs_claim_result result, current;
     struct chimera_vfs_claim     *holder;
+    struct chimera_vfs_claim_ref  probe_ref;
+    bool have_probe_ref;
     bool park;
 
     *queued = false;
@@ -1659,20 +1692,50 @@ chimera_vfs_claim_acquire_or_queue(
             return result;
         }
 
+        have_probe_ref = false;
+
         evpl_mutex_lock(&file->lock);
         current = chimera_vfs_claim_admit_locked(file, ticket->claim, &holder);
         /* A new idle/expired holder needs try_acquire to initiate its break
-         * or reclaim it. Only an outstanding break can supply a future wake. */
-        park = (current == CHIMERA_CLAIM_BREAKING && ticket->wait &&
-                holder->break_state == CHIMERA_CLAIM_BREAK_BREAKING &&
-                !chimera_vfs_claim_deadline_passed(holder)) ||
+         * or reclaim it. Only an outstanding break can supply a future wake.
+         *
+         * An IDLE/ACKED holder whose owner has already committed to
+         * teardown is a special case: try_acquire's own pin attempt just
+         * refused (that is how it reported BREAKING without starting a
+         * break), and retrying admission here will refuse the same way
+         * until the owner's unlink finally runs. Spinning this loop until
+         * then burns CPU and contends file->lock against the very unlink
+         * we are waiting on, so detect that case the same way try_acquire
+         * does -- a refused pin -- and park unconditionally; the owner's
+         * release path pumps this file's pending queue when it unlinks. */
+        if ((current == CHIMERA_CLAIM_BREAKING && ticket->wait &&
+             (holder->break_state == CHIMERA_CLAIM_BREAK_IDLE ||
+              holder->break_state == CHIMERA_CLAIM_BREAK_ACKED)) ||
             (current == CHIMERA_CLAIM_DENIED && ticket->wait_hard &&
-             !chimera_vfs_claim_holder_reclaimable(holder, ticket->claim));
+             chimera_vfs_claim_holder_reclaimable(holder, ticket->claim))) {
+            /* A successful probe pin must not be dropped here: ref_drop()
+             * can call back into an owner put (e.g. an SMB grant release)
+             * that re-acquires file->lock, which this thread already holds.
+             * Carry the pin past the unlock below and drop it there instead. */
+            have_probe_ref = chimera_vfs_claim_ref_take(holder, &probe_ref);
+            park           = !have_probe_ref;
+        } else {
+            park = (current == CHIMERA_CLAIM_BREAKING && ticket->wait &&
+                    holder->break_state == CHIMERA_CLAIM_BREAK_BREAKING &&
+                    !chimera_vfs_claim_deadline_passed(holder)) ||
+                (current == CHIMERA_CLAIM_DENIED && ticket->wait_hard &&
+                 !chimera_vfs_claim_holder_reclaimable(holder, ticket->claim));
+        }
         if (park) {
             chimera_vfs_pending_enqueue_locked(file, ticket);
             *queued = true;
         }
         evpl_mutex_unlock(&file->lock);
+
+        if (have_probe_ref) {
+            chimera_vfs_claim_ref_drop(state, &probe_ref);
+        }
+
         if (park) {
             return current;
         }
@@ -2477,6 +2540,120 @@ chimera_vfs_claim_pin_grant(struct chimera_vfs_claim *claim)
 
     return grant;
 } /* chimera_vfs_claim_pin_grant */
+
+/* -------------------------------------------------------------------- */
+/* Owner pins                                                           */
+/* -------------------------------------------------------------------- */
+
+/* Claims whose allocation the core does not own: the server layer hands in
+ * the owner's own lifetime primitive rather than the core growing a
+ * per-claim refcount.  Registered at server init, before any file is
+ * opened, and only read afterwards. */
+static struct {
+    enum chimera_claim_construct construct;
+    uint8_t                                   proto;
+    const struct chimera_vfs_claim_owner_ops *ops;
+} chimera_vfs_claim_owner_kinds[CHIMERA_VFS_CLAIM_MAX_OWNER_KINDS];
+
+static int chimera_vfs_claim_owner_kind_count;
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_owner_register(
+    enum chimera_claim_construct              construct,
+    uint8_t                                   proto,
+    const struct chimera_vfs_claim_owner_ops *ops)
+{
+    int i;
+
+    for (i = 0; i < chimera_vfs_claim_owner_kind_count; i++) {
+        if (chimera_vfs_claim_owner_kinds[i].construct == construct &&
+            chimera_vfs_claim_owner_kinds[i].proto == proto) {
+            chimera_vfs_claim_owner_kinds[i].ops = ops;
+            return;
+        }
+    }
+
+    chimera_vfs_abort_if(chimera_vfs_claim_owner_kind_count >=
+                         CHIMERA_VFS_CLAIM_MAX_OWNER_KINDS,
+                         "too many claim owner pin kinds registered");
+
+    i                                          = chimera_vfs_claim_owner_kind_count++;
+    chimera_vfs_claim_owner_kinds[i].construct = construct;
+    chimera_vfs_claim_owner_kinds[i].proto     = proto;
+    chimera_vfs_claim_owner_kinds[i].ops       = ops;
+} /* chimera_vfs_claim_owner_register */
+
+static const struct chimera_vfs_claim_owner_ops *
+chimera_vfs_claim_owner_find(const struct chimera_vfs_claim *claim)
+{
+    int i;
+
+    for (i = 0; i < chimera_vfs_claim_owner_kind_count; i++) {
+        if (chimera_vfs_claim_owner_kinds[i].construct == claim->construct &&
+            chimera_vfs_claim_owner_kinds[i].proto == claim->owner.proto) {
+            return chimera_vfs_claim_owner_kinds[i].ops;
+        }
+    }
+
+    return NULL;
+} /* chimera_vfs_claim_owner_find */
+
+SYMBOL_EXPORT bool
+chimera_vfs_claim_ref_take(
+    struct chimera_vfs_claim     *claim,
+    struct chimera_vfs_claim_ref *ref)
+{
+    memset(ref, 0, sizeof(*ref));
+    ref->claim = claim;
+
+    /* A cache claim is protected by the grant it is embedded in: that is the
+     * refcounted coalition the protocol already shares. */
+    if (claim->grant) {
+        ref->grant = chimera_vfs_claim_pin_grant(claim);
+        return ref->grant != NULL;
+    }
+
+    ref->ops = chimera_vfs_claim_owner_find(claim);
+    if (ref->ops == NULL) {
+        /* No owner registered for this (construct, proto): the claim core
+         * does not track an external teardown race for it, so its memory is
+         * assumed caller-managed and stable across the unlocked dispatch
+         * window (the pre-existing assumption for every claim before this
+         * pin mechanism existed). */
+        return true;
+    }
+
+    /* Snapshot cb_private now, under file->lock: the pin we are about to
+     * take protects the OWNER (e.g. the nfs_client), not the claim's own
+     * allocation, which an unrelated path can unlink and free once we drop
+     * the lock.  ref_drop() must use this saved pointer rather than
+     * re-reading claim->cb_private from a claim that may by then be freed. */
+    ref->private_data = claim->cb_private;
+
+    if (!ref->ops->try_get(claim, ref->private_data)) {
+        ref->ops = NULL;
+        return false;
+    }
+
+    return true;
+} /* chimera_vfs_claim_ref_take */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_ref_drop(
+    struct chimera_vfs_state     *state,
+    struct chimera_vfs_claim_ref *ref)
+{
+    /* Neither branch may touch ref->claim afterwards: dropping the last
+     * reference runs the owner's teardown, which frees the object. */
+    if (ref->grant) {
+        chimera_vfs_claim_grant_release(state, ref->grant, false);
+    } else if (ref->ops) {
+        ref->ops->put(ref->private_data, state);
+    }
+
+    memset(ref, 0, sizeof(*ref));
+} /* chimera_vfs_claim_ref_drop */
+
 
 SYMBOL_EXPORT bool
 chimera_vfs_claim_client_holds_handle_cache(

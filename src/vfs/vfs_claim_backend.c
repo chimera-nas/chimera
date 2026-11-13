@@ -508,7 +508,7 @@ chimera_vfs_bl_recall_drive(
 
         evpl_mutex_unlock(&file->lock);
         if (drain) {
-            chimera_vfs_claim_begin_break_ex(state, &file->implicit_claim,
+            chimera_vfs_claim_begin_break_ex(state, file, &file->implicit_claim,
                                              0, 0, true);
         }
     }

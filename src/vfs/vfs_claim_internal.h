@@ -54,19 +54,16 @@ struct chimera_claim_deny_row {
 
 /* The admission mask table in executable form: derive `claim`'s deny rows
  * at its current advertised/raw mode.  Returns the row count. */
-int
-chimera_vfs_claim_deny_rows(
+int chimera_vfs_claim_deny_rows(
     const struct chimera_vfs_claim *claim,
     struct chimera_claim_deny_row   rows[CHIMERA_CLAIM_MAX_DENY_ROWS]);
 
 /* Circle predicates over a (holder-side claim, counterparty claim) pair. */
-bool
-chimera_vfs_claim_same_holder(
+bool chimera_vfs_claim_same_holder(
     const struct chimera_vfs_claim *a,
     const struct chimera_vfs_claim *b);
 
-bool
-chimera_vfs_claim_circle_exempt(
+bool chimera_vfs_claim_circle_exempt(
     uint8_t                         circle,
     const struct chimera_vfs_claim *holder,
     const struct chimera_vfs_claim *probe);
@@ -76,8 +73,7 @@ uint8_t
 chimera_vfs_claim_advertised(
     const struct chimera_vfs_claim *claim);
 
-bool
-chimera_vfs_claim_revocable(
+bool chimera_vfs_claim_revocable(
     const struct chimera_vfs_claim *claim);
 
 /* Advertise-drop policy is a CONSTRUCT property (see
@@ -115,8 +111,7 @@ chimera_vfs_claim_awaited(const struct chimera_vfs_claim *claim)
 } /* chimera_vfs_claim_awaited */
 
 /* 128-bit-safe half-open overlap; UINT64_MAX = to-EOF, 0 = zero-byte. */
-bool
-chimera_vfs_claim_range_overlap(
+bool chimera_vfs_claim_range_overlap(
     uint64_t a_off,
     uint64_t a_len,
     uint64_t b_off,
@@ -136,8 +131,7 @@ chimera_vfs_claim_admit_locked(
     struct chimera_vfs_claim      **conflict_claim);
 
 /* Fill a by-value conflict record from an internal claim pointer. */
-void
-chimera_vfs_claim_conflict_fill(
+void chimera_vfs_claim_conflict_fill(
     const struct chimera_vfs_claim    *claim,
     struct chimera_vfs_claim_conflict *out);
 
@@ -149,13 +143,11 @@ chimera_vfs_claim_contended_floor(
     const struct chimera_vfs_claim *holder);
 
 /* Insert / remove a claim on its file class list; caller holds file->lock. */
-void
-chimera_vfs_claim_link_locked(
+void chimera_vfs_claim_link_locked(
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_claim      *claim);
 
-void
-chimera_vfs_claim_unlink_locked(
+void chimera_vfs_claim_unlink_locked(
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_claim      *claim);
 
@@ -163,13 +155,21 @@ chimera_vfs_claim_unlink_locked(
 /* Break internals                                                    */
 /* ------------------------------------------------------------------ */
 
-void
-chimera_vfs_claim_begin_break_ex(
-    struct chimera_vfs_state *state,
-    struct chimera_vfs_claim *claim,
-    uint8_t                   floor,
-    uint32_t                  deadline_ms,
-    bool                      one_shot);
+/* Membership-validated revoke for a claim selected under `file`'s lock and
+ * pinned before this call (see chimera_vfs_claim_revoke_ex() for why a pin
+ * alone is not enough). */
+void chimera_vfs_claim_revoke_ex(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim);
+
+void chimera_vfs_claim_begin_break_ex(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim,
+    uint8_t                        floor,
+    uint32_t                       deadline_ms,
+    bool                           one_shot);
 
 /* Pin a cache claim's grant across an unlocked begin_break; caller holds
  * file->lock.  Returns NULL for grant-less claims. */
@@ -177,21 +177,18 @@ struct chimera_vfs_claim_grant *
 chimera_vfs_claim_pin_grant(
     struct chimera_vfs_claim *claim);
 
-bool
-chimera_vfs_claim_deadline_passed(
+bool chimera_vfs_claim_deadline_passed(
     const struct chimera_vfs_claim *claim);
 
 /* Courtesy reclaim (R13): holder's client is dead AND differs from the
  * probe's client. */
-bool
-chimera_vfs_claim_holder_reclaimable(
+bool chimera_vfs_claim_holder_reclaimable(
     const struct chimera_vfs_claim *holder,
     const struct chimera_vfs_claim *probe);
 
 /* The trigger engine's collect/pin/break loop over an already-pinned file.
  * For CHIMERA_TRIGGER_RANGE_LOCK, retain != 0 flags an exclusive lock. */
-void
-chimera_vfs_claim_trigger_fire(
+void chimera_vfs_claim_trigger_fire(
     struct chimera_vfs_state         *state,
     struct chimera_vfs_file_state    *file,
     enum chimera_claim_trigger        trigger,
@@ -200,16 +197,14 @@ chimera_vfs_claim_trigger_fire(
 
 /* NS_FULL / FLUSH / NS_UNLINK engines (return true while still blocked);
  * used by the parking io path and the public query verbs. */
-bool
-chimera_vfs_claim_trigger_ns_full(
+bool chimera_vfs_claim_trigger_ns_full(
     struct chimera_vfs_state             *state,
     struct chimera_vfs_file_state        *file,
     const struct chimera_vfs_open_handle *skip_handle,
     bool                                  flush_only,
     const struct chimera_claim_actor     *actor);
 
-bool
-chimera_vfs_claim_trigger_ns_unlink(
+bool chimera_vfs_claim_trigger_ns_unlink(
     struct chimera_vfs_state             *state,
     struct chimera_vfs_file_state        *file,
     const struct chimera_vfs_open_handle *skip_handle,
@@ -227,15 +222,13 @@ chimera_vfs_claim_trigger_ns_unlink(
  * callback fires; `thread` must be the CALLING vfs thread (its request pool
  * is per-thread and unlocked). */
 
-void
-chimera_vfs_claim_backend_project_range(
+void chimera_vfs_claim_backend_project_range(
     struct chimera_vfs_thread          *thread,
     struct chimera_vfs_state           *state,
     struct chimera_vfs_pending_acquire *ticket,
     bool                                serial_lane);
 
-bool
-chimera_vfs_claim_backend_range_projects(
+bool chimera_vfs_claim_backend_range_projects(
     struct chimera_vfs_state       *state,
     struct chimera_vfs_file_state  *file,
     struct chimera_vfs_thread      *thread,
@@ -244,15 +237,13 @@ chimera_vfs_claim_backend_range_projects(
 /* Cancel a pump-deferred RANGE confirm TICKET: true = yanked from the work
  * FIFO (cb will never fire; caller rolls back the local grant); false only
  * after the cb has fired (waits out an in-flight inline confirm). */
-bool
-chimera_vfs_claim_backend_ticket_cancel(
+bool chimera_vfs_claim_backend_ticket_cancel(
     struct chimera_vfs_state           *state,
     struct chimera_vfs_pending_acquire *ticket);
 
 /* Drain queued RELEASE work for `file` inline on `thread` (ordered before
  * a same-file confirm). */
-void
-chimera_vfs_claim_backend_drain_releases(
+void chimera_vfs_claim_backend_drain_releases(
     struct chimera_vfs_thread     *thread,
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file);
@@ -261,11 +252,9 @@ chimera_vfs_claim_backend_drain_releases(
  * holders outside the core (the posix client's SEEK_END records) release
  * by token too. */
 
-
 /* Hand a pump-granted projectable ticket to the service thread (the pump
  * has no vfs thread of its own to dispatch from). */
-void
-chimera_vfs_claim_backend_defer_ticket(
+void chimera_vfs_claim_backend_defer_ticket(
     struct chimera_vfs_state           *state,
     struct chimera_vfs_pending_acquire *ticket);
 
@@ -273,13 +262,11 @@ chimera_vfs_claim_backend_defer_ticket(
 /* Pumps                                                              */
 /* ------------------------------------------------------------------ */
 
-void
-chimera_vfs_claim_pump_pending(
+void chimera_vfs_claim_pump_pending(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file);
 
-void
-chimera_vfs_claim_pump_io(
+void chimera_vfs_claim_pump_io(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file);
 

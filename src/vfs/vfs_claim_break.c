@@ -8,6 +8,7 @@
 
 #include "vfs_claim.h"
 #include "vfs_claim_internal.h"
+#include "vfs_claim_owner.h"
 #include "vfs_internal.h"
 #include "common/macros.h"
 
@@ -28,13 +29,14 @@
 
 void
 chimera_vfs_claim_begin_break_ex(
-    struct chimera_vfs_state *state,
-    struct chimera_vfs_claim *claim,
-    uint8_t                   floor,
-    uint32_t                  deadline_ms,
-    bool                      one_shot)
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim,
+    uint8_t                        floor,
+    uint32_t                       deadline_ms,
+    bool                           one_shot)
 {
-    struct chimera_vfs_file_state *file = claim->file;
+    struct chimera_vfs_file_state *claim_file;
     chimera_vfs_claim_break_cb_t   cb;
     void                          *cb_priv;
     uint8_t                        step = 0;
@@ -47,6 +49,18 @@ chimera_vfs_claim_begin_break_ex(
 
     if (file) {
         evpl_mutex_lock(&file->lock);
+    }
+
+    /* Entitlement, not lifetime: the caller's pin keeps the object alive, and
+     * this check keeps a break off a claim that has left this file's list or
+     * was revoked while the dispatch was in flight. */
+    claim_file = claim->file;
+    if (claim_file != file ||
+        claim->break_state == CHIMERA_CLAIM_BREAK_REVOKED) {
+        if (file) {
+            evpl_mutex_unlock(&file->lock);
+        }
+        return;
     }
 
     /* An ACKED holder settled at 0 and grants nothing: step computes to
@@ -248,6 +262,47 @@ chimera_vfs_claim_revoke(struct chimera_vfs_claim *claim)
         chimera_vfs_claim_backend_reeval(file->state, file);
     }
 } /* chimera_vfs_claim_revoke */
+
+/* Revoke a claim selected (and pinned) against a specific, already-known
+ * `file` -- the pattern every selection-loop caller below uses: pick a
+ * victim under file->lock, pin it, unlock, then act.  The pin keeps the
+ * claim's allocation alive but does not stop a concurrent unlink from
+ * retargeting claim->file (e.g. the owner tearing the claim down and
+ * relinking it nowhere, or -- in principle -- elsewhere); re-validate
+ * membership under the expected file's lock before mutating it, exactly
+ * as chimera_vfs_claim_begin_break_ex() already does.  A mismatch means
+ * someone else has already finished with this claim, so this is a no-op. */
+void
+chimera_vfs_claim_revoke_ex(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_claim      *claim)
+{
+    chimera_vfs_claim_revoked_cb_t revoked_cb = NULL;
+    void                          *cb_private = NULL;
+    bool                           did_revoke = false;
+
+    evpl_mutex_lock(&file->lock);
+    if (claim->file == file) {
+        chimera_vfs_claim_revoke_locked(file, claim, &revoked_cb, &cb_private);
+        did_revoke = true;
+    }
+    evpl_mutex_unlock(&file->lock);
+
+    if (!did_revoke) {
+        return;
+    }
+
+    if (revoked_cb) {
+        revoked_cb(claim, cb_private);
+    }
+
+    if (state) {
+        chimera_vfs_claim_pump_pending(state, file);
+        chimera_vfs_claim_pump_io(state, file);
+        chimera_vfs_claim_backend_reeval(state, file);
+    }
+} /* chimera_vfs_claim_revoke_ex */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_park(
@@ -470,6 +525,7 @@ chimera_vfs_claim_revoke_breaks(
 {
     struct chimera_vfs_file_state *file;
     struct chimera_vfs_claim      *to_revoke[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
+    struct chimera_vfs_claim_ref   revoke_ref[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
     struct chimera_vfs_claim      *cur;
     int                            n = 0;
     int                            i;
@@ -488,13 +544,20 @@ chimera_vfs_claim_revoke_breaks(
         if (cur->break_state == CHIMERA_CLAIM_BREAK_BREAKING &&
             cur->grant != except &&
             n < CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH) {
-            to_revoke[n++] = cur;
+            /* Pin before the batch is used unlocked below: a delegation or
+             * FUSE grant can be freed by its owner the instant file->lock is
+             * dropped. A refused pin just means teardown has already
+             * committed, so the claim is left out of the batch. */
+            if (chimera_vfs_claim_ref_take(cur, &revoke_ref[n])) {
+                to_revoke[n++] = cur;
+            }
         }
     }
     evpl_mutex_unlock(&file->lock);
 
     for (i = 0; i < n; i++) {
-        chimera_vfs_claim_revoke(to_revoke[i]);
+        chimera_vfs_claim_revoke_ex(state, file, to_revoke[i]);
+        chimera_vfs_claim_ref_drop(state, &revoke_ref[i]);
     }
 
     chimera_vfs_state_put(state, file);
@@ -772,7 +835,7 @@ chimera_vfs_claim_trigger_fire(
 {
     struct chimera_vfs_claim        *cur;
     struct chimera_vfs_claim        *to_break[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
-    struct chimera_vfs_claim_grant  *break_pin[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
+    struct chimera_vfs_claim_ref     break_ref[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
     struct chimera_claim_trigger_row rowv[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
     int                              n = 0;
     int                              i;
@@ -792,21 +855,19 @@ chimera_vfs_claim_trigger_fire(
         if (!row.selects) {
             continue;
         }
-        if (n < CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH) {
-            break_pin[n] = chimera_vfs_claim_pin_grant(cur);
-            to_break[n]  = cur;
-            rowv[n]      = row;
+        if (n < CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH &&
+            chimera_vfs_claim_ref_take(cur, &break_ref[n])) {
+            to_break[n] = cur;
+            rowv[n]     = row;
             n++;
         }
     }
     evpl_mutex_unlock(&file->lock);
 
     for (i = 0; i < n; i++) {
-        chimera_vfs_claim_begin_break_ex(state, to_break[i], rowv[i].floor,
+        chimera_vfs_claim_begin_break_ex(state, file, to_break[i], rowv[i].floor,
                                          rowv[i].deadline_ms, rowv[i].one_shot);
-        if (break_pin[i]) {
-            chimera_vfs_claim_grant_release(state, break_pin[i], true);
-        }
+        chimera_vfs_claim_ref_drop(state, &break_ref[i]);
     }
 } /* chimera_vfs_claim_trigger_fire */
 
@@ -855,11 +916,11 @@ chimera_vfs_claim_trigger_ns_full(
     bool had;
 
     for ( ; ; ) {
-        struct chimera_vfs_claim       *cur;
-        struct chimera_vfs_claim       *to_break  = NULL;
-        struct chimera_vfs_claim       *to_revoke = NULL;
-        struct chimera_vfs_claim_grant *break_pin = NULL;
-        bool                            is_deleg;
+        struct chimera_vfs_claim    *cur;
+        struct chimera_vfs_claim    *to_break  = NULL;
+        struct chimera_vfs_claim    *to_revoke = NULL;
+        struct chimera_vfs_claim_ref break_ref;
+        bool                         is_deleg;
 
         evpl_mutex_lock(&file->lock);
         for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur;
@@ -891,7 +952,14 @@ chimera_vfs_claim_trigger_ns_full(
             }
         }
         if (to_break) {
-            break_pin = chimera_vfs_claim_pin_grant(to_break);
+            if (!chimera_vfs_claim_ref_take(to_break, &break_ref)) {
+                /* Teardown has committed: its release will pump us. */
+                to_break = NULL;
+            }
+        } else if (to_revoke) {
+            if (!chimera_vfs_claim_ref_take(to_revoke, &break_ref)) {
+                to_revoke = NULL;
+            }
         }
         evpl_mutex_unlock(&file->lock);
 
@@ -906,14 +974,13 @@ chimera_vfs_claim_trigger_ns_full(
              * intermediate R|H the step would advertise carries a read cache
              * the truncate is invalidating (smb2.lease.breaking2 expects one
              * RWH->NONE break, not RWH->RH). */
-            chimera_vfs_claim_begin_break_ex(state, to_break, 0,
+            chimera_vfs_claim_begin_break_ex(state, file, to_break, 0,
                                              CHIMERA_VFS_NFS_DELEG_METAOP_MS,
                                              false);
-            if (break_pin) {
-                chimera_vfs_claim_grant_release(state, break_pin, true);
-            }
+            chimera_vfs_claim_ref_drop(state, &break_ref);
         } else if (to_revoke) {
-            chimera_vfs_claim_revoke(to_revoke);
+            chimera_vfs_claim_revoke_ex(state, file, to_revoke);
+            chimera_vfs_claim_ref_drop(state, &break_ref);
         } else {
             break;
         }
@@ -963,10 +1030,10 @@ chimera_vfs_claim_trigger_ns_unlink(
     bool had = false;
 
     for ( ; ; ) {
-        struct chimera_vfs_claim       *cur;
-        struct chimera_vfs_claim       *to_break  = NULL;
-        struct chimera_vfs_claim       *to_revoke = NULL;
-        struct chimera_vfs_claim_grant *break_pin = NULL;
+        struct chimera_vfs_claim    *cur;
+        struct chimera_vfs_claim    *to_break  = NULL;
+        struct chimera_vfs_claim    *to_revoke = NULL;
+        struct chimera_vfs_claim_ref victim_ref;
 
         evpl_mutex_lock(&file->lock);
         for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur;
@@ -991,19 +1058,25 @@ chimera_vfs_claim_trigger_ns_unlink(
             }
         }
         if (to_break) {
-            break_pin = chimera_vfs_claim_pin_grant(to_break);
+            if (!chimera_vfs_claim_ref_take(to_break, &victim_ref)) {
+                /* Teardown has committed: its release will pump us. */
+                to_break = NULL;
+            }
+        } else if (to_revoke) {
+            if (!chimera_vfs_claim_ref_take(to_revoke, &victim_ref)) {
+                to_revoke = NULL;
+            }
         }
         evpl_mutex_unlock(&file->lock);
 
         if (to_break) {
-            chimera_vfs_claim_begin_break_ex(state, to_break, retain,
+            chimera_vfs_claim_begin_break_ex(state, file, to_break, retain,
                                              CHIMERA_VFS_NFS_DELEG_METAOP_MS,
                                              true /* single-step */);
-            if (break_pin) {
-                chimera_vfs_claim_grant_release(state, break_pin, true);
-            }
+            chimera_vfs_claim_ref_drop(state, &victim_ref);
         } else if (to_revoke) {
-            chimera_vfs_claim_revoke(to_revoke);
+            chimera_vfs_claim_revoke_ex(state, file, to_revoke);
+            chimera_vfs_claim_ref_drop(state, &victim_ref);
         } else {
             break;
         }
