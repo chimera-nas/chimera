@@ -26,9 +26,10 @@
 
 /* The owner rights of MS-DTYP 2.5.3.2: the object owner holds READ_CONTROL and
  * WRITE_DAC before the DACL is walked, so no DENY ACE can remove them.  An
- * OWNER RIGHTS ACE in the DACL withdraws them; the owner then holds WRITE_DAC
- * only through an ACE, while READ_CONTROL stays in ACE_BASELINE, granted to
- * every caller unless a DENY ACE removes it. */
+ * OWNER RIGHTS ACE that applies to the object (not INHERIT_ONLY) withdraws
+ * them; the owner then holds WRITE_DAC only through an ACE, while READ_CONTROL
+ * stays in ACE_BASELINE, granted to every caller unless a DENY ACE removes
+ * it. */
 #define ACE_OWNER_RIGHTS   (CHIMERA_ACE_READ_ACL | CHIMERA_ACE_WRITE_ACL)
 
 /* Implicit owner rights that are not owner rights in MS-DTYP: chimera also
@@ -172,7 +173,8 @@ mode_access_check(
 
     /* The owner holds ACE_OWNER_IMPLICIT (READ_CONTROL/WRITE_DAC/DELETE)
      * outright.  Under an explicit ACL the owner holds the same set only when
-     * the DACL has no OWNER RIGHTS ACE, and there a DENY ACE can remove DELETE.
+     * the DACL has no OWNER RIGHTS ACE that applies to the object (not
+     * INHERIT_ONLY), and there a DENY ACE can remove DELETE.
      * Not WRITE_ATTRIBUTES or WRITE_OWNER, which Windows grants the owner only
      * via an explicit ACE.  (DELETE_CHILD is derived from write+execute by the
      * caller, for both this and the ACL path.) */
@@ -230,10 +232,14 @@ chimera_acl_access_check(
     int      owner_rights_present = 0;
     int      owner_implicit;
 
-    /* An OWNER_RIGHTS ACE anywhere in the DACL disables the implicit owner
-     * rights: the owner then holds what the ACEs grant, plus ACE_BASELINE, which
-     * every caller holds. */
+    /* An OWNER_RIGHTS ACE that applies to this object disables the implicit
+     * owner rights: the owner then holds what the ACEs grant, plus ACE_BASELINE,
+     * which every caller holds.  An INHERIT_ONLY one applies only to children,
+     * so, as in the walk below, it does not count here. */
     for (unsigned i = 0; i < acl->num_aces; i++) {
+        if (acl->aces[i].flags & CHIMERA_ACE_FLAG_INHERIT_ONLY) {
+            continue;
+        }
         if (acl->aces[i].who.type == CHIMERA_PRINCIPAL_SPECIAL &&
             acl->aces[i].who.special == CHIMERA_WHO_OWNER_RIGHTS) {
             owner_rights_present = 1;
