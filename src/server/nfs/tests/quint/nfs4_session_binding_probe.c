@@ -19,6 +19,8 @@
  *   B6  DESTROY_SESSION under another principal, on an associated
  *       connection: NFS4ERR_WRONG_CRED (Section 18.37.3), and the session
  *       survives.
+ *   B7  DELEGPURGE, which chimera puts in spo_must_enforce, under another
+ *       principal: NFS4ERR_WRONG_CRED; under the machine credential: OK.
  *   B3  SP4_NONE, SEQUENCE on a fresh connection: accepted, as chimera has
  *       always done; nothing in Section 18.46.3 forbids it without
  *       enforcement.
@@ -120,6 +122,9 @@ sb_reply_cb(
                     break;
                 case OP_PUTROOTFH:
                     r->st[i] = op->opputrootfh.status;
+                    break;
+                case OP_DELEGPURGE:
+                    r->st[i] = op->opdelegpurge.status;
                     break;
                 case OP_RECLAIM_COMPLETE:
                     r->st[i] = op->opreclaim_complete.rcr_status;
@@ -380,6 +385,19 @@ check_mach_cred_binding(struct mbt_env *env)
     st = sb_sequence(env, a, &s);
     expect("B6", st == NFS4_OK, "the session survives: SEQUENCE %u", st);
 
+    memset(&op, 0, sizeof(op));
+    op.argop                 = OP_DELEGPURGE;
+    op.opdelegpurge.clientid = clientid;
+    sb_as                    = &other;
+    r                        = sb_compound(env, a, &s, &op, 1);
+    sb_as                    = NULL;
+    expect("B7", r.nres == 2 && r.st[1] == NFS4ERR_WRONG_CRED,
+           "DELEGPURGE under another principal: %u (want %u)", r.st[1],
+           NFS4ERR_WRONG_CRED);
+    r = sb_compound(env, a, &s, &op, 1);
+    expect("B7", r.nres == 2 && r.st[1] == NFS4_OK,
+           "DELEGPURGE under the machine credential: %u", r.st[1]);
+
     evpl_rpc2_client_disconnect(env->rpc2_thread, a);
     evpl_rpc2_client_disconnect(env->rpc2_thread, b);
 } /* check_mach_cred_binding */
@@ -475,7 +493,13 @@ main(
 {
     struct mbt_env_opts opts = { .disable_caches = 1 };
     struct mbt_env     *env  = malloc(sizeof(*env));
+    int                 i;
 
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
+            opts.module = argv[++i];
+        }
+    }
     opts.sec = mbt_sec_scan_argv(argc, argv);
     if (opts.sec != MBT_SEC_SYS) {
         printf("AUTH_SYS only; skipping\n");
