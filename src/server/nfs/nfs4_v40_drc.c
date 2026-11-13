@@ -13,6 +13,7 @@
 #include "nfs_drc_reply.h"
 #include "nfs_common.h"
 #include "nfs_internal.h"
+#include "evpl/evpl_rpc2.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 #include "evpl/evpl_rpc2_program.h"
@@ -348,10 +349,13 @@ nfs4_v40_drc_conn_close(
 * ------------------------------------------------------------------ */
 
 struct nfs4_v40_drc_capture_ctx {
-    struct nfs4_v40_drc *drc;
-    const void          *conn;   /* identity only; never dereferenced */
-    uint32_t             xid;
-    uint64_t             cksum;
+    struct nfs4_v40_drc         *drc;
+    /* The key's connection.  Read once, for its closed flag: libevpl keeps a
+     * connection until its last server request ends, and this capture runs
+     * inside that request's reply. */
+    const struct evpl_rpc2_conn *conn;
+    uint32_t                     xid;
+    uint64_t                     cksum;
 };
 
 static void
@@ -368,6 +372,16 @@ nfs4_v40_drc_capture_reply(
 
     if (total_length <= (int) body_offset ||
         (uint32_t) total_length > NFS4_V40_DRC_MAX_REPLY_SIZE) {
+        return;
+    }
+
+    /* A reply whose connection has already gone: the client's retransmit
+     * comes on a new connection, which this cache never answers from, and
+     * nfs4_v40_drc_conn_close has already freed this connection's entries.
+     * Inserting would recreate them under the dead connection's pointer, to
+     * stay until shutdown and answer whichever new connection is later
+     * allocated at the same address. */
+    if (ctx->conn->closed) {
         return;
     }
 
@@ -396,6 +410,29 @@ nfs4_v40_drc_capture_reply(
 
     free(buf);
 } /* nfs4_v40_drc_capture_reply */
+
+void
+nfs4_v40_drc_arm_capture(
+    struct nfs4_v40_drc       *drc,
+    struct evpl_rpc2_encoding *encoding,
+    struct evpl_rpc2_conn     *conn,
+    uint64_t                   cksum)
+{
+    struct nfs4_v40_drc_capture_ctx *cctx;
+
+    /* Bump-allocated from the request's dbuf, so it lives exactly as long as
+     * the request and needs no free.  If the dbuf is exhausted we simply do
+     * not cache -- a retransmit then re-executes. */
+    cctx = xdr_dbuf_alloc_space(sizeof(*cctx), encoding->dbuf);
+    if (cctx) {
+        cctx->drc                       = drc;
+        cctx->conn                      = conn;
+        cctx->xid                       = encoding->xid;
+        cctx->cksum                     = cksum;
+        encoding->reply_capture_cb      = nfs4_v40_drc_capture_reply;
+        encoding->reply_capture_private = cctx;
+    }
+} /* nfs4_v40_drc_arm_capture */
 
 void
 nfs4_v40_drc_cancel_capture(struct evpl_rpc2_encoding *encoding)
@@ -429,7 +466,6 @@ nfs4_v40_drc_dispatch(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs4_v40_drc              *drc    = &thread->shared->v40_drc;
-    struct nfs4_v40_drc_capture_ctx  *cctx;
     uint8_t                          *cached;
     uint32_t                          cached_len, mv;
     uint64_t                          cksum;
@@ -474,19 +510,8 @@ nfs4_v40_drc_dispatch(
          * inserted).  Fall through and re-execute. */
     }
 
-    /* Miss: arm the capture so this request's reply is cached.  The context is
-     * bump-allocated from the request's dbuf, so it lives exactly as long as the
-     * request and needs no free.  If the dbuf is exhausted we simply do not
-     * cache -- a retransmit then re-executes. */
-    cctx = xdr_dbuf_alloc_space(sizeof(*cctx), encoding->dbuf);
-    if (cctx) {
-        cctx->drc                       = drc;
-        cctx->conn                      = conn;
-        cctx->xid                       = encoding->xid;
-        cctx->cksum                     = cksum;
-        encoding->reply_capture_cb      = nfs4_v40_drc_capture_reply;
-        encoding->reply_capture_private = cctx;
-    }
+    /* Miss: arm the capture so this request's reply is cached. */
+    nfs4_v40_drc_arm_capture(drc, encoding, conn, cksum);
 
     return drc->orig_dispatch(evpl, conn, encoding, proc, program_data, cred,
                               iov, niov, length, private_data);
