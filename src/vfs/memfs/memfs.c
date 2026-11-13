@@ -5278,6 +5278,17 @@ memfs_clone_range(
         return;
     }
 
+    /* Defense in depth: the server is expected to have already type-gated
+     * both endpoints (CHIMERA_VFS_OPEN_REGULAR_ONLY) before handing us these
+     * handles, but a non-regular object reaching clone_range directly would
+     * otherwise read/write through memfs_block in ways the inode's type was
+     * never meant to support. */
+    if (!S_ISREG(src_inode->mode) || !S_ISREG(dst_inode->mode)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     if (src_inode == dst_inode) {
         uint64_t s_end = src_offset + length;
         uint64_t d_end = dst_offset + length;

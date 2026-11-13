@@ -1101,6 +1101,8 @@ chimera_vfs_clone_range(
     uint64_t                           length,
     uint64_t                           pre_attr_mask,
     uint64_t                           post_attr_mask,
+    const struct chimera_claim_actor  *src_io_owner,
+    const struct chimera_claim_actor  *dst_io_owner,
     chimera_vfs_clone_range_callback_t callback,
     void                              *private_data);
 

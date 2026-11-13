@@ -953,7 +953,7 @@ dh_clone(
     uint64_t                        len)
 {
     chimera_vfs_clone_range(dh->thread, &dh->cred, src, src_off, dst, dst_off,
-                            len, 0, 0, dh_clone_cb, dh);
+                            len, 0, 0, NULL, NULL, dh_clone_cb, dh);
     dh_wait(dh);
     return dh->status;
 } /* dh_clone */
