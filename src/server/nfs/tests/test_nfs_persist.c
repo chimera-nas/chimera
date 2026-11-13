@@ -32,6 +32,7 @@
 #include "nfs4_v40_drc.h"
 #include "nfs_drc_reply.h"
 #include "evpl/evpl.h"
+#include "evpl/evpl_rpc2.h"
 #include "nfs4_state.h"
 #include "nfs_kv_keys.h"
 
@@ -2765,6 +2766,62 @@ test_nfs4_v40_conn_cache(void)
     printf("ok: nfs4_v40_conn_cache\n");
 } /* test_nfs4_v40_conn_cache */
 
+/*
+ * A reply can be sent, and so captured, after its client has disconnected:
+ * libevpl keeps the connection until its last request ends.  By then
+ * nfs4_v40_drc_conn_close has freed that connection's cache, and a capture
+ * that inserted would recreate it under the dead connection's pointer -- to
+ * stay until shutdown and answer whichever new connection is later allocated
+ * at the same address.  It must be skipped; the same capture on a live
+ * connection still caches.
+ */
+static void
+test_nfs4_v40_late_capture(void)
+{
+    struct nfs4_v40_drc       drc;
+    struct evpl_rpc2_conn    *gone = calloc(1,sizeof(*gone));
+    struct evpl_rpc2_conn    *live = calloc(1,sizeof(*live));
+    struct evpl_rpc2_encoding enc;
+    struct evpl_iovec         iov;
+    uint8_t                   reply[64];
+    uint32_t                  reply_len;
+    uint8_t                  *out;
+    uint32_t                  out_len;
+
+    CHECK(gone != NULL && live != NULL);
+    gone->closed = 1;
+
+    nfs4_v40_drc_init(&drc);
+    reply_len = v40_make_reply(reply,sizeof(reply),21,"OPEN4res NFS4_OK",0);
+    memset(&iov,0,sizeof(iov));
+    iov.data   = reply;
+    iov.length = reply_len;
+
+    memset(&enc,0,sizeof(enc));
+    enc.dbuf = xdr_dbuf_alloc(4096);
+    enc.xid  = 21;
+    CHECK(enc.dbuf != NULL);
+
+    nfs4_v40_drc_arm_capture(&drc,&enc,gone,0x5555);
+    CHECK(enc.reply_capture_cb != NULL);
+    enc.reply_capture_cb(&iov,1,(int) reply_len,0,enc.reply_capture_private);
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,gone,21,0x5555,&out,&out_len) == 0);
+    CHECK(drc.bytes == 0);
+    CHECK(HASH_COUNT(drc.conns) == 0);
+
+    nfs4_v40_drc_arm_capture(&drc,&enc,live,0x5555);
+    enc.reply_capture_cb(&iov,1,(int) reply_len,0,enc.reply_capture_private);
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,live,21,0x5555,&out,&out_len) == 1);
+    CHECK(out_len == reply_len);
+    free(out);
+
+    xdr_dbuf_free(enc.dbuf);
+    nfs4_v40_drc_destroy(&drc);
+    free(gone);
+    free(live);
+    printf("ok: nfs4_v40_late_capture\n");
+} /* test_nfs4_v40_late_capture */
+
 /* What a cache stores is what the capture callback was shown, minus the
  * reserved headroom in front of it -- nothing else.  The filter that used to
  * live here (only a MSG_ACCEPTED/SUCCESS reply is ever cached) is now rpc2's:
@@ -2968,6 +3025,7 @@ main(void)
     test_nfs4_v40_peek_minorversion();
     test_nfs4_v40_compound_cacheable();
     test_nfs4_v40_conn_cache();
+    test_nfs4_v40_late_capture();
     test_nfs_drc_copy_results();
 
     test_node_scoped_identifiers();

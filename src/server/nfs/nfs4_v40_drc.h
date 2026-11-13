@@ -186,6 +186,19 @@ nfs4_v40_drc_cancel_capture(
     struct evpl_rpc2_encoding *encoding);
 
 /*
+ * Arm the reply capture that caches this request's reply under {conn,
+ * encoding->xid, cksum}.  The context is bump-allocated from the encoding's
+ * dbuf; with no room left nothing is armed and the reply is not cached.
+ * Exposed for unit tests (test_nfs_persist).
+ */
+void
+nfs4_v40_drc_arm_capture(
+    struct nfs4_v40_drc       *drc,
+    struct evpl_rpc2_encoding *encoding,
+    struct evpl_rpc2_conn     *conn,
+    uint64_t                   cksum);
+
+/*
  * Read the COMPOUND4args minorversion straight off the wire, before the request
  * is decoded.  False when it cannot be determined from the first iovec, which
  * the caller must treat as "do not cache" rather than as minorversion 0.
