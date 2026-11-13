@@ -434,6 +434,27 @@ chimera_vfs_setattr_owned(
     void                             *private_data,
     const struct chimera_claim_actor *actor);
 
+/* A setattr whose caller's protocol has already granted it access on this
+ * handle in its own access model, as SMB grants access at CREATE.  Only the
+ * CHIMERA_ACE_WRITE_ATTRIBUTES bit of `granted` counts: it is not required
+ * again of the object's ACL or mode.  `granted` only lifts that requirement;
+ * the rest is judged as chimera_vfs_fsetattr_owned (fd_rights) or
+ * chimera_vfs_setattr_owned judges it, and on a backend that delegates DAC it
+ * has no effect.  `actor` may be NULL. */
+SYMBOL_EXPORT void
+chimera_vfs_setattr_granted(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    int                               fd_rights,
+    uint32_t                          granted,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data,
+    const struct chimera_claim_actor *actor);
+
 SYMBOL_EXPORT void
 chimera_vfs_readdir(
     struct chimera_vfs_thread      *thread,

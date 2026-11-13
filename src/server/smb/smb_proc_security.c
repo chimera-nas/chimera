@@ -19,11 +19,13 @@
 #include "common/platform.h"
 #endif /* ifdef _WIN32 */
 
+#include "common/compiler.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_identity.h"
 #include "vfs/sdk/vfs_acl.h"
+#include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_sid.h"
 
 
@@ -208,6 +210,119 @@ expand_generic_mask(uint32_t m)
     }
     return out;
 } /* expand_generic_mask */
+
+/* ---- mode-derived ACLs in Windows terms --------------------------------- */
+
+/* Holds the Windows-terms copy chimera_smb_acl_view returns; each SMB thread
+ * serves one callback at a time, and every caller is done with the copy
+ * before it returns. */
+static CHIMERA_THREAD_LOCAL uint64_t chimera_smb_acl_view_buf[
+    (sizeof(struct chimera_acl) +
+     CHIMERA_ACL_MAX_ACES * sizeof(struct chimera_ace) + 7) / 8];
+
+/* Whether any entry of `acl` has the shape chimera_acl_from_mode() gives. */
+static int
+chimera_smb_acl_has_mode_entries(const struct chimera_acl *acl)
+{
+    for (unsigned i = 0; i < acl->num_aces; i++) {
+        if (chimera_ace_is_from_mode(&acl->aces[i])) {
+            return 1;
+        }
+    }
+    return 0;
+} /* chimera_smb_acl_has_mode_entries */
+
+/* Present the mode-derived OWNER@, GROUP@ and EVERYONE@ entries of `acl`
+ * (chimera_ace_is_from_mode) in Windows terms: an allowed r, w or x grants
+ * FILE_GENERIC_READ, FILE_GENERIC_WRITE or FILE_GENERIC_EXECUTE, on a file and
+ * a directory alike, each with READ_CONTROL and SYNCHRONIZE, and a denied w
+ * also denies FILE_WRITE_ATTRIBUTES, so a class the mode keeps from writing is
+ * not handed it by a broader entry further down.  Any other entry is left as
+ * it is. */
+static void
+chimera_smb_acl_windows_terms(struct chimera_acl *acl)
+{
+    for (unsigned i = 0; i < acl->num_aces; i++) {
+        struct chimera_ace *ace = &acl->aces[i];
+        uint32_t            m   = ace->access_mask;
+
+        if (!chimera_ace_is_from_mode(ace)) {
+            continue;
+        }
+
+        if (ace->type == CHIMERA_ACE_ALLOWED) {
+            if (m & CHIMERA_ACE_READ_DATA) {
+                m |= ACE4_GENERIC_READ;
+            }
+            if (m & CHIMERA_ACE_WRITE_DATA) {
+                m |= ACE4_GENERIC_WRITE;
+            }
+            if (m & CHIMERA_ACE_EXECUTE) {
+                m |= ACE4_GENERIC_EXECUTE;
+            }
+        } else if (ace->type == CHIMERA_ACE_DENIED) {
+            if (m & CHIMERA_ACE_WRITE_DATA) {
+                m |= CHIMERA_ACE_WRITE_ATTRIBUTES;
+            }
+        }
+        ace->access_mask = m;
+    }
+} /* chimera_smb_acl_windows_terms */
+
+SYMBOL_EXPORT const struct chimera_acl *
+chimera_smb_acl_view(
+    const struct chimera_vfs_attrs *attr,
+    int                             from_mode)
+{
+    const struct chimera_acl *acl =
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL;
+    struct chimera_acl       *out =
+        (struct chimera_acl *) chimera_smb_acl_view_buf;
+
+    if (acl && acl->num_aces) {
+        /* One longer than the buffer holds, which no module should return, is
+         * judged as it stands. */
+        if (acl->num_aces > CHIMERA_ACL_MAX_ACES ||
+            !chimera_smb_acl_has_mode_entries(acl)) {
+            return acl;
+        }
+        memcpy(out, acl, chimera_acl_size(acl->num_aces));
+    } else if (from_mode && (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        if (chimera_acl_from_mode(attr->va_mode, out, CHIMERA_ACL_MAX_ACES) < 0) {
+            return acl;
+        }
+    } else {
+        return acl;
+    }
+
+    chimera_smb_acl_windows_terms(out);
+    return out;
+} /* chimera_smb_acl_view */
+
+SYMBOL_EXPORT uint32_t
+chimera_smb_access_check(
+    const struct chimera_vfs_attrs *attr,
+    const struct chimera_vfs_cred  *cred,
+    uint32_t                        requested)
+{
+    const struct chimera_acl *acl;
+    struct chimera_vfs_attrs  view;
+
+    /* AUTH_NONE and root are granted without looking at the object. */
+    if (cred->flavor == CHIMERA_VFS_AUTH_NONE || cred->uid == 0) {
+        return chimera_vfs_access_check(attr, cred, requested);
+    }
+
+    acl = chimera_smb_acl_view(attr, 1);
+    if (acl == ((attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL)) {
+        return chimera_vfs_access_check(attr, cred, requested);
+    }
+
+    view              = *attr;
+    view.va_acl       = (struct chimera_acl *) acl; /* read only */
+    view.va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+    return chimera_vfs_access_check(&view, cred, requested);
+} /* chimera_smb_access_check */
 
 /*
  * Parse a full self-relative security descriptor into owner/group ids and a
@@ -1163,7 +1278,9 @@ chimera_smb_query_security_getattr_callback(
         return;
     }
 
-    acl = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL;
+    /* Mode-derived entries are reported in the Windows terms the CREATE check
+     * evaluates them in.  An object with no ACL keeps the modefromsid entry. */
+    acl = chimera_smb_acl_view(attr, 0);
 
     /* modefromsid mount: report the mode as an S-1-5-88-3 ACE (the emit's
      * no-ACL path) rather than the Windows ACL memfs synthesizes from it, so a

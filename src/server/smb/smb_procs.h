@@ -314,6 +314,29 @@ SYMBOL_EXPORT int chimera_smb_acl_to_sd(
     struct chimera_vfs       *vfs);
 
 /*
+ * The ACL the SMB server presents and evaluates for `attr`: its mode-derived
+ * entries (chimera_ace_is_from_mode) in Windows terms, r, w and x as
+ * FILE_GENERIC_READ, FILE_GENERIC_WRITE and FILE_GENERIC_EXECUTE; any other
+ * entry as it is.  With `from_mode`, an object with no ACL gets one derived from
+ * its mode, in Windows terms; without, it stays NULL.  A returned copy lives in
+ * a per-thread buffer, valid until the next call on the thread.
+ */
+SYMBOL_EXPORT const struct chimera_acl *
+chimera_smb_acl_view(
+    const struct chimera_vfs_attrs *attr,
+    int                             from_mode);
+
+/*
+ * chimera_vfs_access_check() against chimera_smb_acl_view(attr, 1): the access
+ * the SMB server grants `cred` on the object.
+ */
+SYMBOL_EXPORT uint32_t
+chimera_smb_access_check(
+    const struct chimera_vfs_attrs *attr,
+    const struct chimera_vfs_cred  *cred,
+    uint32_t                        requested);
+
+/*
  * Decode a self-relative security descriptor into owner/group/mode AND a full
  * canonical DACL.  The decoded ACL is written into `acl_buf` (capacity
  * `acl_buf_len` bytes) and, when non-empty, attrs->va_acl is pointed at it with

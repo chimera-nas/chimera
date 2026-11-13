@@ -541,6 +541,39 @@ chmod_as(
     return st;
 } /* chmod_as */
 
+/* chmod through chimera_vfs_setattr_granted, with the protocol's grant
+ * `granted`: only FILE_WRITE_ATTRIBUTES is taken from it, so a grant of
+ * WRITE_ACL or WRITE_OWNER does not skip the ownership rules. */
+static enum chimera_vfs_error
+chmod_granted_as(
+    struct test_ctx               *ctx,
+    const struct chimera_vfs_cred *cred,
+    const uint8_t                 *fh,
+    uint32_t                       fh_len,
+    uint32_t                       mode,
+    uint32_t                       granted)
+{
+    struct chimera_vfs_attrs sattr;
+    enum chimera_vfs_error   st;
+
+    chimera_vfs_open_fh(ctx->vfs_thread, cred, fh, fh_len,
+                        CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+
+    memset(&sattr, 0, sizeof(sattr));
+    sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    sattr.va_mode     = mode;
+
+    chimera_vfs_setattr_granted(ctx->vfs_thread, cred, ctx->handle, &sattr, 0, 0,
+                                1, granted, setattr_cb, ctx, NULL);
+    wait_done(ctx);
+    st = ctx->status;
+
+    chimera_vfs_release(ctx->vfs_thread, ctx->handle);
+    return st;
+} /* chmod_granted_as */
+
 int
 main(
     int    argc,
@@ -639,8 +672,11 @@ main(
      * not.  POSIX chmod(2) by a non-owner is EPERM (ownership required), not
      * EACCES. */
     assert(chmod_as(&ctx, &other, file_fh, file_fh_len, 0640) == CHIMERA_VFS_EPERM);
+    assert(chmod_granted_as(&ctx, &other, file_fh, file_fh_len, 0640,
+                            CHIMERA_ACE_WRITE_ACL | CHIMERA_ACE_WRITE_OWNER) ==
+           CHIMERA_VFS_EPERM);
     assert(chmod_as(&ctx, &owner, file_fh, file_fh_len, 0640) == CHIMERA_VFS_OK);
-    TEST_PASS("chmod: non-owner denied, owner allowed");
+    TEST_PASS("chmod: non-owner denied, even with a protocol grant of WRITE_ACL; owner allowed");
 
     /*
      * Namespace operations on a 0700 directory owned by 1000: the owner may

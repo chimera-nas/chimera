@@ -311,6 +311,32 @@ set_tests_properties(chimera/server/smb/mbt/sidseed_probe_memfs PROPERTIES
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
+# Generic-access CREATE of objects whose access comes from a POSIX mode, which
+# the SMB server presents in Windows terms.  No SMB client can make such an
+# object (a CREATE stamps the default DACL), so the probe seeds them through
+# the VFS as root, as an NFS client with root access would.
+add_executable(smb2_modeacl_probe smb2_modeacl_probe.c)
+target_include_directories(smb2_modeacl_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_modeacl_probe chimera_server chimera_vfs chimera_metrics)
+
+add_test(NAME chimera/server/smb/mbt/modeacl_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_modeacl_probe>)
+set_tests_properties(chimera/server/smb/mbt/modeacl_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_modeacl_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 60)
+
+# The passthrough backends (linux, io_uring).  Seeding another uid's objects
+# needs root, so a run that is not root on Linux exits 77 and is reported as
+# skipped rather than passed.
+add_test(NAME chimera/server/smb/mbt/modeacl_probe_passthrough
+    COMMAND $<TARGET_FILE:smb2_modeacl_probe> passthrough)
+set_tests_properties(chimera/server/smb/mbt/modeacl_probe_passthrough PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_modeacl_probe_passthrough"
+    LABELS "quint;smb_mbt;linux;io_uring"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120)
+
 # ---------------------------------------------------------------------------
 # Trace replay (ROADMAP-SMB.md Increment 3).  A single smb2_mbt_replay process
 # opens the server + client evpl once per CAPABILITY PROFILE (the corpus spans
