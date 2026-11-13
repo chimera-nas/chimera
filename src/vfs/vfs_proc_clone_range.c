@@ -15,6 +15,17 @@ chimera_vfs_clone_range_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_clone_range_callback_t callback = request->proto_callback;
 
+    /* Release both implicit-claim holds this request may have taken: phase 2
+     * (destination) is still live in request->io_lease_file; phase 1
+     * (source) was stashed in clone_range.src_lease_file before phase 2's
+     * acquire overwrote it.  chimera_vfs_io_claim_release no-ops when a
+     * phase mediated through a caller-supplied actor instead (no implicit
+     * claim taken, io_lease_file left NULL). */
+    chimera_vfs_io_claim_release(request);
+    request->io_lease_file     = request->clone_range.src_lease_file;
+    request->io_owns_lease_ref = request->clone_range.src_owns_lease_ref;
+    chimera_vfs_io_claim_release(request);
+
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
                                       request->clone_range.dst_handle->fh_hash,
@@ -51,6 +62,11 @@ chimera_vfs_clone_range_mediate_dst(struct chimera_vfs_request *request)
      * what makes chimera_vfs_io_claim_acquire treat this as a write for
      * invalidation/implicit-claim purposes; it is restored to CLONE_RANGE
      * before the actual dispatch. */
+    /* Stash phase 1's (source) claim hold before it is overwritten below by
+     * phase 2's acquire; chimera_vfs_clone_range_complete releases both. */
+    request->clone_range.src_lease_file     = request->io_lease_file;
+    request->clone_range.src_owns_lease_ref = request->io_owns_lease_ref;
+
     request->io_handle      = request->clone_range.dst_handle;
     request->opcode         = CHIMERA_VFS_OP_WRITE;
     request->io_owner_valid = request->clone_range.dst_io_owner_valid;

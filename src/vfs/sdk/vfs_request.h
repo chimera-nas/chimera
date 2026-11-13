@@ -1300,6 +1300,14 @@ struct chimera_vfs_request {
              * each through its own actor, before issuing the reflink). */
             struct chimera_claim_actor      dst_io_owner;
             uint8_t                         dst_io_owner_valid;
+            /* Phase 1 (source) claim hold, stashed across phase 2's acquire:
+             * chimera_vfs_io_claim_acquire resets request->io_lease_file /
+             * io_owns_lease_ref to mediate the destination, which would
+             * otherwise leak the source's implicit-claim hold (if any)
+             * acquired in phase 1.  Released alongside the destination's
+             * hold once the reflink completes. */
+            struct chimera_vfs_file_state  *src_lease_file;
+            uint8_t                         src_owns_lease_ref;
         } clone_range;
 
         struct {

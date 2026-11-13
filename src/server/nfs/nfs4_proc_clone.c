@@ -217,6 +217,9 @@ chimera_nfs4_clone_dispatch(
     struct chimera_vfs_open_handle *src_handle;
     struct chimera_vfs_open_handle *dst_handle;
 
+    struct chimera_claim_actor      src_owner, dst_owner;
+    uint64_t                        src_client, dst_client;
+
     src_handle = chimera_nfs4_clone_handle(refs, 1);
     dst_handle = chimera_nfs4_clone_handle(refs, 0);
 
@@ -224,34 +227,38 @@ chimera_nfs4_clone_dispatch(
      * hold the respective stateids, exactly as READ/WRITE/COPY do, so that
      * CLONE correctly recalls another client's conflicting delegation
      * instead of silently reflinking over stale cached data.  A special
-     * stateid carries no client identity and is admitted as the per-file
-     * implicit claim, matching the share-reservation checks already done
-     * above. */
-    struct chimera_claim_actor src_owner = {
-        .owner          = {
-            .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
-            .client_key = chimera_nfs4_clone_state_client(refs->src_state,
-                                                          refs->src_type),
-            .owner_lo = src_handle->fh_hash,
-            .owner_hi = 0,
-        },
-    };
-    struct chimera_claim_actor dst_owner = {
-        .owner          = {
-            .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
-            .client_key = chimera_nfs4_clone_state_client(refs->dst_state,
-                                                          refs->dst_type),
-            .owner_lo = dst_handle->fh_hash,
-            .owner_hi = 0,
-        },
-    };
+     * stateid carries no client identity: pass NULL rather than an
+     * NFSV4-protocol actor with client_key 0, so it falls back to the real
+     * per-file implicit claim (CHIMERA_CLAIM_PROTO_INTERNAL), which is
+     * guaranteed never to coalesce with another owner -- including another
+     * anonymous CLONE's actor, which an NFSV4/client_key-0 actor would
+     * wrongly treat as the same owner. */
+    src_client = chimera_nfs4_clone_state_client(refs->src_state, refs->src_type);
+    dst_client = chimera_nfs4_clone_state_client(refs->dst_state, refs->dst_type);
+
+    if (src_client) {
+        src_owner.owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        src_owner.owner.client_key = src_client;
+        src_owner.owner.owner_lo   = src_handle->fh_hash;
+        src_owner.owner.owner_hi   = 0;
+        src_owner.op_handle        = NULL;
+    }
+
+    if (dst_client) {
+        dst_owner.owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        dst_owner.owner.client_key = dst_client;
+        dst_owner.owner.owner_lo   = dst_handle->fh_hash;
+        dst_owner.owner.owner_hi   = 0;
+        dst_owner.op_handle        = NULL;
+    }
 
     chimera_vfs_clone_range(req->thread->vfs_thread, &req->cred,
                             src_handle, args->cl_src_offset,
                             dst_handle, args->cl_dst_offset,
                             length,
                             0, 0,
-                            &src_owner, &dst_owner,
+                            src_client ? &src_owner : NULL,
+                            dst_client ? &dst_owner : NULL,
                             chimera_nfs4_clone_complete,
                             req);
 } /* chimera_nfs4_clone_dispatch */
