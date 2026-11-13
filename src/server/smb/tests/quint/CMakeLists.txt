@@ -284,6 +284,22 @@ set_tests_properties(chimera/server/smb/mbt/sidseed_probe_memfs PROPERTIES
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
+# Generic-access CREATE of objects with no stored ACL.  Every NT generic right
+# expands to a mask that includes SYNCHRONIZE, which the ACL derived from a
+# POSIX mode never grants, so the check must not require it.  No SMB client can
+# make such an object (a CREATE stamps the default DACL), so the probe seeds
+# them through the VFS as the server identity, as NFS and S3 would.
+add_executable(smb2_modeacl_probe smb2_modeacl_probe.c)
+target_include_directories(smb2_modeacl_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_modeacl_probe chimera_server chimera_vfs chimera_metrics)
+
+add_test(NAME chimera/server/smb/mbt/modeacl_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_modeacl_probe>)
+set_tests_properties(chimera/server/smb/mbt/modeacl_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_modeacl_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 60)
+
 # ---------------------------------------------------------------------------
 # Trace replay (ROADMAP-SMB.md Increment 3).  A single smb2_mbt_replay process
 # opens the server + client evpl once per CAPABILITY PROFILE (the corpus spans

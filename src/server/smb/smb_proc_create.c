@@ -4163,9 +4163,11 @@ chimera_smb_create_check_access(
      * so it is always grantable on a successful open.  Treat it like
      * MAXIMUM_ALLOWED and do not require an explicit ACE for it (otherwise a
      * plain mode-derived object such as a freshly mounted share root, whose
-     * synthesised ACEs carry no SYNCHRONIZE bit, would deny every open). */
+     * synthesised ACEs carry no SYNCHRONIZE bit, would deny every open).  The
+     * generic expansions below include SYNCHRONIZE too, so it is cleared after
+     * them, not here. */
     req = da & ~(SMB2_MAXIMUM_ALLOWED | SMB2_ACCESS_SYSTEM_SECURITY |
-                 SMB2_DELETE | SMB2_SYNCHRONIZE |
+                 SMB2_DELETE |
                  SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
                  SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL);
 
@@ -4186,6 +4188,8 @@ chimera_smb_create_check_access(
     if (da & SMB2_GENERIC_ALL) {
         req |= CHIMERA_ACE_MASK_ALL;
     }
+
+    req &= ~SMB2_SYNCHRONIZE;
 
     /* Truncating dispositions implicitly require write access to the existing
      * data, regardless of what the caller asked for: overwriting a read-only
