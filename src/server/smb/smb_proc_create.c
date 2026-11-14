@@ -4120,6 +4120,39 @@ chimera_smb_create_resume_parked_broadcast(struct chimera_server_smb_thread *ori
 } /* chimera_smb_create_resume_parked_broadcast */
 
 /*
+ * Windows owner semantics on a mode-only object: a file's owner always holds
+ * an implicit WRITE_DAC, so it can rewrite the security descriptor at will
+ * and is therefore granted the access it asks for over its own object.  The
+ * engine backends (e.g. memfs) encode this as an owner-full-control default
+ * DACL stamped on an SMB-created object, so the access check passes naturally
+ * there.  A backend that hands the check no ACL at all (linux/io_uring) reports
+ * only the POSIX mode; under POSIX mode evaluation the owner is NOT granted
+ * the WRITE_OWNER / WRITE_ATTRIBUTES / SYNCHRONIZE / EXECUTE bits a Windows
+ * CREATE routinely requests with FILE_ALL_ACCESS, so an owner opening its own
+ * file would be wrongly denied.  True when the caller is the owner of such a
+ * no-ACL object; the CREATE check grants it, and the granted access reported
+ * for the handle follows.  POSIX (NFS/S3) evaluation is unaffected -- this is
+ * the SMB protocol layer applying Windows owner rules, not a change to the
+ * shared engine.  A *different* caller still goes through the normal mode/ACL
+ * evaluation and is gated correctly.
+ */
+static inline int
+chimera_smb_create_owner_of_no_acl(
+    struct chimera_smb_request     *request,
+    const struct chimera_vfs_attrs *attr)
+{
+    const struct chimera_vfs_cred *cred =
+        &request->session_handle->session->cred;
+    int                            has_acl = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
+        attr->va_acl && attr->va_acl->num_aces > 0;
+
+    return !has_acl &&
+           cred->flavor != CHIMERA_VFS_AUTH_NONE &&
+           (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
+           (uint64_t) cred->uid == attr->va_uid;
+} /* chimera_smb_create_owner_of_no_acl */
+
+/*
  * Map the CREATE DesiredAccess to canonical access-mask bits and evaluate it
  * against the opened object's ACL via the shared engine.  Returns
  * SMB2_STATUS_SUCCESS when every requested right is granted, otherwise
@@ -4163,9 +4196,11 @@ chimera_smb_create_check_access(
      * so it is always grantable on a successful open.  Treat it like
      * MAXIMUM_ALLOWED and do not require an explicit ACE for it (otherwise a
      * plain mode-derived object such as a freshly mounted share root, whose
-     * synthesised ACEs carry no SYNCHRONIZE bit, would deny every open). */
+     * synthesised ACEs carry no SYNCHRONIZE bit, would deny every open).  The
+     * generic expansions below include SYNCHRONIZE too, so it is cleared after
+     * them, not here. */
     req = da & ~(SMB2_MAXIMUM_ALLOWED | SMB2_ACCESS_SYSTEM_SECURITY |
-                 SMB2_DELETE | SMB2_SYNCHRONIZE |
+                 SMB2_DELETE |
                  SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
                  SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL);
 
@@ -4173,7 +4208,14 @@ chimera_smb_create_check_access(
         req |= 0x00120089; /* READ_DATA|READ_NAMED_ATTRS|READ_ATTRS|READ_ACL|SYNC */
     }
     if (da & SMB2_GENERIC_WRITE) {
-        req |= 0x00120116; /* WRITE_DATA|APPEND|WRITE_NAMED_ATTRS|WRITE_ATTRS|READ_ACL|SYNC */
+        /* FILE_GENERIC_WRITE without FILE_WRITE_ATTRIBUTES: the ACL derived
+         * from a POSIX mode grants WRITE_ATTRIBUTES to the owner only (it also
+         * lets a caller set explicit timestamps, which POSIX reserves to the
+         * owner), so requiring it would refuse a generic-write open to every
+         * other writer the mode allows.  The handle is reported WRITE_ATTRIBUTES
+         * only when the object grants it (chimera_smb_create_granted_access),
+         * and a bare FILE_WRITE_ATTRIBUTES request is still gated on it. */
+        req |= 0x00120016; /* WRITE_DATA|APPEND|WRITE_NAMED_ATTRS|READ_ACL|SYNC */
     }
     if (da & SMB2_GENERIC_EXECUTE) {
         /* FILE_GENERIC_EXECUTE without the standalone FILE_EXECUTE data right:
@@ -4186,6 +4228,8 @@ chimera_smb_create_check_access(
     if (da & SMB2_GENERIC_ALL) {
         req |= CHIMERA_ACE_MASK_ALL;
     }
+
+    req &= ~SMB2_SYNCHRONIZE;
 
     /* Truncating dispositions implicitly require write access to the existing
      * data, regardless of what the caller asked for: overwriting a read-only
@@ -4200,33 +4244,8 @@ chimera_smb_create_check_access(
         return SMB2_STATUS_SUCCESS;
     }
 
-    /* Windows owner semantics on a mode-only object: a file's owner always holds
-     * an implicit WRITE_DAC, so it can rewrite the security descriptor at will
-     * and is therefore granted the access it asks for over its own object.  The
-     * engine backends (e.g. memfs) encode this as an owner-full-control default
-     * DACL stamped on an SMB-created object, so this check passes naturally
-     * there.  The mode-only backends (linux/io_uring/cairn/diskfs) report only
-     * the POSIX mode and no explicit ACL; under POSIX mode evaluation the owner
-     * is NOT granted the WRITE_OWNER / WRITE_ATTRIBUTES / SYNCHRONIZE / EXECUTE
-     * bits a Windows CREATE routinely requests with FILE_ALL_ACCESS, so an owner
-     * opening its own file would be wrongly denied.  Recognise the owner of a
-     * no-explicit-ACL object here and grant it, matching the owner-full-control
-     * default DACL the engine backends materialise.  POSIX (NFS/S3) evaluation
-     * is unaffected -- this is the SMB protocol layer applying Windows owner
-     * rules, not a change to the shared engine.  A *different* caller still falls
-     * through to the normal mode/ACL evaluation below and is gated correctly. */
-    {
-        const struct chimera_vfs_cred *cred =
-            &request->session_handle->session->cred;
-        int                            has_acl = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
-            attr->va_acl && attr->va_acl->num_aces > 0;
-
-        if (!has_acl &&
-            cred->flavor != CHIMERA_VFS_AUTH_NONE &&
-            (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
-            (uint64_t) cred->uid == attr->va_uid) {
-            return SMB2_STATUS_SUCCESS;
-        }
+    if (chimera_smb_create_owner_of_no_acl(request, attr)) {
+        return SMB2_STATUS_SUCCESS;
     }
 
     /* Evaluate the full grantable universe and require every requested bit to
@@ -4284,6 +4303,7 @@ chimera_smb_create_access_deny_transient(
  * FileAccessInformation / MxAc reporting.  A MAXIMUM_ALLOWED open is granted the
  * full set the caller's ACL evaluation yields; a specific-bits open is granted
  * exactly the bits it asked for (the open already passed the access check).
+ * `attr` is NULL for the creator of a new object, which holds full control.
  */
 static inline uint32_t
 chimera_smb_create_granted_access(
@@ -4310,7 +4330,18 @@ chimera_smb_create_granted_access(
         g |= 0x00120089;
     }
     if (da & SMB2_GENERIC_WRITE) {
-        g |= 0x00120116;
+        g |= 0x00120016;
+        /* The CREATE check does not require WRITE_ATTRIBUTES for a generic
+         * write, so report it only when the object grants it: always to the
+         * creator of a new object (attr NULL) and to the owner of a no-ACL
+         * object, otherwise as the ACL evaluation says. */
+        if (!attr ||
+            chimera_smb_create_owner_of_no_acl(request, attr) ||
+            (chimera_vfs_access_check(attr, &request->session_handle->session->cred,
+                                      CHIMERA_ACE_WRITE_ATTRIBUTES) &
+             CHIMERA_ACE_WRITE_ATTRIBUTES)) {
+            g |= SMB2_FILE_WRITE_ATTRIBUTES;
+        }
     }
     if (da & SMB2_GENERIC_EXECUTE) {
         g |= 0x001200a0;
