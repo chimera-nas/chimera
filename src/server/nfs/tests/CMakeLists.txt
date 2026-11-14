@@ -159,6 +159,10 @@ target_include_directories(test_nfs_persist PRIVATE
     ${NFS_COMMON_INCLUDE_DIR})
 target_link_libraries(test_nfs_persist chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
 add_dependencies(test_nfs_persist chimera_nfs_common)
+# Built from the NFS server's own sources rather than linked against it, so
+# the server's exported data (the NFSv3 cache's test gate) is defined here, and
+# must be declared as the library declares it: dllexport, not dllimport.
+target_compile_definitions(test_nfs_persist PRIVATE CHIMERA_NFS_BUILD)
 set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/server/nfs/nfs_persist COMMAND test_nfs_persist)
 set(CHIMERA_TEST_TIER extended)
@@ -186,6 +190,10 @@ target_include_directories(test_nfs_failover PRIVATE
     ${NFS_COMMON_INCLUDE_DIR})
 target_link_libraries(test_nfs_failover chimera_vfs chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS})
 add_dependencies(test_nfs_failover chimera_nfs_common)
+# Built from the NFS server's own sources rather than linked against it, so
+# the server's exported data (the NFSv3 cache's test gate) is defined here, and
+# must be declared as the library declares it: dllexport, not dllimport.
+target_compile_definitions(test_nfs_failover PRIVATE CHIMERA_NFS_BUILD)
 set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/server/nfs/nfs_failover COMMAND test_nfs_failover)
 set(CHIMERA_TEST_TIER extended)
