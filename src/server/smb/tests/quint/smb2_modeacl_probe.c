@@ -23,10 +23,16 @@
  * server identity, as the NFS and S3 servers would, and then opens them over
  * SMB as an ordinary account.  The negative cases keep the mode authoritative:
  * a generic open must still be refused when the mode bits deny the access.
+ *
+ * memfs hands the check an ACL synthesized from the mode.  A second leg opens
+ * the caller's own objects on the linux backend, which hands the check the
+ * mode alone, where the owner is granted what it asks for on Windows owner
+ * rules.
  */
 
 #include "smb2_mbt_common.h"
 
+#include <limits.h>
 #include <sys/stat.h>
 
 #include "vfs/vfs.h"
@@ -69,6 +75,9 @@ struct seed_obj {
 struct seed_ctx {
     struct chimera_vfs_thread      *thread;
     struct chimera_vfs_open_handle *root_oh;
+    /* Outlives seed_next's frame: a passthrough backend runs the create on a
+     * delegation thread and reads it after seed_next has returned. */
+    struct chimera_vfs_attrs        set_attr;
     const struct seed_obj          *objs;
     int                             nobjs;
     int                             next;
@@ -161,8 +170,8 @@ seed_dir_cb(
 static void
 seed_next(struct seed_ctx *ctx)
 {
-    const struct seed_obj   *o;
-    struct chimera_vfs_attrs set_attr;
+    const struct seed_obj    *o;
+    struct chimera_vfs_attrs *set_attr = &ctx->set_attr;
 
     if (ctx->next == ctx->nobjs) {
         seed_finish(ctx, CHIMERA_VFS_OK);
@@ -171,21 +180,21 @@ seed_next(struct seed_ctx *ctx)
 
     o = &ctx->objs[ctx->next++];
 
-    memset(&set_attr, 0, sizeof(set_attr));
-    set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+    memset(set_attr, 0, sizeof(*set_attr));
+    set_attr->va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
         CHIMERA_VFS_ATTR_GID;
-    set_attr.va_mode = (o->dir ? S_IFDIR : S_IFREG) | o->perm;
-    set_attr.va_uid  = o->uid;
-    set_attr.va_gid  = o->gid;
+    set_attr->va_mode = (o->dir ? S_IFDIR : S_IFREG) | o->perm;
+    set_attr->va_uid  = o->uid;
+    set_attr->va_gid  = o->gid;
 
     if (o->dir) {
         chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(),
-                             ctx->root_oh, o->name, strlen(o->name), &set_attr,
+                             ctx->root_oh, o->name, strlen(o->name), set_attr,
                              CHIMERA_VFS_ATTR_FH, 0, 0, seed_dir_cb, ctx);
     } else {
         chimera_vfs_open_at(ctx->thread, chimera_vfs_get_server_cred(),
                             ctx->root_oh, o->name, strlen(o->name),
-                            CHIMERA_VFS_OPEN_CREATE, &set_attr,
+                            CHIMERA_VFS_OPEN_CREATE, set_attr,
                             CHIMERA_VFS_ATTR_FH, 0, 0, seed_file_cb, ctx);
     }
 } /* seed_next */
@@ -278,7 +287,7 @@ seed_objects(
  * (1000/1000), so the root-owned ones are evaluated against their "other"
  * bits and the SMB2W_UID-owned ones against their owner bits. */
 /* *INDENT-OFF* */
-/* uncrustify 0.78.1 does not converge on this aligned table, so it is guarded. */
+/* uncrustify 0.78.1 does not converge on these aligned tables, so they are guarded. */
 static const struct seed_obj objs[] = {
     /* name             dir  perm  uid        gid       */
     { "root_0644.bin",  0,   0644, 0,         0         },
@@ -289,6 +298,13 @@ static const struct seed_obj objs[] = {
     { "grp_0664.bin",   0,   0664, 0,         SMB2W_GID },
     { "grp_0640.bin",   0,   0640, 0,         SMB2W_GID },
     { "root_0666.bin",  0,   0666, 0,         0         },
+};
+
+/* The linux leg opens only the caller's own objects (see linux_leg). */
+static const struct seed_obj own_objs[] = {
+    /* name             dir  perm  uid        gid       */
+    { "mine_0644.bin",  0,   0644, SMB2W_UID, SMB2W_GID },
+    { "mine_0444.bin",  0,   0444, SMB2W_UID, SMB2W_GID },
 };
 /* *INDENT-ON* */
 
@@ -422,6 +438,34 @@ run_checks(
           "%s: GENERIC_WRITE of a group-readable 0640 file is denied -> 0x%08x", leg, st);
 } /* run_checks */
 
+/* The checks on a backend that hands the CREATE check no ACL, only the mode:
+ * the owner of such an object is granted what it asks for, on Windows owner
+ * rules, and its handle reports WRITE_ATTRIBUTES for a generic write. */
+static void
+run_owner_checks(
+    struct smb2_conn *c,
+    const char       *leg)
+{
+    uint32_t st, granted;
+
+    st = open_status(c, "mine_0644.bin", GENERIC_READ, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS, "%s: GENERIC_READ of own 0644 file -> 0x%08x", leg, st);
+
+    st = open_status(c, "mine_0644.bin", GENERIC_READ | GENERIC_WRITE,
+                     MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_READ|GENERIC_WRITE of own 0644 file -> 0x%08x", leg, st);
+
+    st = open_status(c, "mine_0444.bin", GENERIC_WRITE, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_WRITE of own 0444 file (owner rules) -> 0x%08x", leg, st);
+
+    st = open_granted(c, "mine_0644.bin", GENERIC_WRITE, &granted);
+    CHECK(st == ST_SUCCESS && (granted & 0x00000102u) == 0x00000102u,
+          "%s: owner's GENERIC_WRITE handle has WRITE_DATA and WRITE_ATTRIBUTES "
+          "(0x%08x) -> 0x%08x", leg, granted, st);
+} /* run_owner_checks */
+
 /* Seed `o` on the mounted share, connect, and run `checks`. */
 static void
 run_leg(
@@ -443,6 +487,46 @@ run_leg(
     smb2_conn_disconnect(c);
 } /* run_leg */
 
+/* The linux leg: a passthrough backend over a scratch directory under the
+ * working directory (the build tree, where file handles work).  It opens only
+ * the caller's own objects: that is the path no other leg reaches.  Seeding
+ * objects owned by another uid needs root, so it skips otherwise. */
+static void
+linux_leg(struct smb2_env *env)
+{
+    char tmpl[] = "smb2_modeacl_linux_XXXXXX";
+    char dir[PATH_MAX];
+    char path[PATH_MAX + 64];
+
+    if (geteuid() != 0) {
+        printf("# linux leg skipped: seeding another uid's objects needs root\n");
+        return;
+    }
+
+    if (!mkdtemp(tmpl) || !realpath(tmpl, dir)) {
+        fprintf(stderr, "cannot make the linux leg's directory\n");
+        smb2c_exit(1);
+    }
+
+    if (chimera_server_mount(env->server, "share", "linux", dir, NULL) != 0) {
+        fprintf(stderr, "cannot mount %s on the linux backend\n", dir);
+        smb2c_exit(1);
+    }
+    chimera_server_create_share(env->server, "share", "share", 0);
+
+    run_leg(env, "linux", "linux", dir, own_objs,
+            (int) (sizeof(own_objs) / sizeof(own_objs[0])), run_owner_checks);
+
+    chimera_server_remove_share(env->server, "share");
+    chimera_server_unmount(env->server, "share");
+
+    for (size_t i = 0; i < sizeof(own_objs) / sizeof(own_objs[0]); i++) {
+        snprintf(path, sizeof(path), "%s/%s", dir, own_objs[i].name);
+        unlink(path);
+    }
+    rmdir(dir);
+} /* linux_leg */
+
 int
 main(
     int   argc,
@@ -460,10 +544,14 @@ main(
 
     smb2_env_open_wire(&env, NULL, &w);
 
+    /* memfs hands the check an ACL synthesized from the mode. */
     smb2_env_fs_setup(&env, SEED_FS);
     run_leg(&env, "memfs", "memfs", SEED_FS, objs,
             (int) (sizeof(objs) / sizeof(objs[0])), run_checks);
     smb2_env_fs_teardown(&env, SEED_FS);
+
+    /* linux hands it the mode alone. */
+    linux_leg(&env);
 
     smb2_env_stop(&env);
 
