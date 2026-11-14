@@ -144,6 +144,16 @@ chimera_vfs_clone_range(
         request->clone_range.dst_io_owner = *dst_io_owner;
     }
 
+    /* Requests are pooled and not memset on reuse, so clone_range.src_lease_file/
+     * src_owns_lease_ref -- only written once phase 1 is admitted, in
+     * chimera_vfs_clone_range_mediate_dst() -- must be initialized here.
+     * Otherwise a phase-1 denial (CHIMERA_CLAIM_DENIED or a cover-gate
+     * refusal) completes the request without ever reaching phase 2, and
+     * chimera_vfs_clone_range_complete's second release would act on
+     * whatever a prior user of this pooled request left in the union. */
+    request->clone_range.src_lease_file     = NULL;
+    request->clone_range.src_owns_lease_ref = 0;
+
     /* Phase 1: mediate the source as READ does -- recall another client's
      * conflicting write claim before the reflink reads its data -- then
      * phase 2 mediates the destination, and only then is the reflink

@@ -119,7 +119,12 @@ add_test(chimera/vfs/split_blocking_test vfs_split_blocking_test)
 
 add_executable(vfs_clone_range_test vfs_clone_range_test.c)
 target_link_libraries(vfs_clone_range_test chimera_vfs evpl)
+# Pooled request lifetime is outside the sequential protocol models.
+# Keep the source-denial use-after-free regression in the quick tier.
+set(_clone_saved_tier "${CHIMERA_TEST_TIER}")
+set(CHIMERA_TEST_TIER quick)
 add_test(chimera/vfs/clone_range_test vfs_clone_range_test)
+set(CHIMERA_TEST_TIER "${_clone_saved_tier}")
 
 add_executable(vfs_inode_scoped_remove_test vfs_inode_scoped_remove_test.c)
 target_link_libraries(vfs_inode_scoped_remove_test chimera_vfs evpl)
