@@ -24,11 +24,23 @@
                             CHIMERA_ACE_WRITE_OWNER | \
                             CHIMERA_ACE_READ_ACL)
 
-/* Owner-implied rights under an explicit ACL (Windows "owner rights"): the
- * object owner always holds READ_CONTROL, WRITE_DAC and DELETE, but NOT, for
- * example, WRITE_ATTRIBUTES or WRITE_OWNER -- those must be granted by an ACE. */
-#define ACE_OWNER_IMPLICIT (CHIMERA_ACE_READ_ACL | CHIMERA_ACE_WRITE_ACL | \
-                            CHIMERA_ACE_DELETE)
+/* The owner rights of MS-DTYP 2.5.3.2: the object owner holds READ_CONTROL and
+ * WRITE_DAC before the DACL is walked, so no DENY ACE can remove them.  An
+ * OWNER RIGHTS ACE that applies to the object (not INHERIT_ONLY) withdraws
+ * them; the owner then holds WRITE_DAC only through an ACE, while READ_CONTROL
+ * stays in ACE_BASELINE, granted to every caller unless a DENY ACE removes
+ * it. */
+#define ACE_OWNER_RIGHTS   (CHIMERA_ACE_READ_ACL | CHIMERA_ACE_WRITE_ACL)
+
+/* Implicit owner rights that are not owner rights in MS-DTYP: chimera also
+ * grants the owner DELETE, but under an ACL a DENY ACE can remove it. */
+#define ACE_OWNER_DENIABLE (CHIMERA_ACE_DELETE)
+
+/* Everything the owner holds implicitly.  The mode path grants it whole; the
+ * ACL path grants ACE_OWNER_RIGHTS before the DACL walk and ACE_OWNER_DENIABLE
+ * after it, masked by the denied bits.  Not, for example, WRITE_ATTRIBUTES or
+ * WRITE_OWNER -- those must be granted by an ACE. */
+#define ACE_OWNER_IMPLICIT (ACE_OWNER_RIGHTS | ACE_OWNER_DENIABLE)
 
 /* Translate the rwx bits of one POSIX permission class into a canonical mask. */
 static uint32_t
@@ -159,11 +171,13 @@ mode_access_check(
 
     allowed = ACE_BASELINE | perm_class_to_mask(r, w, x);
 
-    /* The owner always holds the same implicit rights as under an explicit ACL
-     * (READ_CONTROL/WRITE_DAC/DELETE) -- not WRITE_ATTRIBUTES or WRITE_OWNER,
-     * which Windows grants the owner only via an explicit ACE.  (DELETE_CHILD is
-     * derived from write+execute by the caller, for both this and the ACL
-     * path.) */
+    /* The owner holds ACE_OWNER_IMPLICIT (READ_CONTROL/WRITE_DAC/DELETE)
+     * outright.  Under an explicit ACL the owner holds the same set only when
+     * the DACL has no OWNER RIGHTS ACE that applies to the object (not
+     * INHERIT_ONLY), and there a DENY ACE can remove DELETE.
+     * Not WRITE_ATTRIBUTES or WRITE_OWNER, which Windows grants the owner only
+     * via an explicit ACE.  (DELETE_CHILD is derived from write+execute by the
+     * caller, for both this and the ACL path.) */
     if ((uint64_t) cred->uid == owner_uid) {
         allowed |= ACE_OWNER_IMPLICIT;
     }
@@ -216,15 +230,32 @@ chimera_acl_access_check(
 
     uint32_t denied               = 0;
     int      owner_rights_present = 0;
+    int      owner_implicit;
 
-    /* An OWNER_RIGHTS ACE anywhere in the DACL disables the implicit owner
-     * rights -- the owner's access is then defined solely by the ACEs. */
+    /* An OWNER_RIGHTS ACE that applies to this object disables the implicit
+     * owner rights: the owner then holds what the ACEs grant, plus ACE_BASELINE,
+     * which every caller holds.  An INHERIT_ONLY one applies only to children,
+     * so, as in the walk below, it does not count here. */
     for (unsigned i = 0; i < acl->num_aces; i++) {
+        if (acl->aces[i].flags & CHIMERA_ACE_FLAG_INHERIT_ONLY) {
+            continue;
+        }
         if (acl->aces[i].who.type == CHIMERA_PRINCIPAL_SPECIAL &&
             acl->aces[i].who.special == CHIMERA_WHO_OWNER_RIGHTS) {
             owner_rights_present = 1;
             break;
         }
+    }
+
+    owner_implicit = (uint64_t) cred->uid == owner_uid && !owner_rights_present;
+
+    /* The owner rights are granted ahead of the walk, so a DENY ACE met in it
+     * cannot take them away: absent an OWNER RIGHTS ACE, the owner can always
+     * read the object's security descriptor and rewrite its DACL (MS-DTYP
+     * 2.5.3.2). */
+    if (owner_implicit) {
+        granted   |= ACE_OWNER_RIGHTS & eval;
+        remaining &= ~ACE_OWNER_RIGHTS;
     }
 
     for (unsigned i = 0; i < acl->num_aces && remaining; i++) {
@@ -255,15 +286,16 @@ chimera_acl_access_check(
         }
     }
 
-    /* Implicit rights (Windows): metadata-read/sync are available to anyone,
-     * and the object's owner additionally always holds the attribute/ACL/owner
-     * write rights -- unless an explicit DENY ACE removed them.  These fill in
-     * bits a minimal explicit ALLOW ACE would otherwise leave ungranted. */
+    /* Deniable implicit rights: the metadata reads are available to anyone,
+     * and the object's owner additionally holds ACE_OWNER_DENIABLE -- unless an
+     * explicit DENY ACE removed them.  These fill in bits a minimal explicit
+     * ALLOW ACE would otherwise leave ungranted.  (The owner rights were granted
+     * above.) */
     {
         uint32_t implicit = ACE_BASELINE;
 
-        if ((uint64_t) cred->uid == owner_uid && !owner_rights_present) {
-            implicit |= ACE_OWNER_IMPLICIT;
+        if (owner_implicit) {
+            implicit |= ACE_OWNER_DENIABLE;
         }
 
         granted |= implicit & eval & ~denied;

@@ -119,8 +119,10 @@ enum chimera_special_who {
      * matches no Unix caller during access evaluation. */
     CHIMERA_WHO_SYSTEM        = 9,
     /* OWNER RIGHTS (S-1-3-4): matches the object's current owner, but its mere
-     * presence in a DACL suppresses the otherwise-implicit owner rights so the
-     * owner's access is defined entirely by the ACEs. */
+     * presence in a DACL, in an ACE that is not INHERIT_ONLY, suppresses the
+     * otherwise-implicit owner rights, so the owner holds what the ACEs grant
+     * plus the baseline every caller holds (READ_ATTRIBUTES and READ_CONTROL,
+     * unless a DENY ACE removes them). */
     CHIMERA_WHO_OWNER_RIGHTS  = 10,
     /* RFC 7530 §6.2.1.5 Table 5 special identifiers (DIALUP@ / BATCH@ /
      * SERVICE@, SIDs S-1-5-1 / S-1-5-3 / S-1-5-6).  Like INTERACTIVE@/NETWORK@

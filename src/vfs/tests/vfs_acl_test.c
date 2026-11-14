@@ -155,6 +155,158 @@ test_explicit_deny_precedence(void)
     TEST_PASS("explicit ordered DENY beats later ALLOW");
 } /* test_explicit_deny_precedence */
 
+static void
+set_ace(
+    struct chimera_ace *ace,
+    uint32_t            type,
+    uint32_t            mask,
+    uint32_t            who_type,
+    uint64_t            who)
+{
+    memset(ace, 0, sizeof(*ace));
+    ace->type        = type;
+    ace->access_mask = mask;
+    ace->who.type    = who_type;
+    if (who_type == CHIMERA_PRINCIPAL_SPECIAL) {
+        ace->who.special = who;
+    } else {
+        ace->who.id = who;
+    }
+} /* set_ace */
+
+/* The masks an SMB client stores for a generic read or write ACE (smbcacls
+ * "R" and "W"): FILE_GENERIC_READ and FILE_GENERIC_WRITE.  Both carry
+ * READ_CONTROL. */
+#define TEST_FILE_GENERIC_READ  0x00120089
+#define TEST_FILE_GENERIC_WRITE 0x00120116
+
+/*
+ * MS-DTYP 2.5.3.2: the owner holds READ_CONTROL and WRITE_DAC before the DACL
+ * is walked, so no DENY ACE removes them; an OWNER RIGHTS ACE withdraws them
+ * (the owner then keeps READ_CONTROL only through the baseline, unless a DENY
+ * removes it).  DELETE is not an owner right and stays deniable.
+ */
+static void
+test_owner_rights_survive_deny(void)
+{
+    ACL_BUF(acl, 4);
+    struct chimera_vfs_cred owner  = mkcred(1000, 2000);
+    struct chimera_vfs_cred other  = mkcred(1500, 3000);
+    uint32_t                rights = CHIMERA_ACE_READ_ACL | CHIMERA_ACE_WRITE_ACL;
+    uint32_t                all    = CHIMERA_ACE_MASK_ALL;
+    uint32_t                g;
+
+    acl->ctrl_flags = 0;
+
+    /* A generic-read deny against the owner, asked with the full mask as SMB
+     * CREATE asks. */
+    acl->num_aces = 2;
+    set_ace(&acl->aces[0], CHIMERA_ACE_DENIED, TEST_FILE_GENERIC_READ,
+            CHIMERA_PRINCIPAL_USER, 1000);
+    set_ace(&acl->aces[1], CHIMERA_ACE_ALLOWED, all,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_EVERYONE);
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner, all, 0);
+    assert(g == ((all & ~TEST_FILE_GENERIC_READ) | rights));   /* 0xf0176 */
+
+    /* The same with a generic-write deny. */
+    set_ace(&acl->aces[0], CHIMERA_ACE_DENIED, TEST_FILE_GENERIC_WRITE,
+            CHIMERA_PRINCIPAL_USER, 1000);
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner, all, 0);
+    assert(g == ((all & ~TEST_FILE_GENERIC_WRITE) | rights));  /* 0xf00e9 */
+
+    /* The deny alone, with no ALLOW ACE: the owner keeps the owner rights and
+     * the deniable implicit rights the deny leaves (DELETE, READ_ATTRIBUTES). */
+    acl->num_aces = 1;
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner, all, 0);
+    assert(g == (rights | CHIMERA_ACE_DELETE |
+                 CHIMERA_ACE_READ_ATTRIBUTES));                   /* 0x70080 */
+
+    acl->num_aces = 2;
+
+    /* A deny of exactly the owner rights, through the OWNER@ special. */
+    set_ace(&acl->aces[0], CHIMERA_ACE_DENIED, rights,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_OWNER);
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner, rights, 0);
+    assert(g == rights);
+
+    /* Another user under an EVERYONE@ deny of the rights keeps none of them. */
+    set_ace(&acl->aces[0], CHIMERA_ACE_DENIED, rights,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_EVERYONE);
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &other, rights, 0);
+    assert(g == 0);
+
+    /* DELETE is not an owner right: a DENY of it holds against the owner. */
+    set_ace(&acl->aces[0], CHIMERA_ACE_DENIED, CHIMERA_ACE_DELETE,
+            CHIMERA_PRINCIPAL_USER, 1000);
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner,
+                                 CHIMERA_ACE_DELETE, 0);
+    assert(g == 0);
+
+    /* An OWNER RIGHTS ACE withdraws the implicit rights, and the deny covers
+     * the baseline READ_CONTROL, so it holds. */
+    acl->num_aces = 3;
+    set_ace(&acl->aces[0], CHIMERA_ACE_DENIED, rights,
+            CHIMERA_PRINCIPAL_USER, 1000);
+    set_ace(&acl->aces[1], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_PERM_R,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_OWNER_RIGHTS);
+    set_ace(&acl->aces[2], CHIMERA_ACE_ALLOWED, all,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_EVERYONE);
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner, rights, 0);
+    assert(g == 0);
+
+    TEST_PASS("owner keeps READ_CONTROL/WRITE_DAC under a DENY unless OWNER RIGHTS");
+} /* test_owner_rights_survive_deny */
+
+/* An INHERIT_ONLY OWNER RIGHTS ACE does not apply to the object it sits on, so
+ * it leaves the owner rights in place there. */
+static void
+test_owner_rights_inherit_only(void)
+{
+    ACL_BUF(acl, 4);
+    struct chimera_vfs_cred owner  = mkcred(1000, 2000);
+    uint32_t                rights = CHIMERA_ACE_READ_ACL | CHIMERA_ACE_WRITE_ACL;
+    uint32_t                g;
+
+    acl->ctrl_flags = 0;
+    acl->num_aces   = 3;
+    set_ace(&acl->aces[0], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_PERM_R,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_OWNER_RIGHTS);
+    acl->aces[0].flags = CHIMERA_ACE_FLAG_FILE_INHERIT |
+        CHIMERA_ACE_FLAG_DIR_INHERIT |
+        CHIMERA_ACE_FLAG_INHERIT_ONLY;
+    set_ace(&acl->aces[1], CHIMERA_ACE_DENIED, CHIMERA_ACE_WRITE_ACL,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_OWNER);
+    set_ace(&acl->aces[2], CHIMERA_ACE_ALLOWED, CHIMERA_ACE_MASK_ALL,
+            CHIMERA_PRINCIPAL_SPECIAL, CHIMERA_WHO_EVERYONE);
+
+    /* The owner keeps WRITE_DAC on the directory despite the deny. */
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner,
+                                 CHIMERA_ACE_WRITE_ACL, 1);
+    assert(g == CHIMERA_ACE_WRITE_ACL);
+
+    /* And both owner rights under a deny of both. */
+    set_ace(&acl->aces[1], CHIMERA_ACE_DENIED, rights,
+            CHIMERA_PRINCIPAL_USER, 1000);
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner, rights, 1);
+    assert(g == rights);
+
+    /* Without INHERIT_ONLY the OWNER RIGHTS ACE applies, and the deny holds. */
+    acl->aces[0].flags = 0;
+
+    g = chimera_acl_access_check(acl, 0, 1000, 2000, &owner, rights, 1);
+    assert(g == 0);
+
+    TEST_PASS("an INHERIT_ONLY OWNER RIGHTS ACE leaves the owner rights in place");
+} /* test_owner_rights_inherit_only */
+
 /* chmod preserves named ACEs and regenerates special-who from the new mode. */
 static void
 test_chmod_preserves_named(void)
@@ -753,6 +905,8 @@ main(
     test_null_acl_modecheck();
     test_root_bypass();
     test_explicit_deny_precedence();
+    test_owner_rights_survive_deny();
+    test_owner_rights_inherit_only();
     test_chmod_preserves_named();
     test_inherit_file();
     test_inherit_fallback();
