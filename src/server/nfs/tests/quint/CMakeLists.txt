@@ -112,6 +112,13 @@ target_link_libraries(nfs4_deleg_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs4_deleg_probe)
 
+add_executable(nfs4_session_binding_probe nfs4_session_binding_probe.c)
+target_include_directories(nfs4_session_binding_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_session_binding_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_session_binding_probe)
+
 add_executable(nfs4_named_attr_probe nfs4_named_attr_probe.c)
 target_include_directories(nfs4_named_attr_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
@@ -319,6 +326,20 @@ set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_deleg_probe_memfs"
     LABELS "functional;probe;nfs4_mbt;multiproto;memfs"
     TIMEOUT 90)
+
+# Connection/session association probe: SEQUENCE on a connection the session
+# was never associated with under SP4_MACH_CRED, the machine credential on
+# BIND_CONN_TO_SESSION and DESTROY_SESSION, and where DESTROY_SESSION may sit in
+# a COMPOUND (see nfs4_session_binding_probe.c).  Needs no corpus.
+foreach(sbback memfs diskfs)
+    add_test(NAME chimera/server/nfs/mbt4/session_binding_probe_${sbback}
+        COMMAND $<TARGET_FILE:nfs4_session_binding_probe> --backend ${sbback})
+    set_tests_properties(chimera/server/nfs/mbt4/session_binding_probe_${sbback} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_session_binding_probe_${sbback}"
+        LABELS "functional;probe;nfs4_mbt;${sbback}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 60)
+endforeach()
 
 # Named-attribute (OPENATTR) probe: pins the full NFSv4 named-attribute
 # lifecycle the corpus never drives -- OPENATTR, OPEN-create/WRITE/READ of an

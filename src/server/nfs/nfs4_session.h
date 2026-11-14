@@ -297,7 +297,6 @@ struct nfs4_session {
     uint8_t                           nfs4_session_id[NFS4_SESSIONID_SIZE];
     uint64_t                          nfs4_session_clientid;
     uint32_t                          nfs4_session_implicit;
-    struct nfs4_client               *nfs4_session_client;
     struct channel_attrs4             nfs4_session_fore_attrs;
     struct channel_attrs4             nfs4_session_back_attrs;
     uint32_t                          nfs4_session_fore_attrs_rdma_ird;
@@ -803,6 +802,23 @@ void nfs4_session_bind_conn(
     struct nfs4_session   *session);
 void nfs4_session_unbind_conn(
     struct evpl_rpc2_conn *conn);
+bool nfs4_session_conn_associated(
+    struct evpl_rpc2_conn *conn,
+    struct nfs4_session   *session);
+
+/* SP4_MACH_CRED for an operation on a session: whether its client negotiated
+ * it (and so has connection association enforced), and whether `p` is the
+ * client's machine credential.  Both look the client record up by the
+ * session's client id, as CREATE_SESSION and DESTROY_CLIENTID do: a session
+ * holds no pointer to the record, which can be retired while it lives.  An
+ * absent record reads as no protection. */
+bool nfs4_session_mach_cred_enforced(
+    struct nfs4_client_table  *table,
+    const struct nfs4_session *session);
+bool nfs4_session_mach_cred_ok(
+    struct nfs4_client_table           *table,
+    const struct nfs4_session          *session,
+    const struct nfs4_client_principal *p);
 
 static inline bool
 nfs4_session_is_live(struct nfs4_session *session)

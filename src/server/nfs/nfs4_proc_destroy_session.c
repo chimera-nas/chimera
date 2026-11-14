@@ -19,12 +19,16 @@ chimera_nfs4_destroy_session(
     struct DESTROY_SESSION4args      *args   = &argop->opdestroy_session;
     struct DESTROY_SESSION4res       *res    = &resop->opdestroy_session;
     struct nfs4_session              *session;
-    struct nfs4_session              *bound;
 
-    /* RFC 8881 §18.37.3: when preceded by SEQUENCE, DESTROY_SESSION must be
-     * the final operation; otherwise it must be the sole operation. */
+    /* RFC 8881 §18.37.3: after a SEQUENCE for the same session,
+     * DESTROY_SESSION must be the final operation; after a SEQUENCE for
+     * another session it may sit anywhere but first; without SEQUENCE it must
+     * be the sole operation. */
     if (req->seen_sequence) {
-        if (req->index != req->args_compound->num_argarray - 1) {
+        if (req->index != req->args_compound->num_argarray - 1 &&
+            req->session &&
+            memcmp(req->session->nfs4_session_id, args->dsa_sessionid,
+                   NFS4_SESSIONID_SIZE) == 0) {
             res->dsr_status = NFS4ERR_NOT_ONLY_OP;
             chimera_nfs4_compound_complete(req, res->dsr_status);
             return;
@@ -43,17 +47,12 @@ chimera_nfs4_destroy_session(
         return;
     }
 
-    /* RFC 8881 §18.37.3: DESTROY_SESSION must arrive over a connection bound
-     * to a session of the same client -- not necessarily the target session
-     * itself.  chimera keeps only the most recently bound session in a
-     * connection's private data, and one connection may create several
-     * sessions, so match on the owning client rather than session identity:
-     * an unbound connection, or one bound to a different client's session, is
-     * rejected with CONN_NOT_BOUND_TO_SESSION.  SP4_MACH_CRED still gates the
-     * principal below. */
-    bound = evpl_rpc2_conn_get_private_data(req->conn);
-    if (!nfs4_session_is_live(bound) ||
-        bound->nfs4_session_clientid != session->nfs4_session_clientid) {
+    /* RFC 8881 §18.37.3: DESTROY_SESSION must arrive over a connection
+     * associated with the session; nfs4_session_conn_associated answers that
+     * for the session's client.  An unbound connection, or one bound to a
+     * different client's session, is rejected with CONN_NOT_BOUND_TO_SESSION.
+     * SP4_MACH_CRED still gates the principal below. */
+    if (!nfs4_session_conn_associated(req->conn, session)) {
         nfs4_session_put(session);
         res->dsr_status = NFS4ERR_CONN_NOT_BOUND_TO_SESSION;
         chimera_nfs4_compound_complete(req, res->dsr_status);
@@ -70,7 +69,8 @@ chimera_nfs4_destroy_session(
             .machinename     = req->principal_machinename,
             .machinename_len = req->principal_machinename_len,
         };
-        if (!nfs4_client_mach_cred_ok(session->nfs4_session_client, &p)) {
+        if (!nfs4_session_mach_cred_ok(&shared->nfs4_shared_clients, session,
+                                       &p)) {
             nfs4_session_put(session);
             res->dsr_status = NFS4ERR_WRONG_CRED;
             chimera_nfs4_compound_complete(req, res->dsr_status);
