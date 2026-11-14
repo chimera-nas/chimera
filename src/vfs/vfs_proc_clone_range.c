@@ -4,6 +4,7 @@
 
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_pnfs.h"
+#include "vfs/vfs_claim.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
 #include "vfs_attr_cache.h"
@@ -13,6 +14,17 @@ static void
 chimera_vfs_clone_range_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_clone_range_callback_t callback = request->proto_callback;
+
+    /* Release both implicit-claim holds this request may have taken: phase 2
+     * (destination) is still live in request->io_lease_file; phase 1
+     * (source) was stashed in clone_range.src_lease_file before phase 2's
+     * acquire overwrote it.  chimera_vfs_io_claim_release no-ops when a
+     * phase mediated through a caller-supplied actor instead (no implicit
+     * claim taken, io_lease_file left NULL). */
+    chimera_vfs_io_claim_release(request);
+    request->io_lease_file     = request->clone_range.src_lease_file;
+    request->io_owns_lease_ref = request->clone_range.src_owns_lease_ref;
+    chimera_vfs_io_claim_release(request);
 
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_attr_cache_insert(request->thread, request->thread->vfs->vfs_attr_cache,
@@ -32,6 +44,42 @@ chimera_vfs_clone_range_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_clone_range_complete */
 
+static void
+chimera_vfs_clone_range_dispatch_now(struct chimera_vfs_request *request)
+{
+    /* Restore the real opcode -- phase 2 below borrows CHIMERA_VFS_OP_WRITE
+     * so the claim layer invalidates/recalls exactly as a WRITE would. */
+    request->opcode = CHIMERA_VFS_OP_CLONE_RANGE;
+    chimera_vfs_dispatch(request);
+} /* chimera_vfs_clone_range_dispatch_now */
+
+static void
+chimera_vfs_clone_range_mediate_dst(struct chimera_vfs_request *request)
+{
+    /* Phase 2: mediate the destination the way WRITE does -- invalidate
+     * other holders' read caches and recall conflicting claims -- before the
+     * reflink overwrites dst's data.  Borrowing CHIMERA_VFS_OP_WRITE here is
+     * what makes chimera_vfs_io_claim_acquire treat this as a write for
+     * invalidation/implicit-claim purposes; it is restored to CLONE_RANGE
+     * before the actual dispatch. */
+    /* Stash phase 1's (source) claim hold before it is overwritten below by
+     * phase 2's acquire; chimera_vfs_clone_range_complete releases both. */
+    request->clone_range.src_lease_file     = request->io_lease_file;
+    request->clone_range.src_owns_lease_ref = request->io_owns_lease_ref;
+
+    request->io_handle      = request->clone_range.dst_handle;
+    request->opcode         = CHIMERA_VFS_OP_WRITE;
+    request->io_owner_valid = request->clone_range.dst_io_owner_valid;
+    if (request->clone_range.dst_io_owner_valid) {
+        request->io_owner = request->clone_range.dst_io_owner;
+    }
+
+    chimera_vfs_io_claim_acquire(request,
+                                 request->clone_range.dst_io_owner_valid
+                                 ? &request->io_owner : NULL,
+                                 chimera_vfs_clone_range_dispatch_now);
+} /* chimera_vfs_clone_range_mediate_dst */
+
 SYMBOL_EXPORT void
 chimera_vfs_clone_range(
     struct chimera_vfs_thread         *thread,
@@ -43,6 +91,8 @@ chimera_vfs_clone_range(
     uint64_t                           length,
     uint64_t                           pre_attr_mask,
     uint64_t                           post_attr_mask,
+    const struct chimera_claim_actor  *src_io_owner,
+    const struct chimera_claim_actor  *dst_io_owner,
     chimera_vfs_clone_range_callback_t callback,
     void                              *private_data)
 {
@@ -87,5 +137,36 @@ chimera_vfs_clone_range(
     request->proto_callback                      = callback;
     request->proto_private_data                  = private_data;
 
-    chimera_vfs_dispatch(request);
+    /* Stash the destination actor for phase 2 (chimera_vfs_clone_range_mediate_dst);
+     * the generic io_owner slot below carries the source actor for phase 1. */
+    request->clone_range.dst_io_owner_valid = dst_io_owner != NULL;
+    if (dst_io_owner) {
+        request->clone_range.dst_io_owner = *dst_io_owner;
+    }
+
+    /* Requests are pooled and not memset on reuse, so clone_range.src_lease_file/
+     * src_owns_lease_ref -- only written once phase 1 is admitted, in
+     * chimera_vfs_clone_range_mediate_dst() -- must be initialized here.
+     * Otherwise a phase-1 denial (CHIMERA_CLAIM_DENIED or a cover-gate
+     * refusal) completes the request without ever reaching phase 2, and
+     * chimera_vfs_clone_range_complete's second release would act on
+     * whatever a prior user of this pooled request left in the union. */
+    request->clone_range.src_lease_file     = NULL;
+    request->clone_range.src_owns_lease_ref = 0;
+
+    /* Phase 1: mediate the source as READ does -- recall another client's
+     * conflicting write claim before the reflink reads its data -- then
+     * phase 2 mediates the destination, and only then is the reflink
+     * actually issued.  This closes the gap where CLONE never recalled
+     * another client's delegation the way READ/WRITE do. */
+    request->io_handle      = src_handle;
+    request->opcode         = CHIMERA_VFS_OP_READ;
+    request->io_owner_valid = src_io_owner != NULL;
+    if (src_io_owner) {
+        request->io_owner = *src_io_owner;
+    }
+
+    chimera_vfs_io_claim_acquire(request,
+                                 src_io_owner ? &request->io_owner : NULL,
+                                 chimera_vfs_clone_range_mediate_dst);
 } /* chimera_vfs_clone_range */

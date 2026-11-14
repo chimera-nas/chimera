@@ -27,6 +27,8 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_claim.h"
+#include "vfs/vfs_internal.h"
 #include "vfs/sdk/vfs_attrs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
@@ -300,10 +302,61 @@ clone(
     uint64_t                        len)
 {
     chimera_vfs_clone_range(ctx->vfs_thread, cred, src, src_off, dst, dst_off,
-                            len, 0, 0, clone_cb, ctx);
+                            len, 0, 0, NULL, NULL, clone_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
 } /* clone */
+
+/* A recycled request may retain a source hold whose file state has already
+ * been freed. Source admission failure must never try to release that hold. */
+static void
+test_source_denied_reused_request(
+    struct test_ctx                *ctx,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *src,
+    struct chimera_vfs_open_handle *dst)
+{
+    struct chimera_vfs_state      *state = ctx->vfs->vfs_state;
+    struct chimera_vfs_file_state *file, *stale;
+    struct chimera_vfs_request    *pooled;
+    struct chimera_vfs_claim       deny;
+    struct chimera_claim_owner     owner = {
+        .proto      = CHIMERA_CLAIM_PROTO_SMB2,
+        .client_key = 0x1234,
+        .owner_lo   = 1,
+    };
+    const uint8_t                  stale_fh[] = { 0xff, 0x43, 0x4c, 0x4f, 0x4e, 0x45 };
+
+    file = chimera_vfs_state_get(state, src->fh, src->fh_len,
+                                 src->fh_hash, true);
+    assert(file != NULL);
+    chimera_vfs_claim_init_smb_open(&deny, 0, CHIMERA_CLAIM_R, &owner);
+    assert(chimera_vfs_claim_try_acquire(state, file, &deny, NULL) ==
+           CHIMERA_CLAIM_GRANTED);
+
+    /* Seed the union explicitly so allocator contents cannot make the
+     * regression pass accidentally. No other VFS request may intervene. */
+    stale = chimera_vfs_state_get(state, stale_fh, sizeof(stale_fh), 0, true);
+    assert(stale != NULL);
+    pooled = ctx->vfs_thread->free_requests;
+    assert(pooled != NULL);
+    pooled->clone_range.src_lease_file     = stale;
+    pooled->clone_range.src_owns_lease_ref = 1;
+    chimera_vfs_state_put(state, stale);
+
+    chimera_vfs_clone_range(ctx->vfs_thread, cred, src, 0, dst, 0, 4096,
+                            0, 0, NULL, NULL, clone_cb, ctx);
+    wait_done(ctx);
+    assert(ctx->status == CHIMERA_VFS_EACCES);
+    assert(ctx->vfs_thread->free_requests == pooled);
+    assert(pooled->clone_range.src_lease_file == NULL);
+    assert(pooled->clone_range.src_owns_lease_ref == 0);
+    assert(file->implicit_inflight == 0);
+
+    chimera_vfs_claim_release(state, file, &deny);
+    chimera_vfs_state_put(state, file);
+    TEST_PASS("source denial on a recycled clone request ignores stale lease state");
+} /* test_source_denied_reused_request */
 
 int
 main(
@@ -368,6 +421,8 @@ main(
     memcpy(dst_fh, ctx.fh, ctx.fh_len);
     dst_fh_len = ctx.fh_len;
 
+    test_source_denied_reused_request(&ctx, &cred, src_h, dst_h);
+
     /* Distinct byte patterns so a mis-copied byte is visible. */
     pat_a  = malloc(FILESIZE);
     pat_b  = malloc(FILESIZE);
@@ -408,7 +463,7 @@ main(
 
     /* 4. Misaligned offset/length must be rejected (POSIX FICLONERANGE). */
     chimera_vfs_clone_range(ctx.vfs_thread, &cred, src_h, 100, dst_h, 0, 4096,
-                            0, 0, clone_cb, &ctx);
+                            0, 0, NULL, NULL, clone_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_EINVAL);
     TEST_PASS("sub-cluster (non-4K-aligned) clone is rejected with EINVAL");

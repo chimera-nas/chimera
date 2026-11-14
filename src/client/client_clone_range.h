@@ -41,6 +41,8 @@ chimera_dispatch_clone_range(
         request->clone_range.length,
         0,
         0,
+        NULL,
+        NULL,
         chimera_clone_range_complete,
         request);
 } /* chimera_dispatch_clone_range */

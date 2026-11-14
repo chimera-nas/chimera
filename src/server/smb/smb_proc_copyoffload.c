@@ -10,6 +10,7 @@
 #include "smb_session.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_claim.h"
 
 /*
  * Block-level server-side copy beyond COPYCHUNK (smb_proc_copychunk.c):
@@ -80,6 +81,27 @@ chimera_smb_offload_token_parse(
     memcpy(length, token + 32, 8);
     return 0;
 } /* chimera_smb_offload_token_parse */
+
+/* Build the claim actor identity for an open exactly as WRITE/READ/COPYCHUNK
+ * do, so a clone/copy carrying a client's own grant identity does not recall
+ * that client's own delegation. */
+static inline void
+chimera_smb_copyoffload_io_owner(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file,
+    struct chimera_claim_actor   *actor)
+{
+    memset(actor, 0, sizeof(*actor));
+    actor->owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+    actor->owner.client_key = request->session_handle->session->client_key;
+    if (open_file->grant) {
+        actor->owner = open_file->grant->claim.owner;
+    } else {
+        actor->owner.owner_lo = open_file->file_id.pid;
+        actor->owner.owner_hi = open_file->file_id.vid;
+    }
+    actor->op_handle = open_file->handle;
+} /* chimera_smb_copyoffload_io_owner */
 
 /* ----------------------------- DUPLICATE_EXTENTS ------------------------- */
 
@@ -203,17 +225,27 @@ chimera_smb_duplicate_extents_getattr_cb(
         return;
     }
 
-    chimera_vfs_clone_range(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        request->ioctl.de_src_open_file->handle,
-        request->ioctl.de_src_offset,
-        request->ioctl.de_dst_open_file->handle,
-        request->ioctl.de_dst_offset,
-        request->ioctl.de_length,
-        0, 0,
-        chimera_smb_duplicate_extents_clone_cb,
-        request);
+    {
+        struct chimera_claim_actor src_owner, dst_owner;
+
+        chimera_smb_copyoffload_io_owner(request, request->ioctl.de_src_open_file,
+                                         &src_owner);
+        chimera_smb_copyoffload_io_owner(request, request->ioctl.de_dst_open_file,
+                                         &dst_owner);
+
+        chimera_vfs_clone_range(
+            request->compound->thread->vfs_thread,
+            &request->session_handle->session->cred,
+            request->ioctl.de_src_open_file->handle,
+            request->ioctl.de_src_offset,
+            request->ioctl.de_dst_open_file->handle,
+            request->ioctl.de_dst_offset,
+            request->ioctl.de_length,
+            0, 0,
+            &src_owner, &dst_owner,
+            chimera_smb_duplicate_extents_clone_cb,
+            request);
+    }
 } /* chimera_smb_duplicate_extents_getattr_cb */
 
 /* Destination attributes fetched first: the destination range must already lie
@@ -548,15 +580,23 @@ chimera_smb_ioctl_offload_write(struct chimera_smb_request *request)
      * offset within the token range. */
     request->ioctl.od_transfer_offset += base_offset;
 
-    chimera_vfs_clone_range(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        src_open_file->handle,
-        request->ioctl.od_transfer_offset,
-        dst_open_file->handle,
-        request->ioctl.od_file_offset,
-        request->ioctl.od_copy_length,
-        0, 0,
-        chimera_smb_offload_write_clone_cb,
-        request);
+    {
+        struct chimera_claim_actor src_owner, dst_owner;
+
+        chimera_smb_copyoffload_io_owner(request, src_open_file, &src_owner);
+        chimera_smb_copyoffload_io_owner(request, dst_open_file, &dst_owner);
+
+        chimera_vfs_clone_range(
+            request->compound->thread->vfs_thread,
+            &request->session_handle->session->cred,
+            src_open_file->handle,
+            request->ioctl.od_transfer_offset,
+            dst_open_file->handle,
+            request->ioctl.od_file_offset,
+            request->ioctl.od_copy_length,
+            0, 0,
+            &src_owner, &dst_owner,
+            chimera_smb_offload_write_clone_cb,
+            request);
+    }
 } /* chimera_smb_ioctl_offload_write */
