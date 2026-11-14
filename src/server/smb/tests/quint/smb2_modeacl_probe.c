@@ -9,8 +9,14 @@
  * that mode (chimera_acl_from_mode), whose entries never grant SYNCHRONIZE.
  * Every NT generic right expands to a mask that includes SYNCHRONIZE, so the
  * check has to leave that bit out of what it requires, or a GENERIC_READ open
- * -- what the Linux cifs client sends for O_RDONLY -- is refused to everyone
- * but root, the object's owner included.
+ * -- what the Linux cifs client sends for O_RDONLY -- is refused to every
+ * authenticated user except root, the object's owner included.
+ *
+ * GENERIC_WRITE, which the cifs client sends for O_WRONLY and O_RDWR, has the
+ * same shape: FILE_GENERIC_WRITE includes FILE_WRITE_ATTRIBUTES, which the
+ * mode-derived ACL grants to the owner only.  The check does not require it
+ * for a generic write, and the handle reports it only when the object grants
+ * it.
  *
  * No SMB client can make such an object: a CREATE stamps the default DACL,
  * which grants full control.  So this probe makes them through the VFS as the
@@ -228,11 +234,13 @@ seed_mounted_cb(
                         seed_root_cb, ctx);
 } /* seed_mounted_cb */
 
-/* Create `objs` in the share's filesystem root, as the server identity, with
- * the given mode and ownership and no ACL. */
+/* Create `objs` in the root of `module_path` on `module` (the share's root),
+ * as the server identity, with the given mode and ownership and no ACL. */
 static void
 seed_objects(
     struct smb2_env       *env,
+    const char            *module,
+    const char            *module_path,
     const struct seed_obj *objs,
     int                    nobjs)
 {
@@ -248,7 +256,7 @@ seed_objects(
     ctx.status = CHIMERA_VFS_OK;
 
     chimera_vfs_mount_detached(ctx.thread, chimera_vfs_get_server_cred(),
-                               SEED_MOUNT, "memfs", SEED_FS, NULL,
+                               SEED_MOUNT, module, module_path, NULL,
                                seed_mounted_cb, &ctx);
 
     while (!ctx.done) {
@@ -278,6 +286,9 @@ static const struct seed_obj objs[] = {
     { "mine_0644.bin",  0,   0644, SMB2W_UID, SMB2W_GID },
     { "mine_0444.bin",  0,   0444, SMB2W_UID, SMB2W_GID },
     { "root_dir",       1,   0755, 0,         0         },
+    { "grp_0664.bin",   0,   0664, 0,         SMB2W_GID },
+    { "grp_0640.bin",   0,   0640, 0,         SMB2W_GID },
+    { "root_0666.bin",  0,   0666, 0,         0         },
 };
 /* *INDENT-ON* */
 
@@ -299,14 +310,145 @@ open_status(
     return st;
 } /* open_status */
 
+/* Open `name` and return the status; on success also the handle's granted
+ * access, from FILE_ACCESS_INFORMATION, in *granted. */
+static uint32_t
+open_granted(
+    struct smb2_conn *c,
+    const char       *name,
+    uint32_t          access,
+    uint32_t         *granted)
+{
+    struct smb2_create_out co;
+    uint8_t                buf[8];
+    uint32_t               len = 0;
+    uint32_t               st;
+
+    *granted = 0;
+    st       = smb2_create_opts(c, name, MBT_FILE_OPEN, access, MBT_FILE_SHARE_RWD,
+                                MBT_FILE_NON_DIRECTORY_FILE, NULL, &co);
+    if (st != ST_SUCCESS) {
+        return st;
+    }
+    if (smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_ACCESS_INFO_T, co.file_id,
+                        0, buf, sizeof(buf), &len) == ST_SUCCESS && len >= 4) {
+        *granted = (uint32_t) buf[0] | ((uint32_t) buf[1] << 8) |
+            ((uint32_t) buf[2] << 16) | ((uint32_t) buf[3] << 24);
+    }
+    smb2_close(c, co.file_id);
+    return st;
+} /* open_granted */
+
+/* The checks on a backend that hands the CREATE check an ACL synthesized
+ * from the mode, as SMB2W_USER (uid/gid 1000). */
+static void
+run_checks(
+    struct smb2_conn *c,
+    const char       *leg)
+{
+    uint32_t st, granted;
+
+    /* Another user's file whose "other" bits allow reading. */
+    st = open_status(c, "root_0644.bin", GENERIC_READ, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_READ of another user's 0644 file -> 0x%08x", leg, st);
+
+    st = open_status(c, "root_0644.bin", GENERIC_EXECUTE,
+                     MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_EXECUTE of another user's 0644 file -> 0x%08x", leg, st);
+
+    st = open_status(c, "root_0644.bin", GENERIC_WRITE, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_ACCESS_DENIED,
+          "%s: GENERIC_WRITE of another user's 0644 file is denied -> 0x%08x", leg, st);
+
+    st = open_status(c, "root_0600.bin", GENERIC_READ, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_ACCESS_DENIED,
+          "%s: GENERIC_READ of another user's 0600 file is denied -> 0x%08x", leg, st);
+
+    /* The caller's own file: the derived ACL is present, so the owner shortcut
+     * does not apply and the mode-derived owner entry decides. */
+    st = open_status(c, "mine_0644.bin", GENERIC_READ, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS, "%s: GENERIC_READ of own 0644 file -> 0x%08x", leg, st);
+
+    st = open_status(c, "mine_0644.bin", GENERIC_READ | GENERIC_WRITE,
+                     MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_READ|GENERIC_WRITE of own 0644 file -> 0x%08x", leg, st);
+
+    st = open_status(c, "mine_0444.bin", GENERIC_WRITE, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_ACCESS_DENIED,
+          "%s: GENERIC_WRITE of own 0444 file is denied -> 0x%08x", leg, st);
+
+    /* A directory: GENERIC_READ is what a client sends to list it. */
+    st = open_status(c, "root_dir", GENERIC_READ, MBT_FILE_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_READ of another user's 0755 directory -> 0x%08x", leg, st);
+
+    /* Writers that are not the owner: the group class and "other". */
+    st = open_status(c, "grp_0664.bin", GENERIC_WRITE, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_WRITE of a group-writable 0664 file -> 0x%08x", leg, st);
+
+    st = open_status(c, "grp_0664.bin", GENERIC_READ | GENERIC_WRITE,
+                     MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_READ|GENERIC_WRITE of a group-writable 0664 file -> 0x%08x", leg, st);
+
+    st = open_status(c, "root_0666.bin", GENERIC_WRITE, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_WRITE of another user's 0666 file -> 0x%08x", leg, st);
+
+    /* A generic-write open does not require WRITE_ATTRIBUTES, so the handle
+     * must not claim it unless the object grants it: the mode-derived ACL
+     * grants it to the owner only. */
+    st = open_granted(c, "grp_0664.bin", GENERIC_WRITE, &granted);
+    CHECK(st == ST_SUCCESS && (granted & 0x00000002u) &&
+          !(granted & 0x00000100u),
+          "%s: group writer's GENERIC_WRITE handle has WRITE_DATA, not "
+          "WRITE_ATTRIBUTES (0x%08x) -> 0x%08x", leg, granted, st);
+
+    st = open_granted(c, "mine_0644.bin", GENERIC_WRITE, &granted);
+    CHECK(st == ST_SUCCESS && (granted & 0x00000102u) == 0x00000102u,
+          "%s: owner's GENERIC_WRITE handle has WRITE_DATA and WRITE_ATTRIBUTES "
+          "(0x%08x) -> 0x%08x", leg, granted, st);
+
+    st = open_status(c, "grp_0640.bin", GENERIC_READ, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_SUCCESS,
+          "%s: GENERIC_READ of a group-readable 0640 file -> 0x%08x", leg, st);
+
+    st = open_status(c, "grp_0640.bin", GENERIC_WRITE, MBT_FILE_NON_DIRECTORY_FILE);
+    CHECK(st == ST_ACCESS_DENIED,
+          "%s: GENERIC_WRITE of a group-readable 0640 file is denied -> 0x%08x", leg, st);
+} /* run_checks */
+
+/* Seed `o` on the mounted share, connect, and run `checks`. */
+static void
+run_leg(
+    struct smb2_env *env,
+    const char *leg,
+    const char *module,
+    const char *module_path,
+    const struct seed_obj *o,
+    int no,
+    void ( *checks )(struct smb2_conn *, const char *))
+{
+    struct smb2_conn *c;
+
+    seed_objects(env, module, module_path, o, no);
+
+    c = smb2_conn_open(env);
+    smb2_handshake_as(c, SMB2W_USER, SMB2W_PASSWORD);
+    checks(c, leg);
+    smb2_conn_disconnect(c);
+} /* run_leg */
+
 int
 main(
     int   argc,
     char *argv[])
 {
     struct smb2_env                       env;
-    struct smb2_conn                     *c;
-    uint32_t                              st;
     static const struct smb2_wire_profile w = {
         .name = "modeacl", .max_dialect = 0x0300, .ntlmv2 = 1
     };
@@ -317,50 +459,12 @@ main(
     setvbuf(stdout, NULL, _IONBF, 0);
 
     smb2_env_open_wire(&env, NULL, &w);
+
     smb2_env_fs_setup(&env, SEED_FS);
-    seed_objects(&env, objs, (int) (sizeof(objs) / sizeof(objs[0])));
-
-    c = smb2_conn_open(&env);
-    smb2_handshake_as(c, SMB2W_USER, SMB2W_PASSWORD);
-
-    /* Another user's file whose "other" bits allow reading. */
-    st = open_status(c, "root_0644.bin", GENERIC_READ, MBT_FILE_NON_DIRECTORY_FILE);
-    CHECK(st == ST_SUCCESS,
-          "GENERIC_READ of another user's 0644 file -> 0x%08x", st);
-
-    st = open_status(c, "root_0644.bin", GENERIC_EXECUTE,
-                     MBT_FILE_NON_DIRECTORY_FILE);
-    CHECK(st == ST_SUCCESS,
-          "GENERIC_EXECUTE of another user's 0644 file -> 0x%08x", st);
-
-    st = open_status(c, "root_0644.bin", GENERIC_WRITE, MBT_FILE_NON_DIRECTORY_FILE);
-    CHECK(st == ST_ACCESS_DENIED,
-          "GENERIC_WRITE of another user's 0644 file is denied -> 0x%08x", st);
-
-    st = open_status(c, "root_0600.bin", GENERIC_READ, MBT_FILE_NON_DIRECTORY_FILE);
-    CHECK(st == ST_ACCESS_DENIED,
-          "GENERIC_READ of another user's 0600 file is denied -> 0x%08x", st);
-
-    /* The caller's own file: the derived ACL is present, so the owner shortcut
-     * does not apply and the mode-derived owner entry decides. */
-    st = open_status(c, "mine_0644.bin", GENERIC_READ, MBT_FILE_NON_DIRECTORY_FILE);
-    CHECK(st == ST_SUCCESS, "GENERIC_READ of own 0644 file -> 0x%08x", st);
-
-    st = open_status(c, "mine_0644.bin", GENERIC_READ | GENERIC_WRITE,
-                     MBT_FILE_NON_DIRECTORY_FILE);
-    CHECK(st == ST_SUCCESS,
-          "GENERIC_READ|GENERIC_WRITE of own 0644 file -> 0x%08x", st);
-
-    st = open_status(c, "mine_0444.bin", GENERIC_WRITE, MBT_FILE_NON_DIRECTORY_FILE);
-    CHECK(st == ST_ACCESS_DENIED,
-          "GENERIC_WRITE of own 0444 file is denied -> 0x%08x", st);
-
-    /* A directory: GENERIC_READ is what a client sends to list it. */
-    st = open_status(c, "root_dir", GENERIC_READ, MBT_FILE_DIRECTORY_FILE);
-    CHECK(st == ST_SUCCESS,
-          "GENERIC_READ of another user's 0755 directory -> 0x%08x", st);
-
+    run_leg(&env, "memfs", "memfs", SEED_FS, objs,
+            (int) (sizeof(objs) / sizeof(objs[0])), run_checks);
     smb2_env_fs_teardown(&env, SEED_FS);
+
     smb2_env_stop(&env);
 
     if (failures) {
