@@ -255,3 +255,10 @@ target_include_directories(inspect_lifetime_probe PRIVATE ${CMAKE_SOURCE_DIR}/sr
 target_link_libraries(inspect_lifetime_probe chimera_vfs evpl_rpc2)
 add_test(NAME chimera/server/rest/ctl/inspect_lifetime_probe COMMAND $<TARGET_FILE:inspect_lifetime_probe>)
 set_tests_properties(chimera/server/rest/ctl/inspect_lifetime_probe PROPERTIES LABELS "quint;ctl_mbt;memfs" TIMEOUT 30)
+
+find_package(Threads REQUIRED)
+add_executable(inspect_mpsc_probe inspect_mpsc_probe.c)
+target_include_directories(inspect_mpsc_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(inspect_mpsc_probe PRIVATE Threads::Threads)
+add_test(NAME chimera/server/rest/ctl/inspect_mpsc_probe COMMAND $<TARGET_FILE:inspect_mpsc_probe>)
+set_tests_properties(chimera/server/rest/ctl/inspect_mpsc_probe PROPERTIES LABELS "quint;ctl_mbt" TIMEOUT 30)

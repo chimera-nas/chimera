@@ -53,8 +53,34 @@ main(void)
         check(json_is_string(json_object_get(thread, "sampled_monotonic_ns")), "monotonic timestamp string");
         check(json_is_object(json_object_get(thread, "rpc")), "RPC metrics copied");
     }
-    char           instance[64];
+    char instance[64];
     snprintf(instance, sizeof(instance), "%s", json_string_value(json_object_get(snapshot, "server_instance_id")));
+    json_decref(snapshot);
+    snapshot = get(api, "/api/v1/threads?live=1", 200);
+    check(json_is_true(json_object_get(snapshot, "live")), "live snapshot marker");
+    threads = json_object_get(snapshot, "threads");
+    check(json_array_size(threads) == 8, "live reader returns every worker");
+    for (unsigned int i = 0; i < 8; i++) {
+        json_t *thread = json_array_get(threads, i);
+        check(json_is_string(json_object_get(thread, "cpu_ns")), "live CPU time");
+        check(json_is_string(json_object_get(thread, "runq_wait_ns")), "live scheduler wait");
+        check(json_is_string(json_object_get(thread, "loop_iters")), "live loop iterations");
+        check(json_is_string(json_object_get(thread, "loop_iters_with_work")), "live work iterations");
+        check(json_is_object(json_object_get(thread, "vfs")), "live VFS metrics");
+        check(json_is_object(json_object_get(thread, "rpc")), "live RPC metrics");
+        check(json_is_array(json_object_get(json_object_get(thread, "rpc"), "procedures")),
+              "live RPC procedure counters");
+        check(json_is_string(json_object_get(json_object_get(thread, "rpc"), "live_connections")),
+              "live per-worker accepted connection count");
+        json_t *listeners = json_object_get(json_object_get(thread, "rpc"), "listeners");
+        check(json_is_array(listeners) && json_array_size(listeners) > 0,
+              "live per-listener placement totals");
+        json_t *listener = json_array_get(listeners, 0);
+        check(json_is_string(json_object_get(listener, "placement_policy")),
+              "listener placement policy");
+        check(json_is_string(json_object_get(listener, "assigned_total")),
+              "listener cumulative assignment count");
+    }
     json_decref(snapshot);
     const char    *bad[] = {
         "/api/v1/threads?service=nfs",             "/api/v1/threads?worker_id=-1",

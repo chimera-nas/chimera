@@ -436,7 +436,11 @@ chimera_vfs_watchdog(
     struct chimera_vfs_thread *thread);
 
 /* Copy existing per-operation histogram counts on the owning VFS thread. */
-struct chimera_vfs_op_count { char name[64]; uint64_t count; };
+struct chimera_vfs_op_count {
+    const char  *name;
+    uint64_t     count, sum_ticks, buckets[64];
+    unsigned int bucket_count;
+};
 SYMBOL_EXPORT unsigned int chimera_vfs_inspect_counts(
     struct chimera_vfs_thread   *thread,
     unsigned int                 capacity,

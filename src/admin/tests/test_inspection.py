@@ -76,6 +76,24 @@ class InspectionSemantics(unittest.TestCase):
         self.assertEqual(result["rates"]["0"], {"rpc": 500.0, "vfs": 750.0})
         self.assertEqual([r["connection_id"] for r in result["absent"]], ["0:17"])
 
+    def test_live_worker_cpu_and_busy_percentages_use_deltas(self):
+        state = WatchState()
+        before = {
+            "server_instance_id": "instance",
+            "complete": True,
+            "sampled_monotonic_ns": "100",
+            "threads": [{"worker_id": 0, "cpu_ns": "100", "loop_iters": "1000",
+                         "loop_iters_with_work": "700",
+                         "rpc": {"rx_bytes": "0", "tx_bytes": "0"}}],
+        }
+        after = copy.deepcopy(before)
+        after["sampled_monotonic_ns"] = "1000000100"
+        after["threads"][0].update(cpu_ns="500000100", loop_iters="1100", loop_iters_with_work="780",
+                                    rpc={"rx_bytes": "10000000", "tx_bytes": "5000000"})
+        state.update({"live": before})
+        rates = state.update({"live": after})["live_rates"]["0"]
+        self.assertEqual(rates, {"cpu": 50.0, "busy": 80.0, "rx_MB_s": 10.0, "tx_MB_s": 5.0})
+
     def test_large_counters_do_not_lose_integer_precision(self):
         before, after = frames(), frames("snapshot-next.json")
         before["threads"]["threads"][0]["rpc"]["procedures"][0]["latency_samples_total"] = str(2 ** 60)
@@ -238,7 +256,9 @@ class HTTPIntegration(unittest.TestCase):
         with patch.dict(os.environ, env), redirect_stdout(stream):
             status = main(["--host", "127.0.0.1", "--port", str(self.server.server_port), "inspect", "dashboard", "--json"])
         self.assertEqual(status, 0)
-        self.assertEqual([r[0] for r in self.server.requests_seen], ["/api/v1/threads", "/api/v1/connections"])
+        self.assertEqual([r[0] for r in self.server.requests_seen],
+                         ["/api/v1/threads", "/api/v1/threads", "/api/v1/connections"])
+        self.assertEqual(self.server.requests_seen[1][1], {"live": ["1"]})
         self.assertEqual(len(json.loads(stream.getvalue())["connections_snapshot"]["connections"]), 10)
         sample = frames(); sample["connections"].update(complete=False, truncated=True)
         with patch("chimera_admin.inspection.fetch", return_value=sample), redirect_stdout(io.StringIO()):

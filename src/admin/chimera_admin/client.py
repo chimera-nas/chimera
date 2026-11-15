@@ -111,6 +111,10 @@ class ChimeraAdminClient:
         params = {} if worker_id is None else {"worker_id": worker_id}
         return self._inspection_get("/api/v1/threads", params)
 
+    def get_live_threads(self) -> dict:
+        """Get the direct, non-doorbell worker metrics sample."""
+        return self._inspection_get("/api/v1/threads", {"live": 1})
+
     def get_connections(self, **filters) -> dict:
         """Get connection mappings with numeric endpoint and worker filters."""
         allowed = {"worker_id", "service", "transport", "remote_ip", "remote_port", "local_ip", "local_port"}

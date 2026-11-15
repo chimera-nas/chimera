@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <time.h>
 #include "common/platform.h"
 #ifndef _WIN32
 #include <arpa/inet.h>
@@ -37,6 +38,163 @@ signed_decimal(int64_t value)
     snprintf(text, sizeof(text), "%" PRId64, value);
     return json_string(text);
 } /* signed_decimal */
+
+static uint64_t
+approx_percentile_ticks(
+    uint64_t        total,
+    const uint64_t *buckets,
+    unsigned int    bucket_count,
+    unsigned int    percentile)
+{
+    uint64_t target     = total / 100 * percentile + ((total % 100) * percentile + 99) / 100;
+    uint64_t cumulative = 0;
+
+    if (!total) {
+        return 0;
+    }
+    for (unsigned int i = 0; i < bucket_count; i++) {
+        cumulative += buckets[i];
+        if (cumulative >= target) {
+            return i == 63 ? UINT64_MAX : UINT64_C(1) << (i + 1);
+        }
+    }
+    return UINT64_MAX;
+} /* approx_percentile_ticks */
+
+static void
+latency_json_fields(
+    json_t         *item,
+    uint64_t        count,
+    uint64_t        sum_ticks,
+    const uint64_t *buckets,
+    unsigned int    bucket_count)
+{
+    if (!count) {
+        return;
+    }
+    uint64_t mean_ns = stopwatch_ticks_to_ns(&prometheus_stopwatch_ctx, sum_ticks / count);
+    uint64_t p50_ns  = stopwatch_ticks_to_ns(&prometheus_stopwatch_ctx,
+                                             approx_percentile_ticks(count, buckets, bucket_count, 50));
+    uint64_t p99_ns = stopwatch_ticks_to_ns(&prometheus_stopwatch_ctx,
+                                            approx_percentile_ticks(count, buckets, bucket_count, 99));
+    json_object_set_new(item, "latency_avg_ns", decimal(mean_ns));
+    json_object_set_new(item, "latency_p50_ns", decimal(p50_ns));
+    json_object_set_new(item, "latency_p99_ns", decimal(p99_ns));
+} /* latency_json_fields */
+
+static json_t *
+procedure_json(const struct evpl_rpc2_procedure_stats *stats)
+{
+    json_t *item = json_pack("{s:i,s:i,s:i,s:s}", "program", stats->program,
+                             "version", stats->version, "procedure", stats->procedure,
+                             "name", stats->name);
+
+    json_object_set_new(item, "latency_samples_total", decimal(stats->latency_samples_total));
+    latency_json_fields(item, stats->latency_samples_total, stats->latency_sum_ticks,
+                        stats->latency_buckets, stats->latency_bucket_count);
+    return item;
+} /* procedure_json */
+
+void
+chimera_rest_inspect_live(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request)
+{
+    struct chimera_server_inspect *inspect  = chimera_server_get_inspect(thread->shared->server);
+    unsigned int                   capacity = 4096;
+    struct chimera_worker_sample  *samples  = calloc(capacity, sizeof(*samples));
+
+    if (!samples) {
+        chimera_rest_send_error(thread->evpl, request, 503, "Service Unavailable", "Inspection allocation failed");
+        return;
+    }
+    unsigned int                   count = chimera_server_inspect_read_workers(inspect, samples, capacity);
+    json_t                        *obj = json_object(), *workers = json_array();
+    struct timespec                now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t                       sampled_monotonic_ns = (uint64_t) now.tv_sec * 1000000000 + now.tv_nsec;
+    for (unsigned int i = 0; i < count; i++) {
+        const struct chimera_worker_sample *sample = &samples[i];
+        json_t                             *worker = json_pack("{s:i,s:s,s:s}",
+                                                               "worker_id", (int) sample->worker_id,
+                                                               "worker_name", sample->identity.name,
+                                                               "executor", sample->identity.executor);
+        json_object_set_new(worker, "os_tid", decimal(sample->os_tid));
+        json_object_set_new(worker, "cpu_ns", decimal(sample->cpu_ns));
+        json_object_set_new(worker, "runq_wait_ns", decimal(sample->runq_wait_ns));
+        json_object_set_new(worker, "loop_iters", decimal(sample->loop.loop_iters));
+        json_object_set_new(worker, "loop_iters_with_work", decimal(sample->loop.loop_iters_with_work));
+        struct chimera_vfs_op_count   vfs[CHIMERA_INSPECT_VFS_OPS];
+        unsigned int                  nvfs = chimera_server_inspect_read_vfs(inspect, sample->worker_id,
+                                                                             CHIMERA_INSPECT_VFS_OPS, vfs);
+        json_t                       *operations = json_array();
+        for (unsigned int j = 0; j < nvfs; j++) {
+            json_t *operation = json_pack("{s:s}", "name", vfs[j].name);
+            json_object_set_new(operation, "latency_samples_total", decimal(vfs[j].count));
+            latency_json_fields(operation, vfs[j].count, vfs[j].sum_ticks,
+                                vfs[j].buckets, vfs[j].bucket_count);
+            json_array_append_new(operations, operation);
+        }
+        json_t                       *vfs_object = json_object();
+        json_object_set_new(vfs_object, "operations", operations);
+        json_object_set_new(worker, "vfs", vfs_object);
+        struct chimera_inspect_sample rpc_sample = { 0 };
+        chimera_server_inspect_read_live_rpc(inspect, sample->worker_id, &rpc_sample);
+        if (rpc_sample.has_rpc) {
+            json_t *rpc = json_object(), *procedures = json_array(), *listeners = json_array(), *remote_ips = json_array
+                    ();
+            json_object_set_new(worker, "rpc_thread_id", json_integer(rpc_sample.rpc.thread_id));
+            json_object_set_new(rpc, "server_inflight", signed_decimal(rpc_sample.rpc.server_inflight));
+            json_object_set_new(rpc, "client_inflight", signed_decimal(rpc_sample.rpc.client_inflight));
+            json_object_set_new(rpc, "rx_msgs", decimal(rpc_sample.rpc.rx_msgs));
+            json_object_set_new(rpc, "tx_msgs", decimal(rpc_sample.rpc.tx_msgs));
+            json_object_set_new(rpc, "rx_bytes", decimal(rpc_sample.rpc.rx_bytes));
+            json_object_set_new(rpc, "tx_bytes", decimal(rpc_sample.rpc.tx_bytes));
+            json_object_set_new(rpc, "rpc_errors", decimal(rpc_sample.rpc.rpc_errors));
+            json_object_set_new(rpc, "accepts", decimal(rpc_sample.rpc.accepts));
+            json_object_set_new(rpc, "closes", decimal(rpc_sample.rpc.closes));
+            json_object_set_new(rpc, "live_connections", decimal(rpc_sample.rpc.active_connections));
+            for (unsigned int j = 0; j < rpc_sample.rpc.nlisteners; j++) {
+                const char *policy = "unknown";
+                if (rpc_sample.rpc.listeners[j].placement_policy == 1) {
+                    policy = "round_robin";
+                } else if (rpc_sample.rpc.listeners[j].placement_policy == 2) {
+                    policy = "distributed";
+                }
+                json_t     *listener = json_pack("{s:i,s:i,s:s}",
+                                                 "program", rpc_sample.rpc.listeners[j].program,
+                                                 "version", rpc_sample.rpc.listeners[j].version,
+                                                 "placement_policy", policy);
+                json_object_set_new(listener, "assigned_total", decimal(rpc_sample.rpc.listeners[j].assigned_total));
+                json_object_set_new(listener, "live_connections", decimal(rpc_sample.rpc.listeners[j].live_connections))
+                ;
+                json_array_append_new(listeners, listener);
+            }
+            json_object_set_new(rpc, "listeners", listeners);
+            for (unsigned int j = 0; j < rpc_sample.rpc.nrdma_remote_ips; j++) {
+                json_t *remote = json_pack("{s:s}", "address", rpc_sample.rpc.rdma_remote_ips[j].address);
+                json_object_set_new(remote, "accepts", decimal(rpc_sample.rpc.rdma_remote_ips[j].accepts));
+                json_array_append_new(remote_ips, remote);
+            }
+            json_object_set_new(rpc, "rdma_remote_ips", remote_ips);
+            json_object_set_new(rpc, "rdma_remote_ip_overflow_accepts",
+                                decimal(rpc_sample.rpc.rdma_remote_ip_overflow_accepts));
+            for (unsigned int j = 0; j < rpc_sample.nprocedures; j++) {
+                json_array_append_new(procedures, procedure_json(&rpc_sample.procedures[j]));
+            }
+            json_object_set_new(rpc, "procedures", procedures);
+            json_object_set_new(worker, "rpc", rpc);
+        }
+        json_array_append_new(workers, worker);
+    }
+    json_object_set_new(obj, "threads", workers);
+    json_object_set_new(obj, "live", json_true());
+    json_object_set_new(obj, "complete", json_true());
+    json_object_set_new(obj, "server_instance_id", json_string(chimera_server_inspect_instance_id(inspect)));
+    json_object_set_new(obj, "sampled_monotonic_ns", decimal(sampled_monotonic_ns));
+    free(samples);
+    chimera_rest_send_json(thread->evpl, request, 200, obj);
+} /* chimera_rest_inspect_live */
 static json_t *
 endpoint_json(const struct evpl_endpoint_info *endpoint)
 {
@@ -85,6 +243,13 @@ connection_json(
         json_object_set_new(obj, "observed_rpc_programs", programs);
         json_object_set_new(obj, "nfs_minor_versions_seen", minors);
         json_object_set_new(obj, "rpc_framing", json_string(row->rdma_framing ? "rpc_rdma" : "record_marking"));
+        json_object_set_new(obj, "per_connection_stats", json_pack("{s:o,s:o,s:o,s:o,s:o,s:o}",
+                                                                   "rx_msgs", decimal(row->rx_msgs),
+                                                                   "tx_msgs", decimal(row->tx_msgs),
+                                                                   "rx_bytes", decimal(row->rx_bytes),
+                                                                   "tx_bytes", decimal(row->tx_bytes),
+                                                                   "requests_done", decimal(row->requests_done),
+                                                                   "inflight", decimal(row->inflight)));
     } else if (row->service == CHIMERA_INSPECT_SMB) {
         json_object_set_new(obj, "negotiated_dialect", row->smb_dialect ? json_integer(row->smb_dialect) : json_null());
         json_object_set_new(obj, "per_connection_stats", json_pack("{s:I,s:i}",
@@ -98,9 +263,10 @@ connection_json(
 static json_t *
 sample_json(
     const struct chimera_inspect_sample *sample,
-    int                                  connections)
+    int                                  connections,
+    const char                          *sampled_at)
 {
-    json_t *obj = json_pack("{s:i,s:s}", "worker_id", sample->worker_id, "sampled_at", sample->sampled_at);
+    json_t *obj = json_pack("{s:i,s:s}", "worker_id", sample->worker_id, "sampled_at", sampled_at);
 
     json_object_set_new(obj, "sampled_monotonic_ns", decimal(sample->sampled_monotonic_ns));
     json_object_set_new(obj, "truncated", json_boolean(sample->truncated));
@@ -122,13 +288,15 @@ sample_json(
         json_t *rpc = json_object(), *procedures = json_array();
         json_object_set_new(rpc, "server_inflight", signed_decimal(sample->rpc.server_inflight));
         json_object_set_new(rpc, "client_inflight", signed_decimal(sample->rpc.client_inflight));
+        json_object_set_new(rpc, "rx_msgs", decimal(sample->rpc.rx_msgs));
+        json_object_set_new(rpc, "tx_msgs", decimal(sample->rpc.tx_msgs));
+        json_object_set_new(rpc, "rx_bytes", decimal(sample->rpc.rx_bytes));
+        json_object_set_new(rpc, "tx_bytes", decimal(sample->rpc.tx_bytes));
+        json_object_set_new(rpc, "rpc_errors", decimal(sample->rpc.rpc_errors));
+        json_object_set_new(rpc, "accepts", decimal(sample->rpc.accepts));
+        json_object_set_new(rpc, "closes", decimal(sample->rpc.closes));
         for (unsigned int i = 0; i < sample->nprocedures; i++) {
-            const struct evpl_rpc2_procedure_stats *p    = &sample->procedures[i];
-            json_t                                 *proc = json_pack("{s:i,s:i,s:i,s:s}", "program", p->program,
-                                                                     "version", p->version,
-                                                                     "procedure", p->procedure, "name", p->name);
-            json_object_set_new(proc, "latency_samples_total", decimal(p->latency_samples_total));
-            json_array_append_new(procedures, proc);
+            json_array_append_new(procedures, procedure_json(&sample->procedures[i]));
         }
         json_object_set_new(rpc, "procedures", procedures);
         json_object_set_new(obj, "rpc", rpc);
@@ -174,9 +342,15 @@ snapshot_complete(
                                 "No inspection worker responded");
         return;
     }
+    struct timespec now;
+    struct tm       utc;
+    char            sampled_at[40];
+    clock_gettime(CLOCK_REALTIME, &now);
+    gmtime_r(&now.tv_sec, &utc);
+    strftime(sampled_at, sizeof(sampled_at), "%Y-%m-%dT%H:%M:%SZ", &utc);
     /* Conservative escaped-JSON upper bound, checked before building objects.
     * The SDK caps reads at 8 MiB; leave room for the envelope below 6 MiB. */
-    size_t budget = 0;
+    size_t          budget = 0;
     for (unsigned int i = 0; i < result->nworkers; i++) {
         if (!result->present[i]) {
             continue;
@@ -211,7 +385,7 @@ snapshot_complete(
             json_array_append_new(missing, json_integer(sample->worker_id)); continue;
         }
         truncated |= sample->truncated;
-        json_array_append_new(samples, sample_json(sample, ctx->connections));
+        json_array_append_new(samples, sample_json(sample, ctx->connections, sampled_at));
         if (ctx->connections) {
             for (unsigned int j = 0; j < sample->nrows; j++) {
                 json_array_append_new(rows, connection_json(sample, &sample->rows[j]));

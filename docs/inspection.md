@@ -57,4 +57,6 @@ Connection filters are `worker_id`, `service`, `remote_ip`, `remote_port`,
 values must be numeric IPv4/IPv6. Unknown, duplicate, empty or malformed
 parameters return 400. Default services are NFS, SMB and S3; explicitly select
 `mount`, `nlm`, `nsm` or `rpcbind` for auxiliary NFS listeners. `/threads`
-accepts only `worker_id`.
+accepts only `worker_id`. Add `?live=1` to read worker CPU, scheduler wait and
+event-loop iteration counters directly without waking workers. See
+[`worker-metrics.md`](worker-metrics.md) for the fields and rate calculations.

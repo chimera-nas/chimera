@@ -238,6 +238,7 @@ def fetch(client, args):
     else:
         if view in ("threads", "dashboard"):
             result["threads"] = valid(client.get_threads(worker_id=args.worker_id), "threads")
+            result["live"] = valid(client.get_live_threads(), "threads")
         if view in ("connections", "dashboard"):
             params = {key: getattr(args, key, None) for key in ("worker_id", "service", "transport", "remote_ip", "remote_port", "local_ip", "local_port")}
             result["connections"] = valid(client.get_connections(**params), "connections")
@@ -257,12 +258,46 @@ class WatchState:
         self.previous = None
 
     def update(self, snapshots):
-        meta = {"rates": {}, "appeared": [], "absent": [], "changes_comparable": False, "restarted": False}
+        meta = {"rates": {}, "live_rates": {}, "appeared": [], "absent": [], "changes_comparable": False, "restarted": False}
         if len({s["server_instance_id"] for s in snapshots.values()}) > 1:
             self.reset()
             meta["mixed_instances"] = True
             return meta
         previous = self.previous or {}
+        old_live, current_live = previous.get("live"), snapshots.get("live")
+        if old_live and current_live:
+            same = old_live["server_instance_id"] == current_live["server_instance_id"]
+            meta["restarted"] |= not same
+            old_time = _integer(old_live.get("sampled_monotonic_ns"))
+            new_time = _integer(current_live.get("sampled_monotonic_ns"))
+            if same and complete(old_live) and complete(current_live) and old_time is not None and new_time > old_time:
+                before = {w["worker_id"]: w for w in old_live["threads"]}
+                elapsed = new_time - old_time
+                for worker in current_live["threads"]:
+                    prior = before.get(worker["worker_id"])
+                    if not prior:
+                        continue
+                    old_cpu, new_cpu = _integer(prior.get("cpu_ns")), _integer(worker.get("cpu_ns"))
+                    old_iters, new_iters = _integer(prior.get("loop_iters")), _integer(worker.get("loop_iters"))
+                    old_work = _integer(prior.get("loop_iters_with_work"))
+                    new_work = _integer(worker.get("loop_iters_with_work"))
+                    if None in (old_cpu, new_cpu, old_iters, new_iters, old_work, new_work):
+                        continue
+                    if new_cpu < old_cpu or new_iters < old_iters or new_work < old_work or new_iters == old_iters:
+                        continue
+                    meta["live_rates"][str(worker["worker_id"])] = {
+                        "cpu": 100.0 * (new_cpu - old_cpu) / elapsed,
+                        "busy": 100.0 * (new_work - old_work) / (new_iters - old_iters),
+                    }
+                    old_rpc, new_rpc = prior.get("rpc", {}), worker.get("rpc", {})
+                    if isinstance(old_rpc, dict) and isinstance(new_rpc, dict):
+                        for direction in ("rx", "tx"):
+                            old_bytes = _integer(old_rpc.get(direction + "_bytes"))
+                            new_bytes = _integer(new_rpc.get(direction + "_bytes"))
+                            if old_bytes is not None and new_bytes is not None and new_bytes >= old_bytes:
+                                meta["live_rates"][str(worker["worker_id"])][direction + "_MB_s"] = (
+                                    (new_bytes - old_bytes) / elapsed * 1000
+                                )
         old = previous.get("threads")
         current = snapshots.get("threads")
         if old and current:
@@ -366,8 +401,9 @@ def render(snapshots, meta, args, error=None, stale_age=0, width=None):
         for w in sorted(workers, key=worker_key):
             counts, rpc = w.get("connection_counts") or {}, w.get("rpc") or {}
             rates = {} if error or mixed else meta["rates"].get(str(w["worker_id"]), {})
+            live_rates = {} if error or mixed else meta["live_rates"].get(str(w["worker_id"]), {})
             samples = _metric_map(w, "rpc")
-            row = [w.get("worker_name", w["worker_id"]), w.get("os_tid"), w.get("rpc_thread_id"), counts.get("nfs", "--"), counts.get("smb", "--"), counts.get("s3", "--"), rpc.get("server_inflight"), sum(samples.values()) if samples is not None else None, _rate_text(rates.get("rpc")), _rate_text(rates.get("vfs"))]
+            row = [w.get("worker_name", w["worker_id"]), w.get("os_tid"), w.get("rpc_thread_id"), counts.get("nfs", "--"), counts.get("smb", "--"), counts.get("s3", "--"), rpc.get("server_inflight"), sum(samples.values()) if samples is not None else None, _rate_text(rates.get("rpc")), _rate_text(rates.get("vfs")), _rate_text(live_rates.get("rx_MB_s")), _rate_text(live_rates.get("tx_MB_s")), _rate_text(live_rates.get("cpu")), _rate_text(live_rates.get("busy"))]
             if args.inspection_view == "dashboard":
                 listed = connection_counts.get(w["worker_id"], 0)
                 listed = (">=" if not complete(snapshots.get("connections", {})) else "") + str(listed)
@@ -375,22 +411,27 @@ def render(snapshots, meta, args, error=None, stale_age=0, width=None):
                 total = sum(total_values) if total_values and all(value is not None for value in total_values) else "--"
                 row += [listed, total]
             rows.append(row)
-        headers = ["WORKER", "NFS", "SMB", "S3", "RPC IN", "RPC SAMPLES", "RPC samp/s", "VFS samp/s"]
+        headers = ["WORKER", "NFS", "SMB", "S3", "RPC IN", "RPC SAMPLES", "RPC samp/s", "VFS samp/s", "RX MB/s", "TX MB/s", "CPU%", "BUSY%"]
         if args.inspection_view == "dashboard":
             headers += ["MATCH" if filters_applied else "LISTED", "TOTAL(all)"]
         display_rows = [[row[0], *row[3:]] for row in rows]
         if args.wide:
             headers[1:1] = ["TID", "RPC ID"]
             display_rows = [[row[0], row[1], row[2], *row[3:]] for row in rows]
-        if width < 108:
+        if width < 140:
             compact_headers = ["WORKER", "NFS", "SMB", "S3"]
             compact_rows = [[row[0], row[3], row[4], row[5]] for row in rows]
             if args.inspection_view == "dashboard":
                 compact_headers += ["MATCH" if filters_applied else "LISTED", "TOTAL(all)"]
                 compact_rows = [[*compact_rows[i], display_rows[i][-2], display_rows[i][-1]] for i in range(len(rows))]
+            if width < 90:
+                metric_headers = ["WORKER", "RPC/s", "VFS/s", "RX MB/s", "TX MB/s", "CPU%", "BUSY%"]
+                metric_rows = [[row[0], row[8], row[9], row[10], row[11], row[12], row[13]] for row in rows]
+            else:
+                metric_headers = ["WORKER", "RPC IN", "RPC SAMPLES", "RPC samp/s", "VFS samp/s", "RX MB/s", "TX MB/s", "CPU%", "BUSY%"]
+                metric_rows = [[row[0], row[6], row[7], row[8], row[9], row[10], row[11], row[12], row[13]] for row in rows]
             lines += ["", "WORKERS (all traffic)", _table(compact_headers, compact_rows, args.max_rows, numeric=range(1, len(compact_headers))),
-                      "\nWORKER METRICS", _table(["WORKER", "RPC IN", "RPC SAMPLES", "RPC samp/s", "VFS samp/s"],
-                      [[row[0], row[6], row[7], row[8], row[9]] for row in rows], args.max_rows, numeric=range(1, 5))]
+                      "\nWORKER METRICS", _table(metric_headers, metric_rows, args.max_rows, numeric=range(1, len(metric_headers)))]
             if args.wide:
                 lines.append("\nWORKER CONTEXTS")
                 lines.append(_table(["WORKER", "TID", "RPC ID"], [[row[0], row[1], row[2]] for row in rows], args.max_rows, numeric={1, 2}))

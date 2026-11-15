@@ -1925,8 +1925,15 @@ chimera_vfs_inspect_counts(
         if (!thread->metrics.op_latency_series[i]) {
             continue;
         }
-        snprintf(counts[n].name, sizeof(counts[n].name), "%s", chimera_vfs_op_name(i));
-        counts[n++].count = thread->metrics.op_latency_series[i]->count;
+        counts[n].name = chimera_vfs_op_name(i);
+        struct prometheus_histogram_instance *histogram = thread->metrics.op_latency_series[i];
+        counts[n].count        = atomic_load_explicit(&histogram->count, memory_order_relaxed);
+        counts[n].sum_ticks    = atomic_load_explicit(&histogram->sum, memory_order_relaxed);
+        counts[n].bucket_count = histogram->num_buckets < 64 ? (unsigned int) histogram->num_buckets : 64;
+        for (unsigned int bucket = 0; bucket < counts[n].bucket_count; bucket++) {
+            counts[n].buckets[bucket] = atomic_load_explicit(&histogram->buckets[bucket], memory_order_relaxed);
+        }
+        n++;
     }
     return n;
 } /* chimera_vfs_inspect_counts */

@@ -11,6 +11,7 @@
 #include "vfs/sdk/vfs_tcp_flavor.h"
 
 struct chimera_metrics;
+struct chimera_server_inspect;
 
 /*
  * Start the Prometheus scrape endpoint (GET <port>/metrics) on its own evpl
@@ -28,6 +29,10 @@ SYMBOL_EXPORT void chimera_metrics_destroy(
 
 SYMBOL_EXPORT struct prometheus_metrics * chimera_metrics_get(
     struct chimera_metrics *metrics);
+
+SYMBOL_EXPORT void chimera_metrics_set_inspect(
+    struct chimera_metrics       *metrics,
+    struct chimera_server_inspect *inspect);
 
 /*
  * Scrape chimera's prometheus registry plus libevpl's metrics and write the

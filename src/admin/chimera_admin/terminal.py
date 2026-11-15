@@ -157,6 +157,7 @@ class TreeState:
                 key = (name, instance, worker_id)
                 state = view.status() if worker_id in current_workers else "MISSING"
                 rates = view.meta.get("rates", {}).get(str(worker_id), {}) if fresh and worker_id in current_workers else {}
+                rates.update(view.meta.get("live_rates", {}).get(str(worker_id), {}) if fresh else {})
                 children = grouped.get(worker_id, [])
                 children.sort(key=(lambda c: (endpoint(c.get("remote")), c["connection_id"])) if self.args.sort == "client" else (lambda c: c["connection_id"]))
                 rows[key] = WorkerRow(key, worker, children,
@@ -252,10 +253,13 @@ class TreeState:
                     safe(worker.get("rpc_thread_id")), safe(counts.get("nfs")), safe(counts.get("smb")),
                     safe(counts.get("s3")), listed, safe(total), safe(rpc.get("server_inflight")),
                     safe(rpc_samples), safe(vfs_samples), safe(_rate_cell(row, "rpc")),
-                    safe(_rate_cell(row, "vfs")), row.status])
+                    safe(_rate_cell(row, "vfs")), safe(_rate_cell(row, "rx_MB_s")),
+                    safe(_rate_cell(row, "tx_MB_s")), safe(_rate_cell(row, "cpu")),
+                    safe(_rate_cell(row, "busy")), row.status])
             if keys:
                 headers = ["", "WORKER", "TID", "RPC ID", "NFS", "SMB", "S3", matched_label,
-                    "TOTAL(all)", "RPC IN", "RPC SAMPLES", "VFS SAMPLES", "RPC samp/s", "VFS samp/s", "STATUS"]
+                    "TOTAL(all)", "RPC IN", "RPC SAMPLES", "VFS SAMPLES", "RPC samp/s", "VFS samp/s",
+                    "RX MB/s", "TX MB/s", "CPU%", "BUSY%", "STATUS"]
                 numeric = range(2, len(headers) - 1)
                 formatted = _table(headers, worker_rows, 0, numeric=numeric).splitlines()
                 add(formatted[0], kind="summary", indent="  ")

@@ -7,6 +7,8 @@
 #include "evpl/evpl.h"
 
 struct chimera_inspect_writer;
+struct chimera_inspect_sample;
+struct chimera_worker_stats;
 struct chimera_server_config;
 struct chimera_vfs;
 struct chimera_vfs_thread;
@@ -36,4 +38,12 @@ struct chimera_server_protocol {
         void                      *data);
     void  (*thread_destroy)(
         void *data);
+
+    void  (*inspect_live)(
+        void                          *data,
+        struct chimera_inspect_sample *sample);
+
+    void  (*inspect_register)(
+        void                        *data,
+        struct chimera_worker_stats *stats);
 };

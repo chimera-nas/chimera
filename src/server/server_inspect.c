@@ -6,14 +6,17 @@
 #include <string.h>
 #include <stdatomic.h>
 #include <errno.h>
+#include <inttypes.h>
+#include <unistd.h>
 #include "server_inspect.h"
+#include "inspect_mpsc.h"
 #include "protocol.h"
 #include "vfs/vfs.h"
 #include "common/platform.h"
 #include "common/uuid.h"
 
 struct chimera_inspect_task {
-    struct chimera_inspect_task      *next;
+    struct chimera_inspect_mpsc_node  node;
     struct chimera_inspect_collector *collector;
     struct chimera_inspect_endpoint  *target;
     unsigned int                      index;
@@ -23,23 +26,25 @@ struct chimera_inspect_endpoint {
     atomic_uint                       refs;
     struct chimera_server_inspect    *inspect;
     struct evpl                      *evpl;
+    struct chimera_worker_stats      *stats;
     struct evpl_doorbell              doorbell;
     struct evpl_doorbell_sender      *sender;
-    evpl_mutex_t                      lock;
-    int                               closing, worker_id;
-    struct chimera_inspect_task      *head, *tail;
+    int                               worker_id;
+    struct chimera_inspect_mpsc_queue queue;
     struct chimera_inspect_collector *active;
     struct chimera_vfs_thread        *vfs;
     int                               nprotocols;
     struct chimera_server_protocol  **protocols;
     void                            **contexts;
 };
+
 struct chimera_server_inspect {
     evpl_mutex_t                      lock;
     int                               closing, busy;
     unsigned int                      nworkers;
     char                              instance[37];
     struct chimera_inspect_endpoint **workers;
+    struct chimera_worker_stats      *worker_stats;
 };
 struct chimera_inspect_collector {
     atomic_uint                        refs;
@@ -57,6 +62,83 @@ struct chimera_inspect_collector {
     struct chimera_inspect_task       *tasks;
     struct chimera_inspect_connection *rows;
 };
+
+static void
+read_schedstat(
+    uint64_t  tid,
+    uint64_t *cpu_ns,
+    uint64_t *runq_wait_ns)
+{
+    char  path[64];
+    char  buffer[128];
+
+    snprintf(path, sizeof(path), "/proc/self/task/%" PRIu64 "/schedstat", tid);
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        return;
+    }
+    if (fgets(buffer, sizeof(buffer), file)) {
+        (void) sscanf(buffer, "%" SCNu64 " %" SCNu64, cpu_ns, runq_wait_ns);
+    }
+    fclose(file);
+} /* read_schedstat */
+
+SYMBOL_EXPORT unsigned int
+chimera_server_inspect_read_workers(
+    struct chimera_server_inspect *inspect,
+    struct chimera_worker_sample  *out,
+    unsigned int                   capacity)
+{
+    unsigned int count = 0;
+
+    for (unsigned int i = 0; i < inspect->nworkers && count < capacity; i++) {
+        struct chimera_worker_stats  *stats  = &inspect->worker_stats[i];
+        struct chimera_worker_sample *sample = &out[count++];
+        memset(sample, 0, sizeof(*sample));
+        sample->worker_id = i;
+        sample->os_tid    = stats->os_tid;
+        sample->identity  = stats->identity;
+        read_schedstat(sample->os_tid, &sample->cpu_ns, &sample->runq_wait_ns);
+        evpl_get_loop_stats(stats->evpl, &sample->loop);
+    }
+    return count;
+} /* chimera_server_inspect_read_workers */
+
+SYMBOL_EXPORT unsigned int
+chimera_server_inspect_read_vfs(
+    struct chimera_server_inspect *inspect,
+    unsigned int                   worker_id,
+    unsigned int                   capacity,
+    struct chimera_vfs_op_count   *out)
+{
+    if (worker_id >= inspect->nworkers) {
+        return 0;
+    }
+    return chimera_vfs_inspect_counts(inspect->worker_stats[worker_id].vfs, capacity, out);
+} /* chimera_server_inspect_read_vfs */
+
+SYMBOL_EXPORT void
+chimera_server_inspect_read_live_rpc(
+    struct chimera_server_inspect *inspect,
+    unsigned int                   worker_id,
+    struct chimera_inspect_sample *sample)
+{
+    if (worker_id >= inspect->nworkers) {
+        return;
+    }
+    struct chimera_worker_stats *stats = &inspect->worker_stats[worker_id];
+    for (int i = 0; i < stats->nprotocols; i++) {
+        if (stats->contexts[i] && stats->protocols[i]->inspect_live) {
+            stats->protocols[i]->inspect_live(stats->contexts[i], sample);
+        }
+    }
+} /* chimera_server_inspect_read_live_rpc */
+
+SYMBOL_EXPORT const char *
+chimera_server_inspect_instance_id(struct chimera_server_inspect *inspect)
+{
+    return inspect->instance;
+} /* chimera_server_inspect_instance_id */
 
 SYMBOL_EXPORT const char *
 chimera_inspect_service_name(enum chimera_inspect_service service)
@@ -177,7 +259,6 @@ endpoint_release(struct chimera_inspect_endpoint *endpoint)
 {
     if (atomic_fetch_sub(&endpoint->refs, 1) == 1) {
         evpl_doorbell_sender_release(endpoint->sender);
-        evpl_mutex_destroy(&endpoint->lock);
         free(endpoint);
     }
 } /* endpoint_release */
@@ -215,21 +296,14 @@ enqueue(
     struct chimera_inspect_endpoint *endpoint,
     struct chimera_inspect_task     *task)
 {
-    evpl_mutex_lock(&endpoint->lock);
-    if (endpoint->closing) {
-        evpl_mutex_unlock(&endpoint->lock);
+    atomic_fetch_add_explicit(&endpoint->refs, 1, memory_order_relaxed);
+    if (!chimera_inspect_mpsc_push(&endpoint->queue, &task->node)) {
         task_release(task);
+        endpoint_release(endpoint);
         return;
     }
-    task->next = NULL;
-    if (endpoint->tail) {
-        endpoint->tail->next = task;
-    } else {
-        endpoint->head = task;
-    }
-    endpoint->tail = task;
     evpl_doorbell_signal(endpoint->sender);
-    evpl_mutex_unlock(&endpoint->lock);
+    endpoint_release(endpoint);
 } /* enqueue */
 
 static void
@@ -300,15 +374,11 @@ collect_worker(
     struct chimera_inspect_sample    *sample    = &collector->samples[task->index];
     struct chimera_inspect_writer     writer    = { &collector->filter, sample, emit };
     struct timespec                   now;
-    struct tm                         utc;
 
     evpl_thread_get_identity(endpoint->evpl, &sample->identity);
     sample->os_tid = chimera_gettid();
     clock_gettime(CLOCK_MONOTONIC, &now);
     sample->sampled_monotonic_ns = (uint64_t) now.tv_sec * 1000000000 + now.tv_nsec;
-    clock_gettime(CLOCK_REALTIME, &now);
-    gmtime_r(&now.tv_sec, &utc);
-    strftime(sample->sampled_at, sizeof(sample->sampled_at), "%Y-%m-%dT%H:%M:%SZ", &utc);
     for (int i = 0; i < endpoint->nprotocols; i++) {
         if (endpoint->contexts[i] && endpoint->protocols[i]->inspect) {
             endpoint->protocols[i]->inspect(endpoint->contexts[i], &writer);
@@ -337,16 +407,12 @@ inbox(
     struct evpl          *evpl,
     struct evpl_doorbell *doorbell)
 {
-    struct chimera_inspect_endpoint *endpoint = container_of(doorbell, struct chimera_inspect_endpoint, doorbell);
-    struct chimera_inspect_task     *tasks;
+    struct chimera_inspect_endpoint  *endpoint = container_of(doorbell, struct chimera_inspect_endpoint, doorbell);
+    struct chimera_inspect_mpsc_node *nodes    = chimera_inspect_mpsc_drain(&endpoint->queue);
 
-    evpl_mutex_lock(&endpoint->lock);
-    tasks          = endpoint->head;
-    endpoint->head = endpoint->tail = NULL;
-    evpl_mutex_unlock(&endpoint->lock);
-    while (tasks) {
-        struct chimera_inspect_task *task = tasks;
-        tasks = tasks->next;
+    while (nodes) {
+        struct chimera_inspect_task *task = (struct chimera_inspect_task *) nodes;
+        nodes = nodes->next;
         if (!task->result) {
             collect_worker(endpoint, task);
         } else {
@@ -378,8 +444,21 @@ chimera_server_inspect_create(unsigned int workers)
     evpl_mutex_init(&inspect->lock, NULL);
     inspect->nworkers = workers;
     inspect->workers  = calloc(workers, sizeof(*inspect->workers));
-    if (!inspect->workers) {
+    if (posix_memalign((void **) &inspect->worker_stats, 64,
+                       workers * sizeof(*inspect->worker_stats)) || !inspect->workers) {
         abort();
+    }
+    memset(inspect->worker_stats, 0, workers * sizeof(*inspect->worker_stats));
+    for (unsigned int i = 0; i < workers; i++) {
+        struct chimera_worker_stats *stats = &inspect->worker_stats[i];
+        atomic_init(&stats->counters.rx_msgs, 0);
+        atomic_init(&stats->counters.tx_msgs, 0);
+        atomic_init(&stats->counters.rx_bytes, 0);
+        atomic_init(&stats->counters.tx_bytes, 0);
+        atomic_init(&stats->counters.rpc_errors, 0);
+        atomic_init(&stats->counters.accepts, 0);
+        atomic_init(&stats->counters.closes, 0);
+        atomic_init(&stats->counters.active_connections, 0);
     }
     return inspect;
 } /* chimera_server_inspect_create */
@@ -407,8 +486,23 @@ chimera_server_inspect_register(
     endpoint->nprotocols = nprotocols;
     endpoint->protocols  = protocols;
     endpoint->contexts   = contexts;
+    struct chimera_worker_stats *stats = &inspect->worker_stats[endpoint->worker_id];
+    endpoint->stats   = stats;
+    stats->os_tid     = chimera_gettid();
+    stats->pthread    = pthread_self();
+    stats->evpl       = evpl;
+    stats->vfs        = vfs;
+    stats->nprotocols = nprotocols;
+    stats->protocols  = protocols;
+    stats->contexts   = contexts;
+    stats->identity   = identity;
+    for (int i = 0; i < nprotocols; i++) {
+        if (contexts[i] && protocols[i]->inspect_register) {
+            protocols[i]->inspect_register(contexts[i], stats);
+        }
+    }
     atomic_init(&endpoint->refs, 1);
-    evpl_mutex_init(&endpoint->lock, NULL);
+    chimera_inspect_mpsc_init(&endpoint->queue);
     evpl_add_doorbell(evpl, &endpoint->doorbell, inbox);
     endpoint->sender = evpl_doorbell_sender(&endpoint->doorbell);
     evpl_mutex_lock(&inspect->lock);
@@ -428,7 +522,7 @@ chimera_server_inspect_stop(struct chimera_server_inspect *inspect)
 void
 chimera_server_inspect_unregister(struct chimera_inspect_endpoint *endpoint)
 {
-    struct chimera_server_inspect *inspect = endpoint->inspect;
+    struct chimera_server_inspect    *inspect = endpoint->inspect;
 
     evpl_mutex_lock(&inspect->lock);
     inspect->workers[endpoint->worker_id] = NULL;
@@ -436,16 +530,12 @@ chimera_server_inspect_unregister(struct chimera_inspect_endpoint *endpoint)
     if (endpoint->active) {
         chimera_server_inspect_cancel(endpoint->active);
     }
-    evpl_mutex_lock(&endpoint->lock);
-    endpoint->closing = 1;
-    struct chimera_inspect_task *task = endpoint->head;
-    endpoint->head = endpoint->tail = NULL;
-    evpl_mutex_unlock(&endpoint->lock);
+    struct chimera_inspect_mpsc_node *nodes = chimera_inspect_mpsc_close(&endpoint->queue);
     evpl_remove_doorbell(endpoint->evpl, &endpoint->doorbell);
-    while (task) {
-        struct chimera_inspect_task *next = task->next;
+    while (nodes) {
+        struct chimera_inspect_task *task = (struct chimera_inspect_task *) nodes;
+        nodes = nodes->next;
         task_release(task);
-        task = next;
     }
     endpoint_release(endpoint);
 } /* chimera_server_inspect_unregister */
@@ -454,6 +544,7 @@ void
 chimera_server_inspect_destroy(struct chimera_server_inspect *inspect)
 {
     evpl_mutex_destroy(&inspect->lock);
+    free(inspect->worker_stats);
     free(inspect->workers);
     free(inspect);
 } /* chimera_server_inspect_destroy */

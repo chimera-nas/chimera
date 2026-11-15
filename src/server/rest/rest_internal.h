@@ -130,3 +130,6 @@ void chimera_rest_inspect(
     int                          query_len,
     evpl_http_notify_callback_t *notify_callback,
     void                       **notify_data);
+void chimera_rest_inspect_live(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request);

@@ -1807,6 +1807,12 @@ nfs_inspect_connection(
     row.service        = nfs_inspect_service(context->thread->shared, info->server);
     row.minor_versions = info->application_tag;
     row.rdma_framing   = info->rdma_framing;
+    row.rx_msgs        = info->rx_msgs;
+    row.tx_msgs        = info->tx_msgs;
+    row.rx_bytes       = info->rx_bytes;
+    row.tx_bytes       = info->tx_bytes;
+    row.requests_done  = info->requests_done;
+    row.inflight       = info->inflight;
     row.nprograms      = info->nprograms;
     for (int i = 0; i < info->nprograms; i++) {
         row.programs[i] = info->programs[i].program;
@@ -1862,14 +1868,38 @@ nfs_inspect(
     }
 } /* nfs_inspect */
 
+static void
+nfs_inspect_register(
+    void                        *data,
+    struct chimera_worker_stats *stats)
+{
+    struct chimera_server_nfs_thread *thread = data;
+
+    evpl_rpc2_thread_set_worker_counters(thread->rpc2_thread, &stats->counters);
+} /* nfs_inspect_register */
+
+static void
+nfs_inspect_live(
+    void                          *data,
+    struct chimera_inspect_sample *sample)
+{
+    struct chimera_server_nfs_thread *thread = data;
+
+    sample->has_rpc = 1;
+    evpl_rpc2_get_thread_stats(thread->rpc2_thread, &sample->rpc);
+    evpl_rpc2_visit_procedure_stats(thread->rpc2_thread, nfs_inspect_procedure, sample);
+} /* nfs_inspect_live */
+
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
-    .inspect        = nfs_inspect,
-    .init           = nfs_server_init,
-    .destroy        = nfs_server_destroy,
-    .start          = nfs_server_start,
-    .stop           = nfs_server_stop,
-    .thread_init    = nfs_server_thread_init,
-    .thread_destroy = nfs_server_thread_destroy,
+    .inspect          = nfs_inspect,
+    .inspect_live     = nfs_inspect_live,
+    .inspect_register = nfs_inspect_register,
+    .init             = nfs_server_init,
+    .destroy          = nfs_server_destroy,
+    .start            = nfs_server_start,
+    .stop             = nfs_server_stop,
+    .thread_init      = nfs_server_thread_init,
+    .thread_destroy   = nfs_server_thread_destroy,
 };
 
 int

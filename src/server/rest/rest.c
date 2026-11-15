@@ -598,9 +598,14 @@ chimera_rest_dispatch(
         if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
             chimera_rest_handle_method_not_allowed(evpl, request);
         } else {
-            chimera_rest_inspect(thread, request, inspect_connections,
-                                 query ? query + 1 : NULL, query ? url_len - path_len - 1 : 0,
-                                 notify_callback, notify_data);
+            int query_len = query ? url_len - path_len - 1 : 0;
+            if (inspect_threads && query_len == 6 && !memcmp(query + 1, "live=1", 6)) {
+                chimera_rest_inspect_live(thread, request);
+            } else {
+                chimera_rest_inspect(thread, request, inspect_connections,
+                                     query ? query + 1 : NULL, query_len,
+                                     notify_callback, notify_data);
+            }
         }
         return;
     }

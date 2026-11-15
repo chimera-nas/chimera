@@ -3,6 +3,8 @@
 #pragma once
 
 #include <stdint.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <evpl/evpl.h>
 #include <evpl/evpl_rpc2.h>
 #include "common/macros.h"
@@ -28,6 +30,8 @@ struct chimera_inspect_connection {
     int                          nprograms;
     uint16_t                     smb_dialect;
     uint32_t                     messages_received;
+    uint64_t                     rx_msgs, tx_msgs, rx_bytes, tx_bytes;
+    uint64_t                     requests_done, inflight;
     int                          rdma_framing;
     char                         http_framing[16];
 };
@@ -73,6 +77,29 @@ struct chimera_inspect_result {
     const struct chimera_inspect_sample *samples;
     const unsigned char                 *present;
 };
+struct CHIMERA_ALIGNED(64) chimera_worker_stats {
+    uint64_t                         os_tid;
+    pthread_t                        pthread;
+    struct evpl                     *evpl;
+    struct chimera_vfs_thread       *vfs;
+    int                              nprotocols;
+    struct chimera_server_protocol **protocols;
+    void                           **contexts;
+    struct evpl_thread_identity      identity;
+    struct evpl_rpc2_worker_counters counters;
+};
+struct chimera_worker_sample {
+    unsigned int                worker_id;
+    uint64_t                    os_tid, cpu_ns, runq_wait_ns;
+    struct evpl_thread_identity identity;
+    struct evpl_loop_stats      loop;
+};
+
+#define CHIMERA_STAT_ADD(stats, field, n) do { \
+            uint64_t chimera_stat_value = atomic_load_explicit(&(stats)->counters.field, memory_order_relaxed); \
+            atomic_store_explicit(&(stats)->counters.field, chimera_stat_value + (uint64_t) (n), memory_order_relaxed); \
+} while (0)
+#define CHIMERA_STAT_READ(stats, field)   atomic_load_explicit(&(stats)->counters.field, memory_order_relaxed)
 typedef void (*chimera_inspect_callback)(
     const struct chimera_inspect_result *,
     void *);
@@ -94,6 +121,21 @@ void chimera_server_inspect_unregister(
     struct chimera_inspect_endpoint *endpoint);
 SYMBOL_EXPORT struct chimera_server_inspect * chimera_server_get_inspect(
     struct chimera_server *server);
+SYMBOL_EXPORT unsigned int chimera_server_inspect_read_workers(
+    struct chimera_server_inspect *inspect,
+    struct chimera_worker_sample  *out,
+    unsigned int                   capacity);
+SYMBOL_EXPORT unsigned int chimera_server_inspect_read_vfs(
+    struct chimera_server_inspect *inspect,
+    unsigned int                   worker_id,
+    unsigned int                   capacity,
+    struct chimera_vfs_op_count   *out);
+SYMBOL_EXPORT void chimera_server_inspect_read_live_rpc(
+    struct chimera_server_inspect *inspect,
+    unsigned int                   worker_id,
+    struct chimera_inspect_sample *sample);
+SYMBOL_EXPORT const char * chimera_server_inspect_instance_id(
+    struct chimera_server_inspect *inspect);
 /* Start/cancel/release are called only on the requesting worker. Callback is
  * asynchronous, including when collecting from that same worker. */
 SYMBOL_EXPORT int chimera_server_inspect_collect(
