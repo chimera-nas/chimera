@@ -16,7 +16,15 @@ Chimera is currently in an experimental state of development.  The focus so far 
 
 # Documentation
 
-Currently, there is none beyond this README.   More to come.
+See the [API reference](docs/api-reference.md) and [connection and worker inspection guide](docs/inspection.md).
+The [chimera-admin SDK and CLI](src/admin/README.md) provides administrative
+commands and an interactive worker dashboard. Install it from this checkout:
+
+```bash
+python3 -m pip install ./src/admin
+chimera-admin --host nas-server inspect dashboard --interactive
+chimera-admin inspect dashboard --targets targets.json --interactive
+```
 
 # Community
 

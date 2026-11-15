@@ -588,6 +588,23 @@ chimera_rest_dispatch(
         }
     }
 
+    /* Only inspection routes split path/query; existing route behavior stays
+     * with its current path matching and authentication middleware. */
+    const char *query               = memchr(url, '?', url_len);
+    int         path_len            = query ? query - url : url_len;
+    int         inspect_connections = path_len == 19 && !memcmp(url, "/api/v1/connections", 19);
+    int         inspect_threads     = path_len == 15 && !memcmp(url, "/api/v1/threads", 15);
+    if (inspect_connections || inspect_threads) {
+        if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        } else {
+            chimera_rest_inspect(thread, request, inspect_connections,
+                                 query ? query + 1 : NULL, query ? url_len - path_len - 1 : 0,
+                                 notify_callback, notify_data);
+        }
+        return;
+    }
+
     /* Config API: /api/v1/config */
     if (url_len == 14 && strncmp(url, "/api/v1/config", 14) == 0) {
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {

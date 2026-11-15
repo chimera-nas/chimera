@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "common/compiler.h"
+#include "server/server_inspect.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2974,6 +2975,7 @@ chimera_smb_server_accept(
 
     /* Track this connection on its owning thread's active list so the
      * lease-break resume doorbell can walk it for parked CREATEs. */
+    thread->inspection_connection_count++;
     DL_APPEND2(thread->active_conns, conn, active_prev, active_next);
 
     *notify_callback   = chimera_smb_server_notify;
@@ -3320,7 +3322,38 @@ chimera_smb_share_get_path(const struct chimera_smb_share *share)
     return share->path;
 } /* chimera_smb_share_get_path */
 
+static void
+smb_inspect(
+    void                          *data,
+    struct chimera_inspect_writer *writer)
+{
+    struct chimera_server_smb_thread *thread = data;
+    struct chimera_inspect_sample    *sample = writer->sample;
+    struct chimera_smb_conn          *conn;
+
+    sample->connection_counts[CHIMERA_INSPECT_SMB] = thread->inspection_connection_count;
+    if (!writer->filter->connections) {
+        return;
+    }
+    DL_FOREACH2(thread->active_conns, conn, active_next)
+    {
+        if (sample->scanned == CHIMERA_INSPECT_SCAN) {
+            sample->truncated = 1; break;
+        }
+        sample->scanned++;
+        struct chimera_inspect_connection row = { 0 };
+        evpl_bind_get_info(conn->bind, &row.bind);
+        row.service           = CHIMERA_INSPECT_SMB;
+        row.smb_dialect       = conn->dialect;
+        row.messages_received = conn->requests_completed;
+        if (!writer->emit(writer, &row)) {
+            break;
+        }
+    }
+} /* smb_inspect */
+
 SYMBOL_EXPORT struct chimera_server_protocol smb_protocol = {
+    .inspect        = smb_inspect,
     .init           = chimera_smb_server_init,
     .destroy        = chimera_smb_server_destroy,
     .start          = chimera_smb_server_start,

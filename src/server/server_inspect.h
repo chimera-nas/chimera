@@ -1,0 +1,116 @@
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+// SPDX-License-Identifier: LGPL-2.1-only
+#pragma once
+
+#include <stdint.h>
+#include <evpl/evpl.h>
+#include <evpl/evpl_rpc2.h>
+#include "common/macros.h"
+#include "vfs/vfs.h"
+
+#define CHIMERA_INSPECT_ROWS       1024
+#define CHIMERA_INSPECT_SCAN       4096
+#define CHIMERA_INSPECT_PROCEDURES 128
+#define CHIMERA_INSPECT_VFS_OPS    64
+
+enum chimera_inspect_service {
+    CHIMERA_INSPECT_NFS, CHIMERA_INSPECT_MOUNT, CHIMERA_INSPECT_NLM,
+    CHIMERA_INSPECT_NSM, CHIMERA_INSPECT_RPCBIND, CHIMERA_INSPECT_SMB,
+    CHIMERA_INSPECT_S3, CHIMERA_INSPECT_SERVICES
+};
+
+/* All published records contain values only, never protocol/transport pointers. */
+struct chimera_inspect_connection {
+    struct evpl_bind_info        bind;
+    enum chimera_inspect_service service;
+    uint64_t                     minor_versions;
+    uint32_t                     programs[4], versions[4];
+    int                          nprograms;
+    uint16_t                     smb_dialect;
+    uint32_t                     messages_received;
+    int                          rdma_framing;
+    char                         http_framing[16];
+};
+struct chimera_inspect_filter {
+    int          connections;
+    int          worker_id; /* -1 means all */
+    unsigned int services;
+    int          remote_port, local_port; /* -1 means all */
+    char         remote_ip[64], local_ip[64], transport[32];
+};
+struct chimera_inspect_sample {
+    int                                worker_id;
+    struct evpl_thread_identity        identity;
+    uint64_t                           os_tid, sampled_monotonic_ns;
+    char                               sampled_at[40];
+    uint64_t                           connection_counts[CHIMERA_INSPECT_SERVICES];
+    int                                has_rpc;
+    struct evpl_rpc2_thread_stats      rpc;
+    struct evpl_rpc2_procedure_stats   procedures[CHIMERA_INSPECT_PROCEDURES];
+    unsigned int                       nprocedures;
+    struct chimera_vfs_op_count        vfs[CHIMERA_INSPECT_VFS_OPS];
+    unsigned int                       nvfs;
+    struct chimera_inspect_connection *rows;
+    unsigned int                       quota, nrows, scanned;
+    int                                truncated;
+};
+struct chimera_inspect_writer {
+    const struct chimera_inspect_filter *filter;
+    struct chimera_inspect_sample       *sample;
+    int                                  (*emit)(
+        struct chimera_inspect_writer *,
+        const struct chimera_inspect_connection *);
+};
+struct chimera_server;
+struct chimera_vfs_thread;
+struct chimera_server_protocol;
+struct chimera_server_inspect;
+struct chimera_inspect_endpoint;
+struct chimera_inspect_collector;
+struct chimera_inspect_result {
+    char                                 server_instance_id[37];
+    unsigned int                         nworkers, responded;
+    const struct chimera_inspect_sample *samples;
+    const unsigned char                 *present;
+};
+typedef void (*chimera_inspect_callback)(
+    const struct chimera_inspect_result *,
+    void *);
+
+struct chimera_server_inspect * chimera_server_inspect_create(
+    unsigned int workers);
+void chimera_server_inspect_stop(
+    struct chimera_server_inspect *inspect);
+void chimera_server_inspect_destroy(
+    struct chimera_server_inspect *inspect);
+struct chimera_inspect_endpoint * chimera_server_inspect_register(
+    struct chimera_server_inspect   *inspect,
+    struct evpl                     *evpl,
+    struct chimera_vfs_thread       *vfs,
+    int                              nprotocols,
+    struct chimera_server_protocol **protocols,
+    void                           **contexts);
+void chimera_server_inspect_unregister(
+    struct chimera_inspect_endpoint *endpoint);
+SYMBOL_EXPORT struct chimera_server_inspect * chimera_server_get_inspect(
+    struct chimera_server *server);
+/* Start/cancel/release are called only on the requesting worker. Callback is
+ * asynchronous, including when collecting from that same worker. */
+SYMBOL_EXPORT int chimera_server_inspect_collect(
+    struct chimera_server_inspect       *inspect,
+    struct evpl                         *evpl,
+    const struct chimera_inspect_filter *filter,
+    chimera_inspect_callback             callback,
+    void                                *data,
+    struct chimera_inspect_collector   **collector);
+SYMBOL_EXPORT void chimera_server_inspect_cancel(
+    struct chimera_inspect_collector *collector);
+SYMBOL_EXPORT void chimera_server_inspect_release(
+    struct chimera_inspect_collector *collector);
+SYMBOL_EXPORT const char * chimera_inspect_service_name(
+    enum chimera_inspect_service service);
+SYMBOL_EXPORT void chimera_inspect_transport(
+    enum evpl_protocol_id protocol,
+    const char          **transport,
+    const char          **backend,
+    const char          **raw);

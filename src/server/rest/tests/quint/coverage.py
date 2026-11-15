@@ -99,6 +99,8 @@ BUCKETS = {
     "api:read-present":        "a GET of something that is there",
     "api:read-absent":         "a GET of something that is not",
     "api:config":              "the config reconstruction",
+    "api:threads":             "a worker inspection read",
+    "api:connections":         "a connection inspection read",
 
     "mnt:ok":                  "a MOUNT that succeeds",
     "mnt:no-export":           "a MOUNT of a name that is not an export",
@@ -141,6 +143,8 @@ STATUS_BUCKET = {
     ("RUserCreate", 201): "api:user-create-ok",
     ("RUserDelete", 204): "api:user-delete-ok",
     ("RConfig", 200): "api:config",
+    ("RThreads", 200): "api:threads",
+    ("RConnections", 200): "api:connections",
 }
 
 READS = {"RMountGet", "RExportGet", "RShareGet", "RBucketGet", "RUserGet"}

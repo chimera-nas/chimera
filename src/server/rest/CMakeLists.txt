@@ -11,6 +11,7 @@ endif()
 
 add_library(chimera_rest ${CHIMERA_LIBRARY_TYPE}
     rest.c
+    rest_inspect.c
     rest_users.c
     rest_exports.c
     rest_shares.c

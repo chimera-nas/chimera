@@ -1909,3 +1909,24 @@ chimera_vfs_request_alloc_memory(
     request->memory = memory;
     return memory + 1;
 } /* chimera_vfs_request_alloc_memory */
+
+SYMBOL_EXPORT unsigned int
+chimera_vfs_inspect_counts(
+    struct chimera_vfs_thread   *thread,
+    unsigned int                 capacity,
+    struct chimera_vfs_op_count *counts)
+{
+    unsigned int n = 0;
+
+    if (!thread->metrics.op_latency_series) {
+        return 0;
+    }
+    for (int i = 0; i < CHIMERA_VFS_OP_NUM && n < capacity; i++) {
+        if (!thread->metrics.op_latency_series[i]) {
+            continue;
+        }
+        snprintf(counts[n].name, sizeof(counts[n].name), "%s", chimera_vfs_op_name(i));
+        counts[n++].count = thread->metrics.op_latency_series[i]->count;
+    }
+    return n;
+} /* chimera_vfs_inspect_counts */

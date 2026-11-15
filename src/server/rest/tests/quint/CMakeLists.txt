@@ -243,3 +243,15 @@ add_test(NAME chimera/server/rest/ctl/coverage
 set_tests_properties(chimera/server/rest/ctl/coverage PROPERTIES
     LABELS "quint;ctl_mbt"
     TIMEOUT 120)
+
+add_executable(ctl_inspect_probe ctl_inspect_probe.c)
+target_include_directories(ctl_inspect_probe PRIVATE ${CMAKE_SOURCE_DIR}/src ${JANSSON_INCLUDE_DIRS})
+target_link_libraries(ctl_inspect_probe chimera_server chimera_metrics ${JANSSON_LIBRARIES})
+add_test(NAME chimera/server/rest/ctl/inspect_probe COMMAND $<TARGET_FILE:ctl_inspect_probe>)
+set_tests_properties(chimera/server/rest/ctl/inspect_probe PROPERTIES LABELS "quint;ctl_mbt;memfs" TIMEOUT 120)
+
+add_executable(inspect_lifetime_probe inspect_lifetime_probe.c ${CMAKE_SOURCE_DIR}/src/server/server_inspect.c)
+target_include_directories(inspect_lifetime_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(inspect_lifetime_probe chimera_vfs evpl_rpc2)
+add_test(NAME chimera/server/rest/ctl/inspect_lifetime_probe COMMAND $<TARGET_FILE:inspect_lifetime_probe>)
+set_tests_properties(chimera/server/rest/ctl/inspect_lifetime_probe PROPERTIES LABELS "quint;ctl_mbt;memfs" TIMEOUT 30)

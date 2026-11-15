@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "server/server_inspect.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -1510,7 +1511,39 @@ s3_server_thread_destroy(void *data)
     free(thread);
 } /* s3_server_thread_destroy */
 
+static int
+s3_inspect_connection(
+    const struct evpl_http_connection_info *info,
+    void                                   *data)
+{
+    struct chimera_inspect_writer    *writer = data;
+    struct chimera_inspect_connection row    = { 0 };
+
+    row.bind    = info->bind;
+    row.service = CHIMERA_INSPECT_S3;
+    snprintf(row.http_framing, sizeof(row.http_framing), "%s", info->framing);
+    return writer->emit(writer, &row);
+} /* s3_inspect_connection */
+static void
+s3_inspect(
+    void                          *data,
+    struct chimera_inspect_writer *writer)
+{
+    struct chimera_server_s3_thread *thread = data;
+    struct chimera_inspect_sample   *sample = writer->sample;
+
+    sample->connection_counts[CHIMERA_INSPECT_S3] = evpl_http_server_connection_count(thread->server);
+    if (writer->filter->connections) {
+        int truncated;
+        sample->scanned += evpl_http_visit_server_connections(thread->server,
+                                                              CHIMERA_INSPECT_SCAN - sample->scanned,
+                                                              s3_inspect_connection, writer, &truncated);
+        sample->truncated |= truncated;
+    }
+} /* s3_inspect */
+
 SYMBOL_EXPORT struct chimera_server_protocol s3_protocol = {
+    .inspect        = s3_inspect,
     .init           = s3_server_init,
     .destroy        = s3_server_destroy,
     .start          = s3_server_start,

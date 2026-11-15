@@ -341,4 +341,10 @@ module ctlTestRef {
             .then(apiRead(RExportGet("/e1"),
                           getStatus(ctlst.exports.keys().contains("/e1"))))
             .expect(st == NOT_FOUND)
+    run inspectionReadsPreserveStateTest =
+        init
+            .then(apiRead(RThreads, OK))
+            .expect(st == OK and ctlst.mounts.keys().contains("m0"))
+            .then(apiRead(RConnections, OK))
+            .expect(st == OK and ctlst.exports.keys().contains("/e0"))
 }

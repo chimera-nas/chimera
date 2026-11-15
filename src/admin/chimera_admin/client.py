@@ -5,6 +5,9 @@
 """Chimera Admin Client - REST API client for Chimera server administration."""
 
 import requests
+import json
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -12,9 +15,10 @@ from urllib.parse import urljoin
 class ChimeraAdminError(Exception):
     """Base exception for Chimera Admin SDK errors."""
 
-    def __init__(self, message: str, status_code: Optional[int] = None):
+    def __init__(self, message: str, status_code: Optional[int] = None, retry_after: float = 0):
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after = retry_after
 
 
 class ChimeraAdminClient:
@@ -26,6 +30,10 @@ class ChimeraAdminClient:
         timeout: Request timeout in seconds (default: 30).
         verify_ssl: Whether to verify SSL certificates (default: True).
         use_https: Whether to use HTTPS (default: False).
+        token: Optional Bearer token for management authentication.
+        username: Optional Basic-auth username.
+        password: Optional Basic-auth password.
+        ca_file: Optional CA bundle for certificate verification.
     """
 
     def __init__(
@@ -35,15 +43,81 @@ class ChimeraAdminClient:
         timeout: int = 30,
         verify_ssl: bool = True,
         use_https: bool = False,
+        token: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        ca_file: Optional[str] = None,
     ):
         self.host = host
         self.port = port
         self.timeout = timeout
-        self.verify_ssl = verify_ssl
+        self.verify_ssl = ca_file if ca_file else verify_ssl
         self.use_https = use_https
         scheme = "https" if use_https else "http"
-        self._base_url = f"{scheme}://{host}:{port}"
+        url_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        self._base_url = f"{scheme}://{url_host}:{port}"
         self._session = requests.Session()
+        if token and username:
+            raise ValueError("choose a Bearer token or Basic credentials, not both")
+        if token:
+            self._session.headers["Authorization"] = "Bearer " + token
+        elif username:
+            self._session.auth = (username, password or "")
+
+    def _inspection_get(self, endpoint: str, params: dict) -> dict:
+        """Read a bounded inspection response using the existing session."""
+        limit = 8 * 1024 * 1024
+        try:
+            with self._session.get(
+                urljoin(self._base_url, endpoint), params=params,
+                timeout=self.timeout, verify=self.verify_ssl,
+                stream=True, allow_redirects=False,
+            ) as response:
+                data = bytearray()
+                for chunk in response.iter_content(chunk_size=65536):
+                    data.extend(chunk)
+                    if len(data) > limit:
+                        raise ChimeraAdminError("Inspection response exceeds 8 MiB")
+                try:
+                    body = json.loads(data.decode("utf-8"))
+                except (ValueError, UnicodeError):
+                    body = None
+                if response.status_code != 200:
+                    retry = 0.0
+                    value = response.headers.get("Retry-After", "0")
+                    try:
+                        retry = float(value)
+                    except ValueError:
+                        try:
+                            retry = (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+                        except (TypeError, ValueError, OverflowError):
+                            pass
+                    message = body.get("message", response.reason) if isinstance(body, dict) else response.reason
+                    if response.status_code in (404, 405):
+                        message = "Inspection endpoint unavailable; this server needs inspection API support"
+                    raise ChimeraAdminError(
+                        "HTTP {}: {}".format(response.status_code, message),
+                        status_code=response.status_code,
+                        retry_after=max(0.0, min(30.0, retry)),
+                    )
+                if not isinstance(body, dict):
+                    raise ChimeraAdminError("Invalid inspection JSON object")
+                return body
+        except requests.exceptions.RequestException as exc:
+            raise ChimeraAdminError("Inspection request failed: {}".format(exc)) from exc
+
+    def get_threads(self, worker_id: Optional[int] = None) -> dict:
+        """Get worker identities and existing owner-thread metric counts."""
+        params = {} if worker_id is None else {"worker_id": worker_id}
+        return self._inspection_get("/api/v1/threads", params)
+
+    def get_connections(self, **filters) -> dict:
+        """Get connection mappings with numeric endpoint and worker filters."""
+        allowed = {"worker_id", "service", "transport", "remote_ip", "remote_port", "local_ip", "local_port"}
+        unknown = set(filters) - allowed
+        if unknown:
+            raise ValueError("unknown connection filters: " + ", ".join(sorted(unknown)))
+        return self._inspection_get("/api/v1/connections", {k: v for k, v in filters.items() if v is not None})
 
     @staticmethod
     def _http_error_message(e: requests.exceptions.HTTPError) -> str:

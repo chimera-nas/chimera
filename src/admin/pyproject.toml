@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "chimera-admin"
 version = "0.1.0"
-description = "Python SDK for Chimera NAS REST API"
+description = "Python SDK and CLI for the Chimera NAS REST API"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.8"
@@ -35,8 +35,12 @@ dev = [
     "pytest-timeout>=2.0.0",
 ]
 
+[project.scripts]
+chimera-admin = "chimera_admin.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["chimera_admin*"]
 exclude = ["tests*"]
 
 [tool.pytest.ini_options]

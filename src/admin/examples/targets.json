@@ -1,0 +1,16 @@
+{
+  "targets": [
+    {
+      "name": "nas-a",
+      "url": "https://nas-a.example.net:8443",
+      "token_env": "NAS_A_ADMIN_TOKEN",
+      "timeout_seconds": 3
+    },
+    {
+      "name": "nas-b",
+      "url": "https://nas-b.example.net:8443",
+      "token_env": "NAS_B_ADMIN_TOKEN",
+      "timeout_seconds": 3
+    }
+  ]
+}

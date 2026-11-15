@@ -17,6 +17,185 @@
   ],
   "security": [{"bearerAuth": []}, {"basicAuth": []}],
   "paths": {
+      "/threads": {
+        "get": {
+          "summary": "Inspect threads",
+          "operationId": "getThreads",
+          "tags": [
+            "Inspection"
+          ],
+          "description": "Read-only owner-worker snapshots. One collector per server, one-second deadline. Partial results are explicit; snapshots are not globally atomic. Default connection services are NFS, SMB and S3. Worker totals always cover all traffic. No pagination or disconnect history.",
+          "parameters": [
+            {
+              "name": "worker_id",
+              "in": "query",
+              "schema": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "description": "Core worker pool index."
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Complete or explicitly partial snapshot.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ThreadsSnapshot"
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Unknown, duplicate or invalid filter."
+            },
+            "401": {
+              "description": "Normal management authentication required."
+            },
+            "429": {
+              "description": "Collector still outstanding, including after cancellation until queued tasks release.",
+              "headers": {
+                "Retry-After": {
+                  "schema": {
+                    "type": "integer"
+                  },
+                  "description": "Seconds before retry."
+                }
+              }
+            },
+            "503": {
+              "description": "No selected worker responded or server shutting down."
+            }
+          }
+        }
+      },
+      "/connections": {
+        "get": {
+          "summary": "Inspect connections",
+          "operationId": "getConnections",
+          "tags": [
+            "Inspection"
+          ],
+          "description": "Read-only owner-worker snapshots. One collector per server, one-second deadline. Partial results are explicit; snapshots are not globally atomic. Default connection services are NFS, SMB and S3. Worker totals always cover all traffic. No pagination or disconnect history.",
+          "parameters": [
+            {
+              "name": "worker_id",
+              "in": "query",
+              "schema": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647
+              },
+              "description": "Core worker pool index."
+            },
+            {
+              "name": "service",
+              "in": "query",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "nfs",
+                  "mount",
+                  "nlm",
+                  "nsm",
+                  "rpcbind",
+                  "smb",
+                  "s3"
+                ]
+              },
+              "description": "ANDed with other filters."
+            },
+            {
+              "name": "remote_ip",
+              "in": "query",
+              "schema": {
+                "type": "string"
+              },
+              "description": "Numeric IP only; no DNS."
+            },
+            {
+              "name": "remote_port",
+              "in": "query",
+              "schema": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535
+              },
+              "description": "ANDed with other filters."
+            },
+            {
+              "name": "local_ip",
+              "in": "query",
+              "schema": {
+                "type": "string"
+              },
+              "description": "Numeric IP only; no DNS."
+            },
+            {
+              "name": "local_port",
+              "in": "query",
+              "schema": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535
+              },
+              "description": "ANDed with other filters."
+            },
+            {
+              "name": "transport",
+              "in": "query",
+              "schema": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535,
+                "enum": [
+                  "tcp",
+                  "udp",
+                  "rdma",
+                  "unix",
+                  "inproc",
+                  "fabric"
+                ]
+              },
+              "description": "ANDed with other filters."
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Complete or explicitly partial snapshot.",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ConnectionsSnapshot"
+                  }
+                }
+              }
+            },
+            "400": {
+              "description": "Unknown, duplicate or invalid filter."
+            },
+            "401": {
+              "description": "Normal management authentication required."
+            },
+            "429": {
+              "description": "Collector still outstanding, including after cancellation until queued tasks release.",
+              "headers": {
+                "Retry-After": {
+                  "schema": {
+                    "type": "integer"
+                  },
+                  "description": "Seconds before retry."
+                }
+              }
+            },
+            "503": {
+              "description": "No selected worker responded or server shutting down."
+            }
+          }
+        }
+      },
     "/config": {
       "get": {
         "summary": "Get server configuration",
@@ -892,6 +1071,368 @@
       }
     },
     "schemas": {
+        "InspectionEndpoint": {
+          "type": "object",
+          "required": [
+            "family",
+            "address",
+            "port"
+          ],
+          "properties": {
+            "family": {
+              "type": "string",
+              "enum": [
+                "ipv4",
+                "ipv6",
+                "unix",
+                "inproc",
+                "unknown"
+              ]
+            },
+            "address": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "scope_id": {
+              "type": "integer"
+            }
+          }
+        },
+        "InspectionConnection": {
+          "type": "object",
+          "required": [
+            "connection_id",
+            "worker_id",
+            "service",
+            "local",
+            "remote",
+            "transport",
+            "backend",
+            "raw_transport",
+            "state",
+            "per_connection_stats"
+          ],
+          "properties": {
+            "connection_id": {
+              "type": "string"
+            },
+            "worker_id": {
+              "type": "integer"
+            },
+            "worker_name": {
+              "type": "string"
+            },
+            "os_tid": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Exact unsigned 64-bit decimal value."
+            },
+            "origin": {
+              "type": "string",
+              "enum": [
+                "accepted"
+              ]
+            },
+            "service": {
+              "type": "string",
+              "enum": [
+                "nfs",
+                "mount",
+                "nlm",
+                "nsm",
+                "rpcbind",
+                "smb",
+                "s3"
+              ]
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "open",
+                "closing"
+              ]
+            },
+            "transport": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "raw_transport": {
+              "type": "string"
+            },
+            "age_ms": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Exact unsigned 64-bit decimal value."
+            },
+            "local": {
+              "$ref": "#/components/schemas/InspectionEndpoint"
+            },
+            "remote": {
+              "$ref": "#/components/schemas/InspectionEndpoint"
+            },
+            "observed_rpc_programs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "program": {
+                    "type": "integer"
+                  },
+                  "version": {
+                    "type": "integer"
+                  }
+                }
+              }
+            },
+            "nfs_minor_versions_seen": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2
+              }
+            },
+            "negotiated_dialect": {
+              "type": "integer",
+              "nullable": true
+            },
+            "http_framing": {
+              "type": "string",
+              "enum": [
+                "unknown",
+                "h1",
+                "h2"
+              ]
+            },
+            "per_connection_stats": {
+              "type": "object",
+              "nullable": true,
+              "description": "NFS: null. SMB messages_received is the existing wrapping 32-bit received-message counter, not completed commands.",
+              "properties": {
+                "messages_received": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "counter_bits": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "InspectionWorkerSample": {
+          "type": "object",
+          "required": [
+            "worker_id",
+            "sampled_at",
+            "sampled_monotonic_ns",
+            "truncated"
+          ],
+          "properties": {
+            "worker_id": {
+              "type": "integer"
+            },
+            "sampled_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "sampled_monotonic_ns": {
+              "type": "string",
+              "pattern": "^[0-9]+$",
+              "description": "Exact unsigned 64-bit decimal value."
+            },
+            "scanned": {
+              "type": "integer",
+              "maximum": 4096
+            },
+            "returned": {
+              "type": "integer",
+              "maximum": 1024
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          }
+        },
+        "InspectionThread": {
+          "allOf": [
+            {
+              "$ref": "#/components/schemas/InspectionWorkerSample"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "worker_name": {
+                  "type": "string"
+                },
+                "executor": {
+                  "type": "string",
+                  "enum": [
+                    "native",
+                    "spdk"
+                  ]
+                },
+                "os_tid": {
+                  "type": "string",
+                  "pattern": "^[0-9]+$",
+                  "description": "Exact unsigned 64-bit decimal value."
+                },
+                "rpc_thread_id": {
+                  "type": "integer"
+                },
+                "connection_counts": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "pattern": "^[0-9]+$",
+                    "description": "Exact unsigned 64-bit decimal value."
+                  }
+                },
+                "rpc": {
+                  "type": "object",
+                  "description": "Existing worker RPC-context role gauges and per-binding procedure histogram counts, including auxiliary services. Not per-client or per-connection traffic.",
+                  "properties": {
+                    "server_inflight": {
+                      "type": "string"
+                    },
+                    "client_inflight": {
+                      "type": "string"
+                    },
+                    "procedures": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "program": {
+                            "type": "integer"
+                          },
+                          "version": {
+                            "type": "integer"
+                          },
+                          "procedure": {
+                            "type": "integer"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "latency_samples_total": {
+                            "type": "string",
+                            "pattern": "^[0-9]+$",
+                            "description": "Exact unsigned 64-bit decimal value."
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "vfs": {
+                  "type": "object",
+                  "properties": {
+                    "operations": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "latency_samples_total": {
+                            "type": "string",
+                            "pattern": "^[0-9]+$",
+                            "description": "Exact unsigned 64-bit decimal value."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "ThreadsSnapshot": {
+          "type": "object",
+          "required": [
+            "server_instance_id",
+            "complete",
+            "truncated",
+            "missing_workers",
+            "threads"
+          ],
+          "properties": {
+            "server_instance_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "complete": {
+              "type": "boolean"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "missing_workers": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "threads": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/InspectionThread"
+              }
+            }
+          }
+        },
+        "ConnectionsSnapshot": {
+          "type": "object",
+          "required": [
+            "server_instance_id",
+            "complete",
+            "truncated",
+            "missing_workers",
+            "worker_samples",
+            "connections"
+          ],
+          "properties": {
+            "server_instance_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "complete": {
+              "type": "boolean"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "missing_workers": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            "worker_samples": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/InspectionWorkerSample"
+              }
+            },
+            "connections": {
+              "type": "array",
+              "maxItems": 1024,
+              "items": {
+                "$ref": "#/components/schemas/InspectionConnection"
+              }
+            }
+          }
+        },
       "LoginRequest": {
         "type": "object",
         "required": ["username", "password"],

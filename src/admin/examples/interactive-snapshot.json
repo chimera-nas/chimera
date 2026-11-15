@@ -1,0 +1,718 @@
+{
+  "connections_snapshot": {
+    "server_instance_id": "d2c892c0-669f-44f7-a492-f8e0b3c8826",
+    "complete": true,
+    "truncated": false,
+    "missing_workers": [],
+    "worker_samples": [
+      {
+        "worker_id": 0,
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "scanned": 8,
+        "returned": 8,
+        "truncated": false
+      },
+      {
+        "worker_id": 1,
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "scanned": 0,
+        "returned": 0,
+        "truncated": false
+      },
+      {
+        "worker_id": 2,
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "scanned": 0,
+        "returned": 0,
+        "truncated": false
+      },
+      {
+        "worker_id": 3,
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "scanned": 1,
+        "returned": 1,
+        "truncated": false
+      },
+      {
+        "worker_id": 4,
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "scanned": 0,
+        "returned": 0,
+        "truncated": false
+      },
+      {
+        "worker_id": 5,
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "scanned": 1,
+        "returned": 1,
+        "truncated": false
+      },
+      {
+        "worker_id": 6,
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "scanned": 0,
+        "returned": 0,
+        "truncated": false
+      },
+      {
+        "worker_id": 7,
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "scanned": 0,
+        "returned": 0,
+        "truncated": false
+      }
+    ],
+    "connections": [
+      {
+        "connection_id": "0:100",
+        "worker_id": 0,
+        "worker_name": "chm_core_0",
+        "os_tid": "1241",
+        "origin": "accepted",
+        "state": "open",
+        "service": "nfs",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv4",
+          "address": "10.0.0.20",
+          "port": 40100
+        },
+        "local": {
+          "family": "ipv4",
+          "address": "10.0.0.10",
+          "port": 2049
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [
+          {
+            "program": 100003,
+            "version": 4
+          }
+        ],
+        "nfs_minor_versions_seen": [
+          1
+        ],
+        "per_connection_stats": null
+      },
+      {
+        "connection_id": "0:101",
+        "worker_id": 0,
+        "worker_name": "chm_core_0",
+        "os_tid": "1241",
+        "origin": "accepted",
+        "state": "open",
+        "service": "nfs",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv4",
+          "address": "10.0.0.20",
+          "port": 40101
+        },
+        "local": {
+          "family": "ipv4",
+          "address": "10.0.0.10",
+          "port": 2049
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [
+          {
+            "program": 100003,
+            "version": 4
+          }
+        ],
+        "nfs_minor_versions_seen": [
+          1
+        ],
+        "per_connection_stats": null
+      },
+      {
+        "connection_id": "0:102",
+        "worker_id": 0,
+        "worker_name": "chm_core_0",
+        "os_tid": "1241",
+        "origin": "accepted",
+        "state": "open",
+        "service": "nfs",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv4",
+          "address": "10.0.0.20",
+          "port": 40102
+        },
+        "local": {
+          "family": "ipv4",
+          "address": "10.0.0.10",
+          "port": 2049
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [
+          {
+            "program": 100003,
+            "version": 4
+          }
+        ],
+        "nfs_minor_versions_seen": [
+          1
+        ],
+        "per_connection_stats": null
+      },
+      {
+        "connection_id": "0:103",
+        "worker_id": 0,
+        "worker_name": "chm_core_0",
+        "os_tid": "1241",
+        "origin": "accepted",
+        "state": "open",
+        "service": "nfs",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv4",
+          "address": "10.0.0.20",
+          "port": 40103
+        },
+        "local": {
+          "family": "ipv4",
+          "address": "10.0.0.10",
+          "port": 2049
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [
+          {
+            "program": 100003,
+            "version": 4
+          }
+        ],
+        "nfs_minor_versions_seen": [
+          1
+        ],
+        "per_connection_stats": null
+      },
+      {
+        "connection_id": "0:104",
+        "worker_id": 0,
+        "worker_name": "chm_core_0",
+        "os_tid": "1241",
+        "origin": "accepted",
+        "state": "open",
+        "service": "nfs",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv4",
+          "address": "10.0.0.20",
+          "port": 40104
+        },
+        "local": {
+          "family": "ipv4",
+          "address": "10.0.0.10",
+          "port": 2049
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [
+          {
+            "program": 100003,
+            "version": 4
+          }
+        ],
+        "nfs_minor_versions_seen": [
+          1
+        ],
+        "per_connection_stats": null
+      },
+      {
+        "connection_id": "0:105",
+        "worker_id": 0,
+        "worker_name": "chm_core_0",
+        "os_tid": "1241",
+        "origin": "accepted",
+        "state": "open",
+        "service": "nfs",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv4",
+          "address": "10.0.0.20",
+          "port": 40105
+        },
+        "local": {
+          "family": "ipv4",
+          "address": "10.0.0.10",
+          "port": 2049
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [
+          {
+            "program": 100003,
+            "version": 4
+          }
+        ],
+        "nfs_minor_versions_seen": [
+          1
+        ],
+        "per_connection_stats": null
+      },
+      {
+        "connection_id": "0:106",
+        "worker_id": 0,
+        "worker_name": "chm_core_0",
+        "os_tid": "1241",
+        "origin": "accepted",
+        "state": "open",
+        "service": "nfs",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv4",
+          "address": "10.0.0.20",
+          "port": 40106
+        },
+        "local": {
+          "family": "ipv4",
+          "address": "10.0.0.10",
+          "port": 2049
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [
+          {
+            "program": 100003,
+            "version": 4
+          }
+        ],
+        "nfs_minor_versions_seen": [
+          1
+        ],
+        "per_connection_stats": null
+      },
+      {
+        "connection_id": "0:107",
+        "worker_id": 0,
+        "worker_name": "chm_core_0",
+        "os_tid": "1241",
+        "origin": "accepted",
+        "state": "open",
+        "service": "nfs",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv4",
+          "address": "10.0.0.20",
+          "port": 40107
+        },
+        "local": {
+          "family": "ipv4",
+          "address": "10.0.0.10",
+          "port": 2049
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [
+          {
+            "program": 100003,
+            "version": 4
+          }
+        ],
+        "nfs_minor_versions_seen": [
+          1
+        ],
+        "per_connection_stats": null
+      },
+      {
+        "connection_id": "3:18",
+        "worker_id": 3,
+        "worker_name": "chm_core_3",
+        "os_tid": "1244",
+        "origin": "accepted",
+        "state": "open",
+        "service": "smb",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv6",
+          "address": "2001:db8::20",
+          "port": 50101
+        },
+        "local": {
+          "family": "ipv6",
+          "address": "2001:db8::10",
+          "port": 445
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [],
+        "nfs_minor_versions_seen": [],
+        "per_connection_stats": {
+          "messages_received": 12,
+          "counter_bits": 32
+        },
+        "negotiated_dialect": "3.1.1"
+      },
+      {
+        "connection_id": "5:18",
+        "worker_id": 5,
+        "worker_name": "chm_core_5",
+        "os_tid": "1246",
+        "origin": "accepted",
+        "state": "open",
+        "service": "s3",
+        "transport": "tcp",
+        "backend": "socket_tcp",
+        "raw_transport": "EVPL_STREAM_SOCKET_TCP",
+        "remote": {
+          "family": "ipv4",
+          "address": "10.0.0.40",
+          "port": 50202
+        },
+        "local": {
+          "family": "ipv4",
+          "address": "10.0.0.10",
+          "port": 9001
+        },
+        "age_ms": "35210",
+        "observed_rpc_programs": [],
+        "nfs_minor_versions_seen": [],
+        "per_connection_stats": null,
+        "http_framing": "h1"
+      }
+    ],
+    "synthetic": true
+  },
+  "threads_snapshot": {
+    "server_instance_id": "d2c892c0-669f-44f7-a492-f8e0b3c8826",
+    "complete": true,
+    "missing_workers": [],
+    "threads": [
+      {
+        "worker_id": 0,
+        "worker_name": "chm_core_0",
+        "executor": "native",
+        "os_tid": "1241",
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "rpc_thread_id": 0,
+        "connection_counts": {
+          "nfs": 8,
+          "mount": 0,
+          "nlm": 0,
+          "nsm": 0,
+          "rpcbind": 0,
+          "smb": 0,
+          "s3": 0
+        },
+        "rpc": {
+          "server_inflight": "16",
+          "client_inflight": "0",
+          "procedures": [
+            {
+              "program": 100003,
+              "version": 4,
+              "procedure": 1,
+              "name": "NFSPROC4_COMPOUND",
+              "latency_samples_total": "81234"
+            }
+          ]
+        },
+        "vfs": {
+          "operations": [
+            {
+              "name": "read",
+              "latency_samples_total": "12001"
+            }
+          ]
+        }
+      },
+      {
+        "worker_id": 1,
+        "worker_name": "chm_core_1",
+        "executor": "native",
+        "os_tid": "1242",
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "rpc_thread_id": 1,
+        "connection_counts": {
+          "nfs": 0,
+          "mount": 0,
+          "nlm": 0,
+          "nsm": 0,
+          "rpcbind": 0,
+          "smb": 0,
+          "s3": 0
+        },
+        "rpc": {
+          "server_inflight": "16",
+          "client_inflight": "0",
+          "procedures": [
+            {
+              "program": 100003,
+              "version": 4,
+              "procedure": 1,
+              "name": "NFSPROC4_COMPOUND",
+              "latency_samples_total": "81334"
+            }
+          ]
+        },
+        "vfs": {
+          "operations": [
+            {
+              "name": "read",
+              "latency_samples_total": "12026"
+            }
+          ]
+        }
+      },
+      {
+        "worker_id": 2,
+        "worker_name": "chm_core_2",
+        "executor": "native",
+        "os_tid": "1243",
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "rpc_thread_id": 2,
+        "connection_counts": {
+          "nfs": 0,
+          "mount": 0,
+          "nlm": 0,
+          "nsm": 0,
+          "rpcbind": 0,
+          "smb": 0,
+          "s3": 0
+        },
+        "rpc": {
+          "server_inflight": "0",
+          "client_inflight": "0",
+          "procedures": [
+            {
+              "program": 100003,
+              "version": 4,
+              "procedure": 1,
+              "name": "NFSPROC4_COMPOUND",
+              "latency_samples_total": "81434"
+            }
+          ]
+        },
+        "vfs": {
+          "operations": [
+            {
+              "name": "read",
+              "latency_samples_total": "12051"
+            }
+          ]
+        }
+      },
+      {
+        "worker_id": 3,
+        "worker_name": "chm_core_3",
+        "executor": "native",
+        "os_tid": "1244",
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "rpc_thread_id": 3,
+        "connection_counts": {
+          "nfs": 0,
+          "mount": 0,
+          "nlm": 0,
+          "nsm": 0,
+          "rpcbind": 0,
+          "smb": 1,
+          "s3": 0
+        },
+        "rpc": {
+          "server_inflight": "0",
+          "client_inflight": "0",
+          "procedures": [
+            {
+              "program": 100003,
+              "version": 4,
+              "procedure": 1,
+              "name": "NFSPROC4_COMPOUND",
+              "latency_samples_total": "81534"
+            }
+          ]
+        },
+        "vfs": {
+          "operations": [
+            {
+              "name": "read",
+              "latency_samples_total": "12076"
+            }
+          ]
+        }
+      },
+      {
+        "worker_id": 4,
+        "worker_name": "chm_core_4",
+        "executor": "native",
+        "os_tid": "1245",
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "rpc_thread_id": 4,
+        "connection_counts": {
+          "nfs": 0,
+          "mount": 0,
+          "nlm": 0,
+          "nsm": 0,
+          "rpcbind": 0,
+          "smb": 0,
+          "s3": 0
+        },
+        "rpc": {
+          "server_inflight": "0",
+          "client_inflight": "0",
+          "procedures": [
+            {
+              "program": 100003,
+              "version": 4,
+              "procedure": 1,
+              "name": "NFSPROC4_COMPOUND",
+              "latency_samples_total": "81634"
+            }
+          ]
+        },
+        "vfs": {
+          "operations": [
+            {
+              "name": "read",
+              "latency_samples_total": "12101"
+            }
+          ]
+        }
+      },
+      {
+        "worker_id": 5,
+        "worker_name": "chm_core_5",
+        "executor": "native",
+        "os_tid": "1246",
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "rpc_thread_id": 5,
+        "connection_counts": {
+          "nfs": 0,
+          "mount": 0,
+          "nlm": 0,
+          "nsm": 0,
+          "rpcbind": 0,
+          "smb": 0,
+          "s3": 1
+        },
+        "rpc": {
+          "server_inflight": "0",
+          "client_inflight": "0",
+          "procedures": [
+            {
+              "program": 100003,
+              "version": 4,
+              "procedure": 1,
+              "name": "NFSPROC4_COMPOUND",
+              "latency_samples_total": "81734"
+            }
+          ]
+        },
+        "vfs": {
+          "operations": [
+            {
+              "name": "read",
+              "latency_samples_total": "12126"
+            }
+          ]
+        }
+      },
+      {
+        "worker_id": 6,
+        "worker_name": "chm_core_6",
+        "executor": "native",
+        "os_tid": "1247",
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "rpc_thread_id": 6,
+        "connection_counts": {
+          "nfs": 0,
+          "mount": 0,
+          "nlm": 0,
+          "nsm": 0,
+          "rpcbind": 0,
+          "smb": 0,
+          "s3": 0
+        },
+        "rpc": {
+          "server_inflight": "0",
+          "client_inflight": "0",
+          "procedures": [
+            {
+              "program": 100003,
+              "version": 4,
+              "procedure": 1,
+              "name": "NFSPROC4_COMPOUND",
+              "latency_samples_total": "81834"
+            }
+          ]
+        },
+        "vfs": {
+          "operations": [
+            {
+              "name": "read",
+              "latency_samples_total": "12151"
+            }
+          ]
+        }
+      },
+      {
+        "worker_id": 7,
+        "worker_name": "chm_core_7",
+        "executor": "native",
+        "os_tid": "1248",
+        "sampled_at": "2026-11-14T14:00:00.000Z",
+        "sampled_monotonic_ns": "1000000000000",
+        "rpc_thread_id": 7,
+        "connection_counts": {
+          "nfs": 0,
+          "mount": 0,
+          "nlm": 0,
+          "nsm": 0,
+          "rpcbind": 0,
+          "smb": 0,
+          "s3": 0
+        },
+        "rpc": {
+          "server_inflight": "0",
+          "client_inflight": "0",
+          "procedures": [
+            {
+              "program": 100003,
+              "version": 4,
+              "procedure": 1,
+              "name": "NFSPROC4_COMPOUND",
+              "latency_samples_total": "81934"
+            }
+          ]
+        },
+        "vfs": {
+          "operations": [
+            {
+              "name": "read",
+              "latency_samples_total": "12176"
+            }
+          ]
+        }
+      }
+    ],
+    "synthetic": true
+  }
+}

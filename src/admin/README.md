@@ -4,100 +4,90 @@ SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Chimera Admin SDK
+# chimera-admin
 
-Python SDK for the Chimera NAS REST API.
+Python SDK and command-line interface for the Chimera NAS REST API. The package
+provides administrative resource commands and connection/worker inspection,
+including live watch, multi-instance polling and an expandable terminal view.
 
-## Installation
+## Install
 
-```bash
-pip install -e src/admin
+Install a local checkout for development:
+
+```sh
+python3 -m pip install -e '.[dev]'
 ```
 
-## Usage
+Install the package from this directory with `python3 -m pip install .`. To build a wheel, run `python3 -m pip install build && python3 -m build --wheel`; install the generated wheel from `dist/` when needed.
+
+The installed command is `chimera-admin`. `python3 -m chimera_admin` and the
+public `chimera_admin` SDK imports are also supported.
+
+## SDK usage
 
 ```python
 from chimera_admin import ChimeraAdminClient
 
-# Create a client
-client = ChimeraAdminClient(host="localhost", port=8080)
-
-# Get server version
-version_info = client.get_version()
-print(f"Server version: {version_info['version']}")
-
-# Get the running configuration (chimera.json format)
-config = client.get_config()
-print(config["mounts"])
-
-# Using context manager
 with ChimeraAdminClient(host="localhost", port=8080) as client:
     print(client.get_version())
-```
-
-### User management
-
-```python
-with ChimeraAdminClient(host="localhost", port=8080) as client:
-    # uid/gid default to 0 when omitted; gids is capped at 64 entries
-    client.create_user("alice", uid=1000, gid=1000, gids=[27, 44])
-
-    # A minimal user (uid/gid default to 0)
-    client.create_user("svc")
-
+    print(client.get_config()["mounts"])
     print(client.list_users())
-    print(client.get_user("alice"))
-
-    client.delete_user("svc")
 ```
 
-## Command-line interface
+The SDK retains the existing create, list, get and delete methods for users,
+exports, shares, buckets and mounts.
 
-The package provides a CLI, invoked as a module:
+## Use
 
-```bash
-# Global connection options precede the resource and action
-python3 -m chimera_admin --host localhost --port 8080 version
+```sh
+# Administrative resources use readable tables by default; --json preserves
+# the REST response for scripts.
+chimera-admin --host nas-server --port 8080 mount list
+chimera-admin --host nas-server export get /demo --json
 
-# Dump the running configuration (chimera.json format)
-python3 -m chimera_admin config
+# One server or named independent instances.
+chimera-admin --host nas-server inspect dashboard --watch
+chimera-admin inspect dashboard --targets examples/targets.json --interactive
 
-# VFS mounts
-python3 -m chimera_admin mount list
-python3 -m chimera_admin mount get data
-python3 -m chimera_admin mount create data --module linux --path /srv/data
-python3 -m chimera_admin mount delete data
+# Offline synthetic examples; no server is contacted.
+chimera-admin inspect dashboard --input examples/snapshot.json
+chimera-admin inspect dashboard --interactive --input examples/interactive-snapshot.json
 
-# Users, NFS exports, SMB shares, and S3 buckets
-python3 -m chimera_admin user create alice --uid 1000 --gid 1000
-python3 -m chimera_admin export create home /home \
-    --export-id 7 --access ro --squash root --sec krb5
-python3 -m chimera_admin share list
-python3 -m chimera_admin bucket delete photos
+# Optional two-instance synthetic watch: run the mock server twice in separate
+# terminals, then use the checked-in demo targets.
+python3 examples/mock_server.py --port 18080
+python3 examples/mock_server.py --port 18081
+chimera-admin inspect dashboard --targets examples/fleet-demo.json --watch
 ```
 
-Use `--https` (optionally with `--no-verify-ssl`) for TLS endpoints.
-Results are printed as JSON; run `python3 -m chimera_admin <resource> --help`
-for the available actions.
+See [CLI and inspection documentation](docs/inspection.md) for command options,
+interactive controls, filtering, quiet/wide output and synthetic examples. The
+server REST schema and endpoint behavior are documented in the
+[Chimera API reference](../../docs/api-reference.md).
 
-## Configuration
+## Compatibility
 
-The REST API must be enabled in the Chimera server configuration:
+The SDK preserves the existing Chimera REST response structures and supports
+Python 3.8 and newer. Administrative commands use the Chimera REST API v1.
+Connection and worker inspection requires the optional `/api/v1/threads` and
+`/api/v1/connections` endpoints, introduced with the corresponding server
+inspection implementation. Compatibility is exercised against that API
+implementation in the Chimera source checkout; there is not yet a separately
+published minimum server release for those endpoints.
 
-```json
-{
-    "server": {
-        "rest_http_port": 8080
-    }
-}
+## Tests
+
+```sh
+python3 -m pip install -e '.[dev]'
+python3 -m pytest
 ```
 
-Set `rest_http_port` to 0 (the default) to disable the REST API.
+Most SDK, presentation and inspection tests use local fakes or checked-in
+synthetic snapshots. Live NFS/SMB tests require a separately configured Chimera
+server build and are skipped unless `CHIMERA_SERVER_BINARY` points to the
+specific server executable to test. For example:
 
-## Running Tests
-
-```bash
-cd src/admin
-pip install -e ".[dev]"
-pytest
+```sh
+CHIMERA_SERVER_BINARY=/path/to/chimera/build/Debug/src/daemon/chimera \
+    python3 -m pytest tests/test_api.py tests/test_e2e_nfs_xattr.py tests/test_e2e_smb.py
 ```

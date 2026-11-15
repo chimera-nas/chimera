@@ -25,7 +25,7 @@ The same API is also available interactively:
 | Base URL        | `http://<host>:8080/api/v1`                                 |
 | Admin REST port | `8080` (see [Quick Start](quickstart))                      |
 | Content type    | `application/json` for request and response bodies          |
-| Authentication  | None (the admin API is unauthenticated)                     |
+| Authentication  | Bearer token or HTTP Basic, unless disabled in configuration                     |
 | Max request body| 65536 bytes for `POST` bodies                               |
 
 ### Status codes
@@ -60,6 +60,18 @@ Success responses for create operations return:
 ```
 
 ---
+
+## Worker and connection inspection
+
+`GET /api/v1/threads` returns every selected core worker, lifecycle connection
+counts, and existing RPC/VFS metrics. `GET /api/v1/connections` returns bounded
+accepted NFS/SMB/S3 connections with exact endpoints, transport identity,
+observed protocol and owner worker. Both reuse normal management authentication.
+
+See [Connection and worker inspection](inspection.md) for filters, partial-result
+semantics, collector limits and live CLI dashboards, or [OpenAPI](openapi.json)
+for the response schemas. HTTP 429 means a collector is still outstanding; 503
+means no selected worker responded. HTTP 200 may be explicitly partial.
 
 ## Users
 

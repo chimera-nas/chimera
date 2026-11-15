@@ -1,0 +1,447 @@
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+// SPDX-License-Identifier: LGPL-2.1-only
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <inttypes.h>
+#include <limits.h>
+#include "common/platform.h"
+#ifndef _WIN32
+#include <arpa/inet.h>
+#endif /* ifndef _WIN32 */
+#include "evpl/evpl_http.h"
+#include "server/server_inspect.h"
+#include "rest_internal.h"
+
+struct rest_inspect_context {
+    struct chimera_rest_thread       *thread;
+    struct evpl_http_request         *request;
+    struct chimera_inspect_collector *collector;
+    int                               connections;
+};
+
+static json_t *
+decimal(uint64_t value)
+{
+    char text[32];
+
+    snprintf(text, sizeof(text), "%" PRIu64, value);
+    return json_string(text);
+} /* decimal */
+static json_t *
+signed_decimal(int64_t value)
+{
+    char text[32];
+
+    snprintf(text, sizeof(text), "%" PRId64, value);
+    return json_string(text);
+} /* signed_decimal */
+static json_t *
+endpoint_json(const struct evpl_endpoint_info *endpoint)
+{
+    json_t *obj = json_pack("{s:s,s:s}", "family", endpoint->family, "address", endpoint->address);
+
+    json_object_set_new(obj, "port", endpoint->port < 0 ? json_null() : json_integer(endpoint->port));
+    if (endpoint->scope_id) {
+        json_object_set_new(obj, "scope_id", json_integer(endpoint->scope_id));
+    }
+    return obj;
+} /* endpoint_json */
+static json_t *
+connection_json(
+    const struct chimera_inspect_sample     *sample,
+    const struct chimera_inspect_connection *row)
+{
+    char        id[48];
+    const char *transport, *backend, *raw;
+
+    chimera_inspect_transport(row->bind.protocol, &transport, &backend, &raw);
+    snprintf(id, sizeof(id), "%d:%" PRIu64, sample->worker_id, row->bind.serial);
+    json_t     *obj = json_pack("{s:s,s:i,s:s,s:s,s:s,s:s,s:s,s:s,s:s}",
+                                "connection_id", id, "worker_id", sample->worker_id, "worker_name", sample->identity.
+                                name,
+                                "origin", "accepted", "state", row->bind.closing ? "closing" : "open",
+                                "service", chimera_inspect_service_name(row->service), "transport", transport,
+                                "backend", backend, "raw_transport", raw);
+    json_object_set_new(obj, "os_tid", decimal(sample->os_tid));
+    uint64_t    age = sample->sampled_monotonic_ns >= row->bind.created_monotonic_ns ?
+        sample->sampled_monotonic_ns - row->bind.created_monotonic_ns : 0;
+    json_object_set_new(obj, "age_ms", decimal(age / 1000000));
+    json_object_set_new(obj, "local", endpoint_json(&row->bind.local));
+    json_object_set_new(obj, "remote", endpoint_json(&row->bind.remote));
+    json_object_set_new(obj, "per_connection_stats", json_null());
+    if (row->service <= CHIMERA_INSPECT_RPCBIND) {
+        json_t *programs = json_array(), *minors = json_array();
+        for (int i = 0; i < row->nprograms; i++) {
+            json_array_append_new(programs, json_pack("{s:i,s:i}", "program", row->programs[i], "version", row->versions
+                                                      [i]));
+        }
+        for (int i = 0; i < 3; i++) {
+            if (row->minor_versions & (1ULL << i)) {
+                json_array_append_new(minors, json_integer(i));
+            }
+        }
+        json_object_set_new(obj, "observed_rpc_programs", programs);
+        json_object_set_new(obj, "nfs_minor_versions_seen", minors);
+        json_object_set_new(obj, "rpc_framing", json_string(row->rdma_framing ? "rpc_rdma" : "record_marking"));
+    } else if (row->service == CHIMERA_INSPECT_SMB) {
+        json_object_set_new(obj, "negotiated_dialect", row->smb_dialect ? json_integer(row->smb_dialect) : json_null());
+        json_object_set_new(obj, "per_connection_stats", json_pack("{s:I,s:i}",
+                                                                   "messages_received", (json_int_t) row->
+                                                                   messages_received, "counter_bits", 32));
+    } else if (row->service == CHIMERA_INSPECT_S3) {
+        json_object_set_new(obj, "http_framing", json_string(row->http_framing));
+    }
+    return obj;
+} /* connection_json */
+static json_t *
+sample_json(
+    const struct chimera_inspect_sample *sample,
+    int                                  connections)
+{
+    json_t *obj = json_pack("{s:i,s:s}", "worker_id", sample->worker_id, "sampled_at", sample->sampled_at);
+
+    json_object_set_new(obj, "sampled_monotonic_ns", decimal(sample->sampled_monotonic_ns));
+    json_object_set_new(obj, "truncated", json_boolean(sample->truncated));
+    if (connections) {
+        json_object_set_new(obj, "scanned", json_integer(sample->scanned));
+        json_object_set_new(obj, "returned", json_integer(sample->nrows));
+        return obj;
+    }
+    json_object_set_new(obj, "worker_name", json_string(sample->identity.name));
+    json_object_set_new(obj, "executor", json_string(sample->identity.executor));
+    json_object_set_new(obj, "os_tid", decimal(sample->os_tid));
+    json_t *counts = json_object();
+    for (int i = 0; i < CHIMERA_INSPECT_SERVICES; i++) {
+        json_object_set_new(counts, chimera_inspect_service_name(i), decimal(sample->connection_counts[i]));
+    }
+    json_object_set_new(obj, "connection_counts", counts);
+    if (sample->has_rpc) {
+        json_object_set_new(obj, "rpc_thread_id", json_integer(sample->rpc.thread_id));
+        json_t *rpc = json_object(), *procedures = json_array();
+        json_object_set_new(rpc, "server_inflight", signed_decimal(sample->rpc.server_inflight));
+        json_object_set_new(rpc, "client_inflight", signed_decimal(sample->rpc.client_inflight));
+        for (unsigned int i = 0; i < sample->nprocedures; i++) {
+            const struct evpl_rpc2_procedure_stats *p    = &sample->procedures[i];
+            json_t                                 *proc = json_pack("{s:i,s:i,s:i,s:s}", "program", p->program,
+                                                                     "version", p->version,
+                                                                     "procedure", p->procedure, "name", p->name);
+            json_object_set_new(proc, "latency_samples_total", decimal(p->latency_samples_total));
+            json_array_append_new(procedures, proc);
+        }
+        json_object_set_new(rpc, "procedures", procedures);
+        json_object_set_new(obj, "rpc", rpc);
+    }
+    if (sample->nvfs) {
+        json_t *vfs = json_object(), *operations = json_array();
+        for (unsigned int i = 0; i < sample->nvfs; i++) {
+            json_t *op = json_pack("{s:s}", "name", sample->vfs[i].name);
+            json_object_set_new(op, "latency_samples_total", decimal(sample->vfs[i].count));
+            json_array_append_new(operations, op);
+        }
+        json_object_set_new(vfs, "operations", operations);
+        json_object_set_new(obj, "vfs", vfs);
+    }
+    return obj;
+} /* sample_json */
+
+/* JSON_COMPACT leaves UTF-8 intact and escapes ASCII controls, quotes and
+* backslashes. Count their worst-case expansion before allocating JSON. */
+static size_t
+string_budget(const char *text)
+{
+    size_t bytes = 0;
+
+    for (const unsigned char *p = (const unsigned char *) text; *p; p++) {
+        bytes += *p < 32 || *p == '"' || *p == '\\' ? 6 : 1;
+    }
+    return bytes;
+} /* string_budget */
+
+static void
+snapshot_complete(
+    const struct chimera_inspect_result *result,
+    void                                *data)
+{
+    struct rest_inspect_context *ctx = data;
+
+    if (!ctx->request) {
+        return;
+    }
+    if (!result->responded) {
+        chimera_rest_send_error(ctx->thread->evpl, ctx->request, 503, "Service Unavailable",
+                                "No inspection worker responded");
+        return;
+    }
+    /* Conservative escaped-JSON upper bound, checked before building objects.
+    * The SDK caps reads at 8 MiB; leave room for the envelope below 6 MiB. */
+    size_t budget = 0;
+    for (unsigned int i = 0; i < result->nworkers; i++) {
+        if (!result->present[i]) {
+            continue;
+        }
+        const struct chimera_inspect_sample *sample = &result->samples[i];
+        budget += 1024 + string_budget(sample->identity.name) + string_budget(sample->identity.executor);
+        if (ctx->connections) {
+            for (unsigned int j = 0; j < sample->nrows; j++) {
+                const struct chimera_inspect_connection *row = &sample->rows[j];
+                budget += 1024 + string_budget(sample->identity.name) +
+                    string_budget(row->bind.local.address) + string_budget(row->bind.remote.address);
+            }
+        } else {
+            for (unsigned int j = 0; j < sample->nprocedures; j++) {
+                budget += 256 + string_budget(sample->procedures[j].name);
+            }
+            for (unsigned int j = 0; j < sample->nvfs; j++) {
+                budget += 128 + string_budget(sample->vfs[j].name);
+            }
+        }
+    }
+    if (budget > 6 * 1024 * 1024) {
+        chimera_rest_send_error(ctx->thread->evpl, ctx->request, 503, "Service Unavailable",
+                                "Inspection response exceeds the output budget; select a worker");
+        return;
+    }
+    json_t *obj = json_object(), *missing = json_array(), *samples = json_array(), *rows = json_array();
+    int     truncated = 0;
+    for (unsigned int i = 0; i < result->nworkers; i++) {
+        const struct chimera_inspect_sample *sample = &result->samples[i];
+        if (!result->present[i]) {
+            json_array_append_new(missing, json_integer(sample->worker_id)); continue;
+        }
+        truncated |= sample->truncated;
+        json_array_append_new(samples, sample_json(sample, ctx->connections));
+        if (ctx->connections) {
+            for (unsigned int j = 0; j < sample->nrows; j++) {
+                json_array_append_new(rows, connection_json(sample, &sample->rows[j]));
+            }
+        }
+    }
+    json_object_set_new(obj, "server_instance_id", json_string(result->server_instance_id));
+    json_object_set_new(obj, "complete", json_boolean(!truncated && result->responded == result->nworkers));
+    json_object_set_new(obj, "truncated", json_boolean(truncated));
+    json_object_set_new(obj, "missing_workers", missing);
+    json_object_set_new(obj, ctx->connections ? "worker_samples" : "threads", samples);
+    if (ctx->connections) {
+        json_object_set_new(obj, "connections", rows);
+    } else {
+        json_decref(rows);
+    }
+    chimera_rest_send_json(ctx->thread->evpl, ctx->request, 200, obj);
+} /* snapshot_complete */
+
+static void
+inspect_notify(
+    struct evpl                *evpl,
+    struct evpl_http_agent     *agent,
+    struct evpl_http_request   *request,
+    enum evpl_http_notify_type  type,
+    enum evpl_http_request_type request_type,
+    const char                 *uri,
+    void                       *data,
+    void                       *private_data)
+{
+    struct rest_inspect_context *ctx = data;
+
+    if (type == EVPL_HTTP_NOTIFY_FAILED || type == EVPL_HTTP_NOTIFY_RESPONSE_COMPLETE) {
+        ctx->request = NULL;
+        if (ctx->collector) {
+            chimera_server_inspect_cancel(ctx->collector);
+            chimera_server_inspect_release(ctx->collector);
+        }
+        free(ctx);
+    } else if (type == EVPL_HTTP_NOTIFY_RECEIVE_DATA) {
+        struct evpl_iovec iov[64];
+        uint64_t          available;
+        while ((available = evpl_http_request_get_data_avail(request)) != 0) {
+            int n = evpl_http_request_get_datav(evpl, request, iov, available > 64 ? 64 : available);
+            if (n <= 0) {
+                break;
+            }
+            evpl_iovecs_release(evpl, iov, n);
+        }
+    }
+} /* inspect_notify */
+
+static int
+decode(
+    const char *input,
+    size_t      len,
+    char       *output,
+    size_t      size)
+{
+    size_t used = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = input[i];
+        if (ch == '%') {
+            if (i + 2 >= len) {
+                return -1;
+            }
+            int value = 0;
+            for (int j = 0; j < 2; j++) {
+                unsigned char h     = input[++i];
+                int           digit = h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h >= 'A' &&
+                    h <= 'F' ? h - 'A' + 10 : -1;
+                if (digit < 0) {
+                    return -1;
+                }
+                value = value * 16 + digit;
+            }
+            ch = value;
+        }
+        if (ch < 33 || ch > 126 || used + 1 >= size) {
+            return -1;
+        }
+        output[used++] = ch;
+    }
+    output[used] = 0;
+    return used ? 0 : -1;
+} /* decode */
+static int
+number(
+    const char *text,
+    int         max,
+    int        *out)
+{
+    uint64_t value = 0;
+
+    if (!*text) {
+        return -1;
+    }
+    for (; *text; text++) {
+        if (*text < '0' || *text > '9') {
+            return -1;
+        }
+        value = value * 10 + *text - '0';
+        if (value > (unsigned int) max) {
+            return -1;
+        }
+    }
+    *out = value;
+    return 0;
+} /* number */
+static int
+parse_filter(
+    const char                    *query,
+    int                            len,
+    struct chimera_inspect_filter *filter)
+{
+    unsigned int seen = 0;
+
+    if (!len) {
+        return 0;
+    }
+    if (len > 2048) {
+        return -1;
+    }
+    while (len) {
+        const char *end   = memchr(query, '&', len);
+        int         part  = end ? end - query : len;
+        const char *equal = memchr(query, '=', part);
+        char        key[32], value[256];
+        if (!equal || decode(query, equal - query, key, sizeof(key)) ||
+            decode(equal + 1, part - (equal - query) - 1, value, sizeof(value))) {
+            return -1;
+        }
+        const char *keys[] = { "worker_id", "service", "remote_ip", "remote_port", "local_ip", "local_port",
+                               "transport" };
+        int         index;
+        for (index = 0; index < 7 && strcmp(keys[index], key); index++) {
+        }
+        if (index == 7 || (seen & (1U << index)) || (!filter->connections && index != 0)) {
+            return -1;
+        }
+        seen |= 1U << index;
+        if (index == 0) {
+            if (number(value, INT_MAX, &filter->worker_id)) {
+                return -1;
+            }
+        } else if (index == 1) {
+            int service;
+            for (service = 0; service < CHIMERA_INSPECT_SERVICES && strcmp(value, chimera_inspect_service_name(service))
+                 ; service++) {
+            }
+            if (service == CHIMERA_INSPECT_SERVICES) {
+                return -1;
+            }
+            filter->services = 1U << service;
+        } else if (index == 2 || index == 4) {
+            unsigned char address[16];
+            int           family = strchr(value, ':') ? AF_INET6 : AF_INET;
+            if (inet_pton(family, value, address) != 1) {
+                return -1;
+            }
+            inet_ntop(family, address, index == 2 ? filter->remote_ip : filter->local_ip, 64);
+        } else if (index == 3 || index == 5) {
+            if (number(value, 65535, index == 3 ? &filter->remote_port : &filter->local_port)) {
+                return -1;
+            }
+        } else {
+            if (strcmp(value, "tcp") && strcmp(value, "udp") && strcmp(value, "rdma") &&
+                strcmp(value, "unix") && strcmp(value, "inproc") && strcmp(value, "fabric")) {
+                return -1;
+            }
+            snprintf(filter->transport, sizeof(filter->transport), "%.31s", value);
+        }
+        if (!end) {
+            break;
+        }
+        len  -= part + 1;
+        query = end + 1;
+        if (!len) {
+            return -1;
+        }
+    }
+    return 0;
+} /* parse_filter */
+
+void
+chimera_rest_inspect(
+    struct chimera_rest_thread  *thread,
+    struct evpl_http_request    *request,
+    int                          connections,
+    const char                  *query,
+    int                          query_len,
+    evpl_http_notify_callback_t *notify_callback,
+    void                       **notify_data)
+{
+    struct chimera_inspect_filter filter = { .connections = connections,
+                                             .worker_id   = -1,
+                                             .services    = (1U << CHIMERA_INSPECT_NFS) | (1U << CHIMERA_INSPECT_SMB) |
+                                                 (1U << CHIMERA_INSPECT_S3),
+                                             .remote_port = -1,
+                                             .local_port  = -1 };
+
+    if (parse_filter(query, query_len, &filter)) {
+        chimera_rest_send_error(thread->evpl, request, 400, "Bad Request", "Invalid inspection filters");
+        return;
+    }
+    struct rest_inspect_context  *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        chimera_rest_send_error(thread->evpl, request, 503, "Service Unavailable", "Inspection allocation failed");
+        return;
+    }
+    ctx->thread      = thread;
+    ctx->request     = request;
+    ctx->connections = connections;
+    int                           status = chimera_server_inspect_collect(chimera_server_get_inspect(thread->shared->
+                                                                                                     server),
+                                                                          thread->evpl, &filter, snapshot_complete, ctx,
+                                                                          &ctx->collector);
+    if (status) {
+        free(ctx);
+        if (status == 429) {
+            evpl_http_request_add_header(request, "Retry-After", "1");
+        }
+        chimera_rest_send_error(thread->evpl, request, status,
+                                status == 429 ? "Too Many Requests" : status == 400 ? "Bad Request" :
+                                "Service Unavailable",
+                                status == 429 ? "An inspection collector is still outstanding" :
+                                "Inspection worker unavailable");
+        return;
+    }
+    *notify_callback = inspect_notify;
+    *notify_data     = ctx;
+} /* chimera_rest_inspect */
