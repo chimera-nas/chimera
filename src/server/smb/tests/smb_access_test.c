@@ -130,12 +130,19 @@ main(void)
               "writes_data(%s) != %s", wc->name, wc->writes ? "true" : "false");
     }
 
-    CHECK(chimera_smb_max_allowed_trim(FILE_ALL, false, true) == 0x001f01f9u,
+    CHECK(chimera_smb_max_allowed_trim(FILE_ALL, false, true, false) == 0x001f01f9u,
           "a read-only file handle loses WRITE_DATA and APPEND_DATA");
-    CHECK(chimera_smb_max_allowed_trim(FILE_ALL, true, true) == FILE_ALL,
+    CHECK(chimera_smb_max_allowed_trim(FILE_ALL, true, true, false) == FILE_ALL,
           "a read-only directory handle keeps its grant");
-    CHECK(chimera_smb_max_allowed_trim(FILE_ALL, false, false) == FILE_ALL,
+    CHECK(chimera_smb_max_allowed_trim(FILE_ALL, false, false, false) == FILE_ALL,
           "a read-write file handle keeps its grant");
+    CHECK(chimera_smb_max_allowed_trim(FILE_ALL, false, false, true) == 0x001f01b9u,
+          "a READONLY file loses WRITE_DATA, APPEND_DATA/ADD_SUBDIRECTORY and "
+          "DELETE_CHILD");
+    CHECK(chimera_smb_max_allowed_trim(FILE_ALL, true, false, true) == FILE_ALL,
+          "a READONLY directory keeps its grant");
+    CHECK(chimera_smb_max_allowed_trim(FILE_ALL, false, true, true) == 0x001f01b9u,
+          "a READONLY file on a read-only handle loses the same four bits");
 
     fprintf(stderr, "smb_access_test: %d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;

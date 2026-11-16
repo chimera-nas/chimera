@@ -3175,28 +3175,35 @@ chimera_smb_create_open_at_callback(
          * (MS-FSA_R53 / R2422 / R54): the FILE_ATTRIBUTE_READONLY DOS bit is a
          * write/delete fence separate from the DACL evaluated above.  For an
          * existing non-directory file marked READONLY: a DesiredAccess asking
-         * for WRITE_DATA/APPEND_DATA is denied with ACCESS_DENIED, and a
-         * FILE_DELETE_ON_CLOSE with CANNOT_DELETE (a read-only file cannot be
-         * deleted).  Truncating dispositions are gated earlier, so this covers
-         * the OPEN / OPEN_IF paths.  Skipped for a durable reconnect, whose
-         * access was settled at the original open, and when THIS open just
-         * created the file (oh->r_created): the readonly attribute set by a
-         * create does not fence that same creating handle from writing
-         * (smb2.durable-open.read-only).  FSAModel OpenFileTestCase S44/S46
-         * (write/append) and S48 (delete-on-close).  Only the plain OPEN /
-         * OPEN_IF dispositions are fenced: a truncating disposition
-         * (SUPERSEDE/OVERWRITE/OVERWRITE_IF) replaces the file and the READONLY
-         * bit it carries is the NEW state being applied, not a pre-existing
-         * constraint (smb2.openattr trunc-opens a file to set READONLY); those
-         * are gated separately. */
-        if (!request->create.reconnect &&
-            !oh->r_created &&
-            request->create.create_disposition != SMB2_FILE_SUPERSEDE &&
-            request->create.create_disposition != SMB2_FILE_OVERWRITE &&
-            request->create.create_disposition != SMB2_FILE_OVERWRITE_IF &&
-            !S_ISDIR(attr->va_mode) &&
-            (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
-            (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY)) {
+         * for WRITE_DATA/APPEND_DATA is denied with ACCESS_DENIED (generic
+         * rights are mapped to specific rights before this check, so
+         * GENERIC_WRITE and GENERIC_ALL are refused too), a MAXIMUM_ALLOWED
+         * open is granted everything but the data-write rights
+         * (readonly_fenced, see chimera_smb_max_allowed_trim), and a
+         * FILE_DELETE_ON_CLOSE fails with CANNOT_DELETE (a read-only file
+         * cannot be deleted).  Truncating dispositions are gated earlier, so
+         * this covers the OPEN / OPEN_IF paths.  Skipped for a durable
+         * reconnect, whose access was settled at the original open, and when
+         * THIS open just created the file (oh->r_created): the readonly
+         * attribute set by a create does not fence that same creating handle
+         * from writing (smb2.durable-open.read-only).  FSAModel
+         * OpenFileTestCase S44/S46 (write/append) and S48 (delete-on-close).
+         * Only the plain OPEN / OPEN_IF dispositions are fenced: a truncating
+         * disposition (SUPERSEDE/OVERWRITE/OVERWRITE_IF) replaces the file and
+         * the READONLY bit it carries is the NEW state being applied, not a
+         * pre-existing constraint (smb2.openattr trunc-opens a file to set
+         * READONLY); those are gated separately. */
+        request->create.readonly_fenced =
+            (!request->create.reconnect &&
+             !oh->r_created &&
+             request->create.create_disposition != SMB2_FILE_SUPERSEDE &&
+             request->create.create_disposition != SMB2_FILE_OVERWRITE &&
+             request->create.create_disposition != SMB2_FILE_OVERWRITE_IF &&
+             !S_ISDIR(attr->va_mode) &&
+             (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+             (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY)) ? 1 : 0;
+
+        if (request->create.readonly_fenced) {
 
             if (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) {
                 chimera_vfs_release(vfs_thread, oh);
@@ -3206,7 +3213,8 @@ chimera_smb_create_open_at_callback(
             }
 
             if (request->create.desired_access &
-                (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA)) {
+                (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
+                 SMB2_GENERIC_WRITE | SMB2_GENERIC_ALL)) {
                 chimera_smb_debug("CREATE access denied: write open of a "
                                   "FILE_ATTRIBUTE_READONLY file (dos attributes %x)",
                                   (unsigned) attr->va_dos_attributes);
@@ -4284,10 +4292,10 @@ chimera_smb_create_access_deny_transient(
  * Resolve the access mask granted on a successful open, for the open handle's
  * FileAccessInformation reporting and the per-operation access gates.  A
  * MAXIMUM_ALLOWED open is granted the set the caller's ACL evaluation yields,
- * trimmed by chimera_smb_max_allowed_trim for a read-only backend handle; a
- * specific-bits open is granted exactly the bits it asked for (the open
- * already passed the access check).  The MxAc maximal access is the untrimmed
- * ACL evaluation, computed separately.
+ * trimmed by chimera_smb_max_allowed_trim for a FILE_ATTRIBUTE_READONLY file
+ * or a read-only backend handle; a specific-bits open is granted exactly the
+ * bits it asked for (the open already passed the access check).  The MxAc
+ * maximal access is the untrimmed ACL evaluation, computed separately.
  */
 static inline uint32_t
 chimera_smb_create_granted_access(
@@ -4302,7 +4310,8 @@ chimera_smb_create_granted_access(
             chimera_vfs_access_check(attr, &request->session_handle->session->cred,
                                      CHIMERA_ACE_MASK_ALL),
             attr && S_ISDIR(attr->va_mode),
-            request->create.ro_retried);
+            request->create.ro_retried,
+            request->create.readonly_fenced);
     }
 
     /* GrantedAccess is reported in resolved specific rights, never the NT
@@ -5668,6 +5677,7 @@ chimera_smb_create(struct chimera_smb_request *request)
     request->create.gen_share_retry        = 0;
     request->create.access_retries         = 0;
     request->create.ro_retried             = 0;
+    request->create.readonly_fenced        = 0;
     request->create.access_retry_oh        = NULL;
     request->create.share_conflict_retries = 0;
     request->create.share_conflict_oh      = NULL;

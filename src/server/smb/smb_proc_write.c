@@ -306,18 +306,15 @@ chimera_smb_write(struct chimera_smb_request *request)
     }
 
     /* MS-SMB2 3.3.5.13: a WRITE request must be rejected with ACCESS_DENIED
-     * when the open does not carry write access.  The handle's desired_access
-     * may still be in NT generic form (GENERIC_WRITE / GENERIC_ALL /
-     * MAXIMUM_ALLOWED), so accept any access bit that resolves to write data;
-     * only an open lacking all of them (as smbtorture's deny test deliberately
-     * constructs: SEC_FILE_READ_DATA only, no write bit) should be denied
-     * here.  Without this gate, native backends -- which run the write through
-     * the VFS regardless of the per-handle access mask -- silently accept
-     * writes on read-only handles, while the passthrough backends are caught
-     * by the underlying kernel open. */
-    if (!(request->write.open_file->desired_access &
-          (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
-           SMB2_GENERIC_WRITE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED))) {
+     * when the open was not granted write access.  Test the open's
+     * GrantedAccess, not the access it asked for: CREATE has already resolved
+     * the generic rights and MAXIMUM_ALLOWED to specific rights, and trimmed a
+     * MAXIMUM_ALLOWED grant for a FILE_ATTRIBUTE_READONLY file or a read-only
+     * backend handle.  Without this gate, native backends -- which run the
+     * write through the VFS regardless of the per-handle access mask --
+     * silently accept writes on handles that may not write. */
+    if (!(request->write.open_file->granted_access &
+          (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA))) {
         evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
         chimera_smb_open_file_release(request, request->write.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);

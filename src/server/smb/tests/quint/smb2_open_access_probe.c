@@ -234,6 +234,185 @@ probe_attr_only_clears_readonly(struct smb2_conn *c)
     smb2_close(c, o.file_id);
 } /* probe_attr_only_clears_readonly */
 
+/* ---- FILE_ATTRIBUTE_READONLY ---------------------------------------------
+ *
+ * MS-FSA 2.1.5.1.2.1 "Algorithm to Check Access to an Existing File": a data
+ * file marked READONLY refuses an open that asks to write data, and a
+ * MAXIMUM_ALLOWED open of it is granted everything but FILE_WRITE_DATA,
+ * FILE_APPEND_DATA, FILE_ADD_SUBDIRECTORY and FILE_DELETE_CHILD.  As on
+ * Windows, the MxAc response ignores READONLY and a directory's grant is not
+ * trimmed (smbtorture smb2.maximum_allowed.read_only_file / read_only_dir). */
+
+#define OA_READONLY_TRIM (OA_FILE_WRITE_DATA | OA_FILE_APPEND_DATA | \
+                          OA_FILE_DELETE_CHILD)
+
+/* Create `name` holding "abc" and mark it READONLY. */
+static int
+oa_make_readonly_file(
+    struct smb2_conn *c,
+    const char       *name)
+{
+    struct smb2_create_out o;
+    uint32_t               st, count = 0;
+
+    st = oa_open(c, name, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE %s -> 0x%08x", name, st);
+    if (st != ST_SUCCESS) {
+        return 0;
+    }
+    st = smb2_write(c, o.file_id, 0, "abc", 3, &count);
+    CHECK(st == ST_SUCCESS && count == 3, "setup: WRITE %s -> 0x%08x", name, st);
+    st = oa_set_attributes(c, o.file_id, MBT_FILE_ATTRIBUTE_READONLY);
+    CHECK(st == ST_SUCCESS, "setup: SET READONLY on %s -> 0x%08x", name, st);
+    smb2_close(c, o.file_id);
+    return st == ST_SUCCESS;
+} /* oa_make_readonly_file */
+
+/* MAXIMUM_ALLOWED on a READONLY file: opens, MxAc unchanged, the grant loses
+ * the four bits, WRITE is refused, READ works. */
+static void
+probe_ro_file_max_allowed(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint8_t                out[8];
+    uint32_t               st, mx = 0, ga, n = 0;
+
+    printf("# ro_file_max_allowed\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip ro_file_max_allowed: backend keeps no DOS attributes\n");
+        return;
+    }
+    if (!oa_make_readonly_file(c, "r1")) {
+        return;
+    }
+
+    st = oa_open(c, "r1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED, 0, 0, &mx, &o);
+    CHECK(st == ST_SUCCESS, "OPEN READONLY r1 MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    CHECK(mx & OA_FILE_WRITE_DATA, "  MxAc ignores READONLY (0x%08x)", mx);
+    ga = oa_access_info(c, o.file_id);
+    CHECK(ga == (mx & ~OA_READONLY_TRIM),
+          "  granted access 0x%08x == MxAc without WRITE_DATA, APPEND_DATA, "
+          "DELETE_CHILD (0x%08x)", ga, mx & ~OA_READONLY_TRIM);
+    st = smb2_write(c, o.file_id, 0, "x", 1, NULL);
+    CHECK(st == ST_ACCESS_DENIED, "  WRITE -> ACCESS_DENIED (0x%08x)", st);
+    st = smb2_read(c, o.file_id, 0, 3, out, &n);
+    CHECK(st == ST_SUCCESS && n == 3 && memcmp(out, "abc", 3) == 0,
+          "  READ -> 0x%08x (%u bytes)", st, n);
+    smb2_close(c, o.file_id);
+} /* probe_ro_file_max_allowed */
+
+/* GENERIC_WRITE and GENERIC_ALL map to FILE_WRITE_DATA before the READONLY
+ * check, so both are refused; GENERIC_READ is not. */
+static void
+probe_ro_file_generic(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint32_t               st;
+
+    printf("# ro_file_generic\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip ro_file_generic: backend keeps no DOS attributes\n");
+        return;
+    }
+    if (!oa_make_readonly_file(c, "r3")) {
+        return;
+    }
+
+    st = oa_open(c, "r3", MBT_FILE_OPEN, OA_GENERIC_WRITE,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_ACCESS_DENIED, "OPEN READONLY r3 GENERIC_WRITE -> "
+          "ACCESS_DENIED (0x%08x)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+    st = oa_open(c, "r3", MBT_FILE_OPEN, OA_GENERIC_ALL,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_ACCESS_DENIED, "OPEN READONLY r3 GENERIC_ALL -> "
+          "ACCESS_DENIED (0x%08x)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+    st = oa_open(c, "r3", MBT_FILE_OPEN, MBT_GENERIC_READ,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN READONLY r3 GENERIC_READ -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+} /* probe_ro_file_generic */
+
+/* A READONLY directory opened MAXIMUM_ALLOWED keeps its whole grant, and a
+ * file can still be created inside it. */
+static void
+probe_ro_dir_max_allowed(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint32_t               st, mx = 0, ga;
+
+    printf("# ro_dir_max_allowed\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip ro_dir_max_allowed: backend keeps no DOS attributes\n");
+        return;
+    }
+
+    st = oa_open(c, "rd1", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_DIRECTORY_FILE,
+                 MBT_FILE_ATTRIBUTE_READONLY | OA_FILE_ATTRIBUTE_DIR, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE READONLY directory rd1 -> 0x%08x",
+          st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(c, o.file_id);
+
+    st = oa_open(c, "rd1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED, 0, 0, &mx, &o);
+    CHECK(st == ST_SUCCESS, "OPEN READONLY rd1 MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    ga = oa_access_info(c, o.file_id);
+    CHECK(ga == mx, "  granted access 0x%08x == MxAc 0x%08x (READONLY does "
+          "not trim a directory)", ga, mx);
+    smb2_close(c, o.file_id);
+
+    st = oa_open(c, "rd1\\x", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "  CREATE rd1\\x inside it -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+} /* probe_ro_dir_max_allowed */
+
+/* The open that creates a READONLY file is not fenced by it. */
+static void
+probe_ro_create_handle_writes(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint32_t               st, count = 0;
+
+    printf("# ro_create_handle_writes\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip ro_create_handle_writes: backend keeps no DOS "
+               "attributes\n");
+        return;
+    }
+
+    st = oa_open(c, "r2", MBT_FILE_CREATE, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_NON_DIRECTORY_FILE, MBT_FILE_ATTRIBUTE_READONLY,
+                 NULL, &o);
+    CHECK(st == ST_SUCCESS, "CREATE r2 READONLY MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_write(c, o.file_id, 0, "abc", 3, &count);
+    CHECK(st == ST_SUCCESS && count == 3,
+          "  WRITE through the creating handle -> 0x%08x", st);
+    smb2_close(c, o.file_id);
+} /* probe_ro_create_handle_writes */
+
 /* Mount the share on a passthrough backend: a fresh host directory under
  * $CHIMERA_MBT_SCRATCH (default cwd).  Exits 77 when that filesystem cannot
  * produce file handles. */
@@ -323,6 +502,10 @@ main(
     probe_dir_max_allowed(c);
     probe_file_max_allowed_writes(c);
     probe_attr_only_clears_readonly(c);
+    probe_ro_file_max_allowed(c);
+    probe_ro_file_generic(c);
+    probe_ro_dir_max_allowed(c);
+    probe_ro_create_handle_writes(c);
 
     smb2_env_stop(&env);
 

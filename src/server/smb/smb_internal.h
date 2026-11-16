@@ -597,6 +597,10 @@ struct chimera_smb_request {
              * chimera_smb_create_may_reopen_read_only): the handle cannot
              * write data, so its grant is trimmed. */
             uint8_t                         ro_retried;
+            /* Set by the open callback when the existing file is fenced by
+             * FILE_ATTRIBUTE_READONLY (MS-FSA 2.1.5.1.2.1): a MAXIMUM_ALLOWED
+             * grant then loses the data-write rights. */
+            uint8_t                         readonly_fenced;
             /* Open handle parked across the access-retry getattr. */
             struct chimera_vfs_open_handle *access_retry_oh;
             /* Bounded retry budget + parked handle for a share conflict against a

@@ -34,17 +34,24 @@ chimera_smb_access_writes_data(uint32_t desired_access)
 
 /* Trim a MAXIMUM_ALLOWED grant to what the open can actually do.
  *
- * A file whose backend handle is read-only (a MAXIMUM_ALLOWED open the backend
- * refused read-write, re-issued read-only) cannot write data, so it is not
- * granted FILE_WRITE_DATA or FILE_APPEND_DATA.  A directory keeps its grant:
- * there those bits are FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY, which act
- * through the parent rather than through this handle, and Windows grants
- * them. */
+ * A file marked FILE_ATTRIBUTE_READONLY is not granted FILE_WRITE_DATA,
+ * FILE_APPEND_DATA, FILE_ADD_SUBDIRECTORY or FILE_DELETE_CHILD (MS-FSA
+ * 2.1.5.1.2.1 "Algorithm to Check Access to an Existing File");
+ * `readonly_attr` is set by the caller only where that check applies.  A file
+ * whose backend handle is read-only (a MAXIMUM_ALLOWED open the backend refused
+ * read-write, re-issued read-only) cannot write data, so it is not granted
+ * FILE_WRITE_DATA or FILE_APPEND_DATA.
+ *
+ * A directory keeps its grant in both cases.  There FILE_WRITE_DATA and
+ * FILE_APPEND_DATA are FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY, which act
+ * through the parent rather than through this handle, and Windows ignores
+ * READONLY on a directory (smbtorture smb2.maximum_allowed.read_only_dir). */
 static inline uint32_t
 chimera_smb_max_allowed_trim(
     uint32_t granted,
     bool     is_directory,
-    bool     read_only_handle)
+    bool     read_only_handle,
+    bool     readonly_attr)
 {
     if (is_directory) {
         return granted;
@@ -52,6 +59,11 @@ chimera_smb_max_allowed_trim(
 
     if (read_only_handle) {
         granted &= ~(SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA);
+    }
+
+    if (readonly_attr) {
+        granted &= ~(SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
+                     SMB2_FILE_ADD_SUBDIRECTORY | SMB2_FILE_DELETE_CHILD);
     }
 
     return granted;
