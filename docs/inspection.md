@@ -103,3 +103,5 @@ samples. If live VFS Write latency is available, it estimates a request rate as
 `GRANT / average Write latency`. Saturation alone does not prove the slot limit
 is the bottleneck: a slow backend can also keep all slots occupied, so compare
 with a run using a larger negotiated slot count.
+The protocol-neutral dashboard adds an NFSv4.1+ sessions panel when NFS is
+enabled; NFSv3 itself has no session or client view.

@@ -71,6 +71,20 @@ class InspectionSemantics(unittest.TestCase):
         self.assertIn("IN_PROGRESS", output)
         self.assertIn("1500.000 ms", output)
 
+    def test_dashboard_includes_nfs_sessions_when_nfs_is_enabled(self):
+        snapshot = frames()
+        snapshot["nfs_sessions"] = {
+            "server_instance_id": snapshot["threads"]["server_instance_id"],
+            "complete": True,
+            "sessions": [{"session_id": "abcdef0123456789", "client_id": "9",
+                          "negotiated_slots": 64, "slots_in_progress": 3,
+                          "connections": [{"connection_id": "0:7"}]}],
+        }
+        meta = WatchState().update(snapshot)
+        output = render(snapshot, meta, args(), width=160)
+        self.assertIn("NFSv4.1+ SESSIONS", output)
+        self.assertIn("abcdef01", output)
+
     def test_scoped_ipv6_endpoint_keeps_interface_and_port(self):
         self.assertEqual(endpoint({"family": "ipv6", "address": "fe80::1", "scope_id": 3, "port": 2049}), "[fe80::1%3]:2049")
 
@@ -292,7 +306,8 @@ class HTTPIntegration(unittest.TestCase):
             status = main(["--host", "127.0.0.1", "--port", str(self.server.server_port), "inspect", "dashboard", "--json"])
         self.assertEqual(status, 0)
         self.assertEqual([r[0] for r in self.server.requests_seen],
-                         ["/api/v1/threads", "/api/v1/threads", "/api/v1/connections"])
+                         ["/api/v1/threads", "/api/v1/threads", "/api/v1/connections",
+                          "/api/v1/nfs/sessions"])
         self.assertEqual(self.server.requests_seen[1][1], {"live": ["1"]})
         self.assertEqual(len(json.loads(stream.getvalue())["connections_snapshot"]["connections"]), 10)
         sample = frames(); sample["connections"].update(complete=False, truncated=True)

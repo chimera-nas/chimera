@@ -273,6 +273,8 @@ def fetch(client, args):
         for key in ("threads", "connections"):
             if view in (key, "dashboard"):
                 result[key] = valid(raw.get(key + "_snapshot", raw), key)
+        if view == "dashboard" and isinstance(raw.get("nfs_sessions_snapshot"), dict):
+            result["nfs_sessions"] = raw["nfs_sessions_snapshot"]
     else:
         if view in ("threads", "dashboard"):
             result["threads"] = valid(client.get_threads(worker_id=args.worker_id), "threads")
@@ -280,6 +282,8 @@ def fetch(client, args):
         if view in ("connections", "dashboard"):
             params = {key: getattr(args, key, None) for key in ("worker_id", "service", "transport", "remote_ip", "remote_port", "local_ip", "local_port")}
             result["connections"] = valid(client.get_connections(**params), "connections")
+        if view == "dashboard":
+            result["nfs_sessions"] = client.get_nfs_sessions(limit=1024)
     result = copy.deepcopy(result)
     if "threads" in result and args.worker_id is not None:
         result["threads"]["threads"] = [w for w in result["threads"]["threads"] if w["worker_id"] == args.worker_id]
@@ -594,6 +598,19 @@ def render(snapshots, meta, args, error=None, stale_age=0, width=None):
                 lines.append("  ABSENT {} {} on {}".format(safe(c["connection_id"]), endpoint(c.get("remote")), safe(c.get("worker_name", c["worker_id"]))))
         elif args.watch and not getattr(args, "quiet", False):
             lines.append("Connection changes require consecutive complete samples from the same server instance.")
+    if args.inspection_view == "dashboard" and "nfs_sessions" in snapshots:
+        sessions = snapshots["nfs_sessions"].get("sessions", [])
+        nfs_enabled = bool(sessions) or any(
+            _integer((worker.get("connection_counts") or {}).get("nfs"))
+            for worker in snapshots.get("threads", {}).get("threads", []))
+        if nfs_enabled:
+            rows = [[str(session.get("session_id", ""))[:8], session.get("client_id", "--"),
+                     session.get("negotiated_slots", "--"), session.get("slots_in_progress", "--"),
+                     meta.get("nfs_peaks", {}).get(session.get("session_id"), "--"),
+                     len(session.get("connections", []))]
+                    for session in sessions]
+            lines += ["", "NFSv4.1+ SESSIONS", _table(
+                ["SESSION", "CLIENT", "GRANT", "INFL", "PEAK", "CONNS"], rows, args.max_rows)]
     if not getattr(args, "quiet", False):
         if args.inspection_view == "dashboard":
             lines += ["", "Connection filters affect listed connections; worker counters cover all traffic."]

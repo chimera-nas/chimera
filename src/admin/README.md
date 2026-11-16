@@ -111,4 +111,5 @@ from a slow backend, so compare a run with a larger negotiated slot count.
 During `--watch`, the CLI reports slot saturation when most samples reach the
 grant and estimates `GRANT / average Write latency` when live latency is
 available. This estimate is a diagnostic bound; saturation can also reflect a
-slow backend.
+slow backend. `inspect dashboard` also shows a sessions panel when NFS is
+enabled; NFSv3 has no session or client view.
