@@ -280,6 +280,8 @@ probe_running_file(
               "(0x%08x)", ga, mx & ~(OA_FILE_WRITE_DATA | OA_FILE_APPEND_DATA));
         st = smb2_read(c, o.file_id, 0, 4, out, &n);
         CHECK(st == ST_SUCCESS && n == 4, "  READ -> 0x%08x (%u bytes)", st, n);
+        st = smb2_write(c, o.file_id, 0, "x", 1, NULL);
+        CHECK(st == ST_ACCESS_DENIED, "  WRITE -> ACCESS_DENIED (0x%08x)", st);
         smb2_close(c, o.file_id);
     }
 
@@ -704,6 +706,479 @@ probe_attr_only_clears_readonly(struct smb2_conn *c)
     smb2_close(c, o.file_id);
 } /* probe_attr_only_clears_readonly */
 
+/* ---- FILE_ATTRIBUTE_READONLY ---------------------------------------------
+ *
+ * MS-FSA 2.1.5.1.2.1 "Algorithm to Check Access to an Existing File": a data
+ * file marked READONLY refuses an open that asks to write data, and a
+ * MAXIMUM_ALLOWED open of it is granted everything but FILE_WRITE_DATA,
+ * FILE_APPEND_DATA, FILE_ADD_SUBDIRECTORY and FILE_DELETE_CHILD.  As on
+ * Windows, the MxAc response ignores READONLY and a directory's grant is not
+ * trimmed (smbtorture smb2.maximum_allowed.read_only_file / read_only_dir, in
+ * Samba 4.23.9, 4.24.2 and later; these cases carry their checks). */
+
+#define OA_READONLY_TRIM (OA_FILE_WRITE_DATA | OA_FILE_APPEND_DATA | \
+                          OA_FILE_DELETE_CHILD)
+
+/* Create `name` holding "abc" and mark it READONLY. */
+static int
+oa_make_readonly_file(
+    struct smb2_conn *c,
+    const char       *name)
+{
+    struct smb2_create_out o;
+    uint32_t               st, count = 0;
+
+    st = oa_open(c, name, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE %s -> 0x%08x", name, st);
+    if (st != ST_SUCCESS) {
+        return 0;
+    }
+    st = smb2_write(c, o.file_id, 0, "abc", 3, &count);
+    CHECK(st == ST_SUCCESS && count == 3, "setup: WRITE %s -> 0x%08x", name, st);
+    st = oa_set_attributes(c, o.file_id, MBT_FILE_ATTRIBUTE_READONLY);
+    CHECK(st == ST_SUCCESS, "setup: SET READONLY on %s -> 0x%08x", name, st);
+    smb2_close(c, o.file_id);
+    return st == ST_SUCCESS;
+} /* oa_make_readonly_file */
+
+/* MAXIMUM_ALLOWED on a READONLY file: opens, MxAc unchanged, the grant loses
+ * the three bits (FILE_ADD_SUBDIRECTORY is the same bit as FILE_APPEND_DATA),
+ * WRITE is refused, READ works. */
+static void
+probe_ro_file_max_allowed(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint8_t                out[8];
+    uint32_t               st, mx = 0, ga, n = 0;
+
+    printf("# ro_file_max_allowed\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip ro_file_max_allowed: backend keeps no DOS attributes\n");
+        return;
+    }
+    if (!oa_make_readonly_file(c, "r1")) {
+        return;
+    }
+
+    st = oa_open(c, "r1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED, 0, 0, &mx, &o);
+    CHECK(st == ST_SUCCESS, "OPEN READONLY r1 MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    CHECK(mx & OA_FILE_WRITE_DATA, "  MxAc ignores READONLY (0x%08x)", mx);
+    ga = oa_access_info(c, o.file_id);
+    CHECK(ga == (mx & ~OA_READONLY_TRIM),
+          "  granted access 0x%08x == MxAc without WRITE_DATA, APPEND_DATA, "
+          "DELETE_CHILD (0x%08x)", ga, mx & ~OA_READONLY_TRIM);
+    st = smb2_write(c, o.file_id, 0, "x", 1, NULL);
+    CHECK(st == ST_ACCESS_DENIED, "  WRITE -> ACCESS_DENIED (0x%08x)", st);
+    st = smb2_read(c, o.file_id, 0, 3, out, &n);
+    CHECK(st == ST_SUCCESS && n == 3 && memcmp(out, "abc", 3) == 0,
+          "  READ -> 0x%08x (%u bytes)", st, n);
+    smb2_close(c, o.file_id);
+} /* probe_ro_file_max_allowed */
+
+/* GENERIC_WRITE and GENERIC_ALL include FILE_WRITE_DATA, so the READONLY
+ * check refuses both; GENERIC_READ is not refused. */
+static void
+probe_ro_file_generic(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint32_t               st;
+
+    printf("# ro_file_generic\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip ro_file_generic: backend keeps no DOS attributes\n");
+        return;
+    }
+    if (!oa_make_readonly_file(c, "r3")) {
+        return;
+    }
+
+    st = oa_open(c, "r3", MBT_FILE_OPEN, OA_GENERIC_WRITE,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_ACCESS_DENIED, "OPEN READONLY r3 GENERIC_WRITE -> "
+          "ACCESS_DENIED (0x%08x)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+    st = oa_open(c, "r3", MBT_FILE_OPEN, OA_GENERIC_ALL,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_ACCESS_DENIED, "OPEN READONLY r3 GENERIC_ALL -> "
+          "ACCESS_DENIED (0x%08x)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+    st = oa_open(c, "r3", MBT_FILE_OPEN, MBT_GENERIC_READ,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN READONLY r3 GENERIC_READ -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+} /* probe_ro_file_generic */
+
+/* CREATE `name` (a file, or a directory with FILE_DIRECTORY_FILE), delete it,
+ * and check it is gone. */
+static void
+oa_create_and_remove(
+    struct smb2_conn *c,
+    const char       *name,
+    uint32_t          create_options)
+{
+    struct smb2_create_out o;
+    uint32_t               st;
+
+    st = oa_open(c, name, MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS, create_options,
+                 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "  CREATE %s -> 0x%08x", name, st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_set_disposition(c, o.file_id, 1);
+    CHECK(st == ST_SUCCESS, "  SET delete-pending on %s -> 0x%08x", name, st);
+    smb2_close(c, o.file_id);
+
+    st = oa_open(c, name, MBT_FILE_OPEN, MBT_FILE_READ_ATTRIBUTES, 0, 0, NULL,
+                 &o);
+    CHECK(st == ST_OBJECT_NAME_NOT_FOUND, "  %s is gone after CLOSE (0x%08x)",
+          name, st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+} /* oa_create_and_remove */
+
+/* A READONLY directory opened MAXIMUM_ALLOWED keeps its whole grant, and a
+ * file and a directory can still be created and removed inside it
+ * (smbtorture smb2.maximum_allowed.read_only_dir, Samba 4.23.9, 4.24.2 and
+ * later). */
+static void
+probe_ro_dir_max_allowed(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint32_t               st, mx = 0, ga;
+
+    printf("# ro_dir_max_allowed\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip ro_dir_max_allowed: backend keeps no DOS attributes\n");
+        return;
+    }
+
+    st = oa_open(c, "rd1", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_DIRECTORY_FILE,
+                 MBT_FILE_ATTRIBUTE_READONLY | OA_FILE_ATTRIBUTE_DIR, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE READONLY directory rd1 -> 0x%08x",
+          st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(c, o.file_id);
+
+    st = oa_open(c, "rd1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED, 0, 0, &mx, &o);
+    CHECK(st == ST_SUCCESS, "OPEN READONLY rd1 MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    CHECK(mx & OA_FILE_WRITE_DATA, "  MxAc includes ADD_FILE (0x%08x)", mx);
+    ga = oa_access_info(c, o.file_id);
+    CHECK(ga == mx, "  granted access 0x%08x == MxAc 0x%08x (READONLY does "
+          "not trim a directory)", ga, mx);
+    smb2_close(c, o.file_id);
+
+    /* A child file and a child directory can be created in it and removed. */
+    oa_create_and_remove(c, "rd1\\x", MBT_FILE_NON_DIRECTORY_FILE);
+    oa_create_and_remove(c, "rd1\\sd", MBT_FILE_DIRECTORY_FILE);
+} /* probe_ro_dir_max_allowed */
+
+/* The open that creates a READONLY file is not fenced by it. */
+static void
+probe_ro_create_handle_writes(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint32_t               st, count = 0;
+
+    printf("# ro_create_handle_writes\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip ro_create_handle_writes: backend keeps no DOS "
+               "attributes\n");
+        return;
+    }
+
+    st = oa_open(c, "r2", MBT_FILE_CREATE, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_NON_DIRECTORY_FILE, MBT_FILE_ATTRIBUTE_READONLY,
+                 NULL, &o);
+    CHECK(st == ST_SUCCESS, "CREATE r2 READONLY MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_write(c, o.file_id, 0, "abc", 3, &count);
+    CHECK(st == ST_SUCCESS && count == 3,
+          "  WRITE through the creating handle -> 0x%08x", st);
+    smb2_close(c, o.file_id);
+} /* probe_ro_create_handle_writes */
+
+/* MAXIMUM_ALLOWED beside an explicit FILE_WRITE_DATA grants FILE_WRITE_DATA
+ * whenever the open succeeds.  The owner of a file whose mode gives it no
+ * write bit is the case where the two differ: CREATE grants the owner of a
+ * mode-only object the rights it asks for, while the mode evaluation behind
+ * MAXIMUM_ALLOWED does not list FILE_WRITE_DATA.  Passthrough backends only:
+ * the mode is changed on the host (`dir` is the shared host directory). */
+static void
+probe_max_allowed_explicit_write(
+    struct smb2_conn *c,
+    const char       *dir)
+{
+#ifndef _WIN32
+    struct smb2_create_out o;
+    char                   path[600];
+    uint32_t               st, ga, mx = 0, count = 0;
+
+    printf("# max_allowed_explicit_write\n");
+    if (!dir || !dir[0]) {
+        printf("# skip max_allowed_explicit_write: memfs has no host file\n");
+        return;
+    }
+
+    st = oa_open(c, "w1", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE w1 -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(c, o.file_id);
+
+    snprintf(path, sizeof(path), "%s/w1", dir);
+    if (chmod(path, 0444) != 0) {
+        CHECK(0, "setup: chmod 0444 %s: %s", path, strerror(errno));
+        return;
+    }
+
+    st = oa_open(c, "w1", MBT_FILE_OPEN,
+                 MBT_MAXIMUM_ALLOWED | OA_FILE_WRITE_DATA,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, &mx, &o);
+    CHECK(st == ST_SUCCESS, "OPEN w1 (mode 0444) MAXIMUM_ALLOWED|FILE_WRITE_DATA "
+          "-> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    CHECK(!(mx & OA_FILE_WRITE_DATA), "  MxAc has no WRITE_DATA (0x%08x)", mx);
+    ga = oa_access_info(c, o.file_id);
+    CHECK(ga == (mx | OA_FILE_WRITE_DATA),
+          "  granted access 0x%08x == MxAc plus WRITE_DATA (0x%08x)", ga,
+          mx | OA_FILE_WRITE_DATA);
+    st = smb2_write(c, o.file_id, 0, "abc", 3, &count);
+    CHECK(st == ST_SUCCESS && count == 3,
+          "  WRITE 3 bytes -> 0x%08x (count %u)", st, count);
+    smb2_close(c, o.file_id);
+#else  /* ifndef _WIN32 */
+    (void) c;
+    (void) dir;
+    printf("# max_allowed_explicit_write\n");
+    printf("# skip max_allowed_explicit_write: needs a host file mode\n");
+#endif /* ifndef _WIN32 */
+} /* probe_max_allowed_explicit_write */
+
+#define OA_OTHER_USER     "oaother"
+#define OA_OTHER_PASSWORD "Chimera!OA1"
+#define OA_OTHER_UID      2001u
+
+/* CREATE `name` with a SecD context carrying one Everyone ACE of `mask`. */
+static uint32_t
+oa_create_with_dacl(
+    struct smb2_conn       *c,
+    const char             *name,
+    uint32_t                create_options,
+    uint32_t                mask,
+    struct smb2_create_out *o)
+{
+    static const uint8_t secd_tag[4] = { 'S', 'e', 'c', 'D' };
+    struct smb2_sd_ace   ace[1];
+    struct smb2_cctx     ctx;
+    uint8_t              sd[256];
+    int                  len;
+
+    memset(ace, 0, sizeof(ace));
+    ace[0].type        = 0;             /* ACCESS_ALLOWED */
+    ace[0].access_mask = mask;
+    snprintf(ace[0].sid, sizeof(ace[0].sid), "S-1-1-0");
+    len = smb2_sd_build(sd, sizeof(sd), NULL, NULL, ace, 1);
+    if (len <= 0) {
+        o->status = ST_ACCESS_DENIED;
+        return o->status;
+    }
+    ctx.name     = secd_tag;
+    ctx.name_len = 4;
+    ctx.data     = sd;
+    ctx.data_len = len;
+    smb2c_send(c, smb2c_build_create_full(c, name, MBT_FILE_CREATE,
+                                          MBT_MAXIMUM_ALLOWED, MBT_FILE_SHARE_RWD,
+                                          create_options, 0, NULL, &ctx, 1));
+    smb2c_wait(c);
+    smb2c_parse_create(c, o);
+    return o->status;
+} /* oa_create_with_dacl */
+
+/* A connection as a second user, registered once, so a case can make a file
+ * this connection's anonymous user does not own. */
+static struct smb2_conn *
+oa_other_conn(struct smb2_env *env)
+{
+    static const struct smb2_wire_profile w = {
+        .name = "oaother", .max_dialect = 0x0300, .ntlmv2 = 1
+    };
+    static struct smb2_conn              *other;
+    const uint32_t                        gids[1] = { OA_OTHER_UID };
+
+    if (other) {
+        return other;
+    }
+    if (chimera_server_add_user(env->server, OA_OTHER_USER, OA_OTHER_PASSWORD,
+                                OA_OTHER_PASSWORD, NULL, OA_OTHER_UID,
+                                OA_OTHER_UID, 1, gids, 1) != 0) {
+        CHECK(0, "setup: register user %s", OA_OTHER_USER);
+        return NULL;
+    }
+    other       = smb2_conn_open(env);
+    other->wire = &w;
+    smb2_handshake_as(other, OA_OTHER_USER, OA_OTHER_PASSWORD);
+    return other;
+} /* oa_other_conn */
+
+#define OA_DACL_SECURITY_INFO 0x00000004u
+
+/* Full access is the creator's only when the CREATE makes the file (MS-FSA
+ * 2.1.5.1.1).  A MAXIMUM_ALLOWED CREATE of a new named stream on an existing
+ * file is granted what the file's descriptor allows -- MxAc -- not
+ * FILE_ALL_ACCESS, so a caller who does not own the file cannot change its
+ * descriptor through the stream handle.  A second user owns the file; this
+ * connection's anonymous user creates the stream.  memfs only: the
+ * descriptor is set by the CREATE's SecD context. */
+static void
+probe_max_allowed_new_stream(
+    struct smb2_env  *env,
+    struct smb2_conn *c,
+    const char       *dir)
+{
+    struct smb2_conn      *other;
+    struct smb2_create_out o;
+    struct smb2_sd_ace     ace[1];
+    uint8_t                sd[256];
+    uint32_t               st, ga, mxac = 0;
+    int                    len;
+
+    printf("# max_allowed_new_stream\n");
+    if (dir && dir[0]) {
+        printf("# skip max_allowed_new_stream: memfs only\n");
+        return;
+    }
+    other = oa_other_conn(env);
+    if (!other) {
+        return;
+    }
+    st = oa_create_with_dacl(other, "ns1", MBT_FILE_NON_DIRECTORY_FILE,
+                             0x00120089u, &o);
+    CHECK(st == ST_SUCCESS, "setup: %s CREATEs ns1, Everyone read only "
+          "-> 0x%08x", OA_OTHER_USER, st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(other, o.file_id);
+
+    st = oa_open(c, "ns1:s1", MBT_FILE_CREATE, MBT_MAXIMUM_ALLOWED, 0, 0, &mxac,
+                 &o);
+    CHECK(st == ST_SUCCESS, "CREATE new stream ns1:s1 MAXIMUM_ALLOWED as a "
+          "non-owner -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    ga = oa_access_info(c, o.file_id);
+    /* DELETE may also come from the parent's FILE_DELETE_CHILD. */
+    CHECK(ga != MBT_FILE_ALL_ACCESS &&
+          (ga & ~MBT_DELETE) == (mxac & ~MBT_DELETE),
+          "  granted access 0x%08x is MxAc 0x%08x (DELETE aside), not "
+          "FILE_ALL_ACCESS", ga, mxac);
+    CHECK(!(ga & OA_WRITE_DAC), "  granted access 0x%08x has no WRITE_DAC", ga);
+
+    memset(ace, 0, sizeof(ace));
+    ace[0].type        = 0;             /* ACCESS_ALLOWED */
+    ace[0].access_mask = MBT_FILE_ALL_ACCESS;
+    snprintf(ace[0].sid, sizeof(ace[0].sid), "S-1-1-0");
+    len = smb2_sd_build(sd, sizeof(sd), NULL, NULL, ace, 1);
+    st  = smb2_set_info_addl(c, SMB2_INFO_SECURITY_T, 0, o.file_id,
+                             OA_DACL_SECURITY_INFO, sd, (uint32_t) len);
+    CHECK(st == ST_ACCESS_DENIED, "  SET security (DACL) through the stream "
+          "handle -> ACCESS_DENIED (0x%08x)", st);
+    smb2_close(c, o.file_id);
+
+    /* A stream CREATE that also makes the base file makes a new file. */
+    st = oa_open(c, "ns2:s1", MBT_FILE_CREATE, MBT_MAXIMUM_ALLOWED, 0, 0, NULL,
+                 &o);
+    CHECK(st == ST_SUCCESS, "CREATE ns2:s1 MAXIMUM_ALLOWED, ns2 new -> 0x%08x",
+          st);
+    if (st == ST_SUCCESS) {
+        ga = oa_access_info(c, o.file_id);
+        CHECK(ga == MBT_FILE_ALL_ACCESS,
+              "  granted access 0x%08x == FILE_ALL_ACCESS", ga);
+        smb2_close(c, o.file_id);
+    }
+} /* probe_max_allowed_new_stream */
+
+/* A MAXIMUM_ALLOWED open that creates the file is granted full access
+ * (MS-FSA 2.1.5.1.1 "Creation of a New File"), whatever the new file's
+ * security descriptor gives the caller.  On the passthrough backends (`dir`
+ * set) a WRITE goes through the descriptor the open made, so the grant alone
+ * decides it, and the creating handle writes. */
+static void
+probe_max_allowed_creator(
+    struct smb2_conn *c,
+    const char       *dir)
+{
+    static const uint8_t   secd_tag[4] = { 'S', 'e', 'c', 'D' };
+    struct smb2_create_out o;
+    struct smb2_sd_ace     ace[1];
+    struct smb2_cctx       ctx;
+    uint8_t                sd[256];
+    uint32_t               st, ga, count = 0;
+    int                    len;
+
+    printf("# max_allowed_creator\n");
+    memset(ace, 0, sizeof(ace));
+    ace[0].type        = 0;             /* ACCESS_ALLOWED */
+    ace[0].access_mask = 0x00120089u;   /* read only */
+    snprintf(ace[0].sid, sizeof(ace[0].sid), "S-1-1-0");
+    len = smb2_sd_build(sd, sizeof(sd), NULL, NULL, ace, 1);
+    CHECK(len > 0, "setup: build a read-only DACL (%d bytes)", len);
+    if (len <= 0) {
+        return;
+    }
+    ctx.name     = secd_tag;
+    ctx.name_len = 4;
+    ctx.data     = sd;
+    ctx.data_len = len;
+
+    smb2c_send(c, smb2c_build_create_full(c, "mc1", MBT_FILE_CREATE,
+                                          MBT_MAXIMUM_ALLOWED, MBT_FILE_SHARE_RWD,
+                                          MBT_FILE_NON_DIRECTORY_FILE, 0, NULL,
+                                          &ctx, 1));
+    smb2c_wait(c);
+    smb2c_parse_create(c, &o);
+    st = o.status;
+    CHECK(st == ST_SUCCESS, "CREATE mc1 MAXIMUM_ALLOWED with a read-only DACL "
+          "-> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    ga = oa_access_info(c, o.file_id);
+    CHECK(ga == MBT_FILE_ALL_ACCESS, "  granted access 0x%08x == FILE_ALL_ACCESS",
+          ga);
+    if (dir && dir[0]) {
+        st = smb2_write(c, o.file_id, 0, "abc", 3, &count);
+        CHECK(st == ST_SUCCESS && count == 3,
+              "  WRITE through the creating handle -> 0x%08x", st);
+    }
+    smb2_close(c, o.file_id);
+} /* probe_max_allowed_creator */
+
 /* Mount the share on a passthrough backend: a fresh host directory under
  * $CHIMERA_MBT_SCRATCH (default cwd).  Exits 77 when that filesystem cannot
  * produce file handles. */
@@ -775,6 +1250,8 @@ main(
     }
 
     if (strcmp(module, "memfs") == 0) {
+        /* Named streams are off by default; max_allowed_new_stream needs them. */
+        opts.named_streams = 1;
         smb2_env_start_opts(&env, &opts);
     } else if (strcmp(module, "linux") == 0 || strcmp(module, "io_uring") == 0) {
         keeps_dos_attrs = 0;
@@ -798,6 +1275,13 @@ main(
     probe_overwrite_existing_dir(c);
     probe_running_file(c, pt_dir);
     probe_attr_only_clears_readonly(c);
+    probe_ro_file_max_allowed(c);
+    probe_ro_file_generic(c);
+    probe_ro_dir_max_allowed(c);
+    probe_ro_create_handle_writes(c);
+    probe_max_allowed_explicit_write(c, pt_dir);
+    probe_max_allowed_new_stream(&env, c, pt_dir);
+    probe_max_allowed_creator(c, pt_dir);
 
     smb2_env_stop(&env);
 

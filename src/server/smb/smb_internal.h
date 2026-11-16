@@ -594,6 +594,11 @@ struct chimera_smb_request {
              * the file/dir (vs opened an existing one) — drives the OPENED vs
              * CREATED Create Action in the reply. */
             uint8_t                         r_created;
+            /* Set when this CREATE made the file itself.  For a named-stream
+             * CREATE that is the base file: r_created says only that the
+             * stream is new.  A MAXIMUM_ALLOWED open that made the file is
+             * granted full access (MS-FSA 2.1.5.1.1). */
+            uint8_t                         r_file_created;
             /* Bounded re-getattr budget for an ACCESS_DENIED that may be the
              * transient server-owned state of an object a concurrent CREATE is
              * still constructing (see chimera_smb_create_open_at_callback). */
@@ -604,6 +609,11 @@ struct chimera_smb_request {
              * FILE_APPEND_DATA; a directory keeps its grant
              * (chimera_smb_max_allowed_trim). */
             uint8_t                         ro_retried;
+            /* Set by the open callback when the existing file is fenced by
+             * FILE_ATTRIBUTE_READONLY (MS-FSA 2.1.5.1.2.1): a data-write or
+             * delete-on-close open is refused, and a MAXIMUM_ALLOWED grant
+             * loses FILE_WRITE_DATA, FILE_APPEND_DATA and FILE_DELETE_CHILD. */
+            uint8_t                         readonly_fenced;
             /* Open handle parked across the access-retry getattr. */
             struct chimera_vfs_open_handle *access_retry_oh;
             /* Bounded retry budget + parked handle for a share conflict against a
