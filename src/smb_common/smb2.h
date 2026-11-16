@@ -1293,5 +1293,9 @@ struct smb_direct_hdr {
     uint32_t data_length;
 };
 
+/* smb_direct_hdr.flags: the sender asks for a prompt answer (MS-SMBD 2.2.3);
+ * an empty message carrying it is the idle-connection keepalive. */
+#define SMB_DIRECT_RESPONSE_REQUESTED   0x0001
+
 #define SMB2_CHANNEL_RDMA_V1            0x00000001
 #define SMB2_CHANNEL_RDMA_V1_INVALIDATE 0x00000002

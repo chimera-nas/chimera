@@ -290,6 +290,9 @@
 #define SMB2C_DIRECT_HDR                        24
 #define SMB2C_DIRECT_MAX_FRAGS                  1024
 #define SMB2C_DIRECT_PORT                       5445
+/* Data-transfer Flags bit asking the peer to answer promptly (MS-SMBD 2.2.3);
+ * a keepalive is an empty message carrying it. */
+#define SMB2C_DIRECT_RESPONSE_REQUESTED         0x0001
 
 /* SMB2 CHANGE_NOTIFY (MS-SMB2 2.2.35 / 2.2.36) */
 #define SMB2_CHANGE_NOTIFY_REQ_SIZE             32
@@ -722,6 +725,15 @@ struct smb2_conn {
      * never overwrite it before that message is complete. */
     int                             direct_nfrag;
     uint32_t                        direct_frag_len[SMB2C_DIRECT_MAX_FRAGS];
+    /* Messages received with no payload (keepalive answers, credit grants):
+     * how many, and the header of the last one. */
+    int                             direct_nempty;
+    uint16_t                        direct_empty_credits_granted;
+    uint16_t                        direct_empty_flags;
+    uint32_t                        direct_empty_data_offset;
+    int                             direct_empty_len;
+    /* One-shot Flags for the next request's data-transfer header. */
+    uint16_t                        direct_next_flags;
 };
 
 
@@ -1245,8 +1257,14 @@ smb2c_direct_recv(
     doff      = g32(dg, 12);
     dlen      = g32(dg, 16);
 
-    /* No payload: a keepalive or a credit grant, never part of a message. */
+    /* No payload: a keepalive or a credit grant, never part of a message.
+     * Recorded so a probe can tell whether one arrived. */
     if (dlen == 0) {
+        c->direct_nempty++;
+        c->direct_empty_credits_granted = g16(dg, 2);
+        c->direct_empty_flags           = g16(dg, 4);
+        c->direct_empty_data_offset     = doff;
+        c->direct_empty_len             = len;
         return;
     }
 
@@ -1869,17 +1887,45 @@ smb2c_xmit(
     dt = evpl_iovec_data(&iov);
     p16(dt, 0, 255);                  /* CreditsRequested */
     p16(dt, 2, 255);                  /* CreditsGranted */
-    p16(dt, 4, 0);                    /* Flags */
+    p16(dt, 4, c->direct_next_flags); /* Flags */
     p16(dt, 6, 0);                    /* Reserved */
     p32(dt, 8, 0);                    /* RemainingDataLength */
     p32(dt, 12, SMB2C_DIRECT_HDR);    /* DataOffset */
     p32(dt, 16, n);                   /* DataLength */
     p32(dt, 20, 0);                   /* Padding */
     memcpy(dt + SMB2C_DIRECT_HDR, framed + 4, n);
+    c->direct_next_flags = 0;
     evpl_iovec_set_length(&iov, SMB2C_DIRECT_HDR + n);
     evpl_sendv(c->env->evpl, c->bind, &iov, 1, SMB2C_DIRECT_HDR + n,
                EVPL_SEND_FLAG_TAKE_REF);
 } /* smb2c_xmit */
+
+/* Send an empty data-transfer message (MS-SMBD 3.1.5.4) on a direct
+ * connection: the bare 20-byte header with no payload, DataOffset and
+ * DataLength 0.  With SMB2C_DIRECT_RESPONSE_REQUESTED in `flags` this is the
+ * keepalive a peer's idle timer sends, which must be answered promptly.
+ * Nothing is waited for; a following ECHO round trip (smb2_echo_barrier)
+ * bounds when an answer would have arrived, since the transport keeps order. */
+static inline void
+smb2_direct_send_empty(
+    struct smb2_conn *c,
+    uint16_t          flags)
+{
+    struct evpl_iovec iov;
+    uint8_t          *dt;
+
+    evpl_iovec_alloc(c->env->evpl, 20, 8, 1, 0, &iov);
+    dt = evpl_iovec_data(&iov);
+    p16(dt, 0, 255);                  /* CreditsRequested */
+    p16(dt, 2, 255);                  /* CreditsGranted */
+    p16(dt, 4, flags);                /* Flags */
+    p16(dt, 6, 0);                    /* Reserved */
+    p32(dt, 8, 0);                    /* RemainingDataLength */
+    p32(dt, 12, 0);                   /* DataOffset */
+    p32(dt, 16, 0);                   /* DataLength */
+    evpl_iovec_set_length(&iov, 20);
+    evpl_sendv(c->env->evpl, c->bind, &iov, 1, 20, EVPL_SEND_FLAG_TAKE_REF);
+} /* smb2_direct_send_empty */
 
 /* Post a request (non-blocking): frame body_len bytes, send, clear the
  * reply flag.  The MessageId advances so the next request is fresh. */
