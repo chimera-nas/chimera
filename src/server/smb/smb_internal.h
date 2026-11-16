@@ -598,6 +598,12 @@ struct chimera_smb_request {
              * transient server-owned state of an object a concurrent CREATE is
              * still constructing (see chimera_smb_create_open_at_callback). */
             uint8_t                         access_retries;
+            /* Set when an open the backend refused read-write was re-issued
+             * read-only (see chimera_smb_may_reopen_read_only).  A file
+             * opened that way is not granted FILE_WRITE_DATA or
+             * FILE_APPEND_DATA; a directory keeps its grant
+             * (chimera_smb_max_allowed_trim). */
+            uint8_t                         ro_retried;
             /* Open handle parked across the access-retry getattr. */
             struct chimera_vfs_open_handle *access_retry_oh;
             /* Bounded retry budget + parked handle for a share conflict against a

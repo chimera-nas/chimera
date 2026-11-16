@@ -26,6 +26,7 @@
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_release.h"
 #include "smb_attr.h"
+#include "smb_access.h"
 #include "smb_lsarpc.h"
 #include "smb_srvsvc.h"
 #include "smb_samr.h"
@@ -66,19 +67,6 @@ chimera_smb_create_finish_with_eas(
                          request->create.ea_buf_len,
                          chimera_smb_create_ea_done, request);
 } /* chimera_smb_create_finish_with_eas */
-
-#define SMB2_WRITE_MASK                            (SMB2_FILE_WRITE_DATA | \
-                                                    SMB2_FILE_APPEND_DATA | \
-                                                    SMB2_FILE_WRITE_EA | \
-                                                    SMB2_FILE_WRITE_ATTRIBUTES | \
-                                                    SMB2_FILE_DELETE_CHILD | \
-                                                    SMB2_FILE_ADD_FILE | \
-                                                    SMB2_FILE_ADD_SUBDIRECTORY | \
-                                                    SMB2_DELETE | \
-                                                    SMB2_WRITE_DACL | \
-                                                    SMB2_WRITE_OWNER | \
-                                                    SMB2_GENERIC_WRITE | \
-                                                    SMB2_GENERIC_ALL)
 
 /* Bits in DesiredAccess that imply the caller will read or write file
  * data.  Without any of these set, the open is metadata-only — common
@@ -503,11 +491,6 @@ chimera_smb_create_after_share(
 static void
 chimera_smb_create_issue_truncate(
     struct chimera_smb_request *request);
-
-/* True for the dispositions that replace an existing file's contents. */
-static inline bool
-chimera_smb_disposition_overwrites(
-    uint32_t disposition);
 
 /* The open's tail once the share reservation is held; shared by the
  * synchronous grant, the share-park resume and the deferred-truncate
@@ -2851,6 +2834,15 @@ chimera_smb_create_open_stream_chain(
             break;
     } /* switch */
 
+    /* The stream is opened read-write only when the open can write data or
+    * replaces the stream's content (see chimera_smb_create_issue_open). */
+    if (chimera_smb_open_read_only(request->create.desired_access,
+                                   chimera_smb_disposition_overwrites(
+                                       request->create.create_disposition),
+                                   request->create.ro_retried)) {
+        sflags |= CHIMERA_VFS_OPEN_READ_ONLY;
+    }
+
     request->create.base_oh = base_oh;
 
     /* The base is open and, if this create brought it into existence, already
@@ -3058,6 +3050,10 @@ chimera_smb_create_stopped_on_symlink(struct chimera_smb_request *request)
         request);
 } /* chimera_smb_create_stopped_on_symlink */
 
+static void chimera_smb_create_issue_open(
+    struct chimera_smb_request *request);
+
+
 static inline void
 chimera_smb_create_open_at_callback(
     enum chimera_vfs_error          error_code,
@@ -3073,6 +3069,25 @@ chimera_smb_create_open_at_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
+        if (chimera_smb_may_reopen_read_only(request->create.desired_access,
+                                             request->create.create_options,
+                                             request->create.create_disposition,
+                                             request->create.has_stream,
+                                             request->create.ro_retried,
+                                             error_code)) {
+            /* An open chimera_smb_create_issue_open built (the predicate
+             * excludes the mkdir path's own open).  parent_handle is still
+             * held; issue_open is safe to re-run (its set_attr stamping
+             * re-applies the same values, persist_prepare reuses
+             * persist_pid).  The linux backend has already taken the mode and
+             * ACL out of set_attr on the refused attempt, which matters only
+             * if the re-issued open is the one that creates the file. */
+            chimera_smb_debug("CREATE: backend refused the read-write open "
+                              "(%d); re-issuing read-only", (int) error_code);
+            request->create.ro_retried = 1;
+            chimera_smb_create_issue_open(request);
+            return;
+        }
         if (error_code == CHIMERA_VFS_ELOOP) {
             /* Stopped on a symbolic-link leaf: read the link target for the
              * SymbolicLinkErrorResponse body before completing (the readlink
@@ -3081,7 +3096,14 @@ chimera_smb_create_open_at_callback(
             return;
         }
         chimera_smb_create_release_parent(request);
-        chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
+        chimera_smb_complete_request(request,
+                                     chimera_smb_overwrite_met_directory(
+                                         request->create.create_options,
+                                         request->create.create_disposition,
+                                         request->create.has_stream,
+                                         error_code) ?
+                                     SMB2_STATUS_OBJECT_NAME_COLLISION :
+                                     chimera_smb_create_error_status(error_code));
         return;
     }
 
@@ -3309,6 +3331,20 @@ chimera_smb_create_open_at_callback(
         chimera_smb_create_release_handle(vfs_thread, oh);
         chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_IS_A_DIRECTORY);
+        return;
+    }
+
+    /* An existing directory cannot be overwritten or superseded: MS-FSA
+     * 2.1.5.1.2 "Open of an Existing File" fails the open
+     * STATUS_OBJECT_NAME_COLLISION.  FILE_DIRECTORY_FILE with an overwriting
+     * disposition was refused before the open (STATUS_INVALID_PARAMETER) and
+     * FILE_NON_DIRECTORY_FILE just above, so this is an open that named
+     * neither.  A named stream on a directory is a data stream and goes on. */
+    if (!request->create.has_stream && S_ISDIR(attr->va_mode) &&
+        chimera_smb_disposition_overwrites(request->create.create_disposition)) {
+        chimera_smb_create_release_handle(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_COLLISION);
         return;
     }
 
@@ -4287,9 +4323,12 @@ chimera_smb_create_access_deny_transient(
 
 /*
  * Resolve the access mask granted on a successful open, for the open handle's
- * FileAccessInformation / MxAc reporting.  A MAXIMUM_ALLOWED open is granted the
- * full set the caller's ACL evaluation yields; a specific-bits open is granted
- * exactly the bits it asked for (the open already passed the access check).
+ * FileAccessInformation reporting and the per-operation access gates.  A
+ * MAXIMUM_ALLOWED open is granted the set the caller's ACL evaluation yields,
+ * trimmed by chimera_smb_max_allowed_trim for a read-only backend handle; a
+ * specific-bits open is granted exactly the bits it asked for (the open
+ * already passed the access check).  The MxAc maximal access is the untrimmed
+ * ACL evaluation, computed separately.
  */
 static inline uint32_t
 chimera_smb_create_granted_access(
@@ -4300,9 +4339,11 @@ chimera_smb_create_granted_access(
     uint32_t g;
 
     if (da & SMB2_MAXIMUM_ALLOWED) {
-        return chimera_vfs_access_check(
-            attr, &request->session_handle->session->cred,
-            CHIMERA_ACE_MASK_ALL);
+        return chimera_smb_max_allowed_trim(
+            chimera_vfs_access_check(attr, &request->session_handle->session->cred,
+                                     CHIMERA_ACE_MASK_ALL),
+            attr && S_ISDIR(attr->va_mode),
+            request->create.ro_retried);
     }
 
     /* GrantedAccess is reported in resolved specific rights, never the NT
@@ -4426,16 +4467,6 @@ chimera_smb_create_open_callback(
 
 } /* chimera_smb_create_open_at_callback */
 
-
-/* True for the dispositions that replace an existing file's contents
- * (OVERWRITE / OVERWRITE_IF / SUPERSEDE). */
-static inline bool
-chimera_smb_disposition_overwrites(uint32_t disposition)
-{
-    return disposition == SMB2_FILE_OVERWRITE ||
-           disposition == SMB2_FILE_OVERWRITE_IF ||
-           disposition == SMB2_FILE_SUPERSEDE;
-} /* chimera_smb_disposition_overwrites */
 
 /* Decide whether this open is a persistent-handle grant whose record must be
  * persisted with the open, and if so build the handle-state descriptor
@@ -4588,7 +4619,20 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
         flags |= CHIMERA_VFS_OPEN_PATH;
     }
 
-    if (!(request->create.desired_access & SMB2_WRITE_MASK)) {
+    /* Open the backend read-write only when the open can write file data
+     * (chimera_smb_access_writes_data) or replaces the file's content (an
+     * overwriting disposition, truncated through this handle by
+     * chimera_smb_create_issue_truncate); an open that changes only metadata --
+     * attributes, EAs, the security descriptor, delete -- does not need a
+     * descriptor open for writing and is opened read-only.  A named-stream
+     * CREATE's base open never replaces content.  An open the backend refused
+     * read-write is re-issued read-only where chimera_smb_may_reopen_read_only
+     * allows (ro_retried). */
+    if (chimera_smb_open_read_only(request->create.desired_access,
+                                   !request->create.has_stream &&
+                                   chimera_smb_disposition_overwrites(
+                                       request->create.create_disposition),
+                                   request->create.ro_retried)) {
         flags |= CHIMERA_VFS_OPEN_READ_ONLY;
     }
 
@@ -4826,9 +4870,8 @@ chimera_smb_create_open_parent_checked(
 
     request->create.parent_handle = oh;
 
-    if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
-        (request->create.create_disposition == SMB2_FILE_CREATE ||
-         request->create.create_disposition == SMB2_FILE_OPEN_IF)) {
+    if (chimera_smb_create_is_mkdir(request->create.create_options,
+                                    request->create.create_disposition)) {
 
         /* A directory create does not go through chimera_smb_create_issue_open,
          * so it needs the seed of its own -- without it an ordinary Windows
@@ -5672,6 +5715,7 @@ chimera_smb_create(struct chimera_smb_request *request)
     request->create.gen_truncating         = 0;
     request->create.gen_share_retry        = 0;
     request->create.access_retries         = 0;
+    request->create.ro_retried             = 0;
     request->create.access_retry_oh        = NULL;
     request->create.share_conflict_retries = 0;
     request->create.share_conflict_oh      = NULL;
