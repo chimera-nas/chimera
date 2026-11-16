@@ -90,9 +90,9 @@ IDs return 404. Slot rows are capped at 1,024 and report `total`, `truncated`,
 and `complete`. The CLI presents this as
 `chimera-admin inspect nfs sessions --slots SESSION_ID`.
 
-Session connection association is not yet collected. `nfs4_session_bind_conn`
-stores the session pointer in each connection's private data, but the session
-does not retain the full set; its session-level connection pointer is only the
-backchannel connection. A bounded list updated only when a connection first
-binds, plus a read-side match against the inspection connection IDs, is the
-smallest change that would expose all connections without per-request writes.
+Session rows include up to 64 `connections`, each with `connection_id`
+(`worker:serial`) and `worker_id`, plus the distinct `workers` list.
+`connections_truncated` is true if more than 64 distinct bindings were
+observed. This list records connections that have bound the session during its
+lifetime; a disconnected connection can remain listed until the session is
+destroyed.

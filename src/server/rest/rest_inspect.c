@@ -110,6 +110,29 @@ chimera_rest_inspect_nfs_sessions(
         json_object_set_new(item, "slots_cached", json_integer(session->slots_cached));
         json_object_set_new(item, "slots_completed", json_integer(session->slots_completed));
         json_object_set_new(item, "slots_unused", json_integer(session->slots_unused));
+        json_t      *connections = json_array();
+        json_t      *workers     = json_array();
+        int          worker_seen[64];
+        unsigned int nworkers = 0;
+        for (unsigned int j = 0; j < session->connection_count; j++) {
+            char    connection_id[48];
+            snprintf(connection_id, sizeof(connection_id), "%d:%" PRIu64,
+                     session->connections[j].worker_id, session->connections[j].serial);
+            json_t *connection = json_pack("{s:s,s:i}", "connection_id", connection_id,
+                                           "worker_id", session->connections[j].worker_id);
+            json_array_append_new(connections, connection);
+            int     found = 0;
+            for (unsigned int k = 0; k < nworkers; k++) {
+                found |= worker_seen[k] == session->connections[j].worker_id;
+            }
+            if (!found && nworkers < 64) {
+                worker_seen[nworkers++] = session->connections[j].worker_id;
+                json_array_append_new(workers, json_integer(session->connections[j].worker_id));
+            }
+        }
+        json_object_set_new(item, "connections", connections);
+        json_object_set_new(item, "workers", workers);
+        json_object_set_new(item, "connections_truncated", json_boolean(session->connections_truncated));
         json_object_set_new(item, "max_request_size", json_integer(session->max_request_size));
         json_object_set_new(item, "max_response_size", json_integer(session->max_response_size));
         json_object_set_new(item, "max_response_size_cached", json_integer(session->max_response_size_cached));

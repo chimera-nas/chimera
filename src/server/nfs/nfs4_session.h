@@ -300,6 +300,15 @@ struct nfs4_session {
     uint64_t                          inspect_created_wall_ns;
     uint32_t                          inspect_requested_slots;
     uint32_t                          inspect_server_max_slots;
+    /* Bounded list of connections that have bound this session. Entries are
+     * reserved once per connection and published with ready; repeat SEQUENCE
+     * requests return before touching this list. */
+    _Atomic uint32_t                  inspect_connection_count;
+    struct {
+        _Atomic bool ready;
+        int          worker_id;
+        uint64_t     serial;
+    } inspect_connections[64];
     uint32_t                          nfs4_session_implicit;
     struct channel_attrs4             nfs4_session_fore_attrs;
     struct channel_attrs4             nfs4_session_back_attrs;
@@ -874,8 +883,9 @@ void nfs4_session_get(
 void nfs4_session_put(
     struct nfs4_session *session);
 void nfs4_session_bind_conn(
-    struct evpl_rpc2_conn *conn,
-    struct nfs4_session   *session);
+    struct evpl_rpc2_conn            *conn,
+    struct nfs4_session              *session,
+    struct chimera_server_nfs_thread *thread);
 void nfs4_session_unbind_conn(
     struct evpl_rpc2_conn *conn);
 bool nfs4_session_conn_associated(

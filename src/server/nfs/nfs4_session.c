@@ -194,6 +194,21 @@ nfs4_session_inspect_snapshot(
         entry->slots_cached        = counts.cached;
         entry->slots_completed     = counts.completed;
         entry->slots_unused        = counts.unused;
+        uint32_t                      connection_count = atomic_load_explicit(&session->inspect_connection_count,
+                                                                              memory_order_acquire);
+        if (connection_count > 64) {
+            connection_count             = 64;
+            entry->connections_truncated = 1;
+        }
+        for (uint32_t j = 0; j < connection_count; j++) {
+            if (!atomic_load_explicit(&session->inspect_connections[j].ready,
+                                      memory_order_acquire)) {
+                continue;
+            }
+            unsigned int n = entry->connection_count++;
+            entry->connections[n].worker_id = session->inspect_connections[j].worker_id;
+            entry->connections[n].serial    = session->inspect_connections[j].serial;
+        }
         nfs4_session_put(session);
     }
     free(sessions);
@@ -1703,6 +1718,10 @@ nfs4_create_session(
      * to a conn). */
     atomic_init(&session->refcount, 2);
     atomic_init(&session->destroyed, false);
+    atomic_init(&session->inspect_connection_count, 0);
+    for (unsigned int i = 0; i < 64; i++) {
+        atomic_init(&session->inspect_connections[i].ready, false);
+    }
 
     /* Lazy hydrate reconstructs a session with its original id so a
      * persistent client's retransmit on the old sessionid still resolves
@@ -1965,8 +1984,9 @@ nfs4_session_put(struct nfs4_session *session)
 
 void
 nfs4_session_bind_conn(
-    struct evpl_rpc2_conn *conn,
-    struct nfs4_session   *session)
+    struct evpl_rpc2_conn            *conn,
+    struct nfs4_session              *session,
+    struct chimera_server_nfs_thread *thread)
 {
     void    *existing;
     uint32_t magic = 0;
@@ -1993,6 +2013,21 @@ nfs4_session_bind_conn(
 
     nfs4_session_get(session);
     evpl_rpc2_conn_set_private_data(conn, session);
+
+    /* The bind callback runs on the connection's owner thread. Keep this
+     * metadata bounded and do no work on later requests on the same conn. */
+    struct evpl_bind_info       bind_info;
+    struct evpl_thread_identity identity;
+    evpl_bind_get_info(conn->bind, &bind_info);
+    evpl_thread_get_identity(thread->evpl, &identity);
+    uint32_t                    index = atomic_fetch_add_explicit(&session->inspect_connection_count, 1,
+                                                                  memory_order_relaxed);
+    if (index < 64) {
+        session->inspect_connections[index].worker_id = identity.pool_index;
+        session->inspect_connections[index].serial    = bind_info.serial;
+        atomic_store_explicit(&session->inspect_connections[index].ready, true,
+                              memory_order_release);
+    }
 } /* nfs4_session_bind_conn */
 
 void

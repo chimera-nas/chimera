@@ -602,13 +602,21 @@ def _render_nfs_sessions(snapshot, meta, args, error=None):
         rows.append([sid, session.get("client_id", "--"), session.get("requested_slots", "--"),
                      session.get("negotiated_slots", "--"), session.get("slots_in_progress", "--"),
                      session.get("slots_peak", meta.get("nfs_peaks", {}).get(session_id, "--")),
-                     "--", "--", "--", "--"])
+                     len(session.get("connections", [])),
+                     len(set(session.get("workers", []))), "--", "--"])
     if args.sort == "inflight":
         rows.sort(key=lambda row: -(row[4] if isinstance(row[4], int) else -1))
     elif args.sort == "peak":
         rows.sort(key=lambda row: -(row[5] if isinstance(row[5], int) else -1))
     lines += ["", _table(["SESSION", "CLIENT", "REQ", "GRANT", "INFL", "PEAK", "CONNS", "WORKERS", "REPLAY", "ERR"], rows, args.max_rows)]
     if not args.quiet:
+        saturated = [session for session in snapshot.get("sessions", [])
+                     if isinstance(session.get("negotiated_slots"), int)
+                     and session.get("negotiated_slots", 0) > 0
+                     and session.get("slots_in_progress", 0) >= session.get("negotiated_slots", 0)]
+        if saturated:
+            lines.append("Slot-saturated now: INFL == GRANT for {} of {} visible sessions.".format(
+                len(saturated), len(snapshot.get("sessions", []))))
         lines.append("Peak is the maximum INFL observed across watch samples. A full slot table can also indicate a slow backend; compare with a run that negotiates more slots.")
     return "\n".join(lines)
 

@@ -233,7 +233,7 @@ chimera_nfs4_create_session(
         }
     }
 
-    nfs4_session_bind_conn(conn, session);
+    nfs4_session_bind_conn(conn, session, thread);
     req->session = session;
 
     /* Persist this session's metadata so a restart can reconstruct it with the

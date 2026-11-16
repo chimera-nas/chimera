@@ -104,6 +104,7 @@ in `GET /api/v1/threads?live=1&sessions=1` is deprecated. A full slot table can
 mean slot saturation or a slow backend; compare against a client that
 negotiates more slots before concluding the workload is slot-bound.
 Use `chimera-admin inspect nfs sessions --slots SESSION_ID` to view the slot
-states for one session. Session connection IDs and worker associations are not
-yet exposed: connection binding stores the session pointer on each connection,
-but the session does not retain a list of all its connections.
+states for one session. Session rows include up to 64 connection IDs and their
+worker IDs; the list records connections that have bound the session and can
+include a connection after it disconnects. A full slot table can also result
+from a slow backend, so compare a run with a larger negotiated slot count.
