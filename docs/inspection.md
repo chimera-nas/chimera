@@ -60,5 +60,39 @@ parameters return 400. Default services are NFS, SMB and S3; explicitly select
 accepts only `worker_id`. Add `?live=1` to read worker CPU, scheduler wait and
 event-loop iteration counters directly without waking workers. See
 [`worker-metrics.md`](worker-metrics.md) for the fields and rate calculations.
-Use `?live=1&sessions=1` only when an operator needs the NFSv4.1 session and
-slot snapshot, because that request takes the NFS client-table lock.
+The `chimera-admin inspect threads` view reads both the ordinary worker
+snapshot and `?live=1`. CPU%, RUNQ%, BUSY%, RPC/s, and RX/TX MB/s are calculated
+from two consecutive live samples; a first sample has no rate baseline. BUSY%
+is the fraction of event-loop iterations that did work, not CPU utilization.
+Poll-mode workers can have high CPU% and low BUSY%. VFS Read/Write latency uses
+the existing live log2 histograms. When requesting
+`?live=1&sessions=1`, the session list is bounded; its slot-state scan occurs
+after releasing the NFS client-table lock.
+
+In the compatibility `nfs4_sessions` array, `highest_slot_in_use` is the
+highest slot index that has ever held a request. It is not the current number
+of outstanding requests. Use `slots_in_progress` for current in-flight work;
+RESYNCING slots count as in progress.
+
+`GET /api/v1/nfs/sessions` is the NFSv4.1+ session endpoint. It accepts
+`limit` (1–1,024, default 100), `offset`, and optional decimal `client_id`;
+unknown parameters return 400. Results include requested, granted, and server
+slot limits; slot-state counts; forechannel request/response size limits; and
+creation timestamps. `total` and `truncated` describe the bounded result.
+`created_at_monotonic_ns`, `created_at_wall_ns`, and client IDs are decimal
+strings. The `nfs4_sessions` array in the live thread response is deprecated;
+use the namespaced endpoint for detailed session inspection.
+
+`GET /api/v1/nfs/sessions/{session_id}/slots` returns the bounded slot rows
+(`slot`, `state`, `seqid`, and `age_ns` for in-progress slots). The operation
+is `null` when the existing request state does not identify it. Unknown session
+IDs return 404. Slot rows are capped at 1,024 and report `total`, `truncated`,
+and `complete`. The CLI presents this as
+`chimera-admin inspect nfs sessions --slots SESSION_ID`.
+
+Session connection association is not yet collected. `nfs4_session_bind_conn`
+stores the session pointer in each connection's private data, but the session
+does not retain the full set; its session-level connection pointer is only the
+backchannel connection. A bounded list updated only when a connection first
+binds, plus a read-side match against the inspection connection IDs, is the
+smallest change that would expose all connections without per-request writes.

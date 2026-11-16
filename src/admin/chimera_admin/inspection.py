@@ -82,6 +82,25 @@ def add_inspection_commands(subparsers):
             p.add_argument("--local-ip", type=_ip)
             p.add_argument("--local-port", type=_port)
 
+    nfs = commands.add_parser("nfs", help="Inspect NFSv4.1 and later sessions")
+    nfs_views = nfs.add_subparsers(dest="nfs_inspection_view", required=True)
+    sessions = nfs_views.add_parser("sessions", help="Inspect NFSv4.1 and later sessions")
+    sessions.set_defaults(inspection_view="nfs_sessions", target=None, targets=None, worker_id=None,
+                         service=None, transport=None, remote_ip=None, remote_port=None,
+                         local_ip=None, local_port=None)
+    sessions.add_argument("--input", metavar="FILE", help="Read a saved JSON snapshot instead of the API")
+    sessions.add_argument("--client", dest="client_id", type=_nonnegative, help="Filter by NFS client ID")
+    sessions.add_argument("--slots", metavar="SESSION_ID", help="Show the slot table for one session")
+    sessions.add_argument("--watch", action="store_true", help="Refresh until Ctrl-C")
+    sessions.add_argument("--interval", type=_positive, default=2.0, help="Refresh interval, minimum 1s (default: 2)")
+    sessions.add_argument("--iterations", type=_nonnegative, default=0, help="Stop after N poll attempts; 0 means unlimited in watch")
+    sessions.add_argument("--json", action="store_true", help="JSON output; newline-delimited JSON in watch")
+    sessions.add_argument("--quiet", action="store_true", help="Hide banners and explanatory notes")
+    sessions.add_argument("--no-clear", action="store_true", help="Append watch frames on a terminal")
+    sessions.add_argument("--max-rows", type=_nonnegative, default=20, help="Rows per text table; 0 shows all returned rows")
+    sessions.add_argument("--wide", action="store_true", help="Include full identifiers and timestamps")
+    sessions.add_argument("--sort", choices=["client", "inflight", "peak"], default="client")
+
 
 def safe(value):
     """Never interpret server-supplied control sequences in the terminal."""
@@ -222,6 +241,21 @@ def _matches(row, args):
 def fetch(client, args):
     view = args.inspection_view
     result = {}
+    if view == "nfs_sessions":
+        if args.input:
+            path = Path(args.input)
+            if path.stat().st_size > 8 * 1024 * 1024:
+                raise ValueError("snapshot exceeds the 8 MiB input limit")
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            result[view] = raw.get("sessions_snapshot", raw)
+        elif args.slots:
+            result[view] = client.get_nfs_session_slots(args.slots)
+        else:
+            result[view] = client.get_nfs_sessions(limit=1024, client_id=args.client_id)
+        snapshot = result[view]
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("sessions"), list):
+            raise ValueError("NFS session snapshot must contain a sessions array")
+        return copy.deepcopy(result)
     if args.input:
         path = Path(args.input)
         if path.stat().st_size > 8 * 1024 * 1024:
@@ -258,13 +292,21 @@ class WatchState:
         self.previous = None
 
     def update(self, snapshots):
-        meta = {"rates": {}, "live_rates": {}, "appeared": [], "absent": [], "changes_comparable": False, "restarted": False}
+        meta = {"rates": {}, "live_rates": {}, "appeared": [], "absent": [], "changes_comparable": False, "restarted": False, "nfs_peaks": {}}
         if len({s["server_instance_id"] for s in snapshots.values()}) > 1:
             self.reset()
             meta["mixed_instances"] = True
             return meta
         previous = self.previous or {}
         old_live, current_live = previous.get("live"), snapshots.get("live")
+        if current_live:
+            for worker in current_live.get("threads", []):
+                live = meta["live_rates"].setdefault(str(worker.get("worker_id")), {})
+                for item in worker.get("vfs", {}).get("operations", []):
+                    label = {"write": "wr", "read": "rd"}.get(str(item.get("name", "")).lower())
+                    if label:
+                        live[label + "_avg_ns"] = _integer(item.get("latency_avg_ns"))
+                        live[label + "_p99_ns"] = _integer(item.get("latency_p99_ns"))
         if old_live and current_live:
             same = old_live["server_instance_id"] == current_live["server_instance_id"]
             meta["restarted"] |= not same
@@ -281,23 +323,38 @@ class WatchState:
                     old_iters, new_iters = _integer(prior.get("loop_iters")), _integer(worker.get("loop_iters"))
                     old_work = _integer(prior.get("loop_iters_with_work"))
                     new_work = _integer(worker.get("loop_iters_with_work"))
-                    if None in (old_cpu, new_cpu, old_iters, new_iters, old_work, new_work):
-                        continue
-                    if new_cpu < old_cpu or new_iters < old_iters or new_work < old_work or new_iters == old_iters:
-                        continue
-                    meta["live_rates"][str(worker["worker_id"])] = {
-                        "cpu": 100.0 * (new_cpu - old_cpu) / elapsed,
-                        "busy": 100.0 * (new_work - old_work) / (new_iters - old_iters),
-                    }
+                    live = meta["live_rates"].setdefault(str(worker["worker_id"]), {})
+                    if None not in (old_cpu, new_cpu) and new_cpu >= old_cpu:
+                        live["cpu"] = 100.0 * (new_cpu - old_cpu) / elapsed
+                    old_runq, new_runq = _integer(prior.get("runq_wait_ns")), _integer(worker.get("runq_wait_ns"))
+                    if old_runq is not None and new_runq is not None and new_runq >= old_runq:
+                        live["runq"] = 100.0 * (new_runq - old_runq) / elapsed
+                    if None not in (old_iters, new_iters, old_work, new_work) and new_iters > old_iters and new_work >= old_work:
+                        live["busy"] = 100.0 * (new_work - old_work) / (new_iters - old_iters)
                     old_rpc, new_rpc = prior.get("rpc", {}), worker.get("rpc", {})
                     if isinstance(old_rpc, dict) and isinstance(new_rpc, dict):
+                        old_msgs = _integer(old_rpc.get("rx_msgs"))
+                        new_msgs = _integer(new_rpc.get("rx_msgs"))
+                        if old_msgs is not None and new_msgs is not None and new_msgs >= old_msgs:
+                            live["rpc_s"] = (new_msgs - old_msgs) * 1_000_000_000 / elapsed
                         for direction in ("rx", "tx"):
                             old_bytes = _integer(old_rpc.get(direction + "_bytes"))
                             new_bytes = _integer(new_rpc.get(direction + "_bytes"))
                             if old_bytes is not None and new_bytes is not None and new_bytes >= old_bytes:
-                                meta["live_rates"][str(worker["worker_id"])][direction + "_MB_s"] = (
+                                live[direction + "_MB_s"] = (
                                     (new_bytes - old_bytes) / elapsed * 1000
                                 )
+        old_sessions, current_sessions = previous.get("nfs_sessions"), snapshots.get("nfs_sessions")
+        if current_sessions:
+            same_instance = old_sessions and old_sessions.get("server_instance_id") == current_sessions.get("server_instance_id")
+            before_sessions = {row.get("session_id"): row for row in old_sessions.get("sessions", [])} if same_instance else {}
+            for row in current_sessions.get("sessions", []):
+                prior = before_sessions.get(row.get("session_id"), {})
+                current_inflight = _integer(row.get("slots_in_progress")) or 0
+                previous_peak = _integer(prior.get("slots_peak")) or _integer(prior.get("slots_in_progress")) or 0
+                row_peak = max(previous_peak, current_inflight)
+                meta["nfs_peaks"][row.get("session_id")] = row_peak
+                row["slots_peak"] = row_peak
         old = previous.get("threads")
         current = snapshots.get("threads")
         if old and current:
@@ -343,6 +400,13 @@ def _rate_text(value):
     return "--" if value is None else "{:.1f}".format(value)
 
 
+def _latency_text(value):
+    number = _integer(value)
+    if number is None:
+        return "--"
+    return "{:.3f} ms".format(number / 1_000_000)
+
+
 def _age_text(value):
     milliseconds = _integer(value)
     if milliseconds is None:
@@ -358,6 +422,8 @@ def _age_text(value):
 
 
 def render(snapshots, meta, args, error=None, stale_age=0, width=None):
+    if args.inspection_view == "nfs_sessions":
+        return _render_nfs_sessions(snapshots.get("nfs_sessions", {}), meta, args, error)
     states = list(snapshots.values())
     instances = {s["server_instance_id"] for s in states}
     mixed = len(instances) > 1
@@ -384,7 +450,8 @@ def render(snapshots, meta, args, error=None, stale_age=0, width=None):
     if "threads" in snapshots:
         filters_applied = any(getattr(args, field, None) is not None for field in
                               ("worker_id", "service", "transport", "remote_ip", "remote_port", "local_ip", "local_port"))
-        workers = snapshots["threads"]["threads"]
+        live_by_id = {w["worker_id"]: w for w in snapshots.get("live", {}).get("threads", [])}
+        workers = [{**w, **live_by_id.get(w["worker_id"], {})} for w in snapshots["threads"]["threads"]]
         def worker_key(w):
             rates = meta["rates"].get(str(w["worker_id"]), {})
             if args.sort in ("rpc-rate", "vfs-rate"):
@@ -403,7 +470,7 @@ def render(snapshots, meta, args, error=None, stale_age=0, width=None):
             rates = {} if error or mixed else meta["rates"].get(str(w["worker_id"]), {})
             live_rates = {} if error or mixed else meta["live_rates"].get(str(w["worker_id"]), {})
             samples = _metric_map(w, "rpc")
-            row = [w.get("worker_name", w["worker_id"]), w.get("os_tid"), w.get("rpc_thread_id"), counts.get("nfs", "--"), counts.get("smb", "--"), counts.get("s3", "--"), rpc.get("server_inflight"), sum(samples.values()) if samples is not None else None, _rate_text(rates.get("rpc")), _rate_text(rates.get("vfs")), _rate_text(live_rates.get("rx_MB_s")), _rate_text(live_rates.get("tx_MB_s")), _rate_text(live_rates.get("cpu")), _rate_text(live_rates.get("busy"))]
+            row = [w.get("worker_name", w["worker_id"]), w.get("os_tid"), w.get("rpc_thread_id"), counts.get("nfs", "--"), counts.get("smb", "--"), counts.get("s3", "--"), rpc.get("server_inflight"), sum(samples.values()) if samples is not None else None, _rate_text(rates.get("rpc")), _rate_text(rates.get("vfs")), _rate_text(live_rates.get("rpc_s")), _rate_text(live_rates.get("rx_MB_s")), _rate_text(live_rates.get("tx_MB_s")), _rate_text(live_rates.get("cpu")), _rate_text(live_rates.get("runq")), _rate_text(live_rates.get("busy")), _latency_text(live_rates.get("wr_avg_ns")), _latency_text(live_rates.get("wr_p99_ns")), _latency_text(live_rates.get("rd_avg_ns")), _latency_text(live_rates.get("rd_p99_ns"))]
             if args.inspection_view == "dashboard":
                 listed = connection_counts.get(w["worker_id"], 0)
                 listed = (">=" if not complete(snapshots.get("connections", {})) else "") + str(listed)
@@ -411,7 +478,7 @@ def render(snapshots, meta, args, error=None, stale_age=0, width=None):
                 total = sum(total_values) if total_values and all(value is not None for value in total_values) else "--"
                 row += [listed, total]
             rows.append(row)
-        headers = ["WORKER", "NFS", "SMB", "S3", "RPC IN", "RPC SAMPLES", "RPC samp/s", "VFS samp/s", "RX MB/s", "TX MB/s", "CPU%", "BUSY%"]
+        headers = ["WORKER", "NFS", "SMB", "S3", "INFL", "RPC SAMPLES", "RPC samp/s", "VFS samp/s", "RPC/s", "RX MB/s", "TX MB/s", "CPU%", "RUNQ%", "BUSY%", "Wr avg", "Wr p99", "Rd avg", "Rd p99"]
         if args.inspection_view == "dashboard":
             headers += ["MATCH" if filters_applied else "LISTED", "TOTAL(all)"]
         display_rows = [[row[0], *row[3:]] for row in rows]
@@ -425,11 +492,11 @@ def render(snapshots, meta, args, error=None, stale_age=0, width=None):
                 compact_headers += ["MATCH" if filters_applied else "LISTED", "TOTAL(all)"]
                 compact_rows = [[*compact_rows[i], display_rows[i][-2], display_rows[i][-1]] for i in range(len(rows))]
             if width < 90:
-                metric_headers = ["WORKER", "RPC/s", "VFS/s", "RX MB/s", "TX MB/s", "CPU%", "BUSY%"]
-                metric_rows = [[row[0], row[8], row[9], row[10], row[11], row[12], row[13]] for row in rows]
+                metric_headers = ["WORKER", "RPC/s", "RX MB/s", "TX MB/s", "CPU%", "RUNQ%", "BUSY%"]
+                metric_rows = [[row[0], row[10], row[11], row[12], row[13], row[14], row[15]] for row in rows]
             else:
-                metric_headers = ["WORKER", "RPC IN", "RPC SAMPLES", "RPC samp/s", "VFS samp/s", "RX MB/s", "TX MB/s", "CPU%", "BUSY%"]
-                metric_rows = [[row[0], row[6], row[7], row[8], row[9], row[10], row[11], row[12], row[13]] for row in rows]
+                metric_headers = ["WORKER", "INFL", "RPC SAMPLES", "RPC samp/s", "VFS samp/s", "RPC/s", "RX MB/s", "TX MB/s", "CPU%", "RUNQ%", "BUSY%"]
+                metric_rows = [[row[0], row[6], row[7], row[8], row[9], row[10], row[11], row[12], row[13], row[14], row[15]] for row in rows]
             lines += ["", "WORKERS (all traffic)", _table(compact_headers, compact_rows, args.max_rows, numeric=range(1, len(compact_headers))),
                       "\nWORKER METRICS", _table(metric_headers, metric_rows, args.max_rows, numeric=range(1, len(metric_headers)))]
             if args.wide:
@@ -508,9 +575,41 @@ def render(snapshots, meta, args, error=None, stale_age=0, width=None):
         if args.inspection_view == "dashboard":
             lines += ["", "Connection filters affect listed connections; worker counters cover all traffic."]
         if "threads" in snapshots:
-            lines.append("Rates are histogram samples/s, not guaranteed IOPS; -- is unavailable or warming up.")
+            lines.append("Rates use consecutive live samples; -- means the baseline is unavailable or warming up.")
+            lines.append("BUSY% is the loop-iteration ratio, not CPU usage; poll-mode workers can show high CPU% with low BUSY%.")
         if meta.get("changes_comparable"):
             lines.append("ABSENT means no longer observed as a connection; it does not imply NFS lease expiry.")
+    return "\n".join(lines)
+
+
+def _render_nfs_sessions(snapshot, meta, args, error=None):
+    lines = [] if args.quiet else ["NFSv4.1+ SESSIONS"]
+    lines.append("{}  {}".format(
+        "{}:{}".format(safe(getattr(args, "host", "server")), safe(getattr(args, "port", ""))).rstrip(":"),
+        "STALE" if error else "LIVE" if args.watch and not args.input else "SNAPSHOT"))
+    if error:
+        lines.append("Refresh failed: {}".format(safe(error)))
+    if args.slots:
+        rows = [[slot.get("slot", "--"), slot.get("state", "--"), slot.get("seqid", "--"),
+                 _latency_text(slot.get("age_ns")), slot.get("operation", "--")]
+                for slot in snapshot.get("slots", [])]
+        lines += ["", _table(["SLOT", "STATE", "SEQID", "AGE", "OPERATION"], rows, args.max_rows)]
+        return "\n".join(lines)
+    rows = []
+    for session in snapshot.get("sessions", []):
+        session_id = str(session.get("session_id", ""))
+        sid = session_id if args.wide else session_id[:8]
+        rows.append([sid, session.get("client_id", "--"), session.get("requested_slots", "--"),
+                     session.get("negotiated_slots", "--"), session.get("slots_in_progress", "--"),
+                     session.get("slots_peak", meta.get("nfs_peaks", {}).get(session_id, "--")),
+                     "--", "--", "--", "--"])
+    if args.sort == "inflight":
+        rows.sort(key=lambda row: -(row[4] if isinstance(row[4], int) else -1))
+    elif args.sort == "peak":
+        rows.sort(key=lambda row: -(row[5] if isinstance(row[5], int) else -1))
+    lines += ["", _table(["SESSION", "CLIENT", "REQ", "GRANT", "INFL", "PEAK", "CONNS", "WORKERS", "REPLAY", "ERR"], rows, args.max_rows)]
+    if not args.quiet:
+        lines.append("Peak is the maximum INFL observed across watch samples. A full slot table can also indicate a slow backend; compare with a run that negotiates more slots.")
     return "\n".join(lines)
 
 
@@ -519,6 +618,8 @@ def _json_frame(snapshots, meta, args, error=None, stale_age=0):
         result = {key + "_snapshot": value for key, value in snapshots.items()}
     else:
         result = copy.deepcopy(snapshots.get(args.inspection_view, {}))
+        if args.inspection_view == "threads" and "live" in snapshots:
+            result["live"] = copy.deepcopy(snapshots["live"])
     result["_cli"] = {"view": args.inspection_view, "stale": error is not None, "stale_age_seconds": stale_age, "error": str(error) if error else None, **meta}
     return result
 

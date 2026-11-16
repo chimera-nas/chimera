@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "common/logging.h"
 #include "nfs_common.h"
@@ -69,6 +70,7 @@ make_session(
 
     session = nfs4_create_session(table, clientid, 0,
                                   replay_max_slots, replay_maxresp_cached,
+                                  replay_max_slots + 8, replay_max_slots,
                                   NULL, NULL, NULL, false);
     CHECK(session != NULL);
 
@@ -143,8 +145,12 @@ test_session_inspect_snapshot(void)
     CHECK(nfs4_session_inspect_snapshot(&table, rows, 2, &total) == 1);
     CHECK(total == 1);
     CHECK(rows[0].client_id == session->nfs4_session_clientid);
+    CHECK(rows[0].requested_slots == TEST_SLOTS + 8);
     CHECK(rows[0].negotiated_slots == TEST_SLOTS);
+    CHECK(rows[0].server_max_slots == TEST_SLOTS);
     CHECK(!rows[0].has_slots_in_use);
+    CHECK(rows[0].slots_unused == TEST_SLOTS);
+    CHECK(rows[0].slots_in_progress == 0);
 
     reset_request(&req);
     req.session = session;
@@ -152,10 +158,85 @@ test_session_inspect_snapshot(void)
     CHECK(nfs4_session_inspect_snapshot(&table, rows, 2, &total) == 1);
     CHECK(rows[0].has_slots_in_use);
     CHECK(rows[0].highest_slot_in_use == 2);
+    CHECK(rows[0].slots_in_progress == 1);
+    CHECK(rows[0].slots_unused == TEST_SLOTS - 1);
     nfs4_replay_slot_finalize(&req);
+
+    struct nfs4_slot_state_counts counts;
+    atomic_store_explicit(&session->replay_slots[0].state_word,
+                          nfs4_slot_word(4, NFS4_SLOT_CACHED), memory_order_relaxed);
+    atomic_store_explicit(&session->replay_slots[1].state_word,
+                          nfs4_slot_word(5, NFS4_SLOT_COMPLETED), memory_order_relaxed);
+    atomic_store_explicit(&session->replay_slots[3].state_word,
+                          nfs4_slot_word(6, NFS4_SLOT_RESYNCING), memory_order_relaxed);
+    nfs4_session_count_slot_states(session, &counts);
+    CHECK(counts.in_progress == 1);
+    CHECK(counts.cached == 1);
+    CHECK(counts.completed == 2);
+    CHECK(counts.unused == 0);
+    CHECK(counts.has_slots_in_use);
+    CHECK(counts.highest_slot_in_use == 3);
 
     destroy_session_table(&table, session);
 } /* test_session_inspect_snapshot */
+
+struct snapshot_race_context {
+    struct nfs4_client_table *table;
+    uint64_t                  clientid;
+};
+
+static void *
+snapshot_race_mutator(void *data)
+{
+    struct snapshot_race_context *ctx = data;
+
+    for (unsigned int i = 0; i < 500; i++) {
+        struct nfs4_session *session = nfs4_create_session(ctx->table, ctx->clientid,
+                                                           0, TEST_SLOTS, TEST_MAXRESP,
+                                                           TEST_SLOTS, TEST_SLOTS,
+                                                           NULL, NULL, NULL, false);
+        CHECK(session != NULL);
+        nfs4_destroy_session(ctx->table, session->nfs4_session_id);
+        nfs4_session_put(session);
+    }
+    return NULL;
+} /* snapshot_race_mutator */
+
+static void *
+snapshot_race_reader(void *data)
+{
+    struct snapshot_race_context  *ctx = data;
+    struct chimera_inspect_session rows[8];
+
+    for (unsigned int i = 0; i < 1000; i++) {
+        unsigned int total = 0;
+        unsigned int count = nfs4_session_inspect_snapshot(ctx->table, rows, 8, &total);
+        CHECK(count <= 8);
+        CHECK(total >= count);
+    }
+    return NULL;
+} /* snapshot_race_reader */
+
+static void
+test_session_snapshot_concurrent_create_destroy(void)
+{
+    struct nfs4_client_table     table;
+    static const uint8_t         owner[] = "snapshot-race";
+    struct snapshot_race_context ctx;
+    pthread_t                    mutator, reader;
+
+    nfs4_client_table_init(&table, 1);
+    ctx.table    = &table;
+    ctx.clientid = nfs4_client_register(&table, owner, (int) sizeof(owner) - 1,
+                                        0x1234, 40, NULL, NULL);
+    CHECK(ctx.clientid != 0);
+    CHECK(pthread_create(&mutator, NULL, snapshot_race_mutator, &ctx) == 0);
+    CHECK(pthread_create(&reader, NULL, snapshot_race_reader, &ctx) == 0);
+    CHECK(pthread_join(mutator, NULL) == 0);
+    CHECK(pthread_join(reader, NULL) == 0);
+    nfs4_client_table_destroy_unified(&table, NULL, NULL);
+    nfs4_client_table_free(&table);
+} /* test_session_snapshot_concurrent_create_destroy */
 
 /* Case 2: first SEQUENCE on an UNUSED slot with seqid != 1 -> MISORDERED. */
 static void
@@ -511,7 +592,7 @@ test_implicit_session_no_slots(void)
                                     0xfeedfaceULL, 40, NULL, NULL);
 
     /* implicit=1 -> replay_slots stays NULL, replay_max_slots = 0. */
-    session = nfs4_create_session(&table, clientid, 1, 0, 0, NULL, NULL, NULL,
+    session = nfs4_create_session(&table, clientid, 1, 0, 0, 0, 0, NULL, NULL, NULL,
                                   false);
     CHECK(session != NULL);
     CHECK(session->replay_slots == NULL);
@@ -746,6 +827,7 @@ test_restored_session_starts_resync(void)
     clientid = nfs4_client_register(&table, owner, (int) sizeof(owner) - 1,
                                     0xabcdULL, 40, NULL, NULL);
     session = nfs4_create_session(&table, clientid, 0, TEST_SLOTS, TEST_MAXRESP,
+                                  TEST_SLOTS, TEST_SLOTS,
                                   NULL, NULL, sid, true);
     CHECK(session != NULL);
     CHECK(atomic_load(&session->replay_hydrating));
@@ -849,6 +931,7 @@ main(
 
     test_unused_slot_first_seq_ok();
     test_session_inspect_snapshot();
+    test_session_snapshot_concurrent_create_destroy();
     test_unused_slot_wrong_seq_misordered();
     test_out_of_range_slot();
     test_in_progress_retry();

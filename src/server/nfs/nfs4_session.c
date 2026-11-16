@@ -98,6 +98,42 @@ nfs4_client_table_init(
     evpl_mutex_init(&table->nfs4_ct_lock, NULL);
 } /* nfs4_client_table_init */
 
+void
+nfs4_session_count_slot_states(
+    struct nfs4_session           *session,
+    struct nfs4_slot_state_counts *counts)
+{
+    memset(counts, 0, sizeof(*counts));
+    for (uint32_t slot = 0; slot < session->replay_max_slots; slot++) {
+        uint64_t             state_word = atomic_load_explicit(&session->replay_slots[slot].state_word,
+                                                               memory_order_relaxed);
+        enum nfs4_slot_state state = (enum nfs4_slot_state) (state_word & NFS4_SLOT_STATE_MASK);
+
+        switch (state) {
+            case NFS4_SLOT_UNUSED:
+                counts->unused++;
+                break;
+            case NFS4_SLOT_IN_PROGRESS:
+            case NFS4_SLOT_RESYNCING:
+                counts->in_progress++;
+                break;
+            case NFS4_SLOT_CACHED:
+                counts->cached++;
+                break;
+            case NFS4_SLOT_COMPLETED:
+                counts->completed++;
+                break;
+            case NFS4_SLOT_RESYNC:
+                /* Restored slots with an unknown seqid are not requests. */
+                break;
+        } /* switch */
+        if (state != NFS4_SLOT_UNUSED) {
+            counts->highest_slot_in_use = slot;
+            counts->has_slots_in_use    = true;
+        }
+    }
+} /* nfs4_session_count_slot_states */
+
 unsigned int
 nfs4_session_inspect_snapshot(
     struct nfs4_client_table       *table,
@@ -105,40 +141,139 @@ nfs4_session_inspect_snapshot(
     unsigned int                    capacity,
     unsigned int                   *total)
 {
-    static const char    hex[] = "0123456789abcdef";
-    struct nfs4_session *session, *tmp;
-    unsigned int         count = 0;
+    static const char     hex[] = "0123456789abcdef";
+    struct nfs4_session **sessions;
+    struct nfs4_session  *session, *tmp;
+    unsigned int          count = 0;
 
     *total = 0;
+    if (!capacity) {
+        return 0;
+    }
+    sessions = calloc(capacity, sizeof(*sessions));
+    if (!sessions) {
+        return 0;
+    }
+    /* SEQUENCE lookup and connection binding use nfs4_ct_lock.  Take only a
+     * bounded set of references while holding it, then count slot states
+     * after unlocking so an inspection scan cannot hold up request lookup. */
     evpl_mutex_lock(&table->nfs4_ct_lock);
+    *total = HASH_CNT(nfs4_session_hh, table->nfs4_ct_sessions);
     HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, session, tmp)
     {
-        (*total)++;
         if (count >= capacity) {
-            continue;
+            break;
         }
-        struct chimera_inspect_session *entry = &out[count++];
+        atomic_fetch_add_explicit(&session->refcount, 1, memory_order_relaxed);
+        sessions[count++] = session;
+    }
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+
+    for (unsigned int i = 0; i < count; i++) {
+        session = sessions[i];
+        struct chimera_inspect_session *entry = &out[i];
         for (unsigned int i = 0; i < NFS4_SESSIONID_SIZE; i++) {
             entry->session_id[i * 2]     = hex[session->nfs4_session_id[i] >> 4];
             entry->session_id[i * 2 + 1] = hex[session->nfs4_session_id[i] & 0xf];
         }
-        entry->session_id[32]      = '\0';
-        entry->client_id           = session->nfs4_session_clientid;
-        entry->negotiated_slots    = session->replay_max_slots;
-        entry->highest_slot_in_use = 0;
-        entry->has_slots_in_use    = 0;
-        for (uint32_t slot = 0; slot < session->replay_max_slots; slot++) {
-            uint64_t state = atomic_load_explicit(&session->replay_slots[slot].state_word,
-                                                  memory_order_relaxed);
-            if ((state & NFS4_SLOT_STATE_MASK) != NFS4_SLOT_UNUSED) {
-                entry->highest_slot_in_use = slot;
-                entry->has_slots_in_use    = 1;
+        entry->session_id[32]           = '\0';
+        entry->client_id                = session->nfs4_session_clientid;
+        entry->created_monotonic_ns     = session->inspect_created_monotonic_ns;
+        entry->created_wall_ns          = session->inspect_created_wall_ns;
+        entry->requested_slots          = session->inspect_requested_slots;
+        entry->negotiated_slots         = session->replay_max_slots;
+        entry->server_max_slots         = session->inspect_server_max_slots;
+        entry->max_request_size         = session->nfs4_session_fore_attrs.ca_maxrequestsize;
+        entry->max_response_size        = session->nfs4_session_fore_attrs.ca_maxresponsesize;
+        entry->max_response_size_cached = session->replay_maxresp_cached;
+        struct nfs4_slot_state_counts counts;
+        nfs4_session_count_slot_states(session, &counts);
+        entry->highest_slot_in_use = counts.highest_slot_in_use;
+        entry->has_slots_in_use    = counts.has_slots_in_use;
+        entry->slots_in_progress   = counts.in_progress;
+        entry->slots_cached        = counts.cached;
+        entry->slots_completed     = counts.completed;
+        entry->slots_unused        = counts.unused;
+        nfs4_session_put(session);
+    }
+    free(sessions);
+    return count;
+} /* nfs4_session_inspect_snapshot */
+
+int
+nfs4_session_inspect_slots_snapshot(
+    struct nfs4_client_table    *table,
+    const char                  *session_id,
+    struct chimera_inspect_slot *out,
+    unsigned int                 capacity,
+    unsigned int                *total)
+{
+    uint8_t              id[NFS4_SESSIONID_SIZE];
+    struct nfs4_session *session;
+
+    if (!session_id || strlen(session_id) != NFS4_SESSIONID_SIZE * 2) {
+        return -1;
+    }
+    for (unsigned int i = 0; i < NFS4_SESSIONID_SIZE; i++) {
+        unsigned int hi, lo;
+        char         a = session_id[i * 2], b = session_id[i * 2 + 1];
+        if (a >= '0' && a <= '9') {
+            hi = (unsigned int) (a - '0');
+        } else if (a >= 'a' && a <= 'f') {
+            hi = (unsigned int) (a - 'a' + 10);
+        } else if (a >= 'A' && a <= 'F') {
+            hi = (unsigned int) (a - 'A' + 10);
+        } else {
+            return -1;
+        }
+        if (b >= '0' && b <= '9') {
+            lo = (unsigned int) (b - '0');
+        } else if (b >= 'a' && b <= 'f') {
+            lo = (unsigned int) (b - 'a' + 10);
+        } else if (b >= 'A' && b <= 'F') {
+            lo = (unsigned int) (b - 'A' + 10);
+        } else {
+            return -1;
+        }
+        id[i] = (uint8_t) ((hi << 4) | lo);
+    }
+
+    session = nfs4_session_lookup(table, id);
+    if (!session) {
+        return -1;
+    }
+    *total = session->replay_max_slots;
+    unsigned int count = session->replay_max_slots < capacity ? session->replay_max_slots : capacity;
+    for (unsigned int i = 0; i < count; i++) {
+        uint64_t             word  = atomic_load_explicit(&session->replay_slots[i].state_word, memory_order_acquire);
+        enum nfs4_slot_state state = (enum nfs4_slot_state) (word & NFS4_SLOT_STATE_MASK);
+        const char          *name  = "unknown";
+        switch (state) {
+            case NFS4_SLOT_UNUSED: name      = "UNUSED"; break;
+            case NFS4_SLOT_IN_PROGRESS: name = "IN_PROGRESS"; break;
+            case NFS4_SLOT_CACHED: name      = "CACHED"; break;
+            case NFS4_SLOT_COMPLETED: name   = "COMPLETED"; break;
+            case NFS4_SLOT_RESYNC: name      = "RESYNC"; break;
+            case NFS4_SLOT_RESYNCING: name   = "RESYNCING"; break;
+        } /* switch */
+        out[i].slot  = i;
+        out[i].seqid = (uint32_t) (word >> NFS4_SLOT_SEQID_SHIFT);
+        snprintf(out[i].state, sizeof(out[i].state), "%s", name);
+        out[i].has_age = 0;
+        out[i].age_ns  = 0;
+        if (state == NFS4_SLOT_IN_PROGRESS || state == NFS4_SLOT_RESYNCING) {
+            time_t since = atomic_load_explicit(&session->replay_slots[i].in_progress_since,
+                                                memory_order_relaxed);
+            time_t now = nfs4_slot_now();
+            if (since && now >= since) {
+                out[i].age_ns  = (uint64_t) (now - since) * UINT64_C(1000000000);
+                out[i].has_age = 1;
             }
         }
     }
-    evpl_mutex_unlock(&table->nfs4_ct_lock);
-    return count;
-} /* nfs4_session_inspect_snapshot */
+    nfs4_session_put(session);
+    return (int) count;
+} /* nfs4_session_inspect_slots_snapshot */
 
 void
 nfs4_client_table_free(struct nfs4_client_table *table)
@@ -1541,6 +1676,8 @@ nfs4_create_session(
     uint32_t                     implicit,
     uint32_t                     replay_max_slots,
     uint32_t                     replay_maxresp_cached,
+    uint32_t                     requested_slots,
+    uint32_t                     server_max_slots,
     const struct channel_attrs4 *fore_attrs,
     const struct channel_attrs4 *back_attrs,
     const uint8_t               *restore_sessionid,
@@ -1580,6 +1717,13 @@ nfs4_create_session(
 
     session->nfs4_session_implicit = implicit;
     session->nfs4_session_clientid = client_id;
+    struct timespec created_mono, created_wall;
+    clock_gettime(CLOCK_MONOTONIC, &created_mono);
+    clock_gettime(CLOCK_REALTIME, &created_wall);
+    session->inspect_created_monotonic_ns = (uint64_t) created_mono.tv_sec * 1000000000 + created_mono.tv_nsec;
+    session->inspect_created_wall_ns      = (uint64_t) created_wall.tv_sec * 1000000000 + created_wall.tv_nsec;
+    session->inspect_requested_slots      = requested_slots;
+    session->inspect_server_max_slots     = server_max_slots;
     /* Set before the session is hashed: a restored session id is already
      * known to the client, so a retransmit on another connection can find
      * the session the moment it is inserted and must see the flag. */
@@ -2110,11 +2254,11 @@ nfs4_replay_slot_acquire(
                     memory_order_acq_rel, memory_order_acquire)) {
                 continue;  /* lost the race; re-read and re-evaluate */
             }
-            req->replay_slot        = slot;
-            req->replay_session     = session;
-            req->replay_slot_id     = slotid;
-            req->replay_action      = NFS4_REPLAY_ACTION_NEW;
-            slot->in_progress_since = nfs4_slot_now();
+            req->replay_slot    = slot;
+            req->replay_session = session;
+            req->replay_slot_id = slotid;
+            req->replay_action  = NFS4_REPLAY_ACTION_NEW;
+            atomic_store_explicit(&slot->in_progress_since, nfs4_slot_now(), memory_order_relaxed);
             slot->last_stuck_report = 0;
             slot->principal         = nfs4_replay_principal_digest(req);
             if (cachethis) {
@@ -2153,11 +2297,11 @@ nfs4_replay_slot_acquire(
                                               slotid, cseq);
                     }
                 }
-                req->replay_slot        = slot;
-                req->replay_session     = session;
-                req->replay_slot_id     = slotid;
-                req->replay_action      = NFS4_REPLAY_ACTION_NEW;
-                slot->in_progress_since = nfs4_slot_now();
+                req->replay_slot    = slot;
+                req->replay_session = session;
+                req->replay_slot_id = slotid;
+                req->replay_action  = NFS4_REPLAY_ACTION_NEW;
+                atomic_store_explicit(&slot->in_progress_since, nfs4_slot_now(), memory_order_relaxed);
                 slot->last_stuck_report = 0;
                 slot->principal         = nfs4_replay_principal_digest(req);
                 if (cachethis) {
@@ -2211,12 +2355,12 @@ nfs4_replay_slot_acquire(
                             memory_order_acq_rel, memory_order_acquire)) {
                         continue;  /* lost the race; re-read and re-evaluate */
                     }
-                    req->replay_slot        = slot;
-                    req->replay_session     = session;
-                    req->replay_slot_id     = slotid;
-                    req->replay_action      = NFS4_REPLAY_ACTION_FROM_CACHE;
-                    *out_is_replay          = true;
-                    slot->in_progress_since = nfs4_slot_now();
+                    req->replay_slot    = slot;
+                    req->replay_session = session;
+                    req->replay_slot_id = slotid;
+                    req->replay_action  = NFS4_REPLAY_ACTION_FROM_CACHE;
+                    *out_is_replay      = true;
+                    atomic_store_explicit(&slot->in_progress_since, nfs4_slot_now(), memory_order_relaxed);
                     slot->last_stuck_report = 0;
                 } else {
                     /* COMPLETED: original ran with cachethis=false (or was
@@ -2306,8 +2450,10 @@ nfs4_replay_slot_acquire(
                 {
                     time_t now = nfs4_slot_now();
 
-                    if (slot->in_progress_since &&
-                        now - slot->in_progress_since >= 5 &&
+                    time_t in_progress_since = atomic_load_explicit(&slot->in_progress_since,
+                                                                    memory_order_relaxed);
+                    if (in_progress_since &&
+                        now - in_progress_since >= 5 &&
                         now - slot->last_stuck_report >= 10) {
                         slot->last_stuck_report = now;
                         chimera_nfs_error(
@@ -2315,7 +2461,7 @@ nfs4_replay_slot_acquire(
                             "for %ld sec; replying NFS4ERR_DELAY "
                             "(original compound has not completed)",
                             slotid, seqid,
-                            (long) (now - slot->in_progress_since));
+                            (long) (now - in_progress_since));
                     }
                 }
             } else {

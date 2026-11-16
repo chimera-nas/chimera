@@ -55,8 +55,12 @@ connections are excluded. Inproc/Unix endpoints have no invented IP port.
 
 Worker RPC/VFS values are copied from existing histogram instances and role
 gauges. They cover all traffic on that worker, including auxiliary RPC services
-sharing its context. Connection filters never narrow worker totals. Histogram
-samples per second are not automatically IOPS or per-client rates. NFS
+sharing its context. Connection filters never narrow worker totals. Thread CPU%,
+RUNQ%, BUSY%, RPC/s, and RX/TX MB/s use deltas between live samples; a single
+snapshot has no rate baseline. BUSY% is the loop-iteration ratio, not a CPU
+measure. Poll-mode workers can show high CPU% with low BUSY%. Read and Write
+latency comes from the live VFS histograms. Histogram sample rates are not
+automatically IOPS or per-client rates. NFS
 `per_connection_stats` is null. Large cumulative values and nanosecond timestamps
 are decimal strings. Rates use consecutive worker monotonic timestamps; the CLI
 resets them after restarts, failures, partial snapshots or counter/context changes.

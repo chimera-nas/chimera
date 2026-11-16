@@ -99,8 +99,8 @@ chimera_server_inspect_read_workers(
         if (!atomic_load_explicit(&stats->registered, memory_order_acquire)) {
             continue;
         }
-        sample->os_tid    = stats->os_tid;
-        sample->identity  = stats->identity;
+        sample->os_tid   = stats->os_tid;
+        sample->identity = stats->identity;
         read_schedstat(sample->os_tid, &sample->cpu_ns, &sample->runq_wait_ns);
         evpl_get_loop_stats(stats->evpl, &sample->loop);
     }
@@ -167,6 +167,31 @@ chimera_server_inspect_read_sessions(
     }
     return 0;
 } /* chimera_server_inspect_read_sessions */
+
+SYMBOL_EXPORT int
+chimera_server_inspect_read_session_slots(
+    struct chimera_server_inspect *inspect,
+    const char                    *session_id,
+    struct chimera_inspect_slot   *out,
+    unsigned int                   capacity,
+    unsigned int                  *total)
+{
+    *total = 0;
+    if (!inspect->nworkers) {
+        return -1;
+    }
+    struct chimera_worker_stats *stats = &inspect->worker_stats[0];
+    if (!atomic_load_explicit(&stats->registered, memory_order_acquire)) {
+        return -1;
+    }
+    for (int i = 0; i < stats->nprotocols; i++) {
+        if (stats->contexts[i] && stats->protocols[i]->inspect_session_slots) {
+            return stats->protocols[i]->inspect_session_slots(stats->contexts[i], session_id,
+                                                              out, capacity, total);
+        }
+    }
+    return -1;
+} /* chimera_server_inspect_read_session_slots */
 
 SYMBOL_EXPORT const char *
 chimera_server_inspect_instance_id(struct chimera_server_inspect *inspect)

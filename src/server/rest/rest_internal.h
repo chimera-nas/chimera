@@ -134,3 +134,12 @@ void chimera_rest_inspect_live(
     struct chimera_rest_thread *thread,
     struct evpl_http_request   *request,
     int                         include_sessions);
+void chimera_rest_inspect_nfs_sessions(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    const char                 *query,
+    int                         query_len);
+void chimera_rest_inspect_nfs_slots(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    const char                 *session_id);

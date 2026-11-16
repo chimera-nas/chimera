@@ -40,6 +40,7 @@ chimera_nfs4_create_session(
     uint32_t                          replay_max_slots;
     uint32_t                          replay_maxresp_cached;
     uint32_t                          server_max_slots;
+    uint32_t                          requested_slots;
 
     /* RFC 8881 §18.36.3: outside a session CREATE_SESSION must be the only op. */
     if (!req->seen_sequence && req->args_compound->num_argarray != 1) {
@@ -171,7 +172,8 @@ chimera_nfs4_create_session(
     /* RFC 5661 18.36.4: the server may negotiate ca_maxrequests and
      * ca_maxresponsesize_cached downward and return the effective values
      * to the client. */
-    clamped_fore = args->csa_fore_chan_attrs;
+    clamped_fore    = args->csa_fore_chan_attrs;
+    requested_slots = clamped_fore.ca_maxrequests;
 
     /* Chimera applies no header padding, so its preferred ca_headerpadsize is 0
      * on both channels (RFC 8881 §18.36: reply the preferred value, or zero if
@@ -200,6 +202,8 @@ chimera_nfs4_create_session(
         0,
         replay_max_slots,
         replay_maxresp_cached,
+        requested_slots,
+        server_max_slots,
         &clamped_fore,
         &args->csa_back_chan_attrs,
         NULL,

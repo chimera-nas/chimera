@@ -36,6 +36,32 @@ def args(*extra):
 
 
 class InspectionSemantics(unittest.TestCase):
+    def test_nfs_session_command_and_watch_peak(self):
+        parsed = _build_parser().parse_args(["inspect", "nfs", "sessions"])
+        self.assertEqual(parsed.inspection_view, "nfs_sessions")
+        before = {"nfs_sessions": {"server_instance_id": "instance", "complete": True,
+                                   "sessions": [{"session_id": "abc", "client_id": "7",
+                                                 "requested_slots": 64, "negotiated_slots": 64,
+                                                 "slots_in_progress": 50}]}}
+        after = copy.deepcopy(before)
+        after["nfs_sessions"]["sessions"][0]["slots_in_progress"] = 64
+        state = WatchState()
+        state.update(before)
+        meta = state.update(after)
+        self.assertEqual(meta["nfs_peaks"]["abc"], 64)
+        output = render(after, meta, parsed, width=160)
+        self.assertIn("abc", output)
+        self.assertIn("A full slot table can also indicate a slow backend", output)
+
+    def test_nfs_slot_table_input(self):
+        parsed = _build_parser().parse_args(["inspect", "nfs", "sessions", "--slots", "abc"])
+        snapshot = {"nfs_sessions": {"server_instance_id": "instance", "complete": True,
+                                     "slots": [{"slot": 0, "state": "IN_PROGRESS", "seqid": 4,
+                                                "age_ns": "1500000000", "operation": None}]}}
+        output = render(snapshot, {"nfs_peaks": {}}, parsed, width=160)
+        self.assertIn("IN_PROGRESS", output)
+        self.assertIn("1500.000 ms", output)
+
     def test_scoped_ipv6_endpoint_keeps_interface_and_port(self):
         self.assertEqual(endpoint({"family": "ipv6", "address": "fe80::1", "scope_id": 3, "port": 2049}), "[fe80::1%3]:2049")
 
@@ -83,16 +109,16 @@ class InspectionSemantics(unittest.TestCase):
             "complete": True,
             "sampled_monotonic_ns": "100",
             "threads": [{"worker_id": 0, "cpu_ns": "100", "loop_iters": "1000",
-                         "loop_iters_with_work": "700",
-                         "rpc": {"rx_bytes": "0", "tx_bytes": "0"}}],
+                         "runq_wait_ns": "10", "loop_iters_with_work": "700",
+                         "rpc": {"rx_msgs": "1", "rx_bytes": "0", "tx_bytes": "0"}}],
         }
         after = copy.deepcopy(before)
         after["sampled_monotonic_ns"] = "1000000100"
-        after["threads"][0].update(cpu_ns="500000100", loop_iters="1100", loop_iters_with_work="780",
-                                    rpc={"rx_bytes": "10000000", "tx_bytes": "5000000"})
+        after["threads"][0].update(cpu_ns="500000100", runq_wait_ns="20000010", loop_iters="1100", loop_iters_with_work="780",
+                                    rpc={"rx_msgs": "11", "rx_bytes": "10000000", "tx_bytes": "5000000"})
         state.update({"live": before})
         rates = state.update({"live": after})["live_rates"]["0"]
-        self.assertEqual(rates, {"cpu": 50.0, "busy": 80.0, "rx_MB_s": 10.0, "tx_MB_s": 5.0})
+        self.assertEqual(rates, {"cpu": 50.0, "runq": 2.0, "busy": 80.0, "rpc_s": 10.0, "rx_MB_s": 10.0, "tx_MB_s": 5.0})
 
     def test_large_counters_do_not_lose_integer_precision(self):
         before, after = frames(), frames("snapshot-next.json")

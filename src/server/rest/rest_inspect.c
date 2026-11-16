@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <time.h>
@@ -14,6 +15,122 @@
 #include "evpl/evpl_http.h"
 #include "server/server_inspect.h"
 #include "rest_internal.h"
+
+static json_t * decimal(
+    uint64_t value);
+
+void
+chimera_rest_inspect_nfs_sessions(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    const char                 *query,
+    int                         query_len)
+{
+    struct chimera_server_inspect *inspect = chimera_server_get_inspect(thread->shared->server);
+    unsigned int                   limit = 100, offset = 0, total = 0;
+    uint64_t                       client_filter     = 0;
+    int                            has_client_filter = 0;
+    int                            seen_limit = 0, seen_offset = 0, seen_client = 0;
+    char                          *query_copy = NULL;
+
+    if (query_len < 0 || query_len > 1024) {
+        chimera_rest_send_error(thread->evpl, request, 400, "Bad Request", "Invalid query string");
+        return;
+    }
+    if (query_len) {
+        query_copy = strndup(query, (size_t) query_len);
+        if (!query_copy) {
+            chimera_rest_send_error(thread->evpl, request, 503, "Service Unavailable", "Inspection allocation failed");
+            return;
+        }
+        char *save = NULL;
+        for (char *part = strtok_r(query_copy, "&", &save); part; part = strtok_r(NULL, "&", &save)) {
+            char              *equal = strchr(part, '=');
+            if (!equal || equal == part || !equal[1]) {
+                free(query_copy);
+                chimera_rest_send_error(thread->evpl, request, 400, "Bad Request", "Invalid query parameter");
+                return;
+            }
+            *equal++ = '\0';
+            char              *end = NULL;
+            errno = 0;
+            unsigned long long value = strtoull(equal, &end, 10);
+            if (errno || !end || *end) {
+                free(query_copy);
+                chimera_rest_send_error(thread->evpl, request, 400, "Bad Request", "Invalid numeric query parameter");
+                return;
+            }
+            if (!strcmp(part, "limit") && !seen_limit && value > 0 && value <= CHIMERA_INSPECT_ROWS) {
+                limit      = (unsigned int) value;
+                seen_limit = 1;
+            } else if (!strcmp(part, "offset") && !seen_offset && value <= UINT_MAX) {
+                offset      = (unsigned int) value;
+                seen_offset = 1;
+            } else if (!strcmp(part, "client_id") && !seen_client) {
+                client_filter     = (uint64_t) value;
+                has_client_filter = 1;
+                seen_client       = 1;
+            } else {
+                free(query_copy);
+                chimera_rest_send_error(thread->evpl, request, 400, "Bad Request",
+                                        "Unknown or out-of-range query parameter");
+                return;
+            }
+        }
+        free(query_copy);
+    }
+
+    struct chimera_inspect_session *rows = calloc(CHIMERA_INSPECT_ROWS, sizeof(*rows));
+    if (!rows) {
+        chimera_rest_send_error(thread->evpl, request, 503, "Service Unavailable", "Inspection allocation failed");
+        return;
+    }
+    unsigned int                    count = chimera_server_inspect_read_sessions(inspect, rows, CHIMERA_INSPECT_ROWS,
+                                                                                 &total);
+    json_t                         *result   = json_object();
+    json_t                         *sessions = json_array();
+    unsigned int                    matching = 0, emitted = 0;
+    for (unsigned int i = 0; i < count; i++) {
+        const struct chimera_inspect_session *session = &rows[i];
+        if (has_client_filter && session->client_id != client_filter) {
+            continue;
+        }
+        if (matching++ < offset || emitted >= limit) {
+            continue;
+        }
+        json_t                               *item = json_pack("{s:s,s:b}", "session_id", session->session_id,
+                                                               "has_slots_in_use", session->has_slots_in_use);
+        json_object_set_new(item, "client_id", decimal(session->client_id));
+        json_object_set_new(item, "created_at_monotonic_ns", decimal(session->created_monotonic_ns));
+        json_object_set_new(item, "created_at_wall_ns", decimal(session->created_wall_ns));
+        json_object_set_new(item, "requested_slots", json_integer(session->requested_slots));
+        json_object_set_new(item, "negotiated_slots", json_integer(session->negotiated_slots));
+        json_object_set_new(item, "server_max_slots", json_integer(session->server_max_slots));
+        json_object_set_new(item, "slots_in_progress", json_integer(session->slots_in_progress));
+        json_object_set_new(item, "slots_cached", json_integer(session->slots_cached));
+        json_object_set_new(item, "slots_completed", json_integer(session->slots_completed));
+        json_object_set_new(item, "slots_unused", json_integer(session->slots_unused));
+        json_object_set_new(item, "max_request_size", json_integer(session->max_request_size));
+        json_object_set_new(item, "max_response_size", json_integer(session->max_response_size));
+        json_object_set_new(item, "max_response_size_cached", json_integer(session->max_response_size_cached));
+        json_object_set_new(item, "highest_slot_in_use", session->has_slots_in_use ?
+                            json_integer(session->highest_slot_in_use) : json_null());
+        json_array_append_new(sessions, item);
+        emitted++;
+    }
+    int truncated = total > count ||
+        (has_client_filter ? matching : total) > offset + emitted;
+    json_object_set_new(result, "sessions", sessions);
+    json_object_set_new(result, "total", json_integer(has_client_filter ? matching : total));
+    json_object_set_new(result, "offset", json_integer(offset));
+    json_object_set_new(result, "limit", json_integer(limit));
+    json_object_set_new(result, "truncated", json_boolean(truncated));
+    json_object_set_new(result, "complete", json_boolean(!truncated));
+    json_object_set_new(result, "server_instance_id",
+                        json_string(chimera_server_inspect_instance_id(inspect)));
+    free(rows);
+    chimera_rest_send_json(thread->evpl, request, 200, result);
+} /* chimera_rest_inspect_nfs_sessions */
 
 struct rest_inspect_context {
     struct chimera_rest_thread       *thread;
@@ -38,6 +155,48 @@ signed_decimal(int64_t value)
     snprintf(text, sizeof(text), "%" PRId64, value);
     return json_string(text);
 } /* signed_decimal */
+
+void
+chimera_rest_inspect_nfs_slots(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    const char                 *session_id)
+{
+    struct chimera_server_inspect *inspect = chimera_server_get_inspect(thread->shared->server);
+    struct chimera_inspect_slot   *slots   = calloc(CHIMERA_INSPECT_ROWS, sizeof(*slots));
+    unsigned int                   total   = 0;
+
+    if (!slots) {
+        chimera_rest_send_error(thread->evpl, request, 503, "Service Unavailable", "Inspection allocation failed");
+        return;
+    }
+    int                            count = chimera_server_inspect_read_session_slots(inspect, session_id, slots,
+                                                                                     CHIMERA_INSPECT_ROWS, &total);
+    if (count < 0) {
+        free(slots);
+        chimera_rest_send_error(thread->evpl, request, 404, "Not Found", "Unknown NFS session");
+        return;
+    }
+    json_t                        *result = json_object();
+    json_t                        *rows   = json_array();
+    for (int i = 0; i < count; i++) {
+        json_t *row = json_pack("{s:i,s:s,s:i}", "slot", slots[i].slot,
+                                "state", slots[i].state, "seqid", slots[i].seqid);
+        if (slots[i].has_age) {
+            json_object_set_new(row, "age_ns", decimal(slots[i].age_ns));
+            json_object_set_new(row, "operation", json_null());
+        }
+        json_array_append_new(rows, row);
+    }
+    json_object_set_new(result, "slots", rows);
+    json_object_set_new(result, "total", json_integer(total));
+    json_object_set_new(result, "truncated", json_boolean(total > (unsigned int) count));
+    json_object_set_new(result, "complete", json_boolean(total <= (unsigned int) count));
+    json_object_set_new(result, "server_instance_id",
+                        json_string(chimera_server_inspect_instance_id(inspect)));
+    free(slots);
+    chimera_rest_send_json(thread->evpl, request, 200, result);
+} /* chimera_rest_inspect_nfs_slots */
 
 static uint64_t
 approx_percentile_ticks(

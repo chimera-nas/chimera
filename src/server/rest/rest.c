@@ -590,10 +590,37 @@ chimera_rest_dispatch(
 
     /* Only inspection routes split path/query; existing route behavior stays
      * with its current path matching and authentication middleware. */
-    const char *query               = memchr(url, '?', url_len);
-    int         path_len            = query ? query - url : url_len;
-    int         inspect_connections = path_len == 19 && !memcmp(url, "/api/v1/connections", 19);
-    int         inspect_threads     = path_len == 15 && !memcmp(url, "/api/v1/threads", 15);
+    const char *query                = memchr(url, '?', url_len);
+    int         path_len             = query ? query - url : url_len;
+    int         inspect_connections  = path_len == 19 && !memcmp(url, "/api/v1/connections", 19);
+    int         inspect_threads      = path_len == 15 && !memcmp(url, "/api/v1/threads", 15);
+    int         inspect_nfs_sessions = path_len == 20 && !memcmp(url, "/api/v1/nfs/sessions", 20);
+    int         inspect_nfs_slots    = path_len == 59 &&
+        !memcmp(url, "/api/v1/nfs/sessions/", 21) &&
+        !memcmp(url + path_len - 6, "/slots", 6);
+    if (inspect_nfs_slots) {
+        if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        } else if (query) {
+            chimera_rest_send_error(evpl, request, 400, "Bad Request", "Unknown query parameter");
+        } else {
+            char session_id[33];
+            memcpy(session_id, url + 21, 32);
+            session_id[32] = '\0';
+            chimera_rest_inspect_nfs_slots(thread, request, session_id);
+        }
+        return;
+    }
+    if (inspect_nfs_sessions) {
+        if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        } else {
+            chimera_rest_inspect_nfs_sessions(thread, request,
+                                              query ? query + 1 : NULL,
+                                              query ? url_len - path_len - 1 : 0);
+        }
+        return;
+    }
     if (inspect_connections || inspect_threads) {
         if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
             chimera_rest_handle_method_not_allowed(evpl, request);

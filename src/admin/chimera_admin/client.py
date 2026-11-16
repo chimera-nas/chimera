@@ -115,6 +115,25 @@ class ChimeraAdminClient:
         """Get the direct, non-doorbell worker metrics sample."""
         return self._inspection_get("/api/v1/threads", {"live": 1})
 
+    def get_nfs_sessions(self, limit: int = 100, offset: int = 0, client_id: Optional[int] = None) -> dict:
+        """Get a bounded, paged NFSv4.1+ session inspection snapshot."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1024:
+            raise ValueError("limit must be between 1 and 1024")
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError("offset must be nonnegative")
+        if client_id is not None and (not isinstance(client_id, int) or isinstance(client_id, bool) or client_id < 0):
+            raise ValueError("client_id must be a nonnegative integer")
+        params = {"limit": limit, "offset": offset}
+        if client_id is not None:
+            params["client_id"] = client_id
+        return self._inspection_get("/api/v1/nfs/sessions", params)
+
+    def get_nfs_session_slots(self, session_id: str) -> dict:
+        """Get the bounded slot table for one NFSv4.1+ session."""
+        if not isinstance(session_id, str) or not session_id or "/" in session_id or "?" in session_id:
+            raise ValueError("session_id must be a nonempty path-safe identifier")
+        return self._inspection_get("/api/v1/nfs/sessions/{}/slots".format(session_id), {})
+
     def get_connections(self, **filters) -> dict:
         """Get connection mappings with numeric endpoint and worker filters."""
         allowed = {"worker_id", "service", "transport", "remote_ip", "remote_port", "local_ip", "local_port"}

@@ -98,7 +98,7 @@ struct nfs4_replay_slot {
      * and when a stuck-slot report was last logged for it.  Written only by
      * the CAS winner / the retry path observing it, both monotonic-seconds;
      * plain (non-atomic) is fine for a rate-limited log. */
-    time_t           in_progress_since;
+    _Atomic time_t   in_progress_since;
     time_t           last_stuck_report;
 };
 
@@ -296,6 +296,10 @@ struct nfs4_session {
     _Atomic bool                      destroyed;
     uint8_t                           nfs4_session_id[NFS4_SESSIONID_SIZE];
     uint64_t                          nfs4_session_clientid;
+    uint64_t                          inspect_created_monotonic_ns;
+    uint64_t                          inspect_created_wall_ns;
+    uint32_t                          inspect_requested_slots;
+    uint32_t                          inspect_server_max_slots;
     uint32_t                          nfs4_session_implicit;
     struct channel_attrs4             nfs4_session_fore_attrs;
     struct channel_attrs4             nfs4_session_back_attrs;
@@ -373,12 +377,30 @@ struct nfs4_client_table {
 };
 
 struct chimera_inspect_session;
+struct chimera_inspect_slot;
+struct nfs4_slot_state_counts {
+    uint32_t in_progress;
+    uint32_t cached;
+    uint32_t completed;
+    uint32_t unused;
+    uint32_t highest_slot_in_use;
+    bool     has_slots_in_use;
+};
+void nfs4_session_count_slot_states(
+    struct nfs4_session           *session,
+    struct nfs4_slot_state_counts *counts);
 unsigned int
 nfs4_session_inspect_snapshot(
     struct nfs4_client_table       *table,
     struct chimera_inspect_session *out,
     unsigned int                    capacity,
     unsigned int                   *total);
+int nfs4_session_inspect_slots_snapshot(
+    struct nfs4_client_table    *table,
+    const char                  *session_id,
+    struct chimera_inspect_slot *out,
+    unsigned int                 capacity,
+    unsigned int                *total);
 
 /* A clientid carries the minting instance's node_id in its high 16 bits and a
  * per-instance counter in the low 48, so two instances over one backing store
@@ -669,6 +691,8 @@ nfs4_create_session(
     uint32_t                     implicit,
     uint32_t                     replay_max_slots,
     uint32_t                     replay_maxresp_cached,
+    uint32_t                     requested_slots,
+    uint32_t                     server_max_slots,
     const struct channel_attrs4 *fore_attrs,
     const struct channel_attrs4 *back_attrs,
     const uint8_t               *restore_sessionid,

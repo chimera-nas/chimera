@@ -1903,17 +1903,32 @@ nfs_inspect_sessions(
                                          out, capacity, total);
 } /* nfs_inspect_sessions */
 
+static int
+nfs_inspect_session_slots(
+    void                        *data,
+    const char                  *session_id,
+    struct chimera_inspect_slot *out,
+    unsigned int                 capacity,
+    unsigned int                *total)
+{
+    struct chimera_server_nfs_thread *thread = data;
+
+    return nfs4_session_inspect_slots_snapshot(&thread->shared->nfs4_shared_clients,
+                                               session_id, out, capacity, total);
+} /* nfs_inspect_session_slots */
+
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
-    .inspect          = nfs_inspect,
-    .inspect_live     = nfs_inspect_live,
-    .inspect_sessions = nfs_inspect_sessions,
-    .inspect_register = nfs_inspect_register,
-    .init             = nfs_server_init,
-    .destroy          = nfs_server_destroy,
-    .start            = nfs_server_start,
-    .stop             = nfs_server_stop,
-    .thread_init      = nfs_server_thread_init,
-    .thread_destroy   = nfs_server_thread_destroy,
+    .inspect               = nfs_inspect,
+    .inspect_live          = nfs_inspect_live,
+    .inspect_sessions      = nfs_inspect_sessions,
+    .inspect_session_slots = nfs_inspect_session_slots,
+    .inspect_register      = nfs_inspect_register,
+    .init                  = nfs_server_init,
+    .destroy               = nfs_server_destroy,
+    .start                 = nfs_server_start,
+    .stop                  = nfs_server_stop,
+    .thread_init           = nfs_server_thread_init,
+    .thread_destroy        = nfs_server_thread_destroy,
 };
 
 int

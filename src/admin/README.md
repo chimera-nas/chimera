@@ -91,3 +91,19 @@ specific server executable to test. For example:
 CHIMERA_SERVER_BINARY=/path/to/chimera/build/Debug/src/daemon/chimera \
     python3 -m pytest tests/test_api.py tests/test_e2e_nfs_xattr.py tests/test_e2e_smb.py
 ```
+
+`chimera-admin inspect threads` reads the live worker endpoint. CPU%, RUNQ%,
+BUSY%, RPC/s and RX/TX MB/s use deltas between consecutive samples; a one-shot
+sample displays `--` for these rates because it has no baseline. BUSY% is the
+event-loop iteration ratio, not a CPU measure. Poll-mode workers may show high
+CPU% with low BUSY%. Read and Write latency uses the live VFS histograms.
+
+`GET /api/v1/nfs/sessions` provides paged NFSv4.1+ session slot and negotiation
+details (`limit`, `offset`, and `client_id`). The legacy `nfs4_sessions` array
+in `GET /api/v1/threads?live=1&sessions=1` is deprecated. A full slot table can
+mean slot saturation or a slow backend; compare against a client that
+negotiates more slots before concluding the workload is slot-bound.
+Use `chimera-admin inspect nfs sessions --slots SESSION_ID` to view the slot
+states for one session. Session connection IDs and worker associations are not
+yet exposed: connection binding stores the session pointer on each connection,
+but the session does not retain a list of all its connections.
