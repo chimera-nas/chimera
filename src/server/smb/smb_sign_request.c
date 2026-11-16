@@ -95,8 +95,8 @@ chimera_smb_sign_compound(
     evpl_iovec_cursor_init(&cursor, iov, niov);
 
     if (chimera_smb_conn_is_direct(conn)) {
-        evpl_iovec_cursor_skip(&cursor, sizeof(struct smb_direct_hdr) + 4);
-        left -= sizeof(struct smb_direct_hdr) + 4;
+        evpl_iovec_cursor_skip(&cursor, SMB_DIRECT_DATA_OFFSET);
+        left -= SMB_DIRECT_DATA_OFFSET;
     } else {
         evpl_iovec_cursor_skip(&cursor, sizeof(struct netbios_header));
         left -= sizeof(struct netbios_header);
