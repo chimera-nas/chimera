@@ -489,6 +489,28 @@ chimera_smb_direct_fill_hdr(
     hdr->data_length       = data_length;
 } /* chimera_smb_direct_fill_hdr */
 
+/* Send an empty SMB Direct data-transfer message (MS-SMBD 3.1.5.4): the bare
+ * 20-byte header, no payload, DataOffset and DataLength 0.  This is the
+ * answer to a peer's SMB_DIRECT_RESPONSE_REQUESTED; it also grants credits
+ * like every message this server sends. */
+static void
+chimera_smb_direct_send_empty(
+    struct evpl             *evpl,
+    struct chimera_smb_conn *conn)
+{
+    struct evpl_iovec      iov;
+    struct smb_direct_hdr *hdr;
+
+    evpl_iovec_alloc(evpl, sizeof(*hdr), 8, 1, 0, &iov);
+
+    hdr = evpl_iovec_data(&iov);
+    chimera_smb_direct_fill_hdr(hdr, 0, 0);
+    hdr->data_offset = 0;
+
+    evpl_iovec_set_length(&iov, sizeof(*hdr));
+    evpl_sendv(evpl, conn->bind, &iov, 1, sizeof(*hdr), EVPL_SEND_FLAG_TAKE_REF);
+} /* chimera_smb_direct_send_empty */
+
 /* Send an SMB Direct reply: payload_length bytes of SMB2 message that start
  * SMB_DIRECT_DATA_OFFSET bytes into reply_iov, whose first iovec reserves
  * that space for the data-transfer header (MS-SMBD 2.2.3).
@@ -2513,6 +2535,22 @@ chimera_smb_server_handle_rdma(
                  direct_hdr->data_length < sizeof(struct smb2_header))) {
         chimera_smb_error("Received SMB2 message over RDMA that has data length that is too small");
         evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    /* The peer wants a prompt answer (MS-SMBD 3.1.5.8): its idle timer sent
+     * a keepalive, or put the flag on whatever it was sending anyway, and
+     * drops the connection if nothing comes back within a few seconds.
+     * Answer now rather than with the reply to any request this message
+     * carries, which may be held for a long time (CHANGE_NOTIFY, a blocked
+     * lock) or never be sent at all. */
+    if (direct_hdr->flags & SMB_DIRECT_RESPONSE_REQUESTED) {
+        chimera_smb_direct_send_empty(evpl, conn);
+    }
+
+    /* No payload: a keepalive or a bare credit grant, never part of an SMB2
+     * message.  Dispatching it would run an empty compound. */
+    if (direct_hdr->data_length == 0) {
         return;
     }
 

@@ -13,7 +13,9 @@
  * dictates.  The harness accepts no message larger than the PreferredSendSize
  * the server answered the negotiate with, as Windows does, and each
  * connection checks that PreferredSendSize is the smaller of the server's own
- * send size and the MaxReceiveSize offered.
+ * send size and the MaxReceiveSize offered.  Keepalives -- empty messages
+ * asking for a response -- are checked to be answered on a full-size and a
+ * minimum-size connection.
  *
  * Given a wire profile name (signed311), every session is signed and every
  * signed reply's signature is checked, which is what shows the server signed
@@ -208,6 +210,60 @@ check_compound_read(
           (2 * count + 6) / 7, c->direct_nfrag);
 } /* check_compound_read */
 
+/* Keepalives (MS-SMBD 3.1.5.8): a data-transfer message with
+ * SMB_DIRECT_RESPONSE_REQUESTED must be answered promptly, or the peer's
+ * idle timer tears the connection down.  The answer is checked after an ECHO
+ * round trip: the transport keeps order and the server answers as it
+ * receives, so an answer would have landed before the ECHO reply. */
+static void
+check_keepalives(struct smb2_conn *c)
+{
+    int n0;
+
+    /* K1: an empty message asking for a response, as an idle peer's
+     * keepalive timer sends it, gets exactly one empty message back: no
+     * payload (DataOffset 0, 20 bytes), not asking for one in turn, and
+     * granting credits. */
+    n0 = c->direct_nempty;
+    smb2_direct_send_empty(c, SMB2C_DIRECT_RESPONSE_REQUESTED);
+    smb2_echo_barrier(c);
+    CHECK(c->direct_nempty == n0 + 1, "K1: keepalive answered with one empty message (%d)",
+          c->direct_nempty - n0);
+    if (c->direct_nempty == n0 + 1) {
+        CHECK(c->direct_empty_len == 20 && c->direct_empty_data_offset == 0,
+              "K1: the answer is a bare header (%d bytes, DataOffset %u)",
+              c->direct_empty_len, c->direct_empty_data_offset);
+        CHECK(!(c->direct_empty_flags & SMB2C_DIRECT_RESPONSE_REQUESTED),
+              "K1: the answer does not ask for a response (Flags 0x%04x)", c->direct_empty_flags);
+        CHECK(c->direct_empty_credits_granted > 0, "K1: the answer grants credits (%u)",
+              c->direct_empty_credits_granted);
+    }
+
+    /* K2: an empty message that does not ask for a response is a bare
+     * credit grant, and nothing comes back. */
+    n0 = c->direct_nempty;
+    smb2_direct_send_empty(c, 0);
+    smb2_echo_barrier(c);
+    CHECK(c->direct_nempty == n0, "K2: an empty message without the flag is not answered (%d)",
+          c->direct_nempty - n0);
+
+    /* K3: the flag on a message that carries an SMB2 request: answered at
+     * once, whether or not the request itself completes soon. */
+    n0                   = c->direct_nempty;
+    c->direct_next_flags = SMB2C_DIRECT_RESPONSE_REQUESTED;
+    smb2_echo_barrier(c);
+    CHECK(c->direct_nempty == n0 + 1, "K3: a request asking for a response is answered at once (%d)",
+          c->direct_nempty - n0);
+
+    /* K4: repeated keepalives on an idle connection are each answered. */
+    n0 = c->direct_nempty;
+    for (int i = 0; i < 3; i++) {
+        smb2_direct_send_empty(c, SMB2C_DIRECT_RESPONSE_REQUESTED);
+    }
+    smb2_echo_barrier(c);
+    CHECK(c->direct_nempty == n0 + 3, "K4: three keepalives, three answers (%d)", c->direct_nempty - n0);
+} /* check_keepalives */
+
 int
 main(
     int   argc,
@@ -239,6 +295,7 @@ main(
     }
     CHECK(c->direct_peer_max_recv == 8192, "server MaxReceiveSize 8192 (%u)", c->direct_peer_max_recv);
     smb2_handshake(c);
+    check_keepalives(c);
 
     st = smb2_create(c, "direct.bin", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
                      MBT_FILE_SHARE_RWD, NULL, &co);
@@ -297,6 +354,7 @@ main(
     c3 = open_direct(&env, 128);
     CHECK(c3->direct_negotiated, "MaxReceiveSize 128 is accepted");
     smb2_handshake(c3);
+    check_keepalives(c3);
     st = smb2_create(c3, "direct.bin", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
                      MBT_FILE_SHARE_RWD, NULL, &co3);
     CHECK(st == ST_SUCCESS, "open on the minimum-size connection -> 0x%08x", st);
