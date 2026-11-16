@@ -62,6 +62,7 @@ struct pc {
     uint64_t               clientid;
     uint8_t                sessionid[16];
     uint32_t               slot_seq;
+    uint32_t               minor;
     uint8_t                recalls[P_MAX_RECALL][12];
     int                    nrecalls;
 };
@@ -149,6 +150,8 @@ struct prep {
     struct stateid4 open_sid;         /* last OPEN stateid */
     uint32_t        deleg_type;       /* last OPEN delegation type */
     struct stateid4 deleg_sid;
+    uint32_t        read_len;
+    uint8_t         read_byte;
     uint64_t        clientid;         /* EXCHANGE_ID */
     uint32_t        eir_seq;
     uint8_t         sessionid[16];    /* CREATE_SESSION */
@@ -217,6 +220,11 @@ prep_cb(
                     p->st[i] = r->opread.status;
                     if (p->st[i] == NFS4_OK) {
                         int k;
+
+                        p->read_len = r->opread.resok4.data.length;
+                        if (p->read_len && r->opread.resok4.data.niov) {
+                            p->read_byte = *(uint8_t *) r->opread.resok4.data.iov[0].data;
+                        }
 
                         /* Release the reply's data iovecs -- they carry
                         * references the caller now owns (the same
@@ -288,7 +296,7 @@ pc_compound(
     for (i = 0; i < nops; i++) {
         argarray[base + i] = ops[i];
     }
-    args.minorversion = 1;
+    args.minorversion = pc->minor ? pc->minor : 1;
     args.argarray     = argarray;
     args.num_argarray = (uint32_t) (base + nops);
 
@@ -496,6 +504,103 @@ dt_name(uint32_t t)
     return t == 0 ? "none" : t == 1 ? "read" : t == 2 ? "write" : "?";
 } /* dt_name */
 
+/* Exercise CLONE through the same session/backchannel harness as delegations.
+ * The passthrough variant grows the file outside VFS, leaving its cached
+ * source size behind, exactly as a host writer can. */
+static int
+test_clone_bounds(
+    struct pc           *pc,
+    const struct mbt_fh *root)
+{
+    struct prep       src, dst, p;
+    struct nfs_argop4 ops[4];
+    struct evpl_iovec wiov;
+    uint64_t          size = 4096;
+    int               i;
+
+    pc->minor = 2;
+    src       = do_open(pc, root, "clone-src-owner", "clone-src", 3, 1);
+    dst       = do_open(pc, root, "clone-dst-owner", "clone-dst", 3, 1);
+    expect("CLONE endpoints opened", src.status == NFS4_OK && dst.status == NFS4_OK, "OPEN");
+    expect("CLONE source has a write delegation", src.deleg_type == OPEN_DELEGATE_WRITE, "OPEN delegation");
+    if (src.status != NFS4_OK || dst.status != NFS4_OK || src.deleg_type != OPEN_DELEGATE_WRITE) {
+        return 1;
+    }
+    /* OPEN does not return a filehandle unless GETFH follows it. */
+    for (i = 0; i < 2; i++) {
+        memset(ops, 0, sizeof(ops));
+        ops[0]                       = op_putfh(root);
+        ops[1].argop                 = OP_LOOKUP;
+        ops[1].oplookup.objname.data = i ? "clone-dst" : "clone-src";
+        ops[1].oplookup.objname.len  = 9;
+        ops[2].argop                 = OP_GETFH;
+        p                            = pc_compound(pc, ops, 3, 1);
+        if (i) {
+            dst.fh = p.fh;
+        } else {
+            src.fh = p.fh;
+        }
+    }
+    memset(ops, 0, sizeof(ops));
+    ops[0]                 = op_putfh(&src.fh);
+    ops[1].argop           = OP_WRITE;
+    ops[1].opwrite.stateid = src.open_sid;
+    ops[1].opwrite.stable  = FILE_SYNC4;
+    if (evpl_iovec_alloc(pc->env->evpl, 4096, 4096, 1, 0, &wiov) < 0) {
+        return 1;
+    }
+    memset(wiov.data, 'A', 4096);
+    wiov.length                = 4096;
+    ops[1].opwrite.data.iov    = &wiov;
+    ops[1].opwrite.data.niov   = 1;
+    ops[1].opwrite.data.length = 4096;
+    p                          = pc_compound(pc, ops, 2, 1);
+    expect("CLONE source initialized", p.status == NFS4_OK, "WRITE");
+#ifndef _WIN32
+    if (pc->env->pt_root[0]) {
+        char path[512], data[4096];
+        int  fd;
+        snprintf(path, sizeof(path), "%s/fs0/clone-src", pc->env->pt_root);
+        fd = open(path, O_WRONLY);
+        memset(data, 'B', sizeof(data));
+        expect("source grows outside VFS", fd >= 0 && pwrite(fd, data, sizeof(data), 4096) == sizeof(data),
+               "host pwrite");
+        if (fd >= 0) {
+            close(fd);
+        }
+        size = 8192;
+    }
+#endif /* ifndef _WIN32 */
+    for (i = 0; i < 4; i++) {
+        memset(ops, 0, sizeof(ops));
+        ops[0]                        = op_putfh(&src.fh);
+        ops[1].argop                  = OP_SAVEFH;
+        ops[2]                        = op_putfh(&dst.fh);
+        ops[3].argop                  = OP_CLONE;
+        ops[3].opclone.cl_src_stateid = i == 3 ? src.deleg_sid : src.open_sid;
+        ops[3].opclone.cl_dst_stateid = dst.open_sid;
+        ops[3].opclone.cl_src_offset  = i == 1 ? size : i == 2 ? size + 4096 : size - 4096;
+        ops[3].opclone.cl_count       = i == 0 || i == 3 ? 4096 : 0;
+        p                             = pc_compound(pc, ops, 4, 1);
+        if (i == 0 && p.status == NFS4ERR_NOTSUPP && pc->env->pt_root[0]) {
+            printf("SKIP: host filesystem does not support reflink\n");
+            return failures ? 1 : 77;
+        }
+        expect(i == 0 ? "explicit CLONE after source growth" : i == 1 ? "CLONE exactly at EOF succeeds" : i == 2 ?
+               "CLONE past EOF is invalid" : "CLONE delegation stateid succeeds",
+               p.status == (i == 2 ? NFS4ERR_INVAL : NFS4_OK), "CLONE boundary status");
+        memset(ops, 0, sizeof(ops));
+        ops[0]                = op_putfh(&dst.fh);
+        ops[1].argop          = OP_READ;
+        ops[1].opread.stateid = dst.open_sid;
+        ops[1].opread.count   = 8192;
+        p                     = pc_compound(pc, ops, 2, 1);
+        expect("CLONE destination retains expected data and size", p.status == NFS4_OK && p.read_len == 4096 && p.
+               read_byte == (size == 8192 ? 'B' : 'A'), "READ after CLONE");
+    }
+    return failures ? 1 : 0;
+} /* test_clone_bounds */
+
 int
 main(
     int    argc,
@@ -513,6 +618,12 @@ main(
     struct stateid4     a_f7_deleg;
     char                buf[128];
     int                 i;
+    int                 clone_only = argc > 1 && strcmp(argv[1], "--clone") == 0;
+
+    if (clone_only) {
+        opts.disable_caches = 0;
+        opts.module         = argc > 2 ? argv[2] : "memfs";
+    }
 
     opts.sec = mbt_sec_scan_argv(argc, argv);
 
@@ -559,6 +670,12 @@ main(
     }
 
     pc_setup(&a, env, 1);
+    if (clone_only) {
+        int result = test_clone_bounds(&a, &root);
+        mbt_env_stop(env);
+        free(env);
+        return result;
+    }
     pc_setup(&b, env, 2);
     pc_setup(&g4c, env, 3);
     pc_setup(&c4c, env, 4);

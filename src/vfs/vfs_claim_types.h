@@ -219,6 +219,8 @@ struct chimera_vfs_claim_grant {
     struct chimera_vfs_claim        claim;      /* klass CACHE              */
     struct chimera_vfs_file_state  *file;
     uint32_t                        refcount;   /* members + transient pins */
+    bool                            pump_on_release;
+    bool                            pump_suppressed; /* explicit shutdown release */
     uint32_t                        epoch;      /* v2 leases; one bump per
                                                  * break EVENT (R37)        */
     uint8_t                         is_v2;

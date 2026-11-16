@@ -295,6 +295,9 @@ struct chimera_fuse_mount {
      * change watches, both under grant_lock (a leaf: never held while
      * calling into vfs_state or vfs_notify). */
     evpl_mutex_t                    grant_lock;
+    /* 0: admission open; 1: stopping; 2: residency dropped, draining pins. */
+    atomic_int                      grants_closing;
+    atomic_int                      grants_live;
     struct chimera_fuse_grant      *grants;
     struct chimera_fuse_dirwatch   *dirwatches;
     /* Per-mount directory-event notifier: INVAL_ENTRY writes can block on

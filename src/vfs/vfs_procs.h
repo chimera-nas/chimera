@@ -360,6 +360,16 @@ chimera_vfs_getattr(
     chimera_vfs_getattr_callback_t  callback,
     void                           *private_data);
 
+/* Query backend attributes even when the attribute cache has an entry. */
+SYMBOL_EXPORT void
+chimera_vfs_getattr_fresh(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        attr_mask,
+    chimera_vfs_getattr_callback_t  callback,
+    void                           *private_data);
+
 typedef void (*chimera_vfs_setattr_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *pre_attr,

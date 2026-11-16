@@ -9,6 +9,7 @@
 
 #include "vfs_claim.h"
 #include "vfs_claim_internal.h"
+#include "vfs_claim_owner.h"
 #include "vfs_internal.h"
 #include "common/macros.h"
 
@@ -114,10 +115,20 @@ chimera_vfs_claim_drive_breaks(
     const struct chimera_vfs_claim *probe)
 {
     struct chimera_vfs_claim     *conflict = NULL;
+    struct chimera_vfs_claim_ref  conflict_ref;
     enum chimera_vfs_claim_result result;
 
     evpl_mutex_lock(&file->lock);
     result = chimera_vfs_claim_admit_locked(file, probe, &conflict);
+    if (result != CHIMERA_CLAIM_BREAKING) {
+        /* Only the BREAKING arm below dereferences `conflict` past the
+         * unlock; DENIED/GRANTED never touch it, so pinning it here would
+         * leak the reference (nothing below would ever drop it). */
+        conflict = NULL;
+    } else if (conflict && !chimera_vfs_claim_ref_take(conflict, &conflict_ref)) {
+        /* Teardown has committed: its release will pump us. */
+        conflict = NULL;
+    }
     evpl_mutex_unlock(&file->lock);
 
     while (result == CHIMERA_CLAIM_BREAKING && conflict) {
@@ -131,15 +142,22 @@ chimera_vfs_claim_drive_breaks(
                 chimera_vfs_claim_contended_floor(probe, conflict);
 
             chimera_vfs_claim_begin_break_ex(
-                state, conflict, io_floor, deadline_ms, false);
+                state, file, conflict, io_floor, deadline_ms, false);
         } else if (chimera_vfs_claim_deadline_passed(conflict)) {
-            chimera_vfs_claim_revoke(conflict);
+            chimera_vfs_claim_revoke_ex(state, file, conflict);
         } else {
+            chimera_vfs_claim_ref_drop(state, &conflict_ref);
             break;
         }
+        chimera_vfs_claim_ref_drop(state, &conflict_ref);
         conflict = NULL;
         evpl_mutex_lock(&file->lock);
         result = chimera_vfs_claim_admit_locked(file, probe, &conflict);
+        if (result != CHIMERA_CLAIM_BREAKING) {
+            conflict = NULL;
+        } else if (conflict && !chimera_vfs_claim_ref_take(conflict, &conflict_ref)) {
+            conflict = NULL;
+        }
         evpl_mutex_unlock(&file->lock);
     }
 
@@ -860,12 +878,11 @@ chimera_vfs_claim_revoke_expired_breaks(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file)
 {
-    struct chimera_vfs_claim *expired[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
-    struct chimera_vfs_claim *cur;
-    int                       n = 0;
-    int                       i;
-
-    (void) state;
+    struct chimera_vfs_claim    *expired[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
+    struct chimera_vfs_claim_ref expired_ref[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
+    struct chimera_vfs_claim    *cur;
+    int                          n = 0;
+    int                          i;
 
     evpl_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur; cur = cur->next) {
@@ -877,14 +894,16 @@ chimera_vfs_claim_revoke_expired_breaks(
         }
         if (cur->break_state == CHIMERA_CLAIM_BREAK_BREAKING &&
             chimera_vfs_claim_deadline_passed(cur) &&
-            n < CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH) {
+            n < CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH &&
+            chimera_vfs_claim_ref_take(cur, &expired_ref[n])) {
             expired[n++] = cur;
         }
     }
     evpl_mutex_unlock(&file->lock);
 
     for (i = 0; i < n; i++) {
-        chimera_vfs_claim_revoke(expired[i]);
+        chimera_vfs_claim_revoke_ex(state, file, expired[i]);
+        chimera_vfs_claim_ref_drop(state, &expired_ref[i]);
     }
     return n > 0;
 } /* chimera_vfs_claim_revoke_expired_breaks */

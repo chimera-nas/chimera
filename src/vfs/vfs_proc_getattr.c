@@ -34,12 +34,13 @@ chimera_vfs_getattr_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(thread, request);
 } /* chimera_vfs_getattr_complete */
 
-SYMBOL_EXPORT void
-chimera_vfs_getattr(
+static void
+chimera_vfs_getattr_common(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        req_attr_mask,
+    bool                            fresh,
     chimera_vfs_getattr_callback_t  callback,
     void                           *private_data)
 {
@@ -48,7 +49,7 @@ chimera_vfs_getattr(
     struct chimera_vfs_attrs       cached_attr;
     int                            rc;
 
-    if (!(handle->flags & CHIMERA_VFS_OPEN_HANDLE_STREAM) &&
+    if (!fresh && !(handle->flags & CHIMERA_VFS_OPEN_HANDLE_STREAM) &&
         !(req_attr_mask & ~(CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE))) {
         rc = chimera_vfs_attr_cache_lookup(attr_cache,
                                            handle->fh_hash,
@@ -81,3 +82,27 @@ chimera_vfs_getattr(
 
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_getattr */
+
+SYMBOL_EXPORT void
+chimera_vfs_getattr(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        mask,
+    chimera_vfs_getattr_callback_t  callback,
+    void                           *private_data)
+{
+    chimera_vfs_getattr_common(thread, cred, handle, mask, false, callback, private_data);
+} /* chimera_vfs_getattr */
+
+SYMBOL_EXPORT void
+chimera_vfs_getattr_fresh(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        mask,
+    chimera_vfs_getattr_callback_t  callback,
+    void                           *private_data)
+{
+    chimera_vfs_getattr_common(thread, cred, handle, mask, true, callback, private_data);
+} /* chimera_vfs_getattr_fresh */

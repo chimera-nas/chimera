@@ -1285,3 +1285,14 @@ if(Python3_FOUND)
     set_tests_properties(chimera/server/nfs/mbt/coverage_nfs4 PROPERTIES
         LABELS "quint;model_coverage" TIMEOUT 120)
 endif()
+
+foreach(backend memfs linux)
+    if(backend STREQUAL "linux" AND NOT CHIMERA_LINUX)
+        continue()
+    endif()
+    add_test(NAME chimera/server/nfs/mbt4/clone_bounds_${backend}
+        COMMAND $<TARGET_FILE:nfs4_deleg_probe> --clone ${backend})
+    set_tests_properties(chimera/server/nfs/mbt4/clone_bounds_${backend} PROPERTIES
+        LABELS "functional;probe;nfs4_mbt;${backend}"
+        SKIP_RETURN_CODE 77 TIMEOUT 90)
+endforeach()

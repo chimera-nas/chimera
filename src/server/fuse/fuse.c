@@ -18,6 +18,13 @@
 #include "server/server.h"
 #include "vfs/vfs_release.h"
 
+/* Implemented in fuse_coherence.c: registers the claim owner pin for cache
+ * grants with the claim core, so a break/revoke dispatch can hold a grant
+ * across the unlock. */
+void
+chimera_fuse_coherence_register(
+    void);
+
 static void *
 fuse_server_init(
     const struct chimera_server_config *config,
@@ -57,6 +64,8 @@ fuse_server_init(
     evpl_mutex_init(&shared->notifier_lock, NULL);
     evpl_cond_init(&shared->notifier_cond, NULL);
 
+    chimera_fuse_coherence_register();
+
     return shared;
 } /* fuse_server_init */
 
@@ -68,6 +77,11 @@ fuse_server_destroy(void *data)
     int                         m, slot;
 
     for (m = 0; m < shared->num_mounts; m++) {
+        chimera_fuse_coherence_shutdown(shared, &shared->mounts[m]);
+    }
+    chimera_fuse_notifier_stop(shared);
+
+    for (m = 0; m < shared->num_mounts; m++) {
         mount = &shared->mounts[m];
 
         for (slot = 0; slot < CHIMERA_FUSE_MAX_THREADS; slot++) {
@@ -75,8 +89,6 @@ fuse_server_destroy(void *data)
                 close(mount->channel_fds[slot]);
             }
         }
-
-        chimera_fuse_coherence_shutdown(shared, mount);
 
         if (mount->node_table) {
             chimera_fuse_node_table_destroy(mount->node_table);
@@ -123,6 +135,7 @@ fuse_server_stop(void *data)
     int                         m;
 
     for (m = 0; m < shared->num_mounts; m++) {
+        atomic_store(&shared->mounts[m].grants_closing, 1);
         chimera_fuse_mount_teardown(&shared->mounts[m]);
     }
 
@@ -133,9 +146,7 @@ fuse_server_stop(void *data)
         chimera_fuse_locks_shutdown(shared, &shared->mounts[m]);
     }
 
-    /* Drains queued invalidations (their acks matter; the writes are
-     * harmless no-ops on the detached mounts), then exits. */
-    chimera_fuse_notifier_stop(shared);
+    /* Keep the notifier alive until dispatch pins drain during destroy. */
 } /* fuse_server_stop */
 
 /*

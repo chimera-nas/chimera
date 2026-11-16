@@ -20,6 +20,10 @@
 #endif /* ifdef _WIN32 */
 
 #include "fuse_sim.h"
+#include "server/fuse/fuse_internal.h"
+#include "vfs/vfs_internal.h"
+#include "vfs/vfs_claim.h"
+#include "vfs/vfs_claim_owner.h"
 
 static int failures;
 
@@ -32,6 +36,88 @@ static int failures;
                 printf("ok:   " __VA_ARGS__); printf("\n"); \
             } \
         } while (0)
+
+struct destroy_context {
+    struct chimera_server *server;
+    atomic_int             done;
+};
+
+static void *
+destroy_server(void *arg)
+{
+    struct destroy_context *ctx = arg;
+
+    chimera_server_destroy(ctx->server);
+    atomic_store(&ctx->done, 1);
+    return NULL;
+} /* destroy_server */
+
+static void
+close_with_dispatch_pin(
+    struct fuse_sim *sim,
+    uint64_t         nodeid,
+    int              detached)
+{
+    struct chimera_vfs_state    *state = chimera_server_get_vfs(sim->server)->vfs_state;
+    struct chimera_vfs_claim_ref ref   = { 0 };
+    struct chimera_fuse_grant   *grant = NULL;
+    struct chimera_fuse_mount   *mount;
+    evpl_native_thread_t         destroyer;
+    struct destroy_context       ctx = { .server = sim->server };
+    int                          i, j;
+
+    for (i = 0; i < CHIMERA_VFS_STATE_NUM_SHARDS && !grant; i++) {
+        struct chimera_vfs_state_shard *shard = &state->shards[i];
+        evpl_mutex_lock(&shard->lock);
+        for (j = 0; j < shard->nslots && !grant; j++) {
+            struct chimera_vfs_file_state *file;
+            for (file = shard->slots[j]; file && !grant; file = file->bucket_next) {
+                struct chimera_vfs_claim *claim;
+                evpl_mutex_lock(&file->lock);
+                for (claim = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; claim; claim = claim->next) {
+                    if (claim->owner.proto == CHIMERA_CLAIM_PROTO_FUSE &&
+                        ((struct chimera_fuse_grant *) claim->cb_private)->nodeid == nodeid &&
+                        chimera_vfs_claim_ref_take(claim, &ref)) {
+                        grant = claim->cb_private;
+                        break;
+                    }
+                }
+                evpl_mutex_unlock(&file->lock);
+            }
+        }
+        evpl_mutex_unlock(&shard->lock);
+    }
+    CHECK(grant != NULL, "found FUSE grant to pin across shutdown");
+    if (!grant) {
+        fuse_sim_close(sim);
+        return;
+    }
+    mount = grant->mount;
+    if (detached) {
+        struct fuse_forget_in forget = { .nlookup = 1 };
+        fuse_sim_send(sim, FUSE_FORGET, nodeid, &forget, sizeof(forget), NULL, NULL, 0);
+        for (i = 0; i < 5000 && atomic_load(&grant->refcount) != 1; i++) {
+            usleep(1000);
+        }
+        CHECK(atomic_load(&grant->refcount) == 1, "FORGET detached residency while dispatch stays pinned");
+    }
+    evpl_native_thread_create(&destroyer, NULL, destroy_server, &ctx);
+    for (i = 0; i < 5000 && !atomic_load(&ctx.done) && atomic_load(&mount->grants_closing) != 2; i++) {
+        usleep(1000);
+    }
+    CHECK(!atomic_load(&ctx.done) && atomic_load(&mount->grants_closing) == 2,
+          "shutdown reached dispatch-pin drain after dropping residency");
+    for (i = 0; i < 100 && !atomic_load(&ctx.done); i++) {
+        usleep(1000);
+    }
+    CHECK(!atomic_load(&ctx.done), "destruction stays blocked while dispatch pin is held");
+    CHECK(atomic_load(&mount->grants_live) > 0, "shutdown retains mount for outstanding dispatch");
+    chimera_vfs_claim_ref_drop(state, &ref);
+    evpl_native_thread_join(destroyer, NULL);
+    close(sim->fd);
+    mbt_metrics_dump(sim->metrics);
+    prometheus_metrics_destroy(sim->metrics);
+} /* close_with_dispatch_pin */
 
 int
 main(
@@ -169,7 +255,16 @@ main(
     CHECK(rc == ENOENT || (rc == 0 && entry.nodeid == 0),
           "the unlinked name is gone (rc %d)", rc);
 
-    fuse_sim_close(&sim);
+    rc = fuse_sim_create(&sim, FUSE_ROOT_ID, "shutdown-pin", 0644, &entry, &open_out);
+    CHECK(rc == 0, "create grant for detached shutdown test");
+    fuse_sim_release(&sim, entry.nodeid, open_out.fh);
+    close_with_dispatch_pin(&sim, entry.nodeid, 1);
+
+    fuse_sim_open(&sim, "shutdownfs");
+    rc = fuse_sim_create(&sim, FUSE_ROOT_ID, "resident-pin", 0644, &entry, &open_out);
+    CHECK(rc == 0, "create grant for resident shutdown test");
+    fuse_sim_release(&sim, entry.nodeid, open_out.fh);
+    close_with_dispatch_pin(&sim, entry.nodeid, 0);
 
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
 
