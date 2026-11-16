@@ -9,6 +9,7 @@
 #include <xxhash.h>
 #include "prometheus-c.h"
 #include "nfs4_session.h"
+#include "server/protocol.h"
 #include "nfs4_state.h"
 #include "nfs4_callback.h"
 #include "nfs4_drc.h"
@@ -96,6 +97,48 @@ nfs4_client_table_init(
 
     evpl_mutex_init(&table->nfs4_ct_lock, NULL);
 } /* nfs4_client_table_init */
+
+unsigned int
+nfs4_session_inspect_snapshot(
+    struct nfs4_client_table       *table,
+    struct chimera_inspect_session *out,
+    unsigned int                    capacity,
+    unsigned int                   *total)
+{
+    static const char    hex[] = "0123456789abcdef";
+    struct nfs4_session *session, *tmp;
+    unsigned int         count = 0;
+
+    *total = 0;
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, session, tmp)
+    {
+        (*total)++;
+        if (count >= capacity) {
+            continue;
+        }
+        struct chimera_inspect_session *entry = &out[count++];
+        for (unsigned int i = 0; i < NFS4_SESSIONID_SIZE; i++) {
+            entry->session_id[i * 2]     = hex[session->nfs4_session_id[i] >> 4];
+            entry->session_id[i * 2 + 1] = hex[session->nfs4_session_id[i] & 0xf];
+        }
+        entry->session_id[32]      = '\0';
+        entry->client_id           = session->nfs4_session_clientid;
+        entry->negotiated_slots    = session->replay_max_slots;
+        entry->highest_slot_in_use = 0;
+        entry->has_slots_in_use    = 0;
+        for (uint32_t slot = 0; slot < session->replay_max_slots; slot++) {
+            uint64_t state = atomic_load_explicit(&session->replay_slots[slot].state_word,
+                                                  memory_order_relaxed);
+            if ((state & NFS4_SLOT_STATE_MASK) != NFS4_SLOT_UNUSED) {
+                entry->highest_slot_in_use = slot;
+                entry->has_slots_in_use    = 1;
+            }
+        }
+    }
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+    return count;
+} /* nfs4_session_inspect_snapshot */
 
 void
 nfs4_client_table_free(struct nfs4_client_table *table)

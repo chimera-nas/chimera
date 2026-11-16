@@ -1890,9 +1890,23 @@ nfs_inspect_live(
     evpl_rpc2_visit_procedure_stats(thread->rpc2_thread, nfs_inspect_procedure, sample);
 } /* nfs_inspect_live */
 
+static unsigned int
+nfs_inspect_sessions(
+    void                           *data,
+    struct chimera_inspect_session *out,
+    unsigned int                    capacity,
+    unsigned int                   *total)
+{
+    struct chimera_server_nfs_thread *thread = data;
+
+    return nfs4_session_inspect_snapshot(&thread->shared->nfs4_shared_clients,
+                                         out, capacity, total);
+} /* nfs_inspect_sessions */
+
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .inspect          = nfs_inspect,
     .inspect_live     = nfs_inspect_live,
+    .inspect_sessions = nfs_inspect_sessions,
     .inspect_register = nfs_inspect_register,
     .init             = nfs_server_init,
     .destroy          = nfs_server_destroy,

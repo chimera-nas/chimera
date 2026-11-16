@@ -60,3 +60,5 @@ parameters return 400. Default services are NFS, SMB and S3; explicitly select
 accepts only `worker_id`. Add `?live=1` to read worker CPU, scheduler wait and
 event-loop iteration counters directly without waking workers. See
 [`worker-metrics.md`](worker-metrics.md) for the fields and rate calculations.
+Use `?live=1&sessions=1` only when an operator needs the NFSv4.1 session and
+slot snapshot, because that request takes the NFS client-table lock.

@@ -98,7 +98,8 @@ procedure_json(const struct evpl_rpc2_procedure_stats *stats)
 void
 chimera_rest_inspect_live(
     struct chimera_rest_thread *thread,
-    struct evpl_http_request   *request)
+    struct evpl_http_request   *request,
+    int                         include_sessions)
 {
     struct chimera_server_inspect *inspect  = chimera_server_get_inspect(thread->shared->server);
     unsigned int                   capacity = 4096;
@@ -192,6 +193,42 @@ chimera_rest_inspect_live(
     json_object_set_new(obj, "complete", json_true());
     json_object_set_new(obj, "server_instance_id", json_string(chimera_server_inspect_instance_id(inspect)));
     json_object_set_new(obj, "sampled_monotonic_ns", decimal(sampled_monotonic_ns));
+    if (include_sessions) {
+        const unsigned int              session_capacity = 4096;
+        struct chimera_inspect_session *sessions         = calloc(session_capacity, sizeof(*sessions));
+        unsigned int                    session_total    = 0;
+        if (!sessions) {
+            free(samples);
+            json_decref(obj);
+            chimera_rest_send_error(thread->evpl, request, 503, "Service Unavailable",
+                                    "Session snapshot allocation failed");
+            return;
+        }
+        unsigned int                    session_count = chimera_server_inspect_read_sessions(
+            inspect, sessions, session_capacity, &session_total);
+        json_t                         *session_array = json_array();
+        for (unsigned int i = 0; i < session_count; i++) {
+            const struct chimera_inspect_session *session = &sessions[i];
+            json_t                               *item    = json_pack("{s:s,s:i,s:b}",
+                                                                      "session_id", session->session_id,
+                                                                      "negotiated_slots", (int) session->
+                                                                      negotiated_slots,
+                                                                      "has_slots_in_use", session->has_slots_in_use);
+            json_object_set_new(item, "client_id", decimal(session->client_id));
+            if (session->has_slots_in_use) {
+                json_object_set_new(item, "highest_slot_in_use",
+                                    json_integer(session->highest_slot_in_use));
+            } else {
+                json_object_set_new(item, "highest_slot_in_use", json_null());
+            }
+            json_array_append_new(session_array, item);
+        }
+        json_object_set_new(obj, "nfs4_sessions", session_array);
+        json_object_set_new(obj, "nfs4_sessions_total", json_integer(session_total));
+        json_object_set_new(obj, "nfs4_sessions_truncated",
+                            json_boolean(session_total > session_count));
+        free(sessions);
+    }
     free(samples);
     chimera_rest_send_json(thread->evpl, request, 200, obj);
 } /* chimera_rest_inspect_live */

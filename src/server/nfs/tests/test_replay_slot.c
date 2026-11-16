@@ -16,6 +16,7 @@
 #include "common/logging.h"
 #include "nfs_common.h"
 #include "nfs4_session.h"
+#include "server/protocol.h"
 
 /* Active in both debug (NDEBUG unset) and release (NDEBUG set) -- CHECK(3)
  * compiles to a no-op under NDEBUG, which causes -Wunused-but-set-variable
@@ -128,6 +129,33 @@ test_unused_slot_first_seq_ok(void)
 
     destroy_session_table(&table, session);
 } /* test_unused_slot_first_seq_ok */
+
+static void
+test_session_inspect_snapshot(void)
+{
+    struct nfs4_client_table       table;
+    struct nfs4_session           *session = make_session(&table, TEST_SLOTS, TEST_MAXRESP);
+    struct chimera_inspect_session rows[2];
+    struct nfs_request             req;
+    unsigned int                   total;
+    bool                           is_replay;
+
+    CHECK(nfs4_session_inspect_snapshot(&table, rows, 2, &total) == 1);
+    CHECK(total == 1);
+    CHECK(rows[0].client_id == session->nfs4_session_clientid);
+    CHECK(rows[0].negotiated_slots == TEST_SLOTS);
+    CHECK(!rows[0].has_slots_in_use);
+
+    reset_request(&req);
+    req.session = session;
+    CHECK(nfs4_replay_slot_acquire(session, 2, 1, false, &req, &is_replay) == NFS4_OK);
+    CHECK(nfs4_session_inspect_snapshot(&table, rows, 2, &total) == 1);
+    CHECK(rows[0].has_slots_in_use);
+    CHECK(rows[0].highest_slot_in_use == 2);
+    nfs4_replay_slot_finalize(&req);
+
+    destroy_session_table(&table, session);
+} /* test_session_inspect_snapshot */
 
 /* Case 2: first SEQUENCE on an UNUSED slot with seqid != 1 -> MISORDERED. */
 static void
@@ -820,6 +848,7 @@ main(
     chimera_log_init();
 
     test_unused_slot_first_seq_ok();
+    test_session_inspect_snapshot();
     test_unused_slot_wrong_seq_misordered();
     test_out_of_range_slot();
     test_in_progress_retry();

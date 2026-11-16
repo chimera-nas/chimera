@@ -8,6 +8,7 @@
 #include <evpl/evpl.h>
 #include <evpl/evpl_rpc2.h>
 #include "common/macros.h"
+#include "protocol.h"
 #include "vfs/vfs.h"
 
 #define CHIMERA_INSPECT_ROWS       1024
@@ -134,6 +135,11 @@ SYMBOL_EXPORT void chimera_server_inspect_read_live_rpc(
     struct chimera_server_inspect *inspect,
     unsigned int                   worker_id,
     struct chimera_inspect_sample *sample);
+SYMBOL_EXPORT unsigned int chimera_server_inspect_read_sessions(
+    struct chimera_server_inspect  *inspect,
+    struct chimera_inspect_session *out,
+    unsigned int                    capacity,
+    unsigned int                   *total);
 SYMBOL_EXPORT const char * chimera_server_inspect_instance_id(
     struct chimera_server_inspect *inspect);
 /* Start/cancel/release are called only on the requesting worker. Callback is

@@ -31,7 +31,7 @@ SYMBOL_EXPORT struct prometheus_metrics * chimera_metrics_get(
     struct chimera_metrics *metrics);
 
 SYMBOL_EXPORT void chimera_metrics_set_inspect(
-    struct chimera_metrics       *metrics,
+    struct chimera_metrics        *metrics,
     struct chimera_server_inspect *inspect);
 
 /*

@@ -134,6 +134,27 @@ chimera_server_inspect_read_live_rpc(
     }
 } /* chimera_server_inspect_read_live_rpc */
 
+SYMBOL_EXPORT unsigned int
+chimera_server_inspect_read_sessions(
+    struct chimera_server_inspect  *inspect,
+    struct chimera_inspect_session *out,
+    unsigned int                    capacity,
+    unsigned int                   *total)
+{
+    *total = 0;
+    if (!inspect->nworkers) {
+        return 0;
+    }
+    struct chimera_worker_stats *stats = &inspect->worker_stats[0];
+    for (int i = 0; i < stats->nprotocols; i++) {
+        if (stats->contexts[i] && stats->protocols[i]->inspect_sessions) {
+            return stats->protocols[i]->inspect_sessions(stats->contexts[i], out,
+                                                         capacity, total);
+        }
+    }
+    return 0;
+} /* chimera_server_inspect_read_sessions */
+
 SYMBOL_EXPORT const char *
 chimera_server_inspect_instance_id(struct chimera_server_inspect *inspect)
 {

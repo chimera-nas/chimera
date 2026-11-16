@@ -60,6 +60,20 @@ main(void)
     check(json_is_true(json_object_get(snapshot, "live")), "live snapshot marker");
     threads = json_object_get(snapshot, "threads");
     check(json_array_size(threads) == 8, "live reader returns every worker");
+    json_decref(snapshot);
+    snapshot = get(api, "/api/v1/threads?live=1&sessions=1", 200);
+    check(json_is_array(json_object_get(snapshot, "nfs4_sessions")),
+          "operator session snapshot array");
+    check(json_is_integer(json_object_get(snapshot, "nfs4_sessions_total")),
+          "operator session snapshot total");
+    if (json_array_size(json_object_get(snapshot, "nfs4_sessions")) > 0) {
+        check(json_is_string(json_object_get(json_array_get(
+                                                 json_object_get(snapshot, "nfs4_sessions"), 0), "client_id")),
+              "session client ID preserves unsigned value");
+    }
+    json_decref(snapshot);
+    snapshot = get(api, "/api/v1/threads?live=1", 200);
+    threads  = json_object_get(snapshot, "threads");
     for (unsigned int i = 0; i < 8; i++) {
         json_t *thread = json_array_get(threads, i);
         check(json_is_string(json_object_get(thread, "cpu_ns")), "live CPU time");

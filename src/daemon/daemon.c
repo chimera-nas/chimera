@@ -45,6 +45,7 @@
 #include "common/common_config.h"
 #include "common/chimera_tracing.h"
 #include "metrics/metrics.h"
+#include "server/server_inspect.h"
 #include "daemon.h"
 
 static volatile sig_atomic_t SigInt;

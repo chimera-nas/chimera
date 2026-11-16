@@ -132,4 +132,5 @@ void chimera_rest_inspect(
     void                       **notify_data);
 void chimera_rest_inspect_live(
     struct chimera_rest_thread *thread,
-    struct evpl_http_request   *request);
+    struct evpl_http_request   *request,
+    int                         include_sessions);

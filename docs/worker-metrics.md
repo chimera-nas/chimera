@@ -21,6 +21,12 @@ placement policy, and the current connection count. RDMA RPC rows include
 cumulative accepted connections by up to 64 remote IPs per worker. The
 `rdma_remote_ip_overflow_accepts` counter reports accepts from additional IPs.
 
+An operator can request an NFSv4.1 session snapshot with
+`GET /api/v1/threads?live=1&sessions=1`. It includes session IDs, client IDs,
+negotiated slot counts, and the highest slot currently in use. This explicit
+snapshot takes the NFS client-table lock and reads each session's atomic slot
+states; it is excluded from normal live polling.
+
 The owner-thread `/api/v1/connections` snapshot includes per-connection RPC
 receive/transmit messages and bytes, completed requests, and in-flight requests
 for NFS connections. These values are copied while visiting the connection on

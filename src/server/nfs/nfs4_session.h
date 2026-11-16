@@ -372,6 +372,14 @@ struct nfs4_client_table {
     evpl_mutex_t           nfs4_ct_lock;
 };
 
+struct chimera_inspect_session;
+unsigned int
+nfs4_session_inspect_snapshot(
+    struct nfs4_client_table       *table,
+    struct chimera_inspect_session *out,
+    unsigned int                    capacity,
+    unsigned int                   *total);
+
 /* A clientid carries the minting instance's node_id in its high 16 bits and a
  * per-instance counter in the low 48, so two instances over one backing store
  * never hand out the same value (and `clientid >> 48` is the owning node). */
