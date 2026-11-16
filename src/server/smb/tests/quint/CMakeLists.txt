@@ -226,6 +226,46 @@ set_tests_properties(chimera/server/smb/mbt/info_probe_memfs PROPERTIES
     LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 120)
 
+# Open-access probe: the access mode CREATE hands the backend (read-write only
+# for an open that can write data) and the access the open is granted.  The
+# passthrough backends (linux, io_uring) are where a read-write open can be
+# refused -- a directory opened read-write is O_RDWR, which the kernel refuses
+# with EISDIR -- so the probe runs there too.  Their trees must live on a
+# filesystem that supports name_to_handle_at (tmpfs and overlayfs do not): the
+# probe roots them at $CHIMERA_MBT_SCRATCH (default: the working directory,
+# which in CI is the build tree on ext4) and turns an incapable filesystem
+# into a clean SKIP.
+add_executable(smb2_open_access_probe smb2_open_access_probe.c)
+target_include_directories(smb2_open_access_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_open_access_probe chimera_server chimera_metrics chimera_crypto)
+
+add_test(NAME chimera/server/smb/mbt/open_access_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_open_access_probe>)
+set_tests_properties(chimera/server/smb/mbt/open_access_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_open_access_probe_memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
+    TIMEOUT 120)
+
+if(CHIMERA_LINUX)
+    add_test(NAME chimera/server/smb/mbt/open_access_probe_linux
+        COMMAND $<TARGET_FILE:smb2_open_access_probe> -b linux)
+    set_tests_properties(chimera/server/smb/mbt/open_access_probe_linux PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_open_access_probe_linux"
+        LABELS "functional;probe;smb_mbt;linux"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120)
+endif()
+
+if(CHIMERA_VFS_IO_URING)
+    add_test(NAME chimera/server/smb/mbt/open_access_probe_io_uring
+        COMMAND $<TARGET_FILE:smb2_open_access_probe> -b io_uring)
+    set_tests_properties(chimera/server/smb/mbt/open_access_probe_io_uring PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_open_access_probe_io_uring"
+        LABELS "functional;probe;smb_mbt;io_uring"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120)
+endif()
+
 # Alternate-data-stream (ADS / named stream) probe: the whole named-stream
 # lifecycle the corpus never enables -- CREATE with the file:stream syntax,
 # independent stream WRITE/READ, FILE_STREAM_INFORMATION enumeration, and

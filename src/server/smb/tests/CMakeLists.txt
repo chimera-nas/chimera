@@ -148,6 +148,15 @@ target_include_directories(smb_ea_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/ea_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_ea_test)
 
+# SMB access helpers (smb_access.h): which DesiredAccess bits make an open a
+# data-write (read-write backend) open, and the MAXIMUM_ALLOWED grant trim.
+# Header-only.
+add_executable(smb_access_test smb_access_test.c)
+target_include_directories(smb_access_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/access_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_access_test)
+
 # FileFsAttributeInformation flag derivation (smb_attr.h): the FileSystemAttributes
 # word must follow the serving module's capabilities and the named-streams knob.
 # The memfs probe sees only the everything-on shape; this covers the shapes

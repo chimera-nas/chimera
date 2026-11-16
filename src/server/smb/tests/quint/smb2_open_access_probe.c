@@ -1,0 +1,339 @@
+/* SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+ *
+ * SPDX-License-Identifier: LGPL-2.1-only
+ *
+ * SMB2 open-access probe: which access mode an SMB CREATE hands the backend,
+ * and what the open is granted.
+ *
+ * CREATE opens the backend read-write only when DesiredAccess can write data
+ * (FILE_WRITE_DATA, FILE_APPEND_DATA, GENERIC_WRITE, GENERIC_ALL,
+ * MAXIMUM_ALLOWED); every other open is read-only.  A MAXIMUM_ALLOWED open the
+ * backend refuses read-write is re-issued read-only, which is what keeps a
+ * directory opened MAXIMUM_ALLOWED without FILE_DIRECTORY_FILE working on the
+ * passthrough backends (their read-write open of a directory is O_RDWR, which
+ * the kernel refuses with EISDIR).  That is why this probe runs on linux and
+ * io_uring as well as memfs.
+ *
+ * Usage: smb2_open_access_probe [-b memfs|linux|io_uring]
+ *
+ * The passthrough backends mount a host directory, which must live on a
+ * filesystem that supports name_to_handle_at: the probe roots it at
+ * $CHIMERA_MBT_SCRATCH (default: the working directory) and exits 77 (skip)
+ * when that filesystem cannot produce file handles.
+ */
+
+#include <errno.h>
+
+#include "smb2_mbt_common.h"
+#include "vfs/sdk/vfs_error.h"
+
+static int failures = 0;
+
+#define CHECK(cond, ...)                             \
+        do {                                         \
+            if (cond) {                              \
+                printf("ok   - " __VA_ARGS__);       \
+                printf("\n");                        \
+            } else {                                 \
+                printf("FAIL - " __VA_ARGS__);       \
+                printf("\n");                        \
+                failures++;                          \
+            }                                        \
+        } while (0)
+
+#define OA_GENERIC_WRITE          0x40000000u
+#define OA_GENERIC_ALL            0x10000000u
+#define OA_FILE_WRITE_DATA        0x00000002u
+#define OA_FILE_APPEND_DATA       0x00000004u
+#define OA_FILE_DELETE_CHILD      0x00000040u
+#define OA_FILE_WRITE_ATTRIBUTES  0x00000100u
+#define OA_FILE_ATTRIBUTE_DIR     0x00000010u
+#define OA_ST_FILE_IS_A_DIRECTORY 0xC00000BAu
+
+/* memfs keeps DOS attributes; the passthrough backends keep none, so the
+ * READONLY cases run on memfs only. */
+static int keeps_dos_attrs = 1;
+
+/* CREATE with explicit options and file attributes.  With `mxac` non-NULL the
+ * request carries an MxAc context and *mxac receives the reply's
+ * MaximalAccess (MS-SMB2 2.2.14.2.5: QueryStatus, then MaximalAccess). */
+static uint32_t
+oa_open(
+    struct smb2_conn       *c,
+    const char             *name,
+    uint32_t                disp,
+    uint32_t                access,
+    uint32_t                create_options,
+    uint32_t                file_attributes,
+    uint32_t               *mxac,
+    struct smb2_create_out *out)
+{
+    static const uint8_t       mxac_tag[4] = { 'M', 'x', 'A', 'c' };
+    struct smb2_cctx           ctx         = {
+        .name     = mxac_tag,
+        .name_len = 4,
+        .data     = NULL,
+        .data_len = 0,
+    };
+    const struct smb2_rsp_ctx *rsp;
+
+    smb2c_send(c, smb2c_build_create_full(c, name, disp, access,
+                                          MBT_FILE_SHARE_RWD, create_options,
+                                          file_attributes, NULL,
+                                          mxac ? &ctx : NULL, mxac ? 1 : 0));
+    smb2c_wait(c);
+    smb2c_parse_create(c, out);
+
+    if (mxac && out->status == ST_SUCCESS) {
+        rsp = smb2c_create_ctx_find(out, "MxAc");
+        if (rsp && rsp->data_len >= 8 && g32(rsp->data, 0) == ST_SUCCESS) {
+            *mxac = g32(rsp->data, 4);
+        } else {
+            *mxac = 0;
+            CHECK(0, "%s: CREATE reply carries an MxAc context", name);
+        }
+    }
+    return out->status;
+} /* oa_open */
+
+/* FileAccessInformation (MS-FSCC 2.4.1): the handle's granted access. */
+static uint32_t
+oa_access_info(
+    struct smb2_conn *c,
+    const uint8_t     fid[16])
+{
+    uint8_t  buf[16];
+    uint32_t len = 0;
+    uint32_t st  = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_ACCESS_INFO_T,
+                                   fid, 0, buf, sizeof(buf), &len);
+
+    CHECK(st == ST_SUCCESS && len == 4,
+          "  QUERY FileAccessInformation -> 0x%08x (%u bytes)", st, len);
+    return (st == ST_SUCCESS && len == 4) ? g32(buf, 0) : 0;
+} /* oa_access_info */
+
+/* SET_INFO FileBasicInformation with only FileAttributes set. */
+static uint32_t
+oa_set_attributes(
+    struct smb2_conn *c,
+    const uint8_t     fid[16],
+    uint32_t          attributes)
+{
+    uint8_t basic[40];
+
+    memset(basic, 0, sizeof(basic));
+    p32(basic, 32, attributes);
+    return smb2_set_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, fid,
+                         basic, sizeof(basic));
+} /* oa_set_attributes */
+
+/* A directory opened MAXIMUM_ALLOWED without FILE_DIRECTORY_FILE opens, and is
+ * granted what MxAc reports. */
+static void
+probe_dir_max_allowed(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint32_t               st, mx = 0;
+
+    printf("# dir_max_allowed\n");
+    st = oa_open(c, "d1", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE directory d1 -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+
+    st = oa_open(c, "d1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED, 0, 0, &mx, &o);
+    CHECK(st == ST_SUCCESS, "OPEN d1 MAXIMUM_ALLOWED, no FILE_DIRECTORY_FILE -> "
+          "0x%08x (0x%08x is FILE_IS_A_DIRECTORY)", st,
+          OA_ST_FILE_IS_A_DIRECTORY);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    CHECK(mx & OA_FILE_WRITE_DATA, "  MxAc includes ADD_FILE (0x%08x)", mx);
+    {
+        uint32_t ga = oa_access_info(c, o.file_id);
+
+        CHECK(ga == mx, "  granted access 0x%08x == MxAc 0x%08x", ga, mx);
+    }
+    smb2_close(c, o.file_id);
+} /* probe_dir_max_allowed */
+
+/* A file opened MAXIMUM_ALLOWED can be written and read back. */
+static void
+probe_file_max_allowed_writes(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint8_t                out[8];
+    uint32_t               st, count = 0, n = 0;
+
+    printf("# file_max_allowed_writes\n");
+    st = oa_open(c, "f1", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE f1 -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+
+    st = oa_open(c, "f1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN f1 MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_write(c, o.file_id, 0, "abc", 3, &count);
+    CHECK(st == ST_SUCCESS && count == 3,
+          "  WRITE 3 bytes -> 0x%08x (count %u)", st, count);
+    st = smb2_read(c, o.file_id, 0, 3, out, &n);
+    CHECK(st == ST_SUCCESS && n == 3 && memcmp(out, "abc", 3) == 0,
+          "  READ them back -> 0x%08x (%u bytes)", st, n);
+    smb2_close(c, o.file_id);
+} /* probe_file_max_allowed_writes */
+
+/* An attribute-only open (the shape that clears READONLY) works. */
+static void
+probe_attr_only_clears_readonly(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint8_t                buf[64];
+    uint32_t               st, len = 0;
+
+    printf("# attr_only_clears_readonly\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip attr_only_clears_readonly: backend keeps no DOS "
+               "attributes\n");
+        return;
+    }
+
+    st = oa_open(c, "f2", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE f2 -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = oa_set_attributes(c, o.file_id, MBT_FILE_ATTRIBUTE_READONLY);
+    CHECK(st == ST_SUCCESS, "setup: SET READONLY on f2 -> 0x%08x", st);
+    smb2_close(c, o.file_id);
+
+    st = oa_open(c, "f2", MBT_FILE_OPEN,
+                 MBT_FILE_READ_ATTRIBUTES | OA_FILE_WRITE_ATTRIBUTES,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN f2 READ_ATTRIBUTES|WRITE_ATTRIBUTES -> 0x%08x",
+          st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = oa_set_attributes(c, o.file_id, MBT_FILE_ATTRIBUTE_NORMAL);
+    CHECK(st == ST_SUCCESS, "  SET NORMAL (clears READONLY) -> 0x%08x", st);
+    st = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T,
+                         o.file_id, 0, buf, sizeof(buf), &len);
+    CHECK(st == ST_SUCCESS && len >= 40 &&
+          !(g32(buf, 32) & MBT_FILE_ATTRIBUTE_READONLY),
+          "  READONLY is clear (0x%08x, attributes 0x%08x)", st,
+          len >= 40 ? g32(buf, 32) : 0);
+    smb2_close(c, o.file_id);
+} /* probe_attr_only_clears_readonly */
+
+/* Mount the share on a passthrough backend: a fresh host directory under
+ * $CHIMERA_MBT_SCRATCH (default cwd).  Exits 77 when that filesystem cannot
+ * produce file handles. */
+static void
+oa_passthrough_setup(
+    struct smb2_env *env,
+    const char      *module,
+    char            *dir,
+    size_t           dir_len)
+{
+    const char *scratch = getenv("CHIMERA_MBT_SCRATCH");
+    char       *abs_scratch;
+    int         rc;
+
+    if (!scratch || !scratch[0]) {
+        scratch = ".";
+    }
+    abs_scratch = chimera_test_absolute_path(scratch);
+    if (!abs_scratch) {
+        fprintf(stderr, "realpath(%s) failed: %s\n", scratch, strerror(errno));
+        exit(1);
+    }
+    snprintf(dir, dir_len, "%s/smb2_oa_XXXXXX", abs_scratch);
+    free(abs_scratch);
+    if (!mkdtemp(dir)) {
+        fprintf(stderr, "mkdtemp(%s) failed: %s\n", dir, strerror(errno));
+        exit(1);
+    }
+
+    rc = chimera_server_mount(env->server, "share", module, dir, NULL);
+    if (rc == CHIMERA_VFS_ENOTSUP) {
+        fprintf(stderr, "SKIP: %s backend needs a name_to_handle_at-capable "
+                "scratch fs; %s is not one (set CHIMERA_MBT_SCRATCH)\n",
+                module, dir);
+        chimera_test_remove_tree(dir);
+        _exit(77);
+    }
+    if (rc != 0) {
+        fprintf(stderr, "mount %s at %s failed: status=%d\n", module, dir, rc);
+        _exit(1);
+    }
+    chimera_server_create_share(env->server, "share", "share", 0);
+} /* oa_passthrough_setup */
+
+int
+main(
+    int   argc,
+    char *argv[])
+{
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { 0 };
+    struct smb2_conn    *c;
+    const char          *module      = "memfs";
+    char                 pt_dir[512] = { 0 };
+    int                  opt;
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    while ((opt = getopt(argc, argv, "b:")) != -1) {
+        switch (opt) {
+            case 'b':
+                module = optarg;
+                break;
+            default:
+                fprintf(stderr, "usage: %s [-b memfs|linux|io_uring]\n",
+                        argv[0]);
+                return 2;
+        } /* switch */
+    }
+
+    if (strcmp(module, "memfs") == 0) {
+        smb2_env_start_opts(&env, &opts);
+    } else if (strcmp(module, "linux") == 0 || strcmp(module, "io_uring") == 0) {
+        keeps_dos_attrs = 0;
+        smb2_env_open_opts(&env, &opts);
+        oa_passthrough_setup(&env, module, pt_dir, sizeof(pt_dir));
+    } else {
+        fprintf(stderr, "unknown backend %s\n", module);
+        return 2;
+    }
+
+    printf("# backend=%s\n", module);
+
+    c = smb2_conn_open(&env);
+    smb2_handshake(c);
+
+    probe_dir_max_allowed(c);
+    probe_file_max_allowed_writes(c);
+    probe_attr_only_clears_readonly(c);
+
+    smb2_env_stop(&env);
+
+    if (pt_dir[0] && chimera_test_remove_tree(pt_dir) != 0) {
+        fprintf(stderr, "warning: failed to remove %s\n", pt_dir);
+    }
+
+    if (failures) {
+        printf("# %d check(s) FAILED\n", failures);
+        return 1;
+    }
+    printf("# all checks passed\n");
+    return 0;
+} /* main */
