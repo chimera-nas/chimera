@@ -475,6 +475,101 @@ chimera_smb_server_start(void *data)
 } /* smb_server_start */
 
 static inline void
+chimera_smb_direct_fill_hdr(
+    struct smb_direct_hdr *hdr,
+    int                    remaining_length,
+    int                    data_length)
+{
+    hdr->credits_requested = 255;
+    hdr->credits_granted   = 255;
+    hdr->flags             = 0;
+    hdr->reserved          = 0;
+    hdr->remaining_length  = remaining_length;
+    hdr->data_offset       = SMB_DIRECT_DATA_OFFSET;
+    hdr->data_length       = data_length;
+} /* chimera_smb_direct_fill_hdr */
+
+/* Send an SMB Direct reply: payload_length bytes of SMB2 message that start
+ * SMB_DIRECT_DATA_OFFSET bytes into reply_iov, whose first iovec reserves
+ * that space for the data-transfer header (MS-SMBD 2.2.3).
+ *
+ * Takes ownership of reply_iov[0..reply_niov); the caller must not touch them
+ * afterwards.
+ *
+ * A reply that fits one fragment and one send goes out as is, with the header
+ * filled in place, and its iovecs move to evpl in that single send.  Anything
+ * else is carved into fragments, each with a header iovec of its own and
+ * payload segments CLONED from reply_iov, so every fragment holds its own
+ * references and nothing a later fragment needs is moved or released by an
+ * earlier send; reply_iov is released once the last fragment is queued.  A
+ * fragment carries at most conn->rdma_max_send bytes and at most
+ * SMB_DIRECT_FRAGMENT_MAX_IOV iovecs, so one whose payload runs out of iovecs
+ * first is shorter than rdma_max_send.  That is legal: the peer reassembles
+ * by RemainingDataLength (MS-SMBD), not by fragment size. */
+static void
+chimera_smb_direct_send_reply(
+    struct evpl             *evpl,
+    struct chimera_smb_conn *conn,
+    struct evpl_iovec       *reply_iov,
+    int                      reply_niov,
+    int                      payload_length)
+{
+    struct evpl_iovec_cursor cursor;
+    struct evpl_iovec        frag_iov[SMB_DIRECT_FRAGMENT_MAX_IOV];
+    struct smb_direct_hdr   *hdr;
+    int                      left, want, before, moved, n;
+
+    if (payload_length <= conn->rdma_max_send &&
+        reply_niov <= SMB_DIRECT_FRAGMENT_MAX_IOV) {
+        /* The 4 pad bytes after the header were zeroed when the reply was
+         * started. */
+        hdr = evpl_iovec_data(&reply_iov[0]);
+        chimera_smb_direct_fill_hdr(hdr, 0, payload_length);
+        evpl_sendv(evpl, conn->bind, reply_iov, reply_niov,
+                   payload_length + SMB_DIRECT_DATA_OFFSET, EVPL_SEND_FLAG_TAKE_REF);
+        return;
+    }
+
+    evpl_iovec_cursor_init(&cursor, reply_iov, reply_niov);
+    /* Step over the header space reserved in place; it goes unused here. */
+    evpl_iovec_cursor_skip(&cursor, SMB_DIRECT_DATA_OFFSET);
+
+    left = payload_length;
+
+    while (left) {
+        want = conn->rdma_max_send;
+
+        if (left < want) {
+            want = left;
+        }
+
+        before = evpl_iovec_cursor_consumed(&cursor);
+
+        n = evpl_iovec_cursor_move(&cursor, &frag_iov[1], SMB_DIRECT_FRAGMENT_MAX_IOV - 1,
+                                   want, 1);
+
+        /* Less than want when the fragment ran out of iovecs first. */
+        moved = evpl_iovec_cursor_consumed(&cursor) - before;
+
+        chimera_smb_abort_if(moved == 0, "SMB Direct reply ran out of iovecs with %d bytes left",
+                             left);
+
+        left -= moved;
+
+        evpl_iovec_alloc(evpl, SMB_DIRECT_DATA_OFFSET, 8, 1, 0, &frag_iov[0]);
+
+        hdr = evpl_iovec_data(&frag_iov[0]);
+        memset(hdr, 0, SMB_DIRECT_DATA_OFFSET); /* the 4 pad bytes */
+        chimera_smb_direct_fill_hdr(hdr, left, moved);
+
+        evpl_sendv(evpl, conn->bind, frag_iov, 1 + n, moved + SMB_DIRECT_DATA_OFFSET,
+                   EVPL_SEND_FLAG_TAKE_REF);
+    }
+
+    evpl_iovecs_release(evpl, reply_iov, reply_niov);
+} /* chimera_smb_direct_send_reply */
+
+static inline void
 chimera_smb_compound_advance(
     struct chimera_smb_compound *compound);
 
@@ -493,9 +588,8 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     uint32_t                         *prev_command     = NULL;
     uint16_t                          prev_hdr         = 0;
     uint32_t                          preauth_fold_len = 0;
-    struct evpl_iovec                 chunk_iov[3];
-    int                               i, rc, chunk_niov;
-    int                               reply_hdr_len, reply_payload_length, left, chunk;
+    int                               i, rc;
+    int                               reply_hdr_len, reply_payload_length;
 
     /* The connection may have been torn down (and its pooled conn/bind
      * possibly recycled for a NEW connection) while this compound's VFS work
@@ -530,7 +624,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         direct_hdr = evpl_iovec_cursor_data(&reply_cursor);
         evpl_iovec_cursor_skip(&reply_cursor, sizeof(struct smb_direct_hdr));
         evpl_iovec_cursor_zero(&reply_cursor, 4); /* pad to 24 bytes */
-        reply_hdr_len = sizeof(struct smb_direct_hdr) + 4;
+        reply_hdr_len = SMB_DIRECT_DATA_OFFSET;
     } else {
         netbios_hdr = evpl_iovec_cursor_data(&reply_cursor);
         evpl_iovec_cursor_skip(&reply_cursor, sizeof(struct netbios_header));
@@ -1061,56 +1155,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * invariant so it is not a bare conditional dereference. */
         chimera_smb_abort_if(direct_hdr == NULL, "RDMA reply without SMB-Direct header");
 
-        left = reply_payload_length;
-
-        chunk = conn->rdma_max_send;
-
-        if (left < chunk) {
-            chunk = left;
-        }
-
-        direct_hdr->credits_requested = 255;
-        direct_hdr->credits_granted   = 255;
-        direct_hdr->flags             = 0;
-        direct_hdr->reserved          = 0;
-        direct_hdr->remaining_length  = left - chunk;
-        direct_hdr->data_offset       = 24;
-        direct_hdr->data_length       = chunk;
-
-        evpl_sendv(evpl, conn->bind, reply_iov, reply_niov, direct_hdr->data_length + 24,
-                   EVPL_SEND_FLAG_TAKE_REF);
-
-        left -= direct_hdr->data_length;
-
-        evpl_iovec_cursor_init(&reply_cursor, reply_iov, reply_niov);
-        evpl_iovec_cursor_skip(&reply_cursor, direct_hdr->data_length + 24);
-
-        while (left) {
-
-            chunk = conn->rdma_max_send;
-
-            if (left < 4096) {
-                chunk = left;
-            }
-
-            evpl_iovec_alloc(evpl, 24, 8, 1, 0, &chunk_iov[0]);
-
-            direct_hdr = evpl_iovec_data(&chunk_iov[0]);
-
-            direct_hdr->credits_requested = 255;
-            direct_hdr->credits_granted   = 255;
-            direct_hdr->flags             = 0;
-            direct_hdr->reserved          = 0;
-            direct_hdr->remaining_length  = left - chunk;
-            direct_hdr->data_offset       = 24;
-            direct_hdr->data_length       = chunk;
-
-            chunk_niov = 1 + evpl_iovec_cursor_move(&reply_cursor, &chunk_iov[1], 2, chunk, 1);
-
-            evpl_sendv(evpl, conn->bind, chunk_iov, chunk_niov, chunk + 24, EVPL_SEND_FLAG_TAKE_REF);
-
-            left -= chunk;
-        }
+        chimera_smb_direct_send_reply(evpl, conn, reply_iov, reply_niov, reply_payload_length);
 
     } else {
         netbios_hdr->word = chimera_bswap32(reply_payload_length);
@@ -1441,10 +1486,7 @@ chimera_smb_direct_negotiate(
         return;
     }
 
-    evpl_iovec_alloc(evpl, sizeof(*reply), 8, 1, 0, &reply_iov);
-
     request = (struct smb_direct_negotiate_request *) evpl_iovec_data(&iov[0]);
-    reply   = (struct smb_direct_negotiate_reply *) evpl_iovec_data(&reply_iov);
 
     if (request->min_version > 0x100 || request->max_version < 0x100) {
         chimera_smb_error("Received SMB2 message with invalid min or max version");
@@ -1452,7 +1494,20 @@ chimera_smb_direct_negotiate(
         return;
     }
 
-    conn->rdma_max_send = request->max_receive_size - 24;
+    if (request->max_receive_size < SMB_DIRECT_MIN_RECEIVE_SIZE) {
+        chimera_smb_error("Received SMB Direct negotiate with MaxReceiveSize %u below the minimum %d",
+                          request->max_receive_size, SMB_DIRECT_MIN_RECEIVE_SIZE);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    evpl_iovec_alloc(evpl, sizeof(*reply), 8, 1, 0, &reply_iov);
+
+    reply = (struct smb_direct_negotiate_reply *) evpl_iovec_data(&reply_iov);
+
+    conn->rdma_max_send = (request->max_receive_size < SMB_DIRECT_MAX_SEND_SIZE ?
+                           request->max_receive_size : SMB_DIRECT_MAX_SEND_SIZE) -
+        SMB_DIRECT_DATA_OFFSET;
 
     reply->min_version         = 0x100;
     reply->max_version         = 0x100;
@@ -1463,7 +1518,7 @@ chimera_smb_direct_negotiate(
     reply->status              = SMB2_STATUS_SUCCESS;
     reply->max_readwrite_size  = 8 * 1024 * 1024;
     reply->preferred_send_size = 7168;
-    reply->max_receive_size    = 8192;
+    reply->max_receive_size    = SMB_DIRECT_MAX_SEND_SIZE;
     reply->max_fragmented_size = 1 * 1024 * 1024;
 
     evpl_iovec_set_length(&reply_iov, sizeof(*reply));

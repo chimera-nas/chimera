@@ -1583,7 +1583,28 @@ struct chimera_smb_conn {
  * Direct endpoint (chimera-inproc-5445): inproc endpoint names are a single
  * namespace shared by stream and datagram listeners, so SMB Direct cannot
  * reuse the name the SMB stream listener already holds. */
-#define SMB_DIRECT_INPROC_PORT 5445
+#define SMB_DIRECT_INPROC_PORT      5445
+
+/* Where the payload starts in an SMB Direct data-transfer message: the
+ * 20-byte header (struct smb_direct_hdr) padded to 8 bytes (MS-SMBD 2.2.3). */
+#define SMB_DIRECT_DATA_OFFSET      24
+
+/* The smallest MaxReceiveSize a peer may offer: MS-SMBD requires at least
+ * 128.  Enforcing it also keeps rdma_max_send (MaxReceiveSize less
+ * SMB_DIRECT_DATA_OFFSET) positive, which chimera_smb_direct_send_reply
+ * depends on. */
+#define SMB_DIRECT_MIN_RECEIVE_SIZE 128
+
+/* The MaxReceiveSize this server advertises, and the most it ever sends in
+ * one fragment however large a buffer the peer offers. */
+#define SMB_DIRECT_MAX_SEND_SIZE    8192
+
+/* The most iovecs one SMB Direct reply fragment is sent with: its header plus
+ * up to seven payload segments.  On RDMA each iovec is one SGE of a single
+ * send work request, so this must stay within the QP's send-SGE budget: the
+ * smaller of libevpl's rdmacm_max_sge (default 31) and the device's own limit
+ * (13 on bnxt_re). */
+#define SMB_DIRECT_FRAGMENT_MAX_IOV 8
 
 /* Does this connection speak SMB Direct (MS-SMBD) framing rather than
  * NetBIOS-framed TCP?  RDMA does; so does the in-process datagram transport,

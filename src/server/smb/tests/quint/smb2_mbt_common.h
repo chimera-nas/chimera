@@ -701,15 +701,17 @@ struct smb2_conn {
     int                             direct;
     int                             direct_negotiated;  /* negotiate reply, status 0 */
     uint32_t                        direct_peer_max_recv; /* server's MaxReceiveSize */
+    uint32_t                        direct_my_max_recv; /* MaxReceiveSize this side offered */
     /* Reassembly of the message in flight: bytes so far, the total its first
-     * fragment announced, and fragments so far. */
+     * fragment announced, fragments so far, and each one's DataLength. */
     uint32_t                        direct_rx_len;
     uint32_t                        direct_rx_total;
     int                             direct_rx_nfrag;
+    uint32_t                        direct_rx_frag_len[SMB2C_DIRECT_MAX_FRAGS];
     /* The fragmentation of the last fully reassembled message: how many
-     * fragments, and each one's DataLength.  The lengths are recorded as
-     * fragments arrive, so they describe the last message only until the
-     * first fragment of the next one lands. */
+     * fragments, and each one's DataLength.  Copied out of the in-flight
+     * record only when a message completes, so a later message's fragments
+     * never overwrite it before that message is complete. */
     int                             direct_nfrag;
     uint32_t                        direct_frag_len[SMB2C_DIRECT_MAX_FRAGS];
 };
@@ -1153,6 +1155,11 @@ smb2c_direct_recv(
         return;
     }
 
+    if ((uint32_t) len > c->direct_my_max_recv) {
+        smb2c_direct_desync(c, "datagram larger than the MaxReceiveSize offered",
+                            len);
+    }
+
     if (len < 20) {
         smb2c_direct_desync(c, "message shorter than its header", len);
     }
@@ -1188,8 +1195,8 @@ smb2c_direct_recv(
     }
 
     memcpy(c->xbuf + 4 + c->direct_rx_len, dg + doff, dlen);
-    c->direct_frag_len[c->direct_rx_nfrag++] = dlen;
-    c->direct_rx_len                        += dlen;
+    c->direct_rx_frag_len[c->direct_rx_nfrag++] = dlen;
+    c->direct_rx_len                           += dlen;
 
     if (remaining != 0) {
         return;
@@ -1203,7 +1210,9 @@ smb2c_direct_recv(
     c->xbuf[2] = (uint8_t) (total >> 8);
     c->xbuf[3] = (uint8_t) total;
 
-    c->direct_nfrag    = c->direct_rx_nfrag;
+    c->direct_nfrag = c->direct_rx_nfrag;
+    memcpy(c->direct_frag_len, c->direct_rx_frag_len,
+           sizeof(c->direct_frag_len[0]) * (size_t) c->direct_rx_nfrag);
     c->direct_rx_len   = 0;
     c->direct_rx_total = 0;
     c->direct_rx_nfrag = 0;
@@ -2160,9 +2169,10 @@ smb2_conn_open_direct(
         smb2c_exit(1);
     }
 
-    c         = smb2c_conn_alloc(env);
-    c->direct = 1;
-    c->dbuf   = malloc(SMB2C_BUFSZ);
+    c                     = smb2c_conn_alloc(env);
+    c->direct             = 1;
+    c->dbuf               = malloc(SMB2C_BUFSZ);
+    c->direct_my_max_recv = max_receive_size;
 
     ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
                                             "127.0.0.1", SMB2C_DIRECT_PORT);
