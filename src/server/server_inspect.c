@@ -96,6 +96,9 @@ chimera_server_inspect_read_workers(
         struct chimera_worker_sample *sample = &out[count++];
         memset(sample, 0, sizeof(*sample));
         sample->worker_id = i;
+        if (!atomic_load_explicit(&stats->registered, memory_order_acquire)) {
+            continue;
+        }
         sample->os_tid    = stats->os_tid;
         sample->identity  = stats->identity;
         read_schedstat(sample->os_tid, &sample->cpu_ns, &sample->runq_wait_ns);
@@ -114,7 +117,11 @@ chimera_server_inspect_read_vfs(
     if (worker_id >= inspect->nworkers) {
         return 0;
     }
-    return chimera_vfs_inspect_counts(inspect->worker_stats[worker_id].vfs, capacity, out);
+    struct chimera_worker_stats *stats = &inspect->worker_stats[worker_id];
+    if (!atomic_load_explicit(&stats->registered, memory_order_acquire)) {
+        return 0;
+    }
+    return chimera_vfs_inspect_counts(stats->vfs, capacity, out);
 } /* chimera_server_inspect_read_vfs */
 
 SYMBOL_EXPORT void
@@ -127,6 +134,9 @@ chimera_server_inspect_read_live_rpc(
         return;
     }
     struct chimera_worker_stats *stats = &inspect->worker_stats[worker_id];
+    if (!atomic_load_explicit(&stats->registered, memory_order_acquire)) {
+        return;
+    }
     for (int i = 0; i < stats->nprotocols; i++) {
         if (stats->contexts[i] && stats->protocols[i]->inspect_live) {
             stats->protocols[i]->inspect_live(stats->contexts[i], sample);
@@ -146,6 +156,9 @@ chimera_server_inspect_read_sessions(
         return 0;
     }
     struct chimera_worker_stats *stats = &inspect->worker_stats[0];
+    if (!atomic_load_explicit(&stats->registered, memory_order_acquire)) {
+        return 0;
+    }
     for (int i = 0; i < stats->nprotocols; i++) {
         if (stats->contexts[i] && stats->protocols[i]->inspect_sessions) {
             return stats->protocols[i]->inspect_sessions(stats->contexts[i], out,
@@ -472,6 +485,7 @@ chimera_server_inspect_create(unsigned int workers)
     memset(inspect->worker_stats, 0, workers * sizeof(*inspect->worker_stats));
     for (unsigned int i = 0; i < workers; i++) {
         struct chimera_worker_stats *stats = &inspect->worker_stats[i];
+        atomic_init(&stats->registered, false);
         atomic_init(&stats->counters.rx_msgs, 0);
         atomic_init(&stats->counters.tx_msgs, 0);
         atomic_init(&stats->counters.rx_bytes, 0);
@@ -522,6 +536,7 @@ chimera_server_inspect_register(
             protocols[i]->inspect_register(contexts[i], stats);
         }
     }
+    atomic_store_explicit(&stats->registered, true, memory_order_release);
     atomic_init(&endpoint->refs, 1);
     chimera_inspect_mpsc_init(&endpoint->queue);
     evpl_add_doorbell(evpl, &endpoint->doorbell, inbox);

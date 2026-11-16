@@ -79,6 +79,7 @@ struct chimera_inspect_result {
     const unsigned char                 *present;
 };
 struct CHIMERA_ALIGNED(64) chimera_worker_stats {
+    atomic_bool                      registered;
     uint64_t                         os_tid;
     pthread_t                        pthread;
     struct evpl                     *evpl;
