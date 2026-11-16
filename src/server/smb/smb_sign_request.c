@@ -94,7 +94,7 @@ chimera_smb_sign_compound(
 
     evpl_iovec_cursor_init(&cursor, iov, niov);
 
-    if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+    if (chimera_smb_conn_is_direct(conn)) {
         evpl_iovec_cursor_skip(&cursor, sizeof(struct smb_direct_hdr) + 4);
         left -= sizeof(struct smb_direct_hdr) + 4;
     } else {

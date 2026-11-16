@@ -166,8 +166,14 @@ chimera_smb_server_init(
     shared->tcp_flavor   = chimera_server_config_get_tcp_flavor(config);
     shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
 
-    shared->config.port      = chimera_server_config_get_smb_port(config);
-    shared->config.rdma_port = 445;
+    shared->config.port = chimera_server_config_get_smb_port(config);
+
+    /* Over RDMA, SMB Direct listens on 445 in the RDMA CM port space, apart
+     * from the TCP listener on the same number.  Inproc endpoint names are one
+     * namespace for stream and datagram listeners, so there SMB Direct needs a
+     * name of its own. */
+    shared->config.rdma_port = shared->tcp_flavor == CHIMERA_TCP_FLAVOR_INPROC ?
+        SMB_DIRECT_INPROC_PORT : 445;
 
     shared->config.capabilities = SMB2_GLOBAL_CAP_LARGE_MTU | SMB2_GLOBAL_CAP_MULTI_CHANNEL |
         SMB2_GLOBAL_CAP_LEASING;
@@ -520,7 +526,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
     evpl_iovec_cursor_init(&reply_cursor, reply_iov, 1);
 
-    if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+    if (chimera_smb_conn_is_direct(conn)) {
         direct_hdr = evpl_iovec_cursor_data(&reply_cursor);
         evpl_iovec_cursor_skip(&reply_cursor, sizeof(struct smb_direct_hdr));
         evpl_iovec_cursor_zero(&reply_cursor, 4); /* pad to 24 bytes */
@@ -924,7 +930,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         (conn->negotiated.compression_flags & SMB2_COMPRESSION_FLAG_CHAINED);
 
     int comp_applicable = comp_alg != 0 && comp_buf_off > 0 &&
-        conn->protocol != EVPL_DATAGRAM_RDMACM_RC;
+        !chimera_smb_conn_is_direct(conn);
 
     if (!will_encrypt && comp_applicable) {
         struct evpl_iovec comp_iov;
@@ -981,7 +987,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
                 uint64_t           nonce;
                 int                enc_total;
 
-                if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+                if (chimera_smb_conn_is_direct(conn)) {
                     /* SMB-Direct encryption is not yet implemented. */
                     chimera_smb_error("SMB3 encryption over RDMA is not supported");
                     evpl_iovecs_release(evpl, reply_iov, reply_niov);
@@ -1049,7 +1055,7 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         }
     }
 
-    if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+    if (chimera_smb_conn_is_direct(conn)) {
 
         /* direct_hdr was set above under this same protocol check; assert the
          * invariant so it is not a bare conditional dereference. */
@@ -2695,14 +2701,14 @@ chimera_smb_server_notify(
     switch (notify->notify_type) {
         case EVPL_NOTIFY_CONNECTED:
             chimera_smb_info("Established %s SMB connection from %s to %s",
-                             conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
+                             chimera_smb_conn_is_direct(conn) ? "RDMA" : "TCP",
                              conn->remote_addr,
                              conn->local_addr);
 
             break;
         case EVPL_NOTIFY_DISCONNECTED:
             chimera_smb_info("Disconnected %s SMB connection from %s to %s, handled %lu requests",
-                             conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
+                             chimera_smb_conn_is_direct(conn) ? "RDMA" : "TCP",
                              conn->remote_addr, conn->local_addr, conn->requests_completed);
             /* Test hook: delay the START of disconnect processing -- BEFORE the
              * connection is flagged disconnecting -- to deterministically model
@@ -2761,7 +2767,7 @@ chimera_smb_server_notify(
         case EVPL_NOTIFY_RECV_MSG:
             conn->requests_completed++;
 
-            if (conn->protocol == EVPL_DATAGRAM_RDMACM_RC) {
+            if (chimera_smb_conn_is_direct(conn)) {
                 chimera_smb_server_handle_rdma(evpl, thread, conn,
                                                notify->recv_msg.iovec,
                                                notify->recv_msg.niov,
@@ -2826,7 +2832,7 @@ chimera_smb_server_accept(
     conn->thread   = thread;
     conn->bind     = bind;
     conn->protocol = evpl_bind_get_protocol(bind);
-    conn->smbvers  = conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? 2 : 0;
+    conn->smbvers  = chimera_smb_conn_is_direct(conn) ? 2 : 0;
 #ifdef CHIMERA_HAVE_GSSAPI
     conn->gss_flags         = 0;
     conn->gss_major         = 0;
