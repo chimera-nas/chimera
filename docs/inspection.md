@@ -96,6 +96,10 @@ Session rows include up to 64 `connections`, each with `connection_id`
 observed. This list records connections that have bound the session during its
 lifetime; a disconnected connection can remain listed until the session is
 destroyed.
+Session rows also expose `replay_hits`, `seq_misordered`, `bad_slot`,
+`delay_errors`, and `slot_in_progress_retries`. These lifetime event counters
+are sharded by worker and summed in the inspection reader; the CLI shows them
+in the `SESSION EVENTS` table.
 
 During `chimera-admin inspect nfs sessions --watch`, the CLI tracks each
 session's peak in-progress slots and reports when `INFL == GRANT` in most

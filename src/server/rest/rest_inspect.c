@@ -110,6 +110,12 @@ chimera_rest_inspect_nfs_sessions(
         json_object_set_new(item, "slots_cached", json_integer(session->slots_cached));
         json_object_set_new(item, "slots_completed", json_integer(session->slots_completed));
         json_object_set_new(item, "slots_unused", json_integer(session->slots_unused));
+        json_object_set_new(item, "replay_hits", decimal(session->replay_hits));
+        json_object_set_new(item, "seq_misordered", decimal(session->seq_misordered));
+        json_object_set_new(item, "bad_slot", decimal(session->bad_slot));
+        json_object_set_new(item, "delay_errors", decimal(session->delay_errors));
+        json_object_set_new(item, "slot_in_progress_retries",
+                            decimal(session->slot_in_progress_retries));
         json_t      *connections = json_array();
         json_t      *workers     = json_array();
         int          worker_seen[64];

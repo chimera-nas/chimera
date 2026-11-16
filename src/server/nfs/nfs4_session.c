@@ -59,6 +59,21 @@ nfs4_replay_bytes_delta(
     }
 } /* nfs4_replay_bytes_delta */
 
+static inline void
+nfs4_session_inspect_event_for_request(
+    struct nfs_request             *req,
+    struct nfs4_session            *session,
+    enum nfs4_session_inspect_event event)
+{
+    struct evpl_thread_identity identity;
+
+    if (!req || !req->thread || !req->thread->evpl) {
+        return;
+    }
+    evpl_thread_get_identity(req->thread->evpl, &identity);
+    nfs4_session_inspect_count_event(session, (unsigned int) identity.pool_index, event);
+} /* nfs4_session_inspect_event_for_request */
+
 static struct prometheus_counter_instance *
 replay_field_hit(struct nfs4_replay_metrics *rm)
 {
@@ -94,9 +109,52 @@ nfs4_client_table_init(
     table->nfs4_ct_forget           = NULL;
     table->nfs4_ct_forget_count     = 0;
     table->nfs4_ct_forget_capacity  = 0;
+    table->inspect_worker_count     = 1;
 
     evpl_mutex_init(&table->nfs4_ct_lock, NULL);
 } /* nfs4_client_table_init */
+
+void
+nfs4_client_table_set_inspect_workers(
+    struct nfs4_client_table *table,
+    unsigned int              worker_count)
+{
+    table->inspect_worker_count = worker_count ? worker_count : 1;
+} /* nfs4_client_table_set_inspect_workers */
+
+void
+nfs4_session_inspect_count_event(
+    struct nfs4_session            *session,
+    unsigned int                    worker_id,
+    enum nfs4_session_inspect_event event)
+{
+    _Atomic uint64_t *counter;
+
+    if (!session->inspect_shards || worker_id >= session->inspect_worker_count) {
+        return;
+    }
+    switch (event) {
+        case NFS4_SESSION_INSPECT_REPLAY_HIT:
+            counter = &session->inspect_shards[worker_id].replay_hits;
+            break;
+        case NFS4_SESSION_INSPECT_SEQ_MISORDERED:
+            counter = &session->inspect_shards[worker_id].seq_misordered;
+            break;
+        case NFS4_SESSION_INSPECT_BAD_SLOT:
+            counter = &session->inspect_shards[worker_id].bad_slot;
+            break;
+        case NFS4_SESSION_INSPECT_DELAY_ERROR:
+            counter = &session->inspect_shards[worker_id].delay_errors;
+            break;
+        case NFS4_SESSION_INSPECT_IN_PROGRESS_RETRY:
+            counter = &session->inspect_shards[worker_id].slot_in_progress_retries;
+            break;
+        default:
+            return;
+    } /* switch */
+    uint64_t value = atomic_load_explicit(counter, memory_order_relaxed);
+    atomic_store_explicit(counter, value + 1, memory_order_relaxed);
+} /* nfs4_session_inspect_count_event */
 
 void
 nfs4_session_count_slot_states(
@@ -194,8 +252,17 @@ nfs4_session_inspect_snapshot(
         entry->slots_cached        = counts.cached;
         entry->slots_completed     = counts.completed;
         entry->slots_unused        = counts.unused;
-        uint32_t                      connection_count = atomic_load_explicit(&session->inspect_connection_count,
-                                                                              memory_order_acquire);
+        for (unsigned int worker = 0; worker < session->inspect_worker_count; worker++) {
+            struct nfs4_session_inspect_shard *shard = &session->inspect_shards[worker];
+            entry->replay_hits              += atomic_load_explicit(&shard->replay_hits, memory_order_relaxed);
+            entry->seq_misordered           += atomic_load_explicit(&shard->seq_misordered, memory_order_relaxed);
+            entry->bad_slot                 += atomic_load_explicit(&shard->bad_slot, memory_order_relaxed);
+            entry->delay_errors             += atomic_load_explicit(&shard->delay_errors, memory_order_relaxed);
+            entry->slot_in_progress_retries += atomic_load_explicit(&shard->slot_in_progress_retries,
+                                                                    memory_order_relaxed);
+        }
+        uint32_t connection_count = atomic_load_explicit(&session->inspect_connection_count,
+                                                         memory_order_acquire);
         if (connection_count > 64) {
             connection_count             = 64;
             entry->connections_truncated = 1;
@@ -1707,9 +1774,23 @@ nfs4_create_session(
      * lookup and should cover no more than the client lookup and the hash
      * insert (in particular not the getrandom syscall behind the session id).
      * If the client turns out to be gone the unhashed session is discarded. */
-    session = calloc(1, sizeof(*session));
+    unsigned int         worker_count    = table->inspect_worker_count ? table->inspect_worker_count : 1;
+    size_t               allocation_size = sizeof(*session) + 63 +
+        worker_count * sizeof(struct nfs4_session_inspect_shard);
+
+    session = calloc(1, allocation_size);
     if (!session) {
         return NULL;
+    }
+    uintptr_t            shard_address = ((uintptr_t) (session + 1) + 63) & ~(uintptr_t) 63;
+    session->inspect_shards       = (struct nfs4_session_inspect_shard *) shard_address;
+    session->inspect_worker_count = worker_count;
+    for (unsigned int i = 0; i < worker_count; i++) {
+        atomic_init(&session->inspect_shards[i].replay_hits, 0);
+        atomic_init(&session->inspect_shards[i].seq_misordered, 0);
+        atomic_init(&session->inspect_shards[i].bad_slot, 0);
+        atomic_init(&session->inspect_shards[i].delay_errors, 0);
+        atomic_init(&session->inspect_shards[i].slot_in_progress_retries, 0);
     }
 
     session->magic = NFS4_SESSION_MAGIC;
@@ -2260,6 +2341,7 @@ nfs4_replay_slot_acquire(
 
     if (slotid >= session->replay_max_slots) {
         nfs4_replay_metric_inc(req, replay_field_bad_slot);
+        nfs4_session_inspect_event_for_request(req, session, NFS4_SESSION_INSPECT_BAD_SLOT);
         return NFS4ERR_BADSLOT;
     }
 
@@ -2395,6 +2477,8 @@ nfs4_replay_slot_acquire(
                     req->replay_slot_id = slotid;
                     req->replay_action  = NFS4_REPLAY_ACTION_FROM_CACHE;
                     *out_is_replay      = true;
+                    nfs4_session_inspect_event_for_request(req, session,
+                                                           NFS4_SESSION_INSPECT_REPLAY_HIT);
                     atomic_store_explicit(&slot->in_progress_since, nfs4_slot_now(), memory_order_relaxed);
                     slot->last_stuck_report = 0;
                 } else {
@@ -2461,6 +2545,8 @@ nfs4_replay_slot_acquire(
              * (true retry) or not (client jumped ahead), we cannot
              * produce a reply yet.  Both paths return errors. */
             if (seqid == cseq) {
+                nfs4_session_inspect_event_for_request(req, session,
+                                                       NFS4_SESSION_INSPECT_IN_PROGRESS_RETRY);
                 /*
                  * RFC 8881 Section 2.10.6.2: "A retry might be sent while the
                  * original request is still in progress on the replier.  The
@@ -2515,12 +2601,16 @@ nfs4_replay_slot_acquire(
      * to be (nfs4_replay_slot_replay_done / _replay_failed). */
     if (status == NFS4ERR_SEQ_MISORDERED) {
         nfs4_replay_metric_inc(req, replay_field_seq_misordered);
+        nfs4_session_inspect_event_for_request(req, session, NFS4_SESSION_INSPECT_SEQ_MISORDERED);
     } else if (status == NFS4ERR_RETRY_UNCACHED_REP ||
                status == NFS4ERR_DELAY ||
                status == NFS4ERR_SEQ_FALSE_RETRY) {
         /* One counter for "a retry this slot could not replay", whichever of
          * the three the reason turned out to be. */
         nfs4_replay_metric_inc(req, replay_field_retry_uncached);
+    }
+    if (status == NFS4ERR_DELAY) {
+        nfs4_session_inspect_event_for_request(req, session, NFS4_SESSION_INSPECT_DELAY_ERROR);
     }
     return status;
 } /* nfs4_replay_slot_acquire */

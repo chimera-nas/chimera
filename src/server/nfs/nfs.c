@@ -427,6 +427,8 @@ nfs_server_init(
     shared->nsm_v1.recv_call_SM_NOTIFY     = chimera_nfs_sm_notify;
 
     nfs4_client_table_init(&shared->nfs4_shared_clients, shared->node_id);
+    nfs4_client_table_set_inspect_workers(&shared->nfs4_shared_clients,
+                                          (unsigned int) chimera_server_config_get_core_threads(config));
     nfs_state_table_init(&shared->nfs4_state_table, shared->node_id);
     nfs_layout_table_init(&shared->nfs4_layout_table);
     nfs3_drc_init(&shared->nfs3_drc, CHIMERA_KV_TYPE_NFS3_REPLY);

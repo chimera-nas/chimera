@@ -26,6 +26,11 @@ struct chimera_inspect_session {
     uint32_t     slots_cached;
     uint32_t     slots_completed;
     uint32_t     slots_unused;
+    uint64_t     replay_hits;
+    uint64_t     seq_misordered;
+    uint64_t     bad_slot;
+    uint64_t     delay_errors;
+    uint64_t     slot_in_progress_retries;
     unsigned int connection_count;
     int          connections_truncated;
     struct {

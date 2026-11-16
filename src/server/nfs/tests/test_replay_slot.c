@@ -63,6 +63,7 @@ make_session(
     struct nfs4_session *session;
 
     nfs4_client_table_init(table, 1);
+    nfs4_client_table_set_inspect_workers(table, 4);
 
     clientid = nfs4_client_register(table, owner, (int) sizeof(owner) - 1,
                                     0xdeadbeefULL, 40, NULL, NULL);
@@ -151,6 +152,16 @@ test_session_inspect_snapshot(void)
     CHECK(!rows[0].has_slots_in_use);
     CHECK(rows[0].slots_unused == TEST_SLOTS);
     CHECK(rows[0].slots_in_progress == 0);
+
+    nfs4_session_inspect_count_event(session, 0, NFS4_SESSION_INSPECT_REPLAY_HIT);
+    nfs4_session_inspect_count_event(session, 1, NFS4_SESSION_INSPECT_REPLAY_HIT);
+    nfs4_session_inspect_count_event(session, 1, NFS4_SESSION_INSPECT_REPLAY_HIT);
+    nfs4_session_inspect_count_event(session, 3, NFS4_SESSION_INSPECT_DELAY_ERROR);
+    nfs4_session_inspect_count_event(session, 4, NFS4_SESSION_INSPECT_BAD_SLOT);
+    CHECK(nfs4_session_inspect_snapshot(&table, rows, 2, &total) == 1);
+    CHECK(rows[0].replay_hits == 3);
+    CHECK(rows[0].delay_errors == 1);
+    CHECK(rows[0].bad_slot == 0);
 
     reset_request(&req);
     req.session = session;

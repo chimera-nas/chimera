@@ -62,6 +62,10 @@ chimera_server_config_set_core_threads(
     struct chimera_server_config *config,
     int                           threads);
 
+SYMBOL_EXPORT int
+chimera_server_config_get_core_threads(
+    const struct chimera_server_config *config);
+
 SYMBOL_EXPORT void
 chimera_server_config_set_sync_delegation(
     struct chimera_server_config *config,

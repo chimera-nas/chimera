@@ -43,6 +43,9 @@ class InspectionSemantics(unittest.TestCase):
                                    "sessions": [{"session_id": "abc", "client_id": "7",
                                                  "requested_slots": 64, "negotiated_slots": 64,
                                                  "slots_in_progress": 64,
+                                                 "replay_hits": "3", "seq_misordered": "2",
+                                                 "bad_slot": "1", "delay_errors": "4",
+                                                 "slot_in_progress_retries": "3",
                                                  "connections": [{"connection_id": "2:17", "worker_id": 2}],
                                                  "workers": [2]}]}}
         live = {"server_instance_id": "instance", "complete": True,
@@ -59,6 +62,8 @@ class InspectionSemantics(unittest.TestCase):
         output = render(after, meta, parsed, width=160)
         self.assertIn("abc", output)
         self.assertIn("CONNS", output)
+        self.assertIn("IN-PROGRESS RETRY", output)
+        self.assertIn("3", output)
         self.assertIn("64 / 0.280 s = 229 req/s", output)
         self.assertIn("A full slot table can also indicate a slow backend", output)
 

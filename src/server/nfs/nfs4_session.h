@@ -283,51 +283,62 @@ struct nfs4_exchange_id_result {
     struct nfs_client *destroy_unified2;
 };
 
+struct nfs4_session_inspect_shard {
+    _Alignas(64) _Atomic uint64_t replay_hits;
+    _Atomic uint64_t seq_misordered;
+    _Atomic uint64_t bad_slot;
+    _Atomic uint64_t delay_errors;
+    _Atomic uint64_t slot_in_progress_retries;
+};
+
 struct nfs4_session {
     /* magic MUST be the first member -- see NFS4_SESSION_MAGIC comment. */
-    uint32_t                          magic;
+    uint32_t                           magic;
     /* Cached pointer to the owning client's unified state hierarchy, set at
      * session creation.  The session holds a reference on it (nfs_client_get),
      * dropped when the session is freed, so it stays readable after the
      * client's record is retired or superseded; by then the client reads as
      * cancelled (nfs_client_destroy marks it expired). */
-    struct nfs_client                *client_unified;
-    _Atomic uint32_t                  refcount;
-    _Atomic bool                      destroyed;
-    uint8_t                           nfs4_session_id[NFS4_SESSIONID_SIZE];
-    uint64_t                          nfs4_session_clientid;
-    uint64_t                          inspect_created_monotonic_ns;
-    uint64_t                          inspect_created_wall_ns;
-    uint32_t                          inspect_requested_slots;
-    uint32_t                          inspect_server_max_slots;
+    struct nfs_client                 *client_unified;
+    _Atomic uint32_t                   refcount;
+    _Atomic bool                       destroyed;
+    uint8_t                            nfs4_session_id[NFS4_SESSIONID_SIZE];
+    uint64_t                           nfs4_session_clientid;
+    uint64_t                           inspect_created_monotonic_ns;
+    uint64_t                           inspect_created_wall_ns;
+    uint32_t                           inspect_requested_slots;
+    uint32_t                           inspect_server_max_slots;
+    unsigned int                       inspect_worker_count;
+    struct nfs4_session_inspect_shard *inspect_shards;
     /* Bounded list of connections that have bound this session. Entries are
      * reserved once per connection and published with ready; repeat SEQUENCE
      * requests return before touching this list. */
-    _Atomic uint32_t                  inspect_connection_count;
+    _Atomic uint32_t                   inspect_connection_count;
     struct {
         _Atomic bool ready;
         int          worker_id;
         uint64_t     serial;
     } inspect_connections[64];
-    uint32_t                          nfs4_session_implicit;
-    struct channel_attrs4             nfs4_session_fore_attrs;
-    struct channel_attrs4             nfs4_session_back_attrs;
-    uint32_t                          nfs4_session_fore_attrs_rdma_ird;
-    uint32_t                          nfs4_session_back_attrs_rdma_ird;
+    uint32_t                           nfs4_session_implicit;
+    struct nfs4_client                *nfs4_session_client;
+    struct channel_attrs4              nfs4_session_fore_attrs;
+    struct channel_attrs4              nfs4_session_back_attrs;
+    uint32_t                           nfs4_session_fore_attrs_rdma_ird;
+    uint32_t                           nfs4_session_back_attrs_rdma_ird;
     /* NFS4.1 SEQUENCE replay cache (per-session slot table).  Distinct
      * mechanism from the 4.0 per-owner replay in nfs_open_owner.replay /
      * nfs_lock_owner.replay -- the two coexist by minor version.  Implicit
      * sessions (4.0 SETCLIENTID path) leave replay_max_slots = 0. */
-    uint32_t                          replay_max_slots;
-    uint32_t                          replay_maxresp_cached;
-    _Atomic size_t                    replay_bytes_in_use;
-    struct nfs4_replay_slot          *replay_slots;
+    uint32_t                           replay_max_slots;
+    uint32_t                           replay_maxresp_cached;
+    _Atomic size_t                     replay_bytes_in_use;
+    struct nfs4_replay_slot           *replay_slots;
     /* Set on a session rebuilt from the KV store (a restore_sessionid passed
      * to nfs4_create_session) until the hydrate's reply scan has finished
      * (nfs4_session_hydrate_done).  While it is set, a request on a RESYNC
      * slot is answered NFS4ERR_DELAY: the scan may still install that slot's
      * reply record. */
-    _Atomic bool                      replay_hydrating;
+    _Atomic bool                       replay_hydrating;
     /* NFSv4.1 backchannel for delegation recalls (RFC 8881 §2.10.3.1).
      * cb_program and the cb_sec_* callback security (csa_sec_parms) belong to
      * the session: CREATE_SESSION records them whether or not it asks for a
@@ -351,12 +362,12 @@ struct nfs4_session {
      * the backchannel conn is (re)assigned, on that conn's own handler thread).
      * Callbacks must be sent from this thread -- evpl sends are not cross-thread
      * safe -- so cross-thread recalls marshal to it (nfs4_cb_recall_holder). */
-    struct chimera_server_nfs_thread *nfs4_session_backchannel_owner;
+    struct chimera_server_nfs_thread  *nfs4_session_backchannel_owner;
     /* CREATE_SESSION4_FLAG_PERSIST was advertised for this session (server
      * nfs4_drc on AND client requested it): the per-slot reply cache is
      * written through to the KV store so retransmits replay across a restart. */
-    bool                              nfs4_session_persist;
-    struct UT_hash_handle             nfs4_session_hh;
+    bool                               nfs4_session_persist;
+    struct UT_hash_handle              nfs4_session_hh;
 };
 
 /* A sessionid by value, for lists of them. */
@@ -382,6 +393,7 @@ struct nfs4_client_table {
     struct nfs4_sessionid *nfs4_ct_forget;
     uint32_t               nfs4_ct_forget_count;
     uint32_t               nfs4_ct_forget_capacity;
+    unsigned int           inspect_worker_count;
     evpl_mutex_t           nfs4_ct_lock;
 };
 
@@ -422,6 +434,22 @@ void
 nfs4_client_table_init(
     struct nfs4_client_table *table,
     uint16_t                  node_id);
+void
+nfs4_client_table_set_inspect_workers(
+    struct nfs4_client_table *table,
+    unsigned int              worker_count);
+enum nfs4_session_inspect_event {
+    NFS4_SESSION_INSPECT_REPLAY_HIT,
+    NFS4_SESSION_INSPECT_SEQ_MISORDERED,
+    NFS4_SESSION_INSPECT_BAD_SLOT,
+    NFS4_SESSION_INSPECT_DELAY_ERROR,
+    NFS4_SESSION_INSPECT_IN_PROGRESS_RETRY
+};
+void
+nfs4_session_inspect_count_event(
+    struct nfs4_session            *session,
+    unsigned int                    worker_id,
+    enum nfs4_session_inspect_event event);
 
 void
 nfs4_client_table_free(

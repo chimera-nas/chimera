@@ -639,16 +639,29 @@ def _render_nfs_sessions(snapshot, meta, args, error=None):
     for session in snapshot.get("sessions", []):
         session_id = str(session.get("session_id", ""))
         sid = session_id if args.wide else session_id[:8]
+        replay = _integer(session.get("replay_hits"))
+        errors = sum(_integer(session.get(name)) or 0 for name in
+                     ("seq_misordered", "bad_slot", "delay_errors"))
         rows.append([sid, session.get("client_id", "--"), session.get("requested_slots", "--"),
                      session.get("negotiated_slots", "--"), session.get("slots_in_progress", "--"),
                      session.get("slots_peak", meta.get("nfs_peaks", {}).get(session_id, "--")),
                      len(session.get("connections", [])),
-                     len(set(session.get("workers", []))), "--", "--"])
+                     len(set(session.get("workers", []))), replay if replay is not None else "--",
+                     errors if any(session.get(name) is not None for name in
+                                   ("seq_misordered", "bad_slot", "delay_errors")) else "--"])
     if args.sort == "inflight":
         rows.sort(key=lambda row: -(row[4] if isinstance(row[4], int) else -1))
     elif args.sort == "peak":
         rows.sort(key=lambda row: -(row[5] if isinstance(row[5], int) else -1))
     lines += ["", _table(["SESSION", "CLIENT", "REQ", "GRANT", "INFL", "PEAK", "CONNS", "WORKERS", "REPLAY", "ERR"], rows, args.max_rows)]
+    counter_rows = [[str(session.get("session_id", ""))[:8],
+                     session.get("replay_hits", "--"), session.get("seq_misordered", "--"),
+                     session.get("bad_slot", "--"), session.get("delay_errors", "--"),
+                     session.get("slot_in_progress_retries", "--")]
+                    for session in snapshot.get("sessions", [])]
+    lines += ["", "SESSION EVENTS", _table(
+        ["SESSION", "REPLAY", "MISORDERED", "BAD SLOT", "DELAY", "IN-PROGRESS RETRY"],
+        counter_rows, args.max_rows)]
     if not args.quiet:
         saturation = meta.get("nfs_saturation", {})
         likely = next((session for session in snapshot.get("sessions", [])
