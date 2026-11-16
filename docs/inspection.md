@@ -96,3 +96,10 @@ Session rows include up to 64 `connections`, each with `connection_id`
 observed. This list records connections that have bound the session during its
 lifetime; a disconnected connection can remain listed until the session is
 destroyed.
+
+During `chimera-admin inspect nfs sessions --watch`, the CLI tracks each
+session's peak in-progress slots and reports when `INFL == GRANT` in most
+samples. If live VFS Write latency is available, it estimates a request rate as
+`GRANT / average Write latency`. Saturation alone does not prove the slot limit
+is the bottleneck: a slow backend can also keep all slots occupied, so compare
+with a run using a larger negotiated slot count.

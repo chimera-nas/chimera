@@ -108,3 +108,7 @@ states for one session. Session rows include up to 64 connection IDs and their
 worker IDs; the list records connections that have bound the session and can
 include a connection after it disconnects. A full slot table can also result
 from a slow backend, so compare a run with a larger negotiated slot count.
+During `--watch`, the CLI reports slot saturation when most samples reach the
+grant and estimates `GRANT / average Write latency` when live latency is
+available. This estimate is a diagnostic bound; saturation can also reflect a
+slow backend.

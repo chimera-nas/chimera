@@ -248,10 +248,14 @@ def fetch(client, args):
                 raise ValueError("snapshot exceeds the 8 MiB input limit")
             raw = json.loads(path.read_text(encoding="utf-8"))
             result[view] = raw.get("sessions_snapshot", raw)
+            live = raw.get("live_threads_snapshot", raw.get("live"))
+            if isinstance(live, dict):
+                result["live"] = valid(live, "threads")
         elif args.slots:
             result[view] = client.get_nfs_session_slots(args.slots)
         else:
             result[view] = client.get_nfs_sessions(limit=1024, client_id=args.client_id)
+            result["live"] = valid(client.get_live_threads(), "threads")
         snapshot = result[view]
         if not isinstance(snapshot, dict) or not isinstance(snapshot.get("sessions"), list):
             raise ValueError("NFS session snapshot must contain a sessions array")
@@ -287,9 +291,13 @@ def fetch(client, args):
 class WatchState:
     def __init__(self):
         self.previous = None
+        self.nfs_samples = {}
+        self.nfs_saturated = {}
 
     def reset(self):
         self.previous = None
+        self.nfs_samples = {}
+        self.nfs_saturated = {}
 
     def update(self, snapshots):
         meta = {"rates": {}, "live_rates": {}, "appeared": [], "absent": [], "changes_comparable": False, "restarted": False, "nfs_peaks": {}}
@@ -347,6 +355,10 @@ class WatchState:
         old_sessions, current_sessions = previous.get("nfs_sessions"), snapshots.get("nfs_sessions")
         if current_sessions:
             same_instance = old_sessions and old_sessions.get("server_instance_id") == current_sessions.get("server_instance_id")
+            if old_sessions and not same_instance:
+                meta["restarted"] = True
+                self.nfs_samples = {}
+                self.nfs_saturated = {}
             before_sessions = {row.get("session_id"): row for row in old_sessions.get("sessions", [])} if same_instance else {}
             for row in current_sessions.get("sessions", []):
                 prior = before_sessions.get(row.get("session_id"), {})
@@ -355,6 +367,15 @@ class WatchState:
                 row_peak = max(previous_peak, current_inflight)
                 meta["nfs_peaks"][row.get("session_id")] = row_peak
                 row["slots_peak"] = row_peak
+                session_id = row.get("session_id")
+                if complete(current_sessions):
+                    self.nfs_samples[session_id] = self.nfs_samples.get(session_id, 0) + 1
+                    if _integer(row.get("negotiated_slots")) and current_inflight >= _integer(row.get("negotiated_slots")):
+                        self.nfs_saturated[session_id] = self.nfs_saturated.get(session_id, 0) + 1
+                    meta.setdefault("nfs_saturation", {})[session_id] = {
+                        "samples": self.nfs_samples[session_id],
+                        "saturated": self.nfs_saturated.get(session_id, 0),
+                    }
         old = previous.get("threads")
         current = snapshots.get("threads")
         if old and current:
@@ -423,7 +444,9 @@ def _age_text(value):
 
 def render(snapshots, meta, args, error=None, stale_age=0, width=None):
     if args.inspection_view == "nfs_sessions":
-        return _render_nfs_sessions(snapshots.get("nfs_sessions", {}), meta, args, error)
+        session_snapshot = copy.copy(snapshots.get("nfs_sessions", {}))
+        session_snapshot["live"] = snapshots.get("live", {})
+        return _render_nfs_sessions(session_snapshot, meta, args, error)
     states = list(snapshots.values())
     instances = {s["server_instance_id"] for s in states}
     mixed = len(instances) > 1
@@ -610,13 +633,30 @@ def _render_nfs_sessions(snapshot, meta, args, error=None):
         rows.sort(key=lambda row: -(row[5] if isinstance(row[5], int) else -1))
     lines += ["", _table(["SESSION", "CLIENT", "REQ", "GRANT", "INFL", "PEAK", "CONNS", "WORKERS", "REPLAY", "ERR"], rows, args.max_rows)]
     if not args.quiet:
-        saturated = [session for session in snapshot.get("sessions", [])
-                     if isinstance(session.get("negotiated_slots"), int)
-                     and session.get("negotiated_slots", 0) > 0
-                     and session.get("slots_in_progress", 0) >= session.get("negotiated_slots", 0)]
-        if saturated:
-            lines.append("Slot-saturated now: INFL == GRANT for {} of {} visible sessions.".format(
-                len(saturated), len(snapshot.get("sessions", []))))
+        saturation = meta.get("nfs_saturation", {})
+        likely = next((session for session in snapshot.get("sessions", [])
+                      if saturation.get(session.get("session_id"), {}).get("samples", 0) > 0
+                      and saturation[session.get("session_id")]["saturated"] * 2 >
+                      saturation[session.get("session_id")]["samples"]), None)
+        if likely:
+            sid = likely.get("session_id")
+            counts = saturation[sid]
+            write_samples = []
+            for worker in snapshot.get("live", {}).get("threads", []):
+                for operation in worker.get("vfs", {}).get("operations", []):
+                    if str(operation.get("name", "")).lower() == "write":
+                        avg = _integer(operation.get("latency_avg_ns"))
+                        count = _integer(operation.get("latency_samples_total")) or 0
+                        if avg and count:
+                            write_samples.append((avg, count))
+            if write_samples and likely.get("negotiated_slots", 0):
+                avg_ns = sum(avg * count for avg, count in write_samples) // sum(count for _, count in write_samples)
+                bound = likely["negotiated_slots"] * 1_000_000_000 / avg_ns
+                lines.append("Slot-saturated: INFL == GRANT in {} of {} samples. Bound at GRANT / avg VFS Write latency = {} / {:.3f} s = {:.0f} req/s.".format(
+                    counts["saturated"], counts["samples"], likely["negotiated_slots"], avg_ns / 1_000_000_000, bound))
+            else:
+                lines.append("Slot-saturated: INFL == GRANT in {} of {} samples; Write latency is unavailable for a throughput bound.".format(
+                    counts["saturated"], counts["samples"]))
         lines.append("Peak is the maximum INFL observed across watch samples. A full slot table can also indicate a slow backend; compare with a run that negotiates more slots.")
     return "\n".join(lines)
 
@@ -627,6 +667,8 @@ def _json_frame(snapshots, meta, args, error=None, stale_age=0):
     else:
         result = copy.deepcopy(snapshots.get(args.inspection_view, {}))
         if args.inspection_view == "threads" and "live" in snapshots:
+            result["live"] = copy.deepcopy(snapshots["live"])
+        if args.inspection_view == "nfs_sessions" and "live" in snapshots:
             result["live"] = copy.deepcopy(snapshots["live"])
     result["_cli"] = {"view": args.inspection_view, "stale": error is not None, "stale_age_seconds": stale_age, "error": str(error) if error else None, **meta}
     return result

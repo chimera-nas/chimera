@@ -42,9 +42,14 @@ class InspectionSemantics(unittest.TestCase):
         before = {"nfs_sessions": {"server_instance_id": "instance", "complete": True,
                                    "sessions": [{"session_id": "abc", "client_id": "7",
                                                  "requested_slots": 64, "negotiated_slots": 64,
-                                                 "slots_in_progress": 50,
+                                                 "slots_in_progress": 64,
                                                  "connections": [{"connection_id": "2:17", "worker_id": 2}],
                                                  "workers": [2]}]}}
+        live = {"server_instance_id": "instance", "complete": True,
+                "threads": [{"worker_id": 0, "vfs": {"operations": [
+                    {"name": "Write", "latency_avg_ns": "280000000",
+                     "latency_samples_total": "100"}]}}]}
+        before["live"] = live
         after = copy.deepcopy(before)
         after["nfs_sessions"]["sessions"][0]["slots_in_progress"] = 64
         state = WatchState()
@@ -54,6 +59,7 @@ class InspectionSemantics(unittest.TestCase):
         output = render(after, meta, parsed, width=160)
         self.assertIn("abc", output)
         self.assertIn("CONNS", output)
+        self.assertIn("64 / 0.280 s = 229 req/s", output)
         self.assertIn("A full slot table can also indicate a slow backend", output)
 
     def test_nfs_slot_table_input(self):
