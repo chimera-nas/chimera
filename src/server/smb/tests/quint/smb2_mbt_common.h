@@ -278,6 +278,19 @@
 #define SMB2C_MAX_NOTIFY                        32
 #define SMB2C_MAX_NOTIFY_RECS                   16
 
+/* SMB Direct (MS-SMBD) framing, for a connection opened with
+ * smb2_conn_open_direct.  Every data-transfer message starts with a 20-byte
+ * header that the server pads to 24, so DataOffset is 24 both ways.  The
+ * fragment bound is how many messages one reassembled SMB2 message may span:
+ * enough for a 64 KiB READ reply even at the 128-byte MS-SMBD minimum
+ * MaxReceiveSize (about 630 fragments of 104 bytes), and a reply that needs
+ * more stops the harness rather than overrunning the record.  The port is the
+ * IANA smbdirect port, which is also what names the server's in-process SMB
+ * Direct endpoint. */
+#define SMB2C_DIRECT_HDR                        24
+#define SMB2C_DIRECT_MAX_FRAGS                  1024
+#define SMB2C_DIRECT_PORT                       5445
+
 /* SMB2 CHANGE_NOTIFY (MS-SMB2 2.2.35 / 2.2.36) */
 #define SMB2_CHANGE_NOTIFY_REQ_SIZE             32
 #define SMB2_WATCH_TREE                         0x0001
@@ -325,6 +338,14 @@ struct smb2_env_opts {
      * syntax).  Off by default in the server, and only meaningful on a backend
      * that implements the stream ops -- memfs does. */
     int named_streams;
+    /* Advertise an RDMA-capable interface, which is what makes the server
+     * listen for SMB Direct; on the in-process transport that listener is a
+     * datagram endpoint smb2_conn_open_direct can reach. */
+    int smb_direct;
+    /* memfs block size in bytes, 0 keeping the module default.  memfs returns
+     * one iovec per block from a read, so this sets how many pieces a READ
+     * reply is assembled from. */
+    int memfs_block_size;
 };
 
 /* Do the two profiles configure the server identically?  Compared field by
@@ -342,7 +363,9 @@ smb2_env_opts_eq(
            a->persistent_handles == b->persistent_handles &&
            a->force_level2 == b->force_level2 &&
            a->continuous_availability == b->continuous_availability &&
-           a->named_streams == b->named_streams;
+           a->named_streams == b->named_streams &&
+           a->smb_direct == b->smb_direct &&
+           a->memfs_block_size == b->memfs_block_size;
 } /* smb2_env_opts_eq */
 
 /* How a connection is negotiated, authenticated and protected.
@@ -660,6 +683,35 @@ struct smb2_conn {
      * caller built (and the plaintext a caller parses) is never disturbed. */
     uint8_t                        *ebuf;
     uint8_t                        *dbuf;
+
+    /* ---- SMB Direct (smb2_conn_open_direct) -----------------------------
+     *
+     * A direct connection carries each SMB2 message in one or more MS-SMBD
+     * data-transfer messages over a datagram bind instead of behind a NetBIOS
+     * header on a stream.  Requests always go out as one message (the probes
+     * keep them under the server's MaxReceiveSize); replies are reassembled
+     * into xbuf and handed to the stream path with a synthesized NetBIOS
+     * header, so everything above the transport is unchanged for traffic that
+     * is a response to a request.  Server-initiated messages (oplock and
+     * lease breaks, async interim responses, CHANGE_NOTIFY completions) are
+     * still sent with NetBIOS framing on every transport, so a probe that
+     * triggers one over SMB Direct stops with a stream desync.  dbuf, unused
+     * otherwise because a direct connection refuses encryption and
+     * compression, is the scratch each datagram is gathered into. */
+    int                             direct;
+    int                             direct_negotiated;  /* negotiate reply, status 0 */
+    uint32_t                        direct_peer_max_recv; /* server's MaxReceiveSize */
+    /* Reassembly of the message in flight: bytes so far, the total its first
+     * fragment announced, and fragments so far. */
+    uint32_t                        direct_rx_len;
+    uint32_t                        direct_rx_total;
+    int                             direct_rx_nfrag;
+    /* The fragmentation of the last fully reassembled message: how many
+     * fragments, and each one's DataLength.  The lengths are recorded as
+     * fragments arrive, so they describe the last message only until the
+     * first fragment of the next one lands. */
+    int                             direct_nfrag;
+    uint32_t                        direct_frag_len[SMB2C_DIRECT_MAX_FRAGS];
 };
 
 
@@ -887,6 +939,278 @@ smb2c_record_notify(
     smb2c_parse_notify(n, msg, msglen);
 } /* smb2c_record_notify */
 
+/* Hand one complete message, framed with its 4-byte NetBIOS header in
+ * c->xbuf[0, off), to the reply machinery: unwrap encryption and compression,
+ * then classify it as a break, an interim, a CREATE completion, a CHANGE_NOTIFY
+ * completion or an ordinary reply.  Both transports end here -- a stream
+ * message as it arrived, an SMB Direct one once its fragments are
+ * reassembled. */
+static void
+smb2c_deliver(
+    struct smb2_conn *c,
+    int               off)
+{
+    /* Unwrap before anything reads the message.  A TRANSFORM-framed
+     * reply carries no SMB2 header until it is decrypted, so every
+     * classification below (break? interim? which MessageId?) would
+     * otherwise be reading ciphertext.  Breaks arrive encrypted too
+     * once the session is protected, which is why this sits ahead of
+     * the break check rather than in the reply path. */
+    if (c->encrypt_on && off >= 4 + SMB2W_XFORM_SIZE &&
+        c->xbuf[4] == 0xFD && c->xbuf[5] == 'S' &&
+        c->xbuf[6] == 'M' && c->xbuf[7] == 'B') {
+        int plen = smb2w_decrypt(c->cipher, c->recv_key, c->enc_key_len,
+                                 c->xbuf + 4, off - 4, c->dbuf);
+
+        if (plen < 0) {
+            fprintf(stderr, "smb2 harness: failed to decrypt a "
+                    "TRANSFORM-framed reply (%d bytes)\n", off - 4);
+            smb2c_exit(6);
+        }
+        memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
+        off = 4 + plen;
+    }
+    /* Then unwrap compression.  The server compresses BEFORE it
+    * encrypts (MS-SMB2 3.1.4.4), so on the way in the order is
+    * decrypt then decompress -- and on an encrypted session the
+    * compression frame only becomes visible after the block above
+    * has run.  Like the decrypt, this sits ahead of the break/interim
+    * classification, which cannot read a compressed message. */
+    if (c->compress_on && off >= 4 + SMB2W_CXFORM_CHAINED_SIZE &&
+        c->xbuf[4] == 0xFC && c->xbuf[5] == 'S' &&
+        c->xbuf[6] == 'M' && c->xbuf[7] == 'B') {
+        int plen = smb2w_decompress(c->xbuf + 4, off - 4, c->dbuf,
+                                    SMB2C_BUFSZ);
+
+        if (plen < 0) {
+            fprintf(stderr, "smb2 harness: failed to decompress a "
+                    "COMPRESSION_TRANSFORM reply (%d bytes)\n", off - 4);
+            smb2c_exit(6);
+        }
+        memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
+        off = 4 + plen;
+        c->compressed_replies++;
+    }
+    if (off >= 4 + SMB2_HDR_SIZE) {
+        uint16_t cmd    = g16(c->xbuf + 4, 12);
+        uint64_t mid    = g64(c->xbuf + 4, 24);
+        uint32_t status = g32(c->xbuf + 4, 8);
+        uint32_t hflags = g32(c->xbuf + 4, 16);
+        /* Unsolicited break: command 18, MessageId all-ones
+         * (smb_proc_oplock_break.c:58). */
+        if (cmd == SMB2_OPLOCK_BREAK &&
+            mid == 0xFFFFFFFFFFFFFFFFull) {
+            smb2c_record_break(c, c->xbuf + 4 + SMB2_HDR_SIZE);
+            return;
+        }
+        /* Async interim: a parked op (e.g. a CREATE deferred behind
+         * an oplock/lease break) gets a STATUS_PENDING response with
+         * the ASYNC flag first, then the real reply on the SAME
+         * request, tagged with the same AsyncId (= the original
+         * MessageId).  Record it -- "did this request park?" is the
+         * wire fact the model's ST_PENDING names -- and keep waiting
+         * for the final response (smb_async_interim.c). */
+        if (status == ST_PENDING &&
+            (hflags & SMB2_FLAGS_ASYNC_COMMAND)) {
+            c->ninterim++;
+            c->interim_pending = 1;
+            c->last_async_id   = g64(c->xbuf + 4, 32);
+            if (cmd == SMB2_CREATE && c->capture_create &&
+                g64(c->xbuf + 4, 24) == c->create_mid) {
+                c->create_pending  = 1;
+                c->create_async_id = c->last_async_id;
+            }
+            return;
+        }
+        if (cmd == SMB2_CREATE && c->capture_create &&
+            g64(c->xbuf + 4, 24) == c->create_mid) {
+            if (off > SMB2C_BUFSZ || c->create_ready ||
+                (c->create_pending &&
+                 (!(hflags & SMB2_FLAGS_ASYNC_COMMAND) ||
+                  g64(c->xbuf + 4, 32) != c->create_async_id))) {
+                fprintf(stderr, "invalid or duplicate CREATE completion\n");
+                smb2c_exit(4);
+            }
+            memcpy(c->create_reply, c->xbuf, (size_t) off);
+            c->create_len   = off;
+            c->create_ready = 1;
+            c->nreply++;
+            c->nreply_app++;
+            return;
+        }
+        /* The FINAL response to a parked CHANGE_NOTIFY: an async
+         * message answering no outstanding MessageId, arriving
+         * whenever the directory changed -- usually because some other
+         * connection changed it.  Queue it; it is never a reply. */
+        if (cmd == SMB2_CHANGE_NOTIFY &&
+            (hflags & SMB2_FLAGS_ASYNC_COMMAND)) {
+            smb2c_record_notify(c, status, g64(c->xbuf + 4, 32),
+                                c->xbuf + 4, off - 4);
+            return;
+        }
+    }
+    /* Fold the NEGOTIATE / SESSION_SETUP response into the preauth
+     * hash.  A SESSION_SETUP that failed outright contributes nothing
+     * (MS-SMB2 3.3.5.5.3), so roll back to the snapshot taken when its
+     * request was folded; NEGOTIATE always succeeds to here, and its
+     * folded value becomes the baseline every later session restarts
+     * from. */
+    if (c->wire && c->wire->max_dialect == 0x0311 &&
+        off >= 4 + SMB2_HDR_SIZE) {
+        uint16_t cmd  = g16(c->xbuf + 4, 12);
+        uint32_t stat = g32(c->xbuf + 4, 8);
+
+        if (cmd == SMB2_NEGOTIATE || cmd == SMB2_SESSION_SETUP) {
+            if (cmd == SMB2_SESSION_SETUP &&
+                stat != ST_SUCCESS && stat != ST_MORE_PROCESSING_REQUIRED) {
+                memcpy(c->preauth, c->preauth_presession,
+                       sizeof(c->preauth));
+            } else {
+                smb2w_preauth_extend(c->preauth, c->xbuf + 4,
+                                     (uint32_t) (off - 4));
+                if (cmd == SMB2_NEGOTIATE) {
+                    memcpy(c->preauth_base, c->preauth,
+                           sizeof(c->preauth_base));
+                }
+            }
+            if (cmd == SMB2_SESSION_SETUP) {
+                c->ss_in_progress =
+                    (stat == ST_MORE_PROCESSING_REQUIRED);
+            }
+        }
+    }
+    memcpy(c->rbuf, c->xbuf, (size_t) (off <= SMB2C_BUFSZ
+                                       ? off : SMB2C_BUFSZ));
+    c->rlen        = off;
+    c->reply_ready = 1;
+    if (off >= 4 + SMB2_HDR_SIZE) {
+        c->reply_mid = g64(c->xbuf + 4, 24);
+        c->nreply++;
+        if (g16(c->xbuf + 4, 12) != SMB2_ECHO) {
+            c->nreply_app++;
+        }
+    }
+} /* smb2c_deliver */
+
+/* A malformed or inconsistent SMB Direct message.  The harness cannot resync a
+ * fragment stream it has lost its place in, and every later reply would be
+ * read against the wrong bytes, so it stops rather than guess. */
+CHIMERA_NORETURN
+static void
+smb2c_direct_desync(
+    struct smb2_conn *c,
+    const char       *what,
+    int               len)
+{
+    fprintf(stderr, "smb2 harness: SMB Direct stream desync: %s "
+            "(%d-byte datagram, fragment %d, %u of %u bytes reassembled)\n",
+            what, len, c->direct_rx_nfrag, c->direct_rx_len,
+            c->direct_rx_total);
+    smb2c_exit(6);
+} /* smb2c_direct_desync */
+
+/* One SMB Direct datagram, the first len bytes of c->dbuf.
+ *
+ * Before the transport is negotiated the only legal message is the 32-byte
+ * negotiate response (MS-SMBD 2.2.2): Status at 12, MaxReceiveSize at 24.  A
+ * refused negotiate leaves nothing to talk over, so this side closes the
+ * transport, which is what ends smb2_conn_open_direct's wait in that case.
+ *
+ * After it, each datagram is a data-transfer message (MS-SMBD 2.2.3):
+ * RemainingDataLength at 8, DataOffset at 12, DataLength at 16.  The first
+ * fragment of an SMB2 message announces its total size as DataLength plus
+ * RemainingDataLength, and every later fragment has to agree with it; the
+ * one with RemainingDataLength 0 completes the message. */
+static void
+smb2c_direct_recv(
+    struct smb2_conn *c,
+    int               len)
+{
+    const uint8_t *dg = c->dbuf;
+    uint32_t       remaining, doff, dlen, total;
+
+    if (len > SMB2C_BUFSZ) {
+        smb2c_direct_desync(c, "datagram larger than the receive scratch", len);
+    }
+
+    if (!c->direct_negotiated) {
+        uint32_t status;
+
+        if (len < 32) {
+            smb2c_direct_desync(c, "negotiate response shorter than 32 bytes",
+                                len);
+        }
+        status                  = g32(dg, 12);
+        c->direct_peer_max_recv = g32(dg, 24);
+        if (status == 0) {
+            c->direct_negotiated = 1;
+        } else {
+            fprintf(stderr, "smb2 harness: SMB Direct negotiate refused "
+                    "(status 0x%08x)\n", status);
+            c->closed_by_client = 1;
+            evpl_close(c->env->evpl, c->bind);
+        }
+        return;
+    }
+
+    if (len < 20) {
+        smb2c_direct_desync(c, "message shorter than its header", len);
+    }
+    remaining = g32(dg, 8);
+    doff      = g32(dg, 12);
+    dlen      = g32(dg, 16);
+
+    /* No payload: a keepalive or a credit grant, never part of a message. */
+    if (dlen == 0) {
+        return;
+    }
+
+    if (c->direct_rx_nfrag == 0) {
+        if ((uint64_t) dlen + remaining > SMB2C_BUFSZ - 4) {
+            smb2c_direct_desync(c, "message larger than the receive scratch",
+                                len);
+        }
+        c->direct_rx_total = dlen + remaining;
+    }
+    if (doff < SMB2C_DIRECT_HDR) {
+        smb2c_direct_desync(c, "DataOffset inside the header", len);
+    }
+    if ((uint64_t) doff + dlen > (uint64_t) len) {
+        smb2c_direct_desync(c, "data runs past the end of the datagram", len);
+    }
+    if ((uint64_t) c->direct_rx_len + dlen + remaining != c->direct_rx_total) {
+        smb2c_direct_desync(c, "RemainingDataLength disagrees with the "
+                            "message size", len);
+    }
+    if (c->direct_rx_nfrag >= SMB2C_DIRECT_MAX_FRAGS) {
+        smb2c_direct_desync(c, "more fragments than SMB2C_DIRECT_MAX_FRAGS",
+                            len);
+    }
+
+    memcpy(c->xbuf + 4 + c->direct_rx_len, dg + doff, dlen);
+    c->direct_frag_len[c->direct_rx_nfrag++] = dlen;
+    c->direct_rx_len                        += dlen;
+
+    if (remaining != 0) {
+        return;
+    }
+
+    /* Complete: give it the NetBIOS header the stream path expects, publish
+     * how it was fragmented, and hand it on. */
+    total      = c->direct_rx_total;
+    c->xbuf[0] = 0;
+    c->xbuf[1] = (uint8_t) (total >> 16);
+    c->xbuf[2] = (uint8_t) (total >> 8);
+    c->xbuf[3] = (uint8_t) total;
+
+    c->direct_nfrag    = c->direct_rx_nfrag;
+    c->direct_rx_len   = 0;
+    c->direct_rx_total = 0;
+    c->direct_rx_nfrag = 0;
+
+    smb2c_deliver(c, 4 + (int) total);
+} /* smb2c_direct_recv */
+
 static void
 smb2c_notify(
     struct evpl        *evpl,
@@ -904,162 +1228,31 @@ smb2c_notify(
             c->disconnected = 1;
             break;
         case EVPL_NOTIFY_RECV_MSG: {
-            int off = 0;
             /* Receive into a scratch buffer, not rbuf: an unsolicited break
              * notification can arrive while a reply already sits in rbuf
              * (a holder connection that is itself mid-request), and copying
              * the break over it would corrupt the reply the caller is about
-             * to parse.  Only a real reply is promoted into rbuf. */
+             * to parse.  Only a real reply is promoted into rbuf.  An SMB
+             * Direct datagram is a fragment rather than a message, so it is
+             * gathered into dbuf and reassembled into xbuf from there. */
+            uint8_t *dst = c->direct ? c->dbuf : c->xbuf;
+            int      off = 0;
+
             for (unsigned int i = 0; i < notify->recv_msg.niov; i++) {
                 void *d   = evpl_iovec_data(&notify->recv_msg.iovec[i]);
                 int   len = evpl_iovec_length(&notify->recv_msg.iovec[i]);
                 if (off + len <= SMB2C_BUFSZ) {
-                    memcpy(c->xbuf + off, d, len);
+                    memcpy(dst + off, d, len);
                 }
                 off += len;
             }
             for (unsigned int i = 0; i < notify->recv_msg.niov; i++) {
                 evpl_iovec_release(evpl, &notify->recv_msg.iovec[i]);
             }
-            /* Unwrap before anything reads the message.  A TRANSFORM-framed
-             * reply carries no SMB2 header until it is decrypted, so every
-             * classification below (break? interim? which MessageId?) would
-             * otherwise be reading ciphertext.  Breaks arrive encrypted too
-             * once the session is protected, which is why this sits ahead of
-             * the break check rather than in the reply path. */
-            if (c->encrypt_on && off >= 4 + SMB2W_XFORM_SIZE &&
-                c->xbuf[4] == 0xFD && c->xbuf[5] == 'S' &&
-                c->xbuf[6] == 'M' && c->xbuf[7] == 'B') {
-                int plen = smb2w_decrypt(c->cipher, c->recv_key, c->enc_key_len,
-                                         c->xbuf + 4, off - 4, c->dbuf);
-
-                if (plen < 0) {
-                    fprintf(stderr, "smb2 harness: failed to decrypt a "
-                            "TRANSFORM-framed reply (%d bytes)\n", off - 4);
-                    smb2c_exit(6);
-                }
-                memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
-                off = 4 + plen;
-            }
-            /* Then unwrap compression.  The server compresses BEFORE it
-            * encrypts (MS-SMB2 3.1.4.4), so on the way in the order is
-            * decrypt then decompress -- and on an encrypted session the
-            * compression frame only becomes visible after the block above
-            * has run.  Like the decrypt, this sits ahead of the break/interim
-            * classification, which cannot read a compressed message. */
-            if (c->compress_on && off >= 4 + SMB2W_CXFORM_CHAINED_SIZE &&
-                c->xbuf[4] == 0xFC && c->xbuf[5] == 'S' &&
-                c->xbuf[6] == 'M' && c->xbuf[7] == 'B') {
-                int plen = smb2w_decompress(c->xbuf + 4, off - 4, c->dbuf,
-                                            SMB2C_BUFSZ);
-
-                if (plen < 0) {
-                    fprintf(stderr, "smb2 harness: failed to decompress a "
-                            "COMPRESSION_TRANSFORM reply (%d bytes)\n", off - 4);
-                    smb2c_exit(6);
-                }
-                memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
-                off = 4 + plen;
-                c->compressed_replies++;
-            }
-            if (off >= 4 + SMB2_HDR_SIZE) {
-                uint16_t cmd    = g16(c->xbuf + 4, 12);
-                uint64_t mid    = g64(c->xbuf + 4, 24);
-                uint32_t status = g32(c->xbuf + 4, 8);
-                uint32_t hflags = g32(c->xbuf + 4, 16);
-                /* Unsolicited break: command 18, MessageId all-ones
-                 * (smb_proc_oplock_break.c:58). */
-                if (cmd == SMB2_OPLOCK_BREAK &&
-                    mid == 0xFFFFFFFFFFFFFFFFull) {
-                    smb2c_record_break(c, c->xbuf + 4 + SMB2_HDR_SIZE);
-                    break;
-                }
-                /* Async interim: a parked op (e.g. a CREATE deferred behind
-                 * an oplock/lease break) gets a STATUS_PENDING response with
-                 * the ASYNC flag first, then the real reply on the SAME
-                 * request, tagged with the same AsyncId (= the original
-                 * MessageId).  Record it -- "did this request park?" is the
-                 * wire fact the model's ST_PENDING names -- and keep waiting
-                 * for the final response (smb_async_interim.c). */
-                if (status == ST_PENDING &&
-                    (hflags & SMB2_FLAGS_ASYNC_COMMAND)) {
-                    c->ninterim++;
-                    c->interim_pending = 1;
-                    c->last_async_id   = g64(c->xbuf + 4, 32);
-                    if (cmd == SMB2_CREATE && c->capture_create &&
-                        g64(c->xbuf + 4, 24) == c->create_mid) {
-                        c->create_pending  = 1;
-                        c->create_async_id = c->last_async_id;
-                    }
-                    break;
-                }
-                if (cmd == SMB2_CREATE && c->capture_create &&
-                    g64(c->xbuf + 4, 24) == c->create_mid) {
-                    if (off > SMB2C_BUFSZ || c->create_ready ||
-                        (c->create_pending &&
-                         (!(hflags & SMB2_FLAGS_ASYNC_COMMAND) ||
-                          g64(c->xbuf + 4, 32) != c->create_async_id))) {
-                        fprintf(stderr, "invalid or duplicate CREATE completion\n");
-                        smb2c_exit(4);
-                    }
-                    memcpy(c->create_reply, c->xbuf, (size_t) off);
-                    c->create_len   = off;
-                    c->create_ready = 1;
-                    c->nreply++;
-                    c->nreply_app++;
-                    break;
-                }
-                /* The FINAL response to a parked CHANGE_NOTIFY: an async
-                 * message answering no outstanding MessageId, arriving
-                 * whenever the directory changed -- usually because some other
-                 * connection changed it.  Queue it; it is never a reply. */
-                if (cmd == SMB2_CHANGE_NOTIFY &&
-                    (hflags & SMB2_FLAGS_ASYNC_COMMAND)) {
-                    smb2c_record_notify(c, status, g64(c->xbuf + 4, 32),
-                                        c->xbuf + 4, off - 4);
-                    break;
-                }
-            }
-            /* Fold the NEGOTIATE / SESSION_SETUP response into the preauth
-             * hash.  A SESSION_SETUP that failed outright contributes nothing
-             * (MS-SMB2 3.3.5.5.3), so roll back to the snapshot taken when its
-             * request was folded; NEGOTIATE always succeeds to here, and its
-             * folded value becomes the baseline every later session restarts
-             * from. */
-            if (c->wire && c->wire->max_dialect == 0x0311 &&
-                off >= 4 + SMB2_HDR_SIZE) {
-                uint16_t cmd  = g16(c->xbuf + 4, 12);
-                uint32_t stat = g32(c->xbuf + 4, 8);
-
-                if (cmd == SMB2_NEGOTIATE || cmd == SMB2_SESSION_SETUP) {
-                    if (cmd == SMB2_SESSION_SETUP &&
-                        stat != ST_SUCCESS && stat != ST_MORE_PROCESSING_REQUIRED) {
-                        memcpy(c->preauth, c->preauth_presession,
-                               sizeof(c->preauth));
-                    } else {
-                        smb2w_preauth_extend(c->preauth, c->xbuf + 4,
-                                             (uint32_t) (off - 4));
-                        if (cmd == SMB2_NEGOTIATE) {
-                            memcpy(c->preauth_base, c->preauth,
-                                   sizeof(c->preauth_base));
-                        }
-                    }
-                    if (cmd == SMB2_SESSION_SETUP) {
-                        c->ss_in_progress =
-                            (stat == ST_MORE_PROCESSING_REQUIRED);
-                    }
-                }
-            }
-            memcpy(c->rbuf, c->xbuf, (size_t) (off <= SMB2C_BUFSZ
-                                               ? off : SMB2C_BUFSZ));
-            c->rlen        = off;
-            c->reply_ready = 1;
-            if (off >= 4 + SMB2_HDR_SIZE) {
-                c->reply_mid = g64(c->xbuf + 4, 24);
-                c->nreply++;
-                if (g16(c->xbuf + 4, 12) != SMB2_ECHO) {
-                    c->nreply_app++;
-                }
+            if (c->direct) {
+                smb2c_direct_recv(c, off);
+            } else {
+                smb2c_deliver(c, off);
             }
             break;
         } /* EVPL_NOTIFY_RECV_MSG */
@@ -1148,6 +1341,25 @@ smb2_env_open_wire(
                                                          opts->persistent_handles);
         chimera_server_config_set_smb_named_streams(config,
                                                     opts->named_streams);
+    }
+
+    /* Advertising an RDMA-capable interface is what makes the server listen
+     * for SMB Direct at all.  On the in-process transport that listener is a
+     * datagram endpoint, so the SMB Direct framing runs without RDMA
+     * hardware. */
+    if (opts && opts->smb_direct) {
+        struct chimera_server_config_smb_nic nic = {
+            .address = "127.0.0.1", .speed = 10, .rdma = 1
+        };
+
+        chimera_server_config_set_smb_nic_info(config, 1, &nic);
+    }
+    if (opts && opts->memfs_block_size) {
+        char memfs_cfg[64];
+
+        snprintf(memfs_cfg, sizeof(memfs_cfg), "{\"block_size\": %d}",
+                 opts->memfs_block_size);
+        chimera_server_config_add_module(config, "memfs", NULL, memfs_cfg);
     }
 
     if (opts) {
@@ -1273,12 +1485,12 @@ smb2_pump(struct smb2_env *env)
     evpl_continue(env->evpl);
 } /* smb2_pump */
 
-/* Open a fresh SMB2 connection to the in-process server. */
+/* Allocate a connection and its buffers, unconnected and not yet registered
+ * in env->conns[].  Shared by the stream and SMB Direct opens. */
 static inline struct smb2_conn *
-smb2_conn_open(struct smb2_env *env)
+smb2c_conn_alloc(struct smb2_env *env)
 {
-    struct smb2_conn     *c;
-    struct evpl_endpoint *ep;
+    struct smb2_conn *c;
 
     if (env->nconns >= SMB2C_MAX_CONNS) {
         fprintf(stderr,
@@ -1290,10 +1502,7 @@ smb2_conn_open(struct smb2_env *env)
         smb2c_exit(1);
     }
 
-    c  = calloc(1, sizeof(*c));
-    ep =
-        chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
-                                           "127.0.0.1", 445);
+    c = calloc(1, sizeof(*c));
 
     c->env        = env;
     c->conn_index = env->nconns;
@@ -1310,6 +1519,19 @@ smb2_conn_open(struct smb2_env *env)
         c->ebuf = malloc(SMB2C_BUFSZ);
         c->dbuf = malloc(SMB2C_BUFSZ);
     }
+    return c;
+} /* smb2c_conn_alloc */
+
+/* Open a fresh SMB2 connection to the in-process server. */
+static inline struct smb2_conn *
+smb2_conn_open(struct smb2_env *env)
+{
+    struct smb2_conn     *c = smb2c_conn_alloc(env);
+    struct evpl_endpoint *ep;
+
+    ep =
+        chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
+                                           "127.0.0.1", 445);
 
     c->bind = evpl_connect(env->evpl, EVPL_STREAM_INPROC, NULL, ep,
                            smb2c_notify, smb2c_segment, c);
@@ -1525,6 +1747,53 @@ smb2c_begin(
     return 4 + SMB2_HDR_SIZE;
 } /* smb2c_begin */
 
+/* Put one framed message on the wire.  `framed` starts with the 4-byte
+ * NetBIOS header, which a stream connection sends as is.  A direct connection
+ * replaces it with an SMB Direct data-transfer header (MS-SMBD 2.2.3) and
+ * sends the message as a single datagram: the probes keep every request under
+ * the server's MaxReceiveSize, so request fragmentation is not implemented and
+ * a request that would need it stops the harness instead of going out
+ * malformed. */
+static void
+smb2c_xmit(
+    struct smb2_conn *c,
+    const uint8_t    *framed,
+    int               len)
+{
+    struct evpl_iovec iov;
+    uint8_t          *dt;
+    uint32_t          n;
+
+    if (!c->direct) {
+        evpl_send(c->env->evpl, c->bind, framed, len);
+        return;
+    }
+
+    n = (uint32_t) (len - 4);
+    if (SMB2C_DIRECT_HDR + n > c->direct_peer_max_recv) {
+        fprintf(stderr, "smb2 harness: a %u-byte request does not fit one SMB "
+                "Direct message (server MaxReceiveSize %u); request "
+                "fragmentation is not implemented in the harness\n",
+                n, c->direct_peer_max_recv);
+        smb2c_exit(1);
+    }
+
+    evpl_iovec_alloc(c->env->evpl, SMB2C_DIRECT_HDR + n, 8, 1, 0, &iov);
+    dt = evpl_iovec_data(&iov);
+    p16(dt, 0, 255);                  /* CreditsRequested */
+    p16(dt, 2, 255);                  /* CreditsGranted */
+    p16(dt, 4, 0);                    /* Flags */
+    p16(dt, 6, 0);                    /* Reserved */
+    p32(dt, 8, 0);                    /* RemainingDataLength */
+    p32(dt, 12, SMB2C_DIRECT_HDR);    /* DataOffset */
+    p32(dt, 16, n);                   /* DataLength */
+    p32(dt, 20, 0);                   /* Padding */
+    memcpy(dt + SMB2C_DIRECT_HDR, framed + 4, n);
+    evpl_iovec_set_length(&iov, SMB2C_DIRECT_HDR + n);
+    evpl_sendv(c->env->evpl, c->bind, &iov, 1, SMB2C_DIRECT_HDR + n,
+               EVPL_SEND_FLAG_TAKE_REF);
+} /* smb2c_xmit */
+
 /* Post a request (non-blocking): frame body_len bytes, send, clear the
  * reply flag.  The MessageId advances so the next request is fresh. */
 static inline void
@@ -1609,7 +1878,7 @@ smb2c_send(
         c->ebuf[1] = (uint8_t) (elen >> 16);
         c->ebuf[2] = (uint8_t) (elen >> 8);
         c->ebuf[3] = (uint8_t) elen;
-        evpl_send(c->env->evpl, c->bind, c->ebuf, 4 + elen);
+        smb2c_xmit(c, c->ebuf, 4 + elen);
     } else if (c->compress_requests && c->compress_on) {
         /* Leave the SMB2 header uncompressed as the transform's prefix, the
          * same shape the server builds its replies in.  A request that does
@@ -1627,13 +1896,13 @@ smb2c_send(
             c->ebuf[1] = (uint8_t) (clen >> 16);
             c->ebuf[2] = (uint8_t) (clen >> 8);
             c->ebuf[3] = (uint8_t) clen;
-            evpl_send(c->env->evpl, c->bind, c->ebuf, 4 + clen);
+            smb2c_xmit(c, c->ebuf, 4 + clen);
             c->compressed_sent++;
         } else {
-            evpl_send(c->env->evpl, c->bind, c->sbuf, 4 + payload);
+            smb2c_xmit(c, c->sbuf, 4 + payload);
         }
     } else {
-        evpl_send(c->env->evpl, c->bind, c->sbuf, 4 + payload);
+        smb2c_xmit(c, c->sbuf, 4 + payload);
     }
 
     if (!c->pin_armed) {
@@ -1836,6 +2105,97 @@ smb2c_wait(struct smb2_conn *c)
     smb2c_pump_for_reply(c, "a request reply");
     return g32(c->rbuf + 4, 8);   /* reply header Status */
 } /* smb2c_wait */
+
+/* Pump until *done is set or the connection ends.  The server owes one or the
+ * other, so a connect or SMB Direct negotiate it neither completes nor refuses
+ * is a wedge, reported by name rather than left to ctest's timeout. */
+static inline void
+smb2c_direct_wait(
+    struct smb2_conn *c,
+    const int        *done,
+    const char       *what)
+{
+    uint64_t deadline = smb2c_now_ms() + SMB2C_HANG_MS;
+
+    while (!*done && !c->disconnected) {
+        smb2_pump(c->env);
+        if (smb2c_now_ms() >= deadline) {
+            fprintf(stderr, "smb2 harness: WEDGED waiting for %s on SMB Direct "
+                    "conn %d after %d ms: the server neither completed it nor "
+                    "closed the connection\n", what, c->conn_index, SMB2C_HANG_MS);
+            smb2c_exit(4);
+        }
+    }
+} /* smb2c_direct_wait */
+
+/* Open a fresh SMB Direct connection to the in-process server, which needs an
+ * env started with opts.smb_direct, and run the SMB Direct negotiate (MS-SMBD
+ * 2.2.1) offering `max_receive_size` as this side's MaxReceiveSize -- the
+ * largest message the server may send, so it sets how the server fragments
+ * its replies.
+ *
+ * Returns once the negotiate succeeded (direct_negotiated) or the connection
+ * ended (disconnected: the server hung up, or answered with a failure status
+ * and this side closed); refusing a malformed negotiate is behavior a probe
+ * may want to assert, so the latter is reported, never fatal.  The
+ * connection is registered with the env either way, which frees it at stop.
+ * The SMB2 handshake is the caller's, exactly as after smb2_conn_open.
+ *
+ * Encryption and compression are refused: both rewrite the message after it
+ * is built, and neither is implemented over SMB Direct on either side. */
+static inline struct smb2_conn *
+smb2_conn_open_direct(
+    struct smb2_env *env,
+    uint32_t         max_receive_size)
+{
+    struct smb2_conn     *c;
+    struct evpl_endpoint *ep;
+    struct evpl_iovec     iov;
+    uint8_t              *req;
+
+    if (env->wire && (env->wire->encrypt || env->wire->compress)) {
+        fprintf(stderr, "smb2 harness: wire profile '%s' needs encryption or "
+                "compression, which SMB Direct does not carry\n",
+                env->wire->name);
+        smb2c_exit(1);
+    }
+
+    c         = smb2c_conn_alloc(env);
+    c->direct = 1;
+    c->dbuf   = malloc(SMB2C_BUFSZ);
+
+    ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
+                                            "127.0.0.1", SMB2C_DIRECT_PORT);
+
+    c->bind = evpl_connect(env->evpl, EVPL_DATAGRAM_INPROC, NULL, ep,
+                           smb2c_notify, NULL, c);
+    if (!c->bind) {
+        fprintf(stderr, "failed to connect to in-process SMB Direct server\n");
+        smb2c_exit(1);
+    }
+    env->conns[env->nconns++] = c;
+
+    smb2c_direct_wait(c, &c->connected, "the SMB Direct connect");
+    if (c->disconnected) {
+        return c;
+    }
+
+    /* SMB Direct negotiate request (MS-SMBD 2.2.1), one 20-byte message. */
+    evpl_iovec_alloc(env->evpl, 20, 8, 1, 0, &iov);
+    req = evpl_iovec_data(&iov);
+    p16(req, 0, 0x0100);              /* MinVersion */
+    p16(req, 2, 0x0100);              /* MaxVersion */
+    p16(req, 4, 0);                   /* Reserved */
+    p16(req, 6, 255);                 /* CreditsRequested */
+    p32(req, 8, 1364);                /* PreferredSendSize */
+    p32(req, 12, max_receive_size);   /* MaxReceiveSize */
+    p32(req, 16, 1048576);            /* MaxFragmentedSize */
+    evpl_iovec_set_length(&iov, 20);
+    evpl_sendv(env->evpl, c->bind, &iov, 1, 20, EVPL_SEND_FLAG_TAKE_REF);
+
+    smb2c_direct_wait(c, &c->direct_negotiated, "the SMB Direct negotiate response");
+    return c;
+} /* smb2_conn_open_direct */
 
 /* ---- causal settle barrier ----------------------------------------------
  *

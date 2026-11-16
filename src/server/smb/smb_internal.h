@@ -1579,6 +1579,24 @@ struct chimera_smb_conn {
     char                               remote_addr[128];
 };
 
+/* The IANA smbdirect port.  Over the in-process transport it names the SMB
+ * Direct endpoint (chimera-inproc-5445): inproc endpoint names are a single
+ * namespace shared by stream and datagram listeners, so SMB Direct cannot
+ * reuse the name the SMB stream listener already holds. */
+#define SMB_DIRECT_INPROC_PORT 5445
+
+/* Does this connection speak SMB Direct (MS-SMBD) framing rather than
+ * NetBIOS-framed TCP?  RDMA does; so does the in-process datagram transport,
+ * which stands in for RDMA so that the SMB Direct paths -- the transport
+ * negotiate, the data-transfer header and reply fragmentation -- are
+ * testable without RDMA hardware. */
+static inline int
+chimera_smb_conn_is_direct(const struct chimera_smb_conn *conn)
+{
+    return conn->protocol == EVPL_DATAGRAM_RDMACM_RC ||
+           conn->protocol == EVPL_DATAGRAM_INPROC;
+} /* chimera_smb_conn_is_direct */
+
 /* The MaxReadSize/MaxWriteSize this connection actually advertised, for the
  * READ/WRITE handlers to bound against.
  *

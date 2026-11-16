@@ -39,6 +39,19 @@ set_tests_properties(chimera/server/smb/mbt/smoke_probe_memfs PROPERTIES
     LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 60)
 
+# SMB Direct (MS-SMBD) framing over the in-process datagram transport: reply
+# fragmentation, which no other quick-tier test reaches without RDMA hardware.
+add_executable(smb2_direct_probe smb2_direct_probe.c)
+target_include_directories(smb2_direct_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_direct_probe chimera_server chimera_metrics)
+
+add_test(NAME chimera/server/smb/mbt/direct_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_direct_probe>)
+set_tests_properties(chimera/server/smb/mbt/direct_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_direct_probe_memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
+    TIMEOUT 60)
+
 # Hold a backend rename across TREE_DISCONNECT to exercise a completion after
 # the requesting tree has released its share.  The probe embeds memfs to hook
 # its dispatch; ENABLE_EXPORTS lets the server's VFS find that hooked vfs_memfs
