@@ -145,6 +145,25 @@ nfs4_cb_chan_conn(struct nfs4_cb_client *chan)
     return chan->session ? chan->session->nfs4_session_backchannel_conn : NULL;
 } /* nfs4_cb_chan_conn */
 
+/* The thread a callback on chan is sent from: the one whose evpl owns the
+ * connection it rides, since evpl sends are not cross-thread safe.  A 4.0
+ * channel owns its connection, opened on chan->owner_thread.  A 4.1 one rides
+ * the session's backchannel connection, owned by
+ * nfs4_session_backchannel_owner, which CREATE_SESSION and BIND_CONN_TO_SESSION
+ * repoint with the connection; chan->owner_thread is fixed when the channel
+ * opens and drifts from it.  nfs4_cb_recall_holder bounces CB_LAYOUTRECALL to
+ * the same thread. */
+static struct chimera_server_nfs_thread *
+nfs4_cb_send_thread(struct nfs4_cb_client *chan)
+{
+    struct chimera_server_nfs_thread *owner = NULL;
+
+    if (!chan->owns_conn && chan->session) {
+        owner = chan->session->nfs4_session_backchannel_owner;
+    }
+    return owner ? owner : chan->owner_thread;
+} /* nfs4_cb_send_thread */
+
 /* ---------------------------------------------------------------------- */
 /* Callback-channel lifetime (refcount)                                   */
 /* ---------------------------------------------------------------------- */
@@ -627,17 +646,24 @@ nfs4_cb_recall_send(
     uint8_t                    fhwire[CHIMERA_NFS_FH_MAX];
     int                        fhwire_len;
 
-    if (chan && chan->owner_thread != thread) {
-        /* The channel was rebuilt on another thread after this recall was
-         * queued here (a rebind: BIND_CONN_TO_SESSION, CREATE_SESSION or
-         * BACKCHANNEL_CTL).  Its connection belongs to the new channel's
-         * owner, and evpl sends are not cross-thread safe, so hand the recall
-         * to that owner rather than send it from here.  The enqueue takes its
-         * own reference; drop the one this queue held. */
+    if (chan && nfs4_cb_send_thread(chan) != thread) {
+        /* The connection this recall rides belongs to another thread: a
+         * rebind (BIND_CONN_TO_SESSION, CREATE_SESSION or BACKCHANNEL_CTL)
+         * moved the backchannel or rebuilt the channel after the recall was
+         * queued here.  Hand it to that thread rather than send it from here.
+         * The enqueue takes its own reference; drop the one this queue held. */
         nfs4_cb_recall_enqueue(deleg);
         nfs_state_table_release(&thread->shared->nfs4_state_table, deleg,
                                 NFS4_SLOT_TYPE_DELEG, thread->vfs_thread);
         return;
+    }
+
+    if (conn && conn->thread != thread->rpc2_thread) {
+        /* A rebind is repointing the backchannel right now: the session
+         * already names the new connection but not yet the thread that owns
+         * it.  Do not send on it from here; the rebind re-drives every
+         * outstanding recall over the new channel once it is built. */
+        conn = NULL;
     }
 
     if (!conn) {
@@ -1330,7 +1356,7 @@ nfs4_cb_recall_enqueue(struct nfs_delegation *deleg)
         return;
     }
 
-    owner = chan->owner_thread;
+    owner = nfs4_cb_send_thread(chan);
 
     atomic_fetch_add_explicit(&deleg->refcount, 1, memory_order_acq_rel);
 
