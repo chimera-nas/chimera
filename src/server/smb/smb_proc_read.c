@@ -11,7 +11,7 @@
 #include "vfs/vfs_claim.h"
 
 /*
- * Completion for one SMB2_CHANNEL_RDMA_V1 read transfer (RDMA Write to a client
+ * Completion for one RDMA-channel read transfer (RDMA Write to a client
  * buffer descriptor).  evpl invokes this once per evpl_rdma_write issued by
  * chimera_smb_read_callback.  The SMB2 READ response must not be sent until all
  * descriptors have been written -- otherwise the client is told SUCCESS while
@@ -156,25 +156,58 @@ chimera_smb_read_send(struct chimera_smb_request *request)
     struct evpl_iovec                *chunk_iov = request->read.chunk_iov;
     struct evpl_iovec                *iov       = request->read.iov;
     int                               niov      = request->read.niov;
-    int                               chunk_niov;
+    int                               chunk_niovs[CHIMERA_SMB_MAX_RDMA_ELEMENTS];
     int                               i;
 
-    if (request->read.channel == SMB2_CHANNEL_RDMA_V1 &&
+    if (chimera_smb_channel_is_rdma(request->read.channel) &&
         request->read.num_rdma_elements > 0) {
 
-        request->read.pending_rdma_writes = request->read.num_rdma_elements;
+        request->read.pending_rdma_writes = 0;
         request->read.r_rdma_status       = 0;
 
         evpl_iovec_cursor_init(&cursor, iov, niov);
 
+        /* The carve loop sets every entry the send loop reads; zeroing them
+         * first lets static analysis see that too. */
+        memset(chunk_niovs, 0, sizeof(chunk_niovs));
+
+        /* Carve the read data into one chunk per descriptor before sending
+         * any of it.  Each chunk takes its own references: a descriptor
+         * boundary can fall inside one read iovec, and the two chunks that
+         * then share it are released separately.  A short read can leave the
+         * last descriptors with no data; those get no RDMA Write, which
+         * would never complete. */
         for (i = 0; i < request->read.num_rdma_elements; i++) {
 
             /* Each descriptor gets its OWN slice of the read data and its OWN
              * remote token/offset -- index [i], not [0].  Writing every chunk
              * to rdma_elements[0] corrupts/overruns the first registration and
              * leaves the rest empty (issue #950). */
-            chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 64,
-                                                request->read.rdma_elements[i].length, 0);
+            chunk_niovs[i] = evpl_iovec_cursor_move(&cursor, chunk_iov, 64,
+                                                    request->read.rdma_elements[i].length, 1);
+
+            if (chunk_niovs[i]) {
+                request->read.pending_rdma_writes++;
+            }
+
+            chunk_iov += chunk_niovs[i];
+        }
+
+        /* The chunks hold the data now, so drop the read's own references. */
+        evpl_iovecs_release(evpl, iov, niov);
+
+        if (request->read.pending_rdma_writes == 0) {
+            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            return;
+        }
+
+        chunk_iov = request->read.chunk_iov;
+
+        for (i = 0; i < request->read.num_rdma_elements; i++) {
+
+            if (chunk_niovs[i] == 0) {
+                continue;
+            }
 
             evpl_rdma_write(
                 evpl,
@@ -182,12 +215,12 @@ chimera_smb_read_send(struct chimera_smb_request *request)
                 request->read.rdma_elements[i].token,
                 request->read.rdma_elements[i].offset,
                 chunk_iov,
-                chunk_niov,
+                chunk_niovs[i],
                 EVPL_RDMA_FLAG_TAKE_REF,
                 chimera_smb_rdma_write_callback,
                 request);
 
-            chunk_iov += chunk_niov;
+            chunk_iov += chunk_niovs[i];
         }
 
         /* SUCCESS is sent from chimera_smb_rdma_write_callback once the final
@@ -327,8 +360,7 @@ chimera_smb_read(struct chimera_smb_request *request)
      * parseable descriptor list; dispatching that to evpl_rdma_write on a
      * non-RDMA bind would call through a NULL rdma op and crash the thread.
      * Reject before issuing the read. */
-    if ((request->read.channel == SMB2_CHANNEL_RDMA_V1 ||
-         request->read.channel == SMB2_CHANNEL_RDMA_V1_INVALIDATE) &&
+    if (chimera_smb_channel_is_rdma(request->read.channel) &&
         !evpl_bind_is_rdma(request->compound->conn->bind)) {
         chimera_smb_open_file_release(request, request->read.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
@@ -435,7 +467,7 @@ chimera_smb_parse_read(
         return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
     }
 
-    if (request->read.channel == SMB2_CHANNEL_RDMA_V1) {
+    if (chimera_smb_channel_is_rdma(request->read.channel)) {
         if (unlikely(smb_cursor_seek_to(request_cursor, blob_offset) != 0)) {
             chimera_smb_error("Received SMB2 READ with RDMA channel offset out of range");
             return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
@@ -443,7 +475,7 @@ chimera_smb_parse_read(
 
         request->read.num_rdma_elements = blob_length >> 4;
 
-        if (unlikely(request->read.num_rdma_elements > 8)) {
+        if (unlikely(request->read.num_rdma_elements > CHIMERA_SMB_MAX_RDMA_ELEMENTS)) {
             chimera_smb_error("Received SMB2 message with too many RDMA elements");
             request->status = SMB2_STATUS_INVALID_PARAMETER;
             return -1;
@@ -474,10 +506,18 @@ chimera_smb_read_reply(
 {
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_READ_REPLY_SIZE);
 
-    if (request->read.channel == SMB2_CHANNEL_RDMA_V1) {
-        evpl_iovec_cursor_append_uint16(reply_cursor, 0); /* data offset */
+    if (chimera_smb_channel_is_rdma(request->read.channel)) {
+        /* The data went by RDMA Write: DataLength is 0, DataRemaining carries
+         * the count, and DataOffset still names the empty Buffer field
+         * (MS-SMB2 3.3.5.12). */
+        evpl_iovec_cursor_append_uint16(reply_cursor, 64 + 16); /* data offset */
         evpl_iovec_cursor_append_uint32(reply_cursor, 0);
         evpl_iovec_cursor_append_uint32(reply_cursor, request->read.r_length); /* remaining */
+        /* Reserved2, the last of the 16 fixed bytes.  With data in the reply
+         * the pad in front of the data stands in for it; here nothing
+         * follows, and Windows refuses a READ response shorter than the
+         * fixed body. */
+        evpl_iovec_cursor_append_uint32(reply_cursor, 0);
     } else {
         evpl_iovec_cursor_append_uint16(reply_cursor, 64 + 16); /* data offset */
         evpl_iovec_cursor_append_uint32(reply_cursor, request->read.r_length);

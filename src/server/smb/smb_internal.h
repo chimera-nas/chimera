@@ -215,6 +215,12 @@ struct chimera_smb_rdma_element {
     uint64_t offset;
 };
 
+/* The most buffer descriptors one READ or WRITE may carry.  Windows describes
+ * a buffer in pieces of up to 1 MB, so the 8 MB the server allows in one
+ * READ or WRITE arrives as 9 descriptors when the buffer is not page aligned;
+ * the rest is room for a client that registers smaller pieces. */
+#define CHIMERA_SMB_MAX_RDMA_ELEMENTS 16
+
 struct chimera_smb_auth_config {
     int                             winbind_enabled;
     int                             kerberos_enabled;
@@ -843,7 +849,7 @@ struct chimera_smb_request {
              * write-time-sticky handle (chimera_vfs_setattr keeps this pointer
              * across the async call, so it must live in the request). */
             struct chimera_vfs_attrs        restore_attrs;
-            struct chimera_smb_rdma_element rdma_elements[8];
+            struct chimera_smb_rdma_element rdma_elements[CHIMERA_SMB_MAX_RDMA_ELEMENTS];
             struct evpl_iovec               iov[256];
             struct evpl_iovec               chunk_iov[256];
 
@@ -863,7 +869,7 @@ struct chimera_smb_request {
             uint32_t                        r_rdma_status;
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_open_file   *open_file;
-            struct chimera_smb_rdma_element rdma_elements[8];
+            struct chimera_smb_rdma_element rdma_elements[CHIMERA_SMB_MAX_RDMA_ELEMENTS];
             /* Puts back an explicitly set access time after the read. */
             struct chimera_vfs_attrs        restore_attrs;
             struct evpl_iovec               iov[256];
@@ -1619,6 +1625,21 @@ chimera_smb_conn_is_direct(const struct chimera_smb_conn *conn)
     return conn->protocol == EVPL_DATAGRAM_RDMACM_RC ||
            conn->protocol == EVPL_DATAGRAM_INPROC;
 } /* chimera_smb_conn_is_direct */
+
+/* Does a READ or WRITE Channel value (MS-SMB2 2.2.19, 2.2.21) move the data
+ * by RDMA, through the buffer descriptors the request carries?  Both RDMA
+ * values do.  RDMA_V1_INVALIDATE also asks for the first descriptor's token
+ * to be invalidated remotely with the reply; MS-SMBD 3.1.5.1 lets the sender
+ * ignore that, and this server does, so the client invalidates it itself.
+ * Windows sends RDMA_V1_INVALIDATE on every RDMA read and write once the
+ * dialect is 3.0.2 or later, so a test for RDMA_V1 alone misses all of its
+ * RDMA I/O. */
+static inline int
+chimera_smb_channel_is_rdma(uint32_t channel)
+{
+    return channel == SMB2_CHANNEL_RDMA_V1 ||
+           channel == SMB2_CHANNEL_RDMA_V1_INVALIDATE;
+} /* chimera_smb_channel_is_rdma */
 
 /* The MaxReadSize/MaxWriteSize this connection actually advertised, for the
  * READ/WRITE handlers to bound against.

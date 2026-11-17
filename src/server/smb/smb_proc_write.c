@@ -355,8 +355,7 @@ chimera_smb_write(struct chimera_smb_request *request)
     * The Channel field is client-controlled; honoring RDMA_V1 on a plain-TCP
     * connection would dispatch evpl_rdma_read on a non-RDMA bind.  Reject with
     * INVALID_PARAMETER (the spec-required status) before touching the data. */
-    if ((request->write.channel == SMB2_CHANNEL_RDMA_V1 ||
-         request->write.channel == SMB2_CHANNEL_RDMA_V1_INVALIDATE) &&
+    if (chimera_smb_channel_is_rdma(request->write.channel) &&
         !evpl_bind_is_rdma(request->compound->conn->bind)) {
         evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
         chimera_smb_open_file_release(request, request->write.open_file);
@@ -432,7 +431,7 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
-    if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {
+    if (chimera_smb_channel_is_rdma(request->write.channel)) {
         /* We need to read in the data we're supposed to be writing first */
 
         request->write.pending_rdma_reads = request->write.num_rdma_elements;
@@ -510,7 +509,7 @@ chimera_smb_parse_write(
         return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
     }
 
-    if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {
+    if (chimera_smb_channel_is_rdma(request->write.channel)) {
 
         if (unlikely(smb_cursor_seek_to(request_cursor, blob_offset) != 0)) {
             chimera_smb_error("Received SMB2 WRITE with RDMA channel offset out of range");
@@ -519,7 +518,7 @@ chimera_smb_parse_write(
 
         request->write.num_rdma_elements = blob_length >> 4;
 
-        if (unlikely(request->write.num_rdma_elements > 8)) {
+        if (unlikely(request->write.num_rdma_elements > CHIMERA_SMB_MAX_RDMA_ELEMENTS)) {
             chimera_smb_error("Received SMB2 message with too many RDMA elements");
             request->status = SMB2_STATUS_INVALID_PARAMETER;
             return -1;
