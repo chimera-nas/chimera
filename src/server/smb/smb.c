@@ -1479,6 +1479,7 @@ chimera_smb_direct_negotiate(
     struct smb_direct_negotiate_request *request;
     struct smb_direct_negotiate_reply   *reply;
     struct evpl_iovec                    reply_iov;
+    uint32_t                             max_send;
 
     if (length != 20 || niov != 1) {
         chimera_smb_error("Received SMB2 message with invalid length or niov");
@@ -1505,9 +1506,16 @@ chimera_smb_direct_negotiate(
 
     reply = (struct smb_direct_negotiate_reply *) evpl_iovec_data(&reply_iov);
 
-    conn->rdma_max_send = (request->max_receive_size < SMB_DIRECT_MAX_SEND_SIZE ?
-                           request->max_receive_size : SMB_DIRECT_MAX_SEND_SIZE) -
-        SMB_DIRECT_DATA_OFFSET;
+    /* This side's MaxSendSize: the smaller of its own and the peer's
+     * MaxReceiveSize (MS-SMBD 3.1.5.6).  The response advertises it as
+     * PreferredSendSize (3.1.5.3), and the peer takes that as the most it will
+     * be sent and sizes its receive buffers to it (3.1.5.7), so every message
+     * this server sends has to fit it.  Windows drops the connection on a
+     * message larger than its posted receive buffer. */
+    max_send = request->max_receive_size < SMB_DIRECT_MAX_SEND_SIZE ?
+        request->max_receive_size : SMB_DIRECT_MAX_SEND_SIZE;
+
+    conn->rdma_max_send = max_send - SMB_DIRECT_DATA_OFFSET;
 
     reply->min_version         = 0x100;
     reply->max_version         = 0x100;
@@ -1517,7 +1525,7 @@ chimera_smb_direct_negotiate(
     reply->credits_granted     = request->credits_requested;
     reply->status              = SMB2_STATUS_SUCCESS;
     reply->max_readwrite_size  = 8 * 1024 * 1024;
-    reply->preferred_send_size = 7168;
+    reply->preferred_send_size = max_send;
     reply->max_receive_size    = SMB_DIRECT_MAX_SEND_SIZE;
     reply->max_fragmented_size = 1 * 1024 * 1024;
 
