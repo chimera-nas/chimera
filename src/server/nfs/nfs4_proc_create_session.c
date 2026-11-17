@@ -248,17 +248,23 @@ chimera_nfs4_create_session(
                                  args->csa_cb_program, rec_flags);
     }
 
-    /* RFC 8881 §18.36: when the client asks to use this connection as the
-     * backchannel, record it together with the callback program number so the
-     * server can deliver CB_RECALL for delegations over the fore conn.  Also
-     * stamp the callback path on the unified client.  The backchannel carries
-     * the session's own minorversion: a 4.2 client rejects a CB_COMPOUND
-     * tagged minorversion 1 with NFS4ERR_MINOR_VERS_MISMATCH.  No separate
-     * netid/addr -- the backchannel is the fore conn. */
-    /* The program belongs to the session whether or not this connection is
-     * its backchannel: one bound later (BIND_CONN_TO_SESSION) carries it. */
+    /* The callback program and security (RFC 8881 §18.36.3 csa_cb_program,
+     * csa_sec_parms) belong to the session whether or not this connection is
+     * its backchannel: a backchannel bound later (BIND_CONN_TO_SESSION) is
+     * given them from here (nfs4_client_note_backchannel). */
     session->nfs4_session_cb_program = args->csa_cb_program;
+    nfs4_cb_sec_from_parms(args->csa_sec_parms, args->num_csa_sec_parms,
+                           &session->nfs4_session_cb_sec_flavor,
+                           &session->nfs4_session_cb_sec_uid,
+                           &session->nfs4_session_cb_sec_gid);
 
+    /* RFC 8881 §18.36: when the client asks to use this connection as the
+     * backchannel, record it so the server can deliver CB_RECALL for
+     * delegations over the fore conn, and stamp the callback path on the
+     * unified client.  The backchannel carries the session's own
+     * minorversion: a 4.2 client rejects a CB_COMPOUND tagged minorversion 1
+     * with NFS4ERR_MINOR_VERS_MISMATCH.  No separate netid/addr -- the
+     * backchannel is the fore conn. */
     if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
         session->nfs4_session_backchannel_conn = conn;
         /* This compound runs on conn's owner thread; record it so cross-thread
@@ -272,20 +278,14 @@ chimera_nfs4_create_session(
                                 req->minorversion,
                                 NULL, 0, NULL, 0);
 
-        /* Record the callback auth the client wants the server to use
-         * (RFC 8881 §18.36.3 csa_sec_parms).  Use the first parameter; for
-         * AUTH_SYS carry its uid/gid onto the callback path. */
+        /* The callback auth the client wants the server to use, recorded on
+         * the session above. */
         if (args->num_csa_sec_parms > 0) {
-            struct callback_sec_parms4 *sp = &args->csa_sec_parms[0];
-            uint32_t                    uid = 0, gid = 0;
-
-            if (sp->cb_secflavor == AUTH_SYS) {
-                uid = sp->cbsp_sys_cred.uid;
-                gid = sp->cbsp_sys_cred.gid;
-            }
             nfs4_client_set_cb_sec(&shared->nfs4_shared_clients,
                                    args->csa_clientid, 0,
-                                   sp->cb_secflavor, uid, gid);
+                                   session->nfs4_session_cb_sec_flavor,
+                                   session->nfs4_session_cb_sec_uid,
+                                   session->nfs4_session_cb_sec_gid);
         }
 
         /* If this client destroyed a session while a delegation recall was

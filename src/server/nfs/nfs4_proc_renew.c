@@ -14,8 +14,9 @@
  * NFS4ERR_EXPIRED when the client's lease has been lost to a conflicting
  * acquirer.
  *
- * One exception: if the client holds delegations but its callback path has
- * been found unusable (a CB_RECALL failed), RENEW returns NFS4ERR_CB_PATH_DOWN
+ * One exception: if the client holds delegations but its callback path is
+ * down -- a probe or a CB_RECALL failed, or the client registered no callback
+ * program (nfs4_cb_path_reported_down) -- RENEW returns NFS4ERR_CB_PATH_DOWN
  * (RFC 7530 §16.28.4) so the client knows to re-establish the callback path;
  * the server retains the delegations meanwhile. */
 void

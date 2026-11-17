@@ -720,6 +720,15 @@ nfs4_drc_reconstruct_session(
         return NULL;
     }
 
+    /* The callback program belongs to the session (nfs4_proc_create_session).
+     * A client that answers CB_PATH_DOWN after a failover binds a backchannel
+     * to the rebuilt session with BIND_CONN_TO_SESSION, which gives the
+     * client's callback path this program: without it the path has none, and
+     * nfs4_cb_probe_drive answers DOWN for it without storing anything.  The
+     * callback security is not in the record; such a backchannel calls back
+     * with AUTH_NONE until the client sends BACKCHANNEL_CTL. */
+    session->nfs4_session_cb_program = rec->cb_program;
+
     /* Drop the +1 caller ref; the hash holds the session. */
     nfs4_session_put(session);
     return unified;

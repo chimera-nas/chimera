@@ -24,9 +24,11 @@
  * channel to a surviving connection here -- the same repoint + recall re-drive
  * that CREATE_SESSION performs (see nfs4_proc_create_session.c).
  *
- * The op carries no cb_program / sec_parms, so (unlike CREATE_SESSION /
- * BACKCHANNEL_CTL) it does not change the callback program or credentials --
- * those were established earlier; we only repoint the transport.
+ * The op carries no cb_program / sec_parms of its own.  A back-direction bind
+ * gives the client's callback path the program and credentials the session
+ * already has (from CREATE_SESSION or BACKCHANNEL_CTL), which differ from the
+ * path's when the session was created without a backchannel, and repoints the
+ * transport.
  *
  * Chimera multiplexes both channels over a single TCP connection, so binding
  * either direction makes both available at no extra cost; the _OR_BOTH
@@ -133,16 +135,14 @@ chimera_nfs4_bind_conn_to_session(
         /* This compound runs on req->conn's owner thread; record it so
          * cross-thread callbacks marshal their send to the new owner. */
         session->nfs4_session_backchannel_owner = thread;
-        /* A backchannel first bound here is a 4.1 one: record it as such, with
-         * the program the session was created with. */
+        /* Record the backchannel's minor version and the session's program
+         * and callback security on the client. */
         nfs4_client_note_backchannel(&thread->shared->nfs4_shared_clients,
-                                     session->nfs4_session_clientid,
-                                     session->nfs4_session_cb_program,
-                                     req->minorversion);
-        /* The rebind rebuilds the channel on req->session, which is the
-         * session the connection was bound to when this COMPOUND arrived --
-         * none, on a fresh connection, so the path was stored DOWN.  It is the
-         * session just bound, as SEQUENCE sets it. */
+                                     session, req->minorversion);
+        /* The rebind rebuilds the channel on req->session, which the
+         * dispatcher took from the connection's binding when this COMPOUND
+         * arrived: none on a fresh connection, or another session.  Point it
+         * at the session just bound, as SEQUENCE does. */
         req->session = session;
         nfs4_cb_resend_recalls_on_rebind(thread, session->client_unified, req);
     }

@@ -14,6 +14,9 @@
 #
 # memfs only and no vfs section at all (memfs is a built-in module), so the
 # server is the only thing in the picture: no dlopened backend, no KV store.
+#
+# NFS4_TEST_DELEGATIONS=true turns protocol delegations on, for a test that
+# needs one granted (the NFSv4.0 RENEW callback-path test shares this wrapper).
 
 set -u
 
@@ -71,6 +74,7 @@ cat > "$CONFIG_FILE" << EOF
         "delegation_threads": 4,
         "nfs4_lease_time": 4,
         "nfs4_grace_time": 1,
+        "nfs4_delegations": ${NFS4_TEST_DELEGATIONS:-false},
         "external_portmap": false
     },
     "filesystems": {

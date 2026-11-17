@@ -1831,9 +1831,13 @@ nfs4_session_unbind_conn(struct evpl_rpc2_conn *conn)
     /* Drop the backchannel pointer if this was the conn carrying it, so a
      * later recall does not send on a dead connection, and mark the client's
      * callback path down if it rode this session (nfs4_cb_backchannel_lost).
-     * Only the session the connection was last bound to is seen here: a
-     * backchannel left on a connection since bound to another session is not
-     * noticed until a recall over it fails. */
+     * Only the session the connection was last bound to is seen here.  A
+     * session whose backchannel is this connection but which has since been
+     * replaced on it (CREATE_SESSION or SEQUENCE for another session over the
+     * same connection) keeps nfs4_session_backchannel_conn pointing at it, and
+     * libevpl frees the connection once this notify returns: that pointer
+     * dangles, the path stays UP, and the next recall over it is a
+     * use-after-free.  See the field comment in nfs4_session.h. */
     if (session->nfs4_session_backchannel_conn == conn) {
         session->nfs4_session_backchannel_conn = NULL;
         nfs4_cb_backchannel_lost(session);
@@ -2661,13 +2665,13 @@ nfs4_client_set_cb_sec(
 
 void
 nfs4_client_note_backchannel(
-    struct nfs4_client_table *table,
-    uint64_t                  client_id,
-    uint32_t                  cb_program,
-    uint8_t                   minorversion)
+    struct nfs4_client_table  *table,
+    const struct nfs4_session *session,
+    uint8_t                    minorversion)
 {
     struct nfs4_client *c;
     struct nfs_client  *u;
+    uint64_t            client_id = session->nfs4_session_clientid;
 
     evpl_mutex_lock(&table->nfs4_ct_lock);
 
@@ -2681,15 +2685,20 @@ nfs4_client_note_backchannel(
 
     u = c->unified;
 
-    /* Without this a backchannel first registered here kept the minor version
-     * zero a client record starts with, and nfs4_cb_channel_open took it for
-     * a 4.0 callback address that does not exist: no delegation was ever
-     * granted over it. */
+    /* nfs4_cb_channel_open picks the 4.0 transport (connect to cb_addr) or the
+     * 4.1 one (the session's backchannel) by cb_minorversion.  A client record
+     * starts at 0, and only SETCLIENTID_CONFIRM and CREATE_SESSION with
+     * CONN_BACK_CHAN set it otherwise, so a backchannel bound later records
+     * it here, together with the session's program and the callback security
+     * its CREATE_SESSION or BACKCHANNEL_CTL asked for. */
     evpl_mutex_lock(&u->lock);
     u->cb_path.cb_minorversion = minorversion;
-    if (cb_program) {
-        u->cb_path.cb_program = cb_program;
+    if (session->nfs4_session_cb_program) {
+        u->cb_path.cb_program = session->nfs4_session_cb_program;
     }
+    u->cb_path.cb_sec_flavor = session->nfs4_session_cb_sec_flavor;
+    u->cb_path.cb_sec_uid    = session->nfs4_session_cb_sec_uid;
+    u->cb_path.cb_sec_gid    = session->nfs4_session_cb_sec_gid;
     evpl_mutex_unlock(&u->lock);
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
