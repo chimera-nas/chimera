@@ -13,9 +13,11 @@
  * dictates.  The harness accepts no message larger than the PreferredSendSize
  * the server answered the negotiate with, as Windows does, and each
  * connection checks that PreferredSendSize is the smaller of the server's own
- * send size and the MaxReceiveSize offered.  Keepalives -- empty messages
- * asking for a response -- are checked to be answered on a full-size and a
- * minimum-size connection.
+ * send size and the MaxReceiveSize offered.  The datagram transport also
+ * performs real one-sided transfers, so READs and WRITEs under both RDMA
+ * channel values are checked to move their data through a client buffer by
+ * RDMA.  Keepalives -- empty messages asking for a response -- are checked to
+ * be answered on a full-size and a minimum-size connection.
  *
  * Given a wire profile name (signed311), every session is signed and every
  * signed reply's signature is checked, which is what shows the server signed
@@ -210,6 +212,184 @@ check_compound_read(
           (2 * count + 6) / 7, c->direct_nfrag);
 } /* check_compound_read */
 
+/* SMB2 READ and WRITE Channel values (MS-SMB2 2.2.19, 2.2.21).  Both mean
+ * "the data moves by RDMA, through the buffer descriptors in the request";
+ * V1_INVALIDATE also asks the server to invalidate the first descriptor's
+ * token remotely, which MS-SMBD 3.1.5.1 lets it skip.  Windows asks for
+ * V1_INVALIDATE on every RDMA read and write once the dialect is 3.0.2 or
+ * later. */
+#define CHANNEL_RDMA_V1            1
+#define CHANNEL_RDMA_V1_INVALIDATE 2
+
+/* Allocate a len-byte client buffer the server can reach by one-sided RDMA,
+ * and describe it at desc with ndesc SMB_DIRECT_BUFFER_DESCRIPTOR_V1s (MS-SMBD
+ * 2.2.3.1): Offset, Token, Length.  The descriptors split the buffer into
+ * consecutive pieces, as Windows describes a large buffer in pieces of up to
+ * 1 MB.  The in-process transport performs the server's RDMA Read and Write
+ * as a memcpy against registered memory, so the bytes really move through
+ * the buffer. */
+static uint8_t *
+rdma_buffer(
+    struct smb2_conn  *c,
+    struct evpl_iovec *buf,
+    uint32_t           len,
+    uint32_t           ndesc,
+    uint8_t           *desc)
+{
+    uint32_t token, piece, i;
+    uint64_t addr;
+
+    if (evpl_iovec_alloc(c->env->evpl, len, 4096, 1, 0, buf) != 1) {
+        fprintf(stderr, "could not allocate a contiguous %u-byte RDMA buffer\n", len);
+        exit(1);
+    }
+    evpl_rdma_get_address(c->env->evpl, c->bind, buf, &token, &addr);
+    piece = len / ndesc;
+    for (i = 0; i < ndesc; i++) {
+        p64(desc + 16 * i, 0, addr + (uint64_t) piece * i);                      /* Offset */
+        p32(desc + 16 * i, 8, token);                                            /* Token */
+        p32(desc + 16 * i, 12, i + 1 < ndesc ? piece : len - piece * (ndesc - 1)); /* Length */
+    }
+    return evpl_iovec_data(buf);
+} /* rdma_buffer */
+
+/* READ len bytes at offset 0 with the given Channel and ndesc buffer
+ * descriptors.  The data must arrive by RDMA Write into the client's buffer,
+ * and the reply must carry none of it: DataLength 0 and DataRemaining len
+ * (MS-SMB2 3.3.5.12).  The reply is still a whole READ response -- Windows
+ * refuses one shorter than the 16-byte fixed body as an invalid response. */
+static void
+check_rdma_read(
+    struct smb2_conn *c,
+    const uint8_t     fid[16],
+    uint32_t          channel,
+    uint32_t          len,
+    uint32_t          ndesc)
+{
+    struct evpl_iovec buf;
+    const uint8_t    *rb;
+    uint8_t          *body, *data;
+    uint32_t          st;
+    int               b;
+
+    b    = smb2c_begin(c, SMB2_READ, 0);
+    body = c->sbuf + b;
+    p16(body, 0, 49);                 /* StructureSize */
+    p32(body, 4, len);                /* Length; Offset 0 */
+    memcpy(body + 16, fid, 16);       /* FileId */
+    p32(body, 36, channel);           /* Channel */
+    p32(body, 40, len);               /* RemainingBytes: the length to read */
+    p16(body, 44, SMB2_HDR_SIZE + 48); /* ReadChannelInfoOffset */
+    p16(body, 46, 16 * ndesc);        /* ReadChannelInfoLength */
+    data = rdma_buffer(c, &buf, len, ndesc, body + 48);
+    memset(data, 0, len);
+
+    st = smb2c_xfer(c, 48 + 16 * ndesc);
+    rb = c->rbuf + 4 + SMB2_HDR_SIZE;
+    CHECK(st == ST_SUCCESS, "RDMA READ %u, Channel %u, %u descriptors -> 0x%08x", len, channel, ndesc, st);
+    if (st == ST_SUCCESS) {
+        CHECK(c->rlen - 4 >= SMB2_HDR_SIZE + 16,
+              "RDMA READ %u, Channel %u: the reply holds the whole fixed body (%d bytes)",
+              len, channel, c->rlen - 4);
+        CHECK(g32(rb, 4) == 0 && g32(rb, 8) == len,
+              "RDMA READ %u, Channel %u: no data in the reply (DataLength %u, DataRemaining %u)",
+              len, channel, g32(rb, 4), g32(rb, 8));
+        /* DataOffset still names the (empty) Buffer field. */
+        CHECK(rb[2] == SMB2_HDR_SIZE + 16, "RDMA READ %u, Channel %u: DataOffset %u (%u)",
+              len, channel, SMB2_HDR_SIZE + 16, rb[2]);
+    }
+    CHECK(memcmp(data, pattern, len) == 0,
+          "RDMA READ %u, Channel %u: data written into the client's buffer", len, channel);
+    evpl_iovec_release(c->env->evpl, &buf);
+} /* check_rdma_read */
+
+/* READ 32768 bytes at off, where only avail are left before the end of the
+ * file, with two descriptors of 16384: the data ends inside the first and the
+ * second gets none.  The reply must still come, and count avail bytes. */
+static void
+check_rdma_short_read(
+    struct smb2_conn *c,
+    const uint8_t     fid[16],
+    uint32_t          channel,
+    uint64_t          off,
+    uint32_t          avail,
+    const uint8_t    *want)
+{
+    struct evpl_iovec buf;
+    const uint8_t    *rb;
+    uint8_t          *body, *data;
+    uint32_t          st;
+    int               b;
+
+    b    = smb2c_begin(c, SMB2_READ, 0);
+    body = c->sbuf + b;
+    p16(body, 0, 49);                 /* StructureSize */
+    p32(body, 4, 32768);              /* Length */
+    p64(body, 8, off);                /* Offset */
+    memcpy(body + 16, fid, 16);       /* FileId */
+    p32(body, 36, channel);           /* Channel */
+    p32(body, 40, 32768);             /* RemainingBytes: the length to read */
+    p16(body, 44, SMB2_HDR_SIZE + 48); /* ReadChannelInfoOffset */
+    p16(body, 46, 32);                /* ReadChannelInfoLength */
+    data = rdma_buffer(c, &buf, 32768, 2, body + 48);
+    memset(data, 0, 32768);
+
+    st = smb2c_xfer(c, 48 + 32);
+    rb = c->rbuf + 4 + SMB2_HDR_SIZE;
+    CHECK(st == ST_SUCCESS && g32(rb, 4) == 0 && g32(rb, 8) == avail,
+          "RDMA READ 32768 with %u left, Channel %u -> 0x%08x DataLength %u DataRemaining %u",
+          avail, channel, st, g32(rb, 4), g32(rb, 8));
+    CHECK(memcmp(data, want, avail) == 0,
+          "RDMA READ 32768 with %u left, Channel %u: data written into the client's buffer", avail, channel);
+    evpl_iovec_release(c->env->evpl, &buf);
+} /* check_rdma_short_read */
+
+/* WRITE len bytes at off with the given Channel, as Windows sends an RDMA
+ * write: no data in the request (Length and DataOffset 0), RemainingBytes
+ * len, and ndesc buffer descriptors naming the client buffer the server must
+ * RDMA Read the data from (MS-SMB2 2.2.21).  The reply must count len bytes,
+ * and a plain READ must return what the buffer held. */
+static void
+check_rdma_write(
+    struct smb2_conn *c,
+    const uint8_t     fid[16],
+    uint32_t          channel,
+    uint64_t          off,
+    uint32_t          len,
+    uint32_t          ndesc)
+{
+    struct evpl_iovec buf;
+    uint8_t          *body, *data;
+    uint32_t          st, count, rlen, i;
+    int               b;
+
+    b    = smb2c_begin(c, SMB2_WRITE, 0);
+    body = c->sbuf + b;
+    p16(body, 0, 49);                 /* StructureSize; DataOffset, Length 0 */
+    p64(body, 8, off);                /* Offset */
+    memcpy(body + 16, fid, 16);       /* FileId */
+    p32(body, 32, channel);           /* Channel */
+    p32(body, 36, len);               /* RemainingBytes: the length to write */
+    p16(body, 40, SMB2_HDR_SIZE + 48); /* WriteChannelInfoOffset */
+    p16(body, 42, 16 * ndesc);        /* WriteChannelInfoLength */
+    data = rdma_buffer(c, &buf, len, ndesc, body + 48);
+    for (i = 0; i < len; i++) {
+        data[i] = (uint8_t) (pattern[i] ^ (0x50 + channel));
+    }
+
+    st    = smb2c_xfer(c, 48 + 16 * ndesc);
+    count = st == ST_SUCCESS ? smb2c_write_count(c) : 0;
+    CHECK(st == ST_SUCCESS && count == len,
+          "RDMA WRITE %u at %" PRIu64 ", Channel %u, %u descriptors -> 0x%08x count=%u",
+          len, off, channel, ndesc, st, count);
+
+    rlen = 0;
+    st   = smb2_read(c, fid, off, len, rdbuf, &rlen);
+    CHECK(st == ST_SUCCESS && rlen == len && memcmp(rdbuf, data, len) == 0,
+          "RDMA WRITE %u, Channel %u: read back intact (0x%08x, %u bytes)", len, channel, st, rlen);
+    evpl_iovec_release(c->env->evpl, &buf);
+} /* check_rdma_write */
+
 /* Keepalives (MS-SMBD 3.1.5.8): a data-transfer message with
  * SMB_DIRECT_RESPONSE_REQUESTED must be answered promptly, or the peer's
  * idle timer tears the connection down.  The answer is checked after an ECHO
@@ -275,6 +455,7 @@ main(
     struct smb2_conn               *c, *c2, *c3, *c4, *bad;
     struct smb2_create_out          co, co2, co3, co4;
     uint32_t                        st, count, off;
+    uint8_t                         tail[4096];
 
     for (uint32_t i = 0; i < DIRECT_FILE_SIZE; i++) {
         pattern[i] = (uint8_t) (i ^ (i >> 8) ^ (i >> 16));
@@ -326,6 +507,26 @@ main(
     /* A reply short enough for one fragment but with too many iovecs for one
      * send. */
     check_compound_read(c, co.file_id, 12);
+
+    /* Data moved by RDMA under each RDMA channel value; the writes land past
+     * DIRECT_FILE_SIZE, so every READ below still sees the pattern. */
+    check_rdma_read(c, co.file_id, CHANNEL_RDMA_V1, 32768, 1);
+    check_rdma_read(c, co.file_id, CHANNEL_RDMA_V1_INVALIDATE, 32768, 1);
+    check_rdma_write(c, co.file_id, CHANNEL_RDMA_V1, DIRECT_FILE_SIZE, 32768, 1);
+    check_rdma_write(c, co.file_id, CHANNEL_RDMA_V1_INVALIDATE, DIRECT_FILE_SIZE + 32768, 32768, 1);
+
+    /* Nine descriptors is what Windows sends for the largest READ or WRITE
+     * the server allows, 8 MB, from a buffer that is not page aligned: one
+     * per megabyte and one for the overhang. */
+    check_rdma_read(c, co.file_id, CHANNEL_RDMA_V1_INVALIDATE, 32768, 9);
+    check_rdma_write(c, co.file_id, CHANNEL_RDMA_V1_INVALIDATE, DIRECT_FILE_SIZE + 65536, 32768, 9);
+
+    /* The file now ends at DIRECT_FILE_SIZE + 98304, at the end of that
+     * WRITE; read across the end, starting 4096 bytes before it. */
+    for (uint32_t i = 0; i < 4096; i++) {
+        tail[i] = (uint8_t) (pattern[28672 + i] ^ (0x50 + CHANNEL_RDMA_V1_INVALIDATE));
+    }
+    check_rdma_short_read(c, co.file_id, CHANNEL_RDMA_V1_INVALIDATE, DIRECT_FILE_SIZE + 98304 - 4096, 4096, tail);
 
     st = smb2_close(c, co.file_id);
     CHECK(st == ST_SUCCESS, "CLOSE -> 0x%08x", st);
