@@ -316,13 +316,23 @@ struct nfs4_session {
      * reply record. */
     _Atomic bool                      replay_hydrating;
     /* NFSv4.1 backchannel for delegation recalls (RFC 8881 §2.10.3.1).
-     * Set at CREATE_SESSION when CREATE_SESSION4_FLAG_CONN_BACK_CHAN is
-     * requested: cb_program is the client's callback program number and
-     * backchannel_conn is the fore connection the session was created on,
-     * which doubles as the server->client callback transport.  The conn is
-     * a borrowed pointer kept live by the session<->conn binding; it is
-     * cleared by nfs4_session_unbind_conn on disconnect. */
+     * cb_program and the cb_sec_* callback security (csa_sec_parms) belong to
+     * the session: CREATE_SESSION records them whether or not it asks for a
+     * backchannel, and BACKCHANNEL_CTL replaces them, so a backchannel bound
+     * later (BIND_CONN_TO_SESSION) carries them.  backchannel_conn is the
+     * connection bound as the back channel, by CREATE_SESSION with
+     * CREATE_SESSION4_FLAG_CONN_BACK_CHAN or by BIND_CONN_TO_SESSION.  It is a
+     * borrowed pointer with no reference behind it: nfs4_session_unbind_conn
+     * clears it when the connection closes while still bound to this session,
+     * but a connection since bound to another session (rebound by
+     * CREATE_SESSION or SEQUENCE) is freed on close with this pointer still
+     * set, and a later recall over it is a use-after-free.  That needs every
+     * session whose backchannel is the closing connection to be found, which
+     * the connection's single bound session cannot do. */
     uint32_t                          nfs4_session_cb_program;
+    uint32_t                          nfs4_session_cb_sec_flavor;
+    uint32_t                          nfs4_session_cb_sec_uid;
+    uint32_t                          nfs4_session_cb_sec_gid;
     struct evpl_rpc2_conn            *nfs4_session_backchannel_conn;
     /* The thread that owns nfs4_session_backchannel_conn's evpl (set whenever
      * the backchannel conn is (re)assigned, on that conn's own handler thread).
@@ -760,16 +770,39 @@ nfs4_client_set_cb_sec(
     uint32_t                  uid,
     uint32_t                  gid);
 
-/* A 4.1 backchannel registered after CREATE_SESSION (BIND_CONN_TO_SESSION
- * with a back direction, or BACKCHANNEL_CTL): record the minor version it
- * speaks, and cb_program unless it is zero.  The path's state is left to the
- * caller, whose rebind forces a fresh probe. */
+/* A 4.1 backchannel bound after CREATE_SESSION (BIND_CONN_TO_SESSION with a
+ * back direction): record on the session's client the minor version the
+ * backchannel speaks, the session's callback program unless it is zero, and
+ * the session's callback security.  The path's state is left to the caller,
+ * which rebuilds the channel and so re-probes it. */
 void
 nfs4_client_note_backchannel(
-    struct nfs4_client_table *table,
-    uint64_t                  client_id,
-    uint32_t                  cb_program,
-    uint8_t                   minorversion);
+    struct nfs4_client_table  *table,
+    const struct nfs4_session *session,
+    uint8_t                    minorversion);
+
+/* The callback security a client asked for in CREATE_SESSION's csa_sec_parms
+ * or BACKCHANNEL_CTL's bca_sec_parms: the first entry's flavor, with its
+ * uid/gid for AUTH_SYS; AUTH_NONE when the list is empty. */
+static inline void
+nfs4_cb_sec_from_parms(
+    const struct callback_sec_parms4 *parms,
+    uint32_t                          nparms,
+    uint32_t                         *flavor,
+    uint32_t                         *uid,
+    uint32_t                         *gid)
+{
+    *flavor = AUTH_NONE;
+    *uid    = 0;
+    *gid    = 0;
+    if (nparms > 0) {
+        *flavor = parms[0].cb_secflavor;
+        if (*flavor == AUTH_SYS) {
+            *uid = parms[0].cbsp_sys_cred.uid;
+            *gid = parms[0].cbsp_sys_cred.gid;
+        }
+    }
+} /* nfs4_cb_sec_from_parms */
 
 struct nfs4_session *
 nfs4_session_lookup(

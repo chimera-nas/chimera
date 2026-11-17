@@ -384,6 +384,15 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py" AND
         SKIP_RETURN_CODE 77
         TIMEOUT 180
         ENVIRONMENT "PYTHONUNBUFFERED=1")
+    add_test(NAME chimera/server/nfs/v40_cb_path_renew
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_lease_cancel_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs
+                ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_v40_cb_path_renew.py)
+    set_tests_properties(chimera/server/nfs/v40_cb_path_renew PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120
+        ENVIRONMENT "PYTHONUNBUFFERED=1;NFS4_TEST_DELEGATIONS=true")
 endif()
 
 # End-to-end NFSv4.1 presented-stateid validation: a superseded stateid seqid

@@ -382,6 +382,7 @@ test_cross_reboot_replay(void)
     srec.replay_maxresp_cached = session->replay_maxresp_cached;
     srec.fore                  = session->nfs4_session_fore_attrs;
     srec.back                  = session->nfs4_session_back_attrs;
+    srec.cb_program            = 0x40000123;
     srec.owner_len             = sizeof(owner) - 1;
     memcpy(srec.owner,owner,srec.owner_len);
 
@@ -410,6 +411,9 @@ test_cross_reboot_replay(void)
     CHECK(memcmp(session->nfs4_session_id, sessionid, NFS4_SESSIONID_SIZE) == 0);
     CHECK(session->nfs4_session_clientid == srec.clientid);
     CHECK(session->nfs4_session_persist);
+    /* With its callback program, which a backchannel the client binds to it
+     * after the failover gives the client's callback path. */
+    CHECK(session->nfs4_session_cb_program == 0x40000123);
 
     /* Every slot of the rebuilt session waits for either a reply record or
      * the client's own seqid; none demands seqid 1. */
@@ -2561,12 +2565,11 @@ test_nfs3_drc_persist_switch(void)
 
 /*
  * RENEW answers NFS4ERR_CB_PATH_DOWN to a client holding delegations whose
- * callback path is down (RFC 7530 Section 16.30).  A registration with no
- * callback program is one: nothing can be recalled over it.  But no probe ever
- * records it -- nfs4_cb_probe_drive answers DOWN for it without storing
- * anything, and every registration resets the stored state to UNINIT -- so a
- * client that re-registered with program zero while holding delegations was
- * told its path was fine.
+ * callback path is down (RFC 7530 Section 16.28).  A registration with no
+ * callback program is down -- nothing can be recalled over it -- although no
+ * probe ever stores that: nfs4_cb_probe_drive answers DOWN for it without
+ * storing anything, and every registration resets the stored state to
+ * UNINIT.  nfs4_cb_path_reported_down reports it down all the same.
  */
 static void
 test_cb_path_reported_down(void)
@@ -2589,7 +2592,7 @@ test_cb_path_reported_down(void)
     CHECK(c != NULL && c->unified != NULL);
     u = c->unified;
 
-    /* Registered with a program: not down, whatever the probe later finds. */
+    /* Registered with a program and not yet probed: not down. */
     nfs4_client_set_cb_path(&table,clientid,0x40000000,1,0,netid,3,addr,
                             (int) sizeof(addr) - 1);
     CHECK(atomic_load(&u->cb_path.cb_state) == NFS4_CB_UNINIT);

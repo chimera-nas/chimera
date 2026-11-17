@@ -12,9 +12,10 @@
  * the model and this probe together) or a regression landed.
  *
  * Behaviors pinned:
- *   K1  probe kick: a client's FIRST delegation-eligible OPEN gets no
- *       delegation (it kicks the CB_NULL path probe); the probe completes
- *       immediately in-process, so the SECOND eligible OPEN grants.
+ *   K1  no probe kick at 4.1: the session's backchannel is up at
+ *       CREATE_SESSION, so a client's FIRST delegation-eligible OPEN is
+ *       granted (the CB_NULL kick, where the first OPEN gets none, is the
+ *       4.0 path's).
  *   G1  grant matrix: WRITE/BOTH open -> write delegation; READ open ->
  *       read delegation (fresh file, no contention).
  *   G2  same client re-OPEN of a file it holds a delegation on: no second
