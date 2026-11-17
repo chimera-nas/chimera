@@ -11,6 +11,10 @@
  * fragmented, so every READ here is checked twice: the bytes against what was
  * written, and the fragment count and sizes against what MaxReceiveSize
  * dictates.
+ *
+ * Given a wire profile name (signed311), every session is signed and every
+ * signed reply's signature is checked, which is what shows the server signed
+ * each reply from the right place behind the SMB Direct header.
  */
 
 #include "smb2_mbt_common.h"
@@ -38,6 +42,19 @@ static int failures = 0;
 static uint8_t pattern[DIRECT_FILE_SIZE];
 static uint8_t rdbuf[DIRECT_FILE_SIZE];
 
+/* An SMB Direct connection that also checks the signature on every signed
+ * reply, which only matters on a signed run. */
+static struct smb2_conn *
+open_direct(
+    struct smb2_env *env,
+    uint32_t         max_receive_size)
+{
+    struct smb2_conn *c = smb2_conn_open_direct(env, max_receive_size);
+
+    c->check_reply_sigs = 1;
+    return c;
+} /* open_direct */
+
 /* READ len bytes at offset 0, then check the data and the fragmentation: the
  * reply arrived in nfrag fragments, each but the final one carrying max_send
  * bytes and the final one carrying last bytes. */
@@ -55,6 +72,11 @@ check_read(
 
     CHECK(st == ST_SUCCESS && rlen == len, "READ %u -> 0x%08x len=%u", len, st, rlen);
     CHECK(memcmp(rdbuf, pattern, len) == 0, "READ %u data intact", len);
+    if (c->signing_on) {
+        /* The harness already rejected a bad signature; this makes sure there
+         * was one to check. */
+        CHECK(g32(c->rbuf + 4, 16) & SMB2_FLAGS_SIGNED, "READ %u reply is signed", len);
+    }
     CHECK(c->direct_nfrag == nfrag, "READ %u in %d fragment(s) (%d)", len, nfrag, c->direct_nfrag);
     CHECK(c->direct_nfrag > 0, "READ %u left a fragment record", len);
     if (c->direct_nfrag == 0) {
@@ -108,7 +130,25 @@ check_compound_read(
         memcpy(body + 16, fid, 16);       /* FileId */
     }
 
-    smb2c_send(c, total - SMB2_HDR_SIZE);
+    if (c->signing_on) {
+        uint8_t sig[16];
+
+        /* Each request in a compound is signed on its own, up to its
+         * NextCommand (MS-SMB2 3.2.4.1.1), but smb2c_send signs its buffer as
+         * one message: sign here and keep smb2c_send from signing again. */
+        for (i = 0; i < count; i++) {
+            h = c->sbuf + 4 + 120 * i;
+            p32(h, 16, g32(h, 16) | SMB2_FLAGS_SIGNED);
+            smb2w_sign(c->dialect, c->signing_alg, c->signing_key, h,
+                       i + 1 < count ? 120 : SMB2_HDR_SIZE + 49, sig);
+            memcpy(h + 48, sig, 16);
+        }
+        c->signing_on = 0;
+        smb2c_send(c, total - SMB2_HDR_SIZE);
+        c->signing_on = 1;
+    } else {
+        smb2c_send(c, total - SMB2_HDR_SIZE);
+    }
     c->msg_id += (uint64_t) (count - 1);
     smb2c_wait(c);
 
@@ -130,6 +170,9 @@ check_compound_read(
               off + doff + 16 <= c->rlen &&
               memcmp(h + doff, pattern + 16 * nrsp, 16) == 0,
               "compound READ %d intact (0x%08x, %u bytes)", nrsp, st, dlen);
+        if (c->signing_on) {
+            CHECK(g32(h, 16) & SMB2_FLAGS_SIGNED, "compound READ %d reply is signed", nrsp);
+        }
         nrsp++;
         if (next == 0) {
             break;
@@ -154,11 +197,12 @@ main(
     int   argc,
     char *argv[])
 {
-    struct smb2_env        env;
-    struct smb2_env_opts   opts = { 0 };
-    struct smb2_conn      *c, *c2, *c3, *c4, *bad;
-    struct smb2_create_out co, co2, co3, co4;
-    uint32_t               st, count, off;
+    struct smb2_env                 env;
+    struct smb2_env_opts            opts = { 0 };
+    const struct smb2_wire_profile *wire = argc > 1 ? smb2_wire_profile_find(argv[1]) : NULL;
+    struct smb2_conn               *c, *c2, *c3, *c4, *bad;
+    struct smb2_create_out          co, co2, co3, co4;
+    uint32_t                        st, count, off;
 
     for (uint32_t i = 0; i < DIRECT_FILE_SIZE; i++) {
         pattern[i] = (uint8_t) (i ^ (i >> 8) ^ (i >> 16));
@@ -166,9 +210,10 @@ main(
 
     opts.smb_direct       = 1;
     opts.memfs_block_size = 4096;
-    smb2_env_start_opts(&env, &opts);
+    smb2_env_open_wire(&env, &opts, wire);
+    smb2_env_fs_setup(&env, "fs0");
 
-    c = smb2_conn_open_direct(&env, DIRECT_MAX_RECV);
+    c = open_direct(&env, DIRECT_MAX_RECV);
     CHECK(c->direct_negotiated, "SMB Direct negotiate accepted");
     if (!c->direct_negotiated) {
         /* Nothing below can run on a connection the server refused. */
@@ -214,7 +259,7 @@ main(
 
     /* A second connection offering a small MaxReceiveSize, so every reply
      * larger than 1000 bytes fragments, the handshake's included. */
-    c2 = smb2_conn_open_direct(&env, 1024);
+    c2 = open_direct(&env, 1024);
     CHECK(c2->direct_negotiated, "SMB Direct negotiate accepted at MaxReceiveSize 1024");
     smb2_handshake(c2);
     st = smb2_create(c2, "direct.bin", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
@@ -225,15 +270,15 @@ main(
     CHECK(st == ST_SUCCESS, "CLOSE on the small-MTU connection -> 0x%08x", st);
 
     /* Below the MS-SMBD minimum: refused, and the server keeps serving. */
-    bad = smb2_conn_open_direct(&env, 64);
+    bad = open_direct(&env, 64);
     CHECK(!bad->direct_negotiated && bad->disconnected, "MaxReceiveSize 64 is refused");
-    bad = smb2_conn_open_direct(&env, 127);
+    bad = open_direct(&env, 127);
     CHECK(!bad->direct_negotiated && bad->disconnected, "MaxReceiveSize 127 is refused");
-    bad = smb2_conn_open_direct(&env, 16);
+    bad = open_direct(&env, 16);
     CHECK(!bad->direct_negotiated && bad->disconnected, "MaxReceiveSize 16 is refused");
 
     /* The minimum itself works: 104-byte fragments. */
-    c3 = smb2_conn_open_direct(&env, 128);
+    c3 = open_direct(&env, 128);
     CHECK(c3->direct_negotiated, "MaxReceiveSize 128 is accepted");
     smb2_handshake(c3);
     st = smb2_create(c3, "direct.bin", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,
@@ -244,7 +289,7 @@ main(
     CHECK(st == ST_SUCCESS, "CLOSE on the minimum-size connection -> 0x%08x", st);
 
     /* A peer that would take 64 KiB at once still gets the server's own size. */
-    c4 = smb2_conn_open_direct(&env, 65536);
+    c4 = open_direct(&env, 65536);
     CHECK(c4->direct_negotiated, "MaxReceiveSize 65536 is accepted");
     smb2_handshake(c4);
     st = smb2_create(c4, "direct.bin", MBT_FILE_OPEN, MBT_FILE_ALL_ACCESS,

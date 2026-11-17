@@ -52,6 +52,15 @@ set_tests_properties(chimera/server/smb/mbt/direct_probe_memfs PROPERTIES
     LABELS "functional;probe;smb_mbt;memfs"
     TIMEOUT 60)
 
+# The same probe on signed sessions, checking every reply's signature: SMB
+# Direct moves where the signed message starts in the reply buffer.
+add_test(NAME chimera/server/smb/mbt/direct_probe_memfs_signed311
+    COMMAND $<TARGET_FILE:smb2_direct_probe> signed311)
+set_tests_properties(chimera/server/smb/mbt/direct_probe_memfs_signed311 PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_direct_probe_memfs_signed311"
+    LABELS "functional;probe;smb_mbt;memfs"
+    TIMEOUT 60)
+
 # Hold a backend rename across TREE_DISCONNECT to exercise a completion after
 # the requesting tree has released its share.  The probe embeds memfs to hook
 # its dispatch; ENABLE_EXPORTS lets the server's VFS find that hooked vfs_memfs

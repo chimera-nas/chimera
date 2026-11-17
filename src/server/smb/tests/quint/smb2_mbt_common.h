@@ -656,7 +656,12 @@ struct smb2_conn {
      * is what distinguishes a continuation leg from the start of a new
      * session for preauth-hash purposes. */
     int                             ss_in_progress;
-    int                             signing_on;    /* sign + verify traffic */
+    int                             signing_on;    /* sign requests */
+    /* Also check the signature on every signed reply (smb2c_check_signatures).
+     * Opt-in for now: the signed base replay draws a signed
+     * STATUS_USER_SESSION_DELETED reply whose signature this check rejects,
+     * which needs a look of its own before the check can be on everywhere. */
+    int                             check_reply_sigs;
     int                             encrypt_on;    /* wrap in TRANSFORM */
     /* SMB3 transport compression.  compress_on means the client advertised a
      * COMPRESSION_CAPABILITIES context and the server echoed one back, which
@@ -941,6 +946,55 @@ smb2c_record_notify(
     smb2c_parse_notify(n, msg, msglen);
 } /* smb2c_record_notify */
 
+/* Check the signature of every signed message in the reply framed in
+ * c->xbuf[0, off), each element of a compound on its own: a signed element
+ * covers itself up to its NextCommand, the last one up to the end (MS-SMB2
+ * 3.2.5.1.3).  Without this, signing is only ever checked on requests, and a
+ * server that signed the wrong bytes -- or the right bytes from the wrong
+ * offset -- passes every signed run.  SESSION_SETUP responses are left out:
+ * the final one is signed with the key it completes, which this side arms only
+ * after it has arrived. */
+static void
+smb2c_check_signatures(
+    struct smb2_conn *c,
+    int               off)
+{
+    uint8_t *msg  = c->xbuf + 4;
+    int      left = off - 4;
+
+    while (left >= SMB2_HDR_SIZE) {
+        uint32_t next = g32(msg, 20);
+        int      len  = next ? (int) next : left;
+        uint8_t  want[16], got[16];
+
+        if (next && (next < SMB2_HDR_SIZE || next > (uint32_t) left)) {
+            fprintf(stderr, "smb2 harness: reply NextCommand %u overruns the "
+                    "%d bytes left of the compound\n", next, left);
+            smb2c_exit(6);
+        }
+        if ((g32(msg, 16) & SMB2_FLAGS_SIGNED) &&
+            g16(msg, 12) != SMB2_SESSION_SETUP) {
+            memcpy(want, msg + 48, 16);
+            memset(msg + 48, 0, 16);
+            smb2w_sign(c->dialect, c->signing_alg, c->signing_key, msg, len,
+                       got);
+            memcpy(msg + 48, want, 16);
+            if (memcmp(got, want, 16) != 0) {
+                fprintf(stderr, "smb2 harness: bad signature on a reply on "
+                        "conn %d (command %u, MessageId %llu, status 0x%08x, "
+                        "%d bytes)\n", c->conn_index, g16(msg, 12),
+                        (unsigned long long) g64(msg, 24), g32(msg, 8), len);
+                smb2c_exit(6);
+            }
+        }
+        if (next == 0) {
+            break;
+        }
+        msg  += next;
+        left -= (int) next;
+    }
+} /* smb2c_check_signatures */
+
 /* Hand one complete message, framed with its 4-byte NetBIOS header in
  * c->xbuf[0, off), to the reply machinery: unwrap encryption and compression,
  * then classify it as a break, an interim, a CREATE completion, a CHANGE_NOTIFY
@@ -992,6 +1046,11 @@ smb2c_deliver(
         memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
         off = 4 + plen;
         c->compressed_replies++;
+    }
+    /* Then the signatures, over the plaintext: the server signs a reply before
+     * it compresses or encrypts it (chimera_smb_compound_reply). */
+    if (c->signing_on && c->check_reply_sigs) {
+        smb2c_check_signatures(c, off);
     }
     if (off >= 4 + SMB2_HDR_SIZE) {
         uint16_t cmd    = g16(c->xbuf + 4, 12);
