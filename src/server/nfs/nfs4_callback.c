@@ -627,6 +627,19 @@ nfs4_cb_recall_send(
     uint8_t                    fhwire[CHIMERA_NFS_FH_MAX];
     int                        fhwire_len;
 
+    if (chan && chan->owner_thread != thread) {
+        /* The channel was rebuilt on another thread after this recall was
+         * queued here (a rebind: BIND_CONN_TO_SESSION, CREATE_SESSION or
+         * BACKCHANNEL_CTL).  Its connection belongs to the new channel's
+         * owner, and evpl sends are not cross-thread safe, so hand the recall
+         * to that owner rather than send it from here.  The enqueue takes its
+         * own reference; drop the one this queue held. */
+        nfs4_cb_recall_enqueue(deleg);
+        nfs_state_table_release(&thread->shared->nfs4_state_table, deleg,
+                                NFS4_SLOT_TYPE_DELEG, thread->vfs_thread);
+        return;
+    }
+
     if (!conn) {
         /* The backchannel went away before this queued recall could be sent
          * (e.g. the client destroyed the session in the DESTROY/CREATE gap).
