@@ -86,6 +86,10 @@ chimera_linux_errno_to_status(int err)
             return CHIMERA_VFS_EAGAIN;
         case EACCES:
             return CHIMERA_VFS_EACCES;
+        case ETXTBSY:
+            /* A write open of a file being executed on the host: the
+             * caller may not write it, and may still open it to read. */
+            return CHIMERA_VFS_EACCES;
         case EFAULT:
             return CHIMERA_VFS_EFAULT;
         case EEXIST:

@@ -23,6 +23,12 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "smb2_mbt_common.h"
 #include "vfs/sdk/vfs_error.h"
@@ -413,6 +419,134 @@ probe_ro_create_handle_writes(struct smb2_conn *c)
     smb2_close(c, o.file_id);
 } /* probe_ro_create_handle_writes */
 
+/* ---- a file being executed on the server host ---------------------------
+ *
+ * The kernel refuses a write open of a running executable with ETXTBSY.  A
+ * MAXIMUM_ALLOWED open of one is re-issued read-only and granted no data-write
+ * right; an explicit data-write open is refused ACCESS_DENIED.  Passthrough
+ * backends only: `dir` is the shared host directory. */
+
+/* Copy /bin/sleep to `path` (named "sleep") as an executable. */
+static int
+oa_copy_sleep(const char *path)
+{
+    char    buf[65536];
+    ssize_t n;
+    int     in, out, ok = 1;
+
+    in = open("/bin/sleep", O_RDONLY);
+    if (in < 0) {
+        return 0;
+    }
+    out = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (out < 0) {
+        close(in);
+        return 0;
+    }
+    while ((n = read(in, buf, sizeof(buf))) > 0) {
+        if (write(out, buf, n) != n) {
+            ok = 0;
+            break;
+        }
+    }
+    if (n < 0) {
+        ok = 0;
+    }
+    close(in);
+    close(out);
+    return ok;
+} /* oa_copy_sleep */
+
+/* Wait until a write open of `path` fails ETXTBSY (the child has exec'd it).
+ * Returns 0 if it never does: the exec failed, or this kernel lets a running
+ * executable be opened for write. */
+static int
+oa_wait_txtbsy(const char *path)
+{
+    struct timespec ts = { 0, 20 * 1000 * 1000 };
+    int             fd, i;
+
+    for (i = 0; i < 100; i++) {
+        fd = open(path, O_WRONLY);
+        if (fd < 0 && errno == ETXTBSY) {
+            return 1;
+        }
+        if (fd >= 0) {
+            close(fd);
+        }
+        nanosleep(&ts, NULL);
+    }
+    return 0;
+} /* oa_wait_txtbsy */
+
+static void
+probe_running_file(
+    struct smb2_conn *c,
+    const char       *dir)
+{
+    struct smb2_create_out o;
+    char                   path[600];
+    uint8_t                out[4];
+    uint32_t               st, ga, n = 0;
+    pid_t                  pid;
+
+    printf("# running_file\n");
+    if (!dir || !dir[0]) {
+        printf("# skip running_file: memfs has no host file to execute\n");
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/sleep", dir);
+    if (!oa_copy_sleep(path)) {
+        printf("# skip running_file: cannot copy /bin/sleep (%s)\n",
+               strerror(errno));
+        return;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        printf("# skip running_file: fork: %s\n", strerror(errno));
+        return;
+    }
+    if (pid == 0) {
+        /* Named "sleep": /bin/sleep may be a multi-call binary that picks the
+         * program from its own file name. */
+        char *const argv[] = { (char *) "sleep", (char *) "30", NULL };
+
+        execv(path, argv);
+        _exit(127);
+    }
+
+    if (!oa_wait_txtbsy(path)) {
+        printf("# skip running_file: a write open of the running file is not "
+               "refused ETXTBSY here\n");
+        goto out;
+    }
+
+    st = oa_open(c, "sleep", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN running sleep MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        ga = oa_access_info(c, o.file_id);
+        CHECK(!(ga & (OA_FILE_WRITE_DATA | OA_FILE_APPEND_DATA)),
+              "  granted access 0x%08x has no WRITE_DATA or APPEND_DATA", ga);
+        st = smb2_read(c, o.file_id, 0, 4, out, &n);
+        CHECK(st == ST_SUCCESS && n == 4, "  READ -> 0x%08x (%u bytes)", st, n);
+        smb2_close(c, o.file_id);
+    }
+
+    st = oa_open(c, "sleep", MBT_FILE_OPEN, OA_FILE_WRITE_DATA,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_ACCESS_DENIED, "OPEN running sleep FILE_WRITE_DATA -> "
+          "ACCESS_DENIED (0x%08x)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+
+ out:
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+} /* probe_running_file */
+
 /* Mount the share on a passthrough backend: a fresh host directory under
  * $CHIMERA_MBT_SCRATCH (default cwd).  Exits 77 when that filesystem cannot
  * produce file handles. */
@@ -506,6 +640,7 @@ main(
     probe_ro_file_generic(c);
     probe_ro_dir_max_allowed(c);
     probe_ro_create_handle_writes(c);
+    probe_running_file(c, pt_dir);
 
     smb2_env_stop(&env);
 
