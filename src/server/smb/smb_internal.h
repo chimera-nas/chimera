@@ -1596,7 +1596,9 @@ struct chimera_smb_conn {
 #define SMB_DIRECT_MIN_RECEIVE_SIZE 128
 
 /* The MaxReceiveSize this server advertises, and the most it ever sends in
- * one fragment however large a buffer the peer offers. */
+ * one fragment however large a buffer the peer offers.  The negotiate
+ * response's PreferredSendSize is this or the peer's MaxReceiveSize,
+ * whichever is smaller. */
 #define SMB_DIRECT_MAX_SEND_SIZE    8192
 
 /* The most iovecs one SMB Direct reply fragment is sent with: its header plus

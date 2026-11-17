@@ -706,7 +706,10 @@ struct smb2_conn {
     int                             direct;
     int                             direct_negotiated;  /* negotiate reply, status 0 */
     uint32_t                        direct_peer_max_recv; /* server's MaxReceiveSize */
-    uint32_t                        direct_my_max_recv; /* MaxReceiveSize this side offered */
+    uint32_t                        direct_peer_pref_send; /* server's PreferredSendSize */
+    /* The largest message this side accepts: the MaxReceiveSize it offered,
+     * cut to the server's PreferredSendSize once negotiated. */
+    uint32_t                        direct_my_max_recv;
     /* Reassembly of the message in flight: bytes so far, the total its first
      * fragment announced, fragments so far, and each one's DataLength. */
     uint32_t                        direct_rx_len;
@@ -1173,9 +1176,15 @@ smb2c_direct_desync(
 /* One SMB Direct datagram, the first len bytes of c->dbuf.
  *
  * Before the transport is negotiated the only legal message is the 32-byte
- * negotiate response (MS-SMBD 2.2.2): Status at 12, MaxReceiveSize at 24.  A
- * refused negotiate leaves nothing to talk over, so this side closes the
- * transport, which is what ends smb2_conn_open_direct's wait in that case.
+ * negotiate response (MS-SMBD 2.2.2): Status at 12, PreferredSendSize at 20,
+ * MaxReceiveSize at 24.  PreferredSendSize is the most the server will send in
+ * one message, and this side treats it as a conforming client must (MS-SMBD
+ * 3.1.5.7): one larger than the MaxReceiveSize offered is a refusal, and
+ * otherwise it becomes this side's MaxReceiveSize, so a later message larger
+ * than it is a desync.  Windows sizes its receive buffers the same way and
+ * drops the connection on such a message.  A refused negotiate leaves nothing
+ * to talk over, so this side closes the transport, which is what ends
+ * smb2_conn_open_direct's wait in that case.
  *
  * After it, each datagram is a data-transfer message (MS-SMBD 2.2.3):
  * RemainingDataLength at 8, DataOffset at 12, DataLength at 16.  The first
@@ -1201,13 +1210,23 @@ smb2c_direct_recv(
             smb2c_direct_desync(c, "negotiate response shorter than 32 bytes",
                                 len);
         }
-        status                  = g32(dg, 12);
-        c->direct_peer_max_recv = g32(dg, 24);
-        if (status == 0) {
-            c->direct_negotiated = 1;
+        status                   = g32(dg, 12);
+        c->direct_peer_pref_send = g32(dg, 20);
+        c->direct_peer_max_recv  = g32(dg, 24);
+        if (status == 0 && c->direct_peer_pref_send <= c->direct_my_max_recv) {
+            c->direct_negotiated  = 1;
+            c->direct_my_max_recv = c->direct_peer_pref_send > 128 ?
+                c->direct_peer_pref_send : 128;
         } else {
-            fprintf(stderr, "smb2 harness: SMB Direct negotiate refused "
-                    "(status 0x%08x)\n", status);
+            if (status != 0) {
+                fprintf(stderr, "smb2 harness: SMB Direct negotiate refused "
+                        "(status 0x%08x)\n", status);
+            } else {
+                fprintf(stderr, "smb2 harness: SMB Direct negotiate response "
+                        "refused: PreferredSendSize %u is larger than the "
+                        "MaxReceiveSize %u offered\n",
+                        c->direct_peer_pref_send, c->direct_my_max_recv);
+            }
             c->closed_by_client = 1;
             evpl_close(c->env->evpl, c->bind);
         }
@@ -1215,8 +1234,8 @@ smb2c_direct_recv(
     }
 
     if ((uint32_t) len > c->direct_my_max_recv) {
-        smb2c_direct_desync(c, "datagram larger than the MaxReceiveSize offered",
-                            len);
+        smb2c_direct_desync(c, "datagram larger than the server's "
+                            "PreferredSendSize", len);
     }
 
     if (len < 20) {
@@ -2204,7 +2223,8 @@ smb2c_direct_wait(
  *
  * Returns once the negotiate succeeded (direct_negotiated) or the connection
  * ended (disconnected: the server hung up, or answered with a failure status
- * and this side closed); refusing a malformed negotiate is behavior a probe
+ * or a PreferredSendSize above max_receive_size and this side closed);
+ * refusing a malformed negotiate is behavior a probe
  * may want to assert, so the latter is reported, never fatal.  The
  * connection is registered with the env either way, which frees it at stop.
  * The SMB2 handshake is the caller's, exactly as after smb2_conn_open.

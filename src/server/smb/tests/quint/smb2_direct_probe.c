@@ -10,7 +10,10 @@
  * hardware.  The harness reassembles each reply and records how it was
  * fragmented, so every READ here is checked twice: the bytes against what was
  * written, and the fragment count and sizes against what MaxReceiveSize
- * dictates.
+ * dictates.  The harness accepts no message larger than the PreferredSendSize
+ * the server answered the negotiate with, as Windows does, and each
+ * connection checks that PreferredSendSize is the smaller of the server's own
+ * send size and the MaxReceiveSize offered.
  *
  * Given a wire profile name (signed311), every session is signed and every
  * signed reply's signature is checked, which is what shows the server signed
@@ -35,23 +38,36 @@ static int failures = 0;
 
 /* The MaxReceiveSize this client offers, and so the largest message the server
  * may send it; each fragment carries that less the 24-byte header. */
-#define DIRECT_MAX_RECV  8192
-#define DIRECT_MAX_SEND  (DIRECT_MAX_RECV - SMB2C_DIRECT_HDR)   /* 8168 */
-#define DIRECT_FILE_SIZE 65536
+#define DIRECT_MAX_RECV        8192
+#define DIRECT_MAX_SEND        (DIRECT_MAX_RECV - SMB2C_DIRECT_HDR) /* 8168 */
+#define DIRECT_FILE_SIZE       65536
+
+/* The most the server sends in one message, however much a client offers. */
+#define DIRECT_SERVER_MAX_SEND 8192
 
 static uint8_t pattern[DIRECT_FILE_SIZE];
 static uint8_t rdbuf[DIRECT_FILE_SIZE];
 
 /* An SMB Direct connection that also checks the signature on every signed
- * reply, which only matters on a signed run. */
+ * reply, which only matters on a signed run.  Once negotiated, the server's
+ * PreferredSendSize must be its MaxSendSize, the smaller of its own and the
+ * MaxReceiveSize offered (MS-SMBD 3.1.5.6 and 3.1.5.3): a client takes it as
+ * the most the server will send and sizes its receive buffers to it. */
 static struct smb2_conn *
 open_direct(
     struct smb2_env *env,
     uint32_t         max_receive_size)
 {
-    struct smb2_conn *c = smb2_conn_open_direct(env, max_receive_size);
+    struct smb2_conn *c        = smb2_conn_open_direct(env, max_receive_size);
+    uint32_t          max_send = max_receive_size < DIRECT_SERVER_MAX_SEND ?
+        max_receive_size : DIRECT_SERVER_MAX_SEND;
 
     c->check_reply_sigs = 1;
+    if (c->direct_negotiated) {
+        CHECK(c->direct_peer_pref_send == max_send,
+              "MaxReceiveSize %u: server PreferredSendSize %u (%u)",
+              max_receive_size, max_send, c->direct_peer_pref_send);
+    }
     return c;
 } /* open_direct */
 
