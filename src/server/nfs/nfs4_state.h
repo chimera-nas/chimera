@@ -119,6 +119,12 @@ struct nfs4_cb_path {
     /* Lazily-established outbound channel (4.0) or borrowed backchannel (4.1).
      * Owned/serviced by a single NFS thread; see nfs4_callback.c. */
     struct nfs4_cb_client *cb_client;
+    /* The session a 4.1 channel rides (its chan->session, as an address),
+     * published beside cb_client so nfs4_cb_backchannel_lost, which runs on
+     * the disconnecting connection's thread, need not dereference a channel
+     * another thread may be tearing down.  Compared, never dereferenced; 0 for
+     * a 4.0 channel and while none is open. */
+    _Atomic uintptr_t      cb_session;
     /* OPENs deferred while a 4.0 CB_NULL probe is in flight: the very first
      * delegation-wanting OPEN flips UNINIT->PROBING and skips the grant
      * (current behavior); a second OPEN that arrives during PROBING parks
