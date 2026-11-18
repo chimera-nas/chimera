@@ -346,6 +346,13 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
             break;
+        default:
+            /* The sizing switch above already refused any other class.  Say
+             * so here too: the cursor calls in between take pointers into the
+             * request, so the static analyzer cannot carry that across, and
+             * without this case it follows a path that leaves namebuf NULL
+             * and subtracts from it below. */
+            chimera_smb_abort("Unsupported info class %d", request->query_directory.info_class);
     } /* switch */
 
     request->query_directory.last_entry_end = (uint32_t) ((char *) namebuf -
