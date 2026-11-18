@@ -346,6 +346,8 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
             break;
+        default:
+            chimera_smb_abort("Unsupported info class %d", request->query_directory.info_class);
     } /* switch */
 
     request->query_directory.last_entry_end = (uint32_t) ((char *) namebuf -
