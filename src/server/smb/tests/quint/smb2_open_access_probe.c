@@ -1646,6 +1646,79 @@ probe_max_allowed_no_read(
 #endif /* ifndef _WIN32 */
 } /* probe_max_allowed_no_read */
 
+/* CREATE with an explicit ShareAccess (oa_open shares everything). */
+static uint32_t
+oa_open_share(
+    struct smb2_conn       *c,
+    const char             *name,
+    uint32_t                access,
+    uint32_t                share,
+    struct smb2_create_out *out)
+{
+    smb2c_send(c, smb2c_build_create_full(c, name, MBT_FILE_OPEN, access, share,
+                                          MBT_FILE_NON_DIRECTORY_FILE, 0, NULL,
+                                          NULL, 0));
+    smb2c_wait(c);
+    smb2c_parse_create(c, out);
+    return out->status;
+} /* oa_open_share */
+
+/* The sharing check compares the opens' granted access (MS-FSA 2.1.5.1.2.2
+ * "Algorithm to Check Sharing Access to an Existing Stream or Directory").  A
+ * MAXIMUM_ALLOWED open of a READONLY file is granted no FILE_WRITE_DATA or
+ * FILE_APPEND_DATA, so it does not conflict with a later open that shares
+ * read and delete but not write; on a writable file it is granted them, and
+ * does. */
+static void
+probe_share_mode_on_grant(struct smb2_conn *c)
+{
+    struct smb2_create_out o1, o2;
+    uint32_t               st;
+
+    printf("# share_mode_on_grant\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip share_mode_on_grant: backend keeps no DOS attributes\n");
+        return;
+    }
+    if (!oa_make_readonly_file(c, "r6")) {
+        return;
+    }
+    st = oa_open_share(c, "r6", MBT_MAXIMUM_ALLOWED, MBT_FILE_SHARE_RWD, &o1);
+    CHECK(st == ST_SUCCESS, "OPEN READONLY r6 MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = oa_open_share(c, "r6", OA_FILE_READ_DATA,
+                       MBT_FILE_SHARE_READ | MBT_FILE_SHARE_DELETE, &o2);
+    CHECK(st == ST_SUCCESS, "  then OPEN r6 FILE_READ_DATA not sharing write "
+          "-> 0x%08x (the first open holds no write access)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o2.file_id);
+    }
+    smb2_close(c, o1.file_id);
+
+    st = oa_open(c, "s6", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o1);
+    CHECK(st == ST_SUCCESS, "setup: CREATE s6 -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(c, o1.file_id);
+    st = oa_open_share(c, "s6", MBT_MAXIMUM_ALLOWED, MBT_FILE_SHARE_RWD, &o1);
+    CHECK(st == ST_SUCCESS, "OPEN s6 MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = oa_open_share(c, "s6", OA_FILE_READ_DATA,
+                       MBT_FILE_SHARE_READ | MBT_FILE_SHARE_DELETE, &o2);
+    CHECK(st == ST_SHARING_VIOLATION, "  then OPEN s6 FILE_READ_DATA not "
+          "sharing write -> SHARING_VIOLATION (0x%08x)", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o2.file_id);
+    }
+    smb2_close(c, o1.file_id);
+} /* probe_share_mode_on_grant */
+
 /* Mount the share on a passthrough backend: a fresh host directory under
  * $CHIMERA_MBT_SCRATCH (default cwd).  Exits 77 when that filesystem cannot
  * produce file handles. */
@@ -1755,6 +1828,7 @@ main(
     probe_max_allowed_delete_via_parent(&env, c, pt_dir);
     probe_ro_file_set_eof(c);
     probe_max_allowed_no_read(c, pt_dir);
+    probe_share_mode_on_grant(c);
 
     smb2_env_stop(&env);
 
