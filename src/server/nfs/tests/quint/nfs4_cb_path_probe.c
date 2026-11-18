@@ -687,12 +687,17 @@ main(
         st     = pc_bind(&a, CDFC4_FORE);
         expect("L1", st == NFS4_OK, "BIND_CONN_TO_SESSION(FORE): %u", st);
         evpl_rpc2_client_disconnect(env->rpc2_thread, old);
-        for (int i = 0; i < 20; i++) {
-            (void) pc_seq_flags(&a);
-        }
     }
 
-    flags = pc_seq_flags(&a);
+    /* The server sees the disconnect on its own thread, in its own time: poll
+     * for the report, for up to about two seconds. */
+    for (int i = 0; i < 200; i++) {
+        flags = pc_seq_flags(&a);
+        if (flags & SEQ4_STATUS_CB_PATH_DOWN) {
+            break;
+        }
+        usleep(10000);
+    }
     expect("L1", (flags & SEQ4_STATUS_CB_PATH_DOWN) != 0,
            "SEQUENCE reports CB_PATH_DOWN once the backchannel is gone: "
            "flags 0x%x", flags);
@@ -719,8 +724,9 @@ main(
     st     = pc_bind(&a, CDFC4_BACK_OR_BOTH);
     expect("R1", st == NFS4_OK, "BIND_CONN_TO_SESSION(BACK_OR_BOTH) on a fresh "
            "connection: %u", st);
-    for (int i = 0; i < 20 && !recall_seen(&a, &l0_sid); i++) {
+    for (int i = 0; i < 200 && !recall_seen(&a, &l0_sid); i++) {
         (void) pc_seq_flags(&a);
+        usleep(10000);
     }
     expect("R1", recall_seen(&a, &l0_sid),
            "the rebind sends the recall held back while the path was down");
