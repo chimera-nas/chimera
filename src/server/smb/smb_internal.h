@@ -614,6 +614,10 @@ struct chimera_smb_request {
              * delete-on-close open is refused, and a MAXIMUM_ALLOWED grant
              * loses FILE_WRITE_DATA, FILE_APPEND_DATA and FILE_DELETE_CHILD. */
             uint8_t                         readonly_fenced;
+            /* Set, for a MAXIMUM_ALLOWED open, when the parent's descriptor
+             * grants the caller FILE_DELETE_CHILD: the grant then includes
+             * DELETE (MS-FSA 2.1.5.1.2.1). */
+            uint8_t                         r_parent_delete_child;
             /* Open handle parked across the access-retry getattr. */
             struct chimera_vfs_open_handle *access_retry_oh;
             /* Bounded retry budget + parked handle for a share conflict against a
