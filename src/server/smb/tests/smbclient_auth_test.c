@@ -395,6 +395,38 @@ static const uint8_t wire_kerberos_again[] = {
     0x60, 0x0b, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
 };
 
+/* negTokenInit, mechTypes [NEGOEX, KRB5, NTLMSSP], opaque mechToken: a
+ * client whose optimistic mechanism is NEGOEX and which can also do Kerberos
+ * and NTLM. */
+static const uint8_t wire_negoex_first_with_kerberos[] = {
+    0x60, 0x3b,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x31,
+    0x30, 0x2f,
+    0xa0, 0x25,
+    0x30, 0x23,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x1e,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
+/* negTokenInit, mechTypes [NEGOEX, NTLMSSP], opaque mechToken: NEGOEX
+ * first from a client that cannot do Kerberos. */
+static const uint8_t wire_negoex_first[] = {
+    0x60, 0x30,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x26,
+    0x30, 0x24,
+    0xa0, 0x1a,
+    0x30, 0x18,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x1e,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
 /* The steering reply: negTokenResp { accept-incomplete, supportedMech NTLMSSP }. */
 static const uint8_t wire_ntlmssp_hint[] = {
     0xa1, 0x15,
@@ -1005,6 +1037,56 @@ test_kerberos_desired_logon(void)
     return 0;
 } /* test_kerberos_desired_logon */
 
+/* A NEGOEX-first client is steered to NTLMSSP on a Kerberos-enabled server
+ * too, whether or not its list also offers Kerberos.  GSSAPI's acceptor would
+ * pick Kerberos out of such a list, but only by requiring a mechListMIC
+ * exchange: the client's last leg is then a negTokenResp that carries the MIC
+ * alone and names no mechanism, which the server has no way to route.  NTLMSSP
+ * is the mechanism both sides can finish, as it is with Kerberos disabled. */
+static int
+check_negoex_first_is_steered_to_ntlmssp(
+    const uint8_t *token,
+    size_t         token_len,
+    const char    *list)
+{
+    uint32_t status = 0;
+    uint8_t  sec[128];
+    size_t   sec_len = sizeof(sec);
+    char     name[128];
+    size_t   i;
+
+    fprintf(stderr, "\n  Testing a NEGOEX-first SESSION_SETUP %s is steered to NTLMSSP...\n", list);
+
+    if (wire_first_session_setup_leg(token, token_len, &status, sec, &sec_len, NULL, NULL) < 0) {
+        fprintf(stderr, "    raw SMB2 exchange failed\n");
+        snprintf(name, sizeof(name), "NEGOEX-first leg %s answered on the wire", list);
+        test_fail(name);
+        return -1;
+    }
+
+    snprintf(name, sizeof(name), "NEGOEX-first leg %s gets STATUS_MORE_PROCESSING_REQUIRED", list);
+    if (status != WIRE_STATUS_MORE_PROCESSING_REQUIRED) {
+        fprintf(stderr, "    status 0x%08x, expected STATUS_MORE_PROCESSING_REQUIRED\n", status);
+        test_fail(name);
+        return -1;
+    }
+    test_pass(name);
+
+    snprintf(name, sizeof(name), "NEGOEX-first leg %s is steered to NTLMSSP", list);
+    if (sec_len != sizeof(wire_ntlmssp_hint) ||
+        memcmp(sec, wire_ntlmssp_hint, sec_len) != 0) {
+        fprintf(stderr, "    security buffer (%zu bytes) is not the NTLMSSP steering hint:", sec_len);
+        for (i = 0; i < sec_len; i++) {
+            fprintf(stderr, " %02x", sec[i]);
+        }
+        fprintf(stderr, "\n");
+        test_fail(name);
+        return -1;
+    }
+    test_pass(name);
+    return 0;
+} /* check_negoex_first_is_steered_to_ntlmssp */
+
 static int
 run_kerberos_tests(struct test_env *env)
 {
@@ -1030,6 +1112,15 @@ run_kerberos_tests(struct test_env *env)
         failures++;
     }
     if (test_kerberos_desired_logon() < 0) {
+        failures++;
+    }
+    if (check_negoex_first_is_steered_to_ntlmssp(wire_negoex_first_with_kerberos,
+                                                 sizeof(wire_negoex_first_with_kerberos),
+                                                 "that offers Kerberos") < 0) {
+        failures++;
+    }
+    if (check_negoex_first_is_steered_to_ntlmssp(wire_negoex_first, sizeof(wire_negoex_first),
+                                                 "without Kerberos") < 0) {
         failures++;
     }
 

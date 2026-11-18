@@ -783,6 +783,22 @@ static const uint8_t spnego_negoex_first[] = {
     0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
 };
 
+/* negTokenInit, mechTypes [NEGOEX, KRB5, NTLMSSP]: Kerberos offered, but
+ * not as the optimistic mechanism. */
+static const uint8_t spnego_negoex_then_kerberos[] = {
+    0x60, 0x3b,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x31,
+    0x30, 0x2f,
+    0xa0, 0x25,
+    0x30, 0x23,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x1e,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
 /* negTokenInit, mechTypes [KRB5] only: a client that cannot do NTLM. */
 static const uint8_t spnego_kerberos_only[] = {
     0x60, 0x23,
@@ -900,6 +916,8 @@ test_spnego_mechanism_detection(void)
 
     if (smb_auth_spnego_offers_ntlmssp(spnego_kerberos_first, sizeof(spnego_kerberos_first)) == 1 &&
         smb_auth_spnego_offers_ntlmssp(spnego_negoex_first, sizeof(spnego_negoex_first)) == 1 &&
+        smb_auth_spnego_offers_ntlmssp(spnego_negoex_then_kerberos,
+                                       sizeof(spnego_negoex_then_kerberos)) == 1 &&
         smb_auth_spnego_offers_ntlmssp(spnego_kerberos_only, sizeof(spnego_kerberos_only)) == 0 &&
         smb_auth_spnego_offers_ntlmssp(gss_krb5_bare, sizeof(gss_krb5_bare)) == 0 &&
         smb_auth_spnego_offers_ntlmssp(spnego_resp_ntlmssp, sizeof(spnego_resp_ntlmssp)) == 0 &&
@@ -907,6 +925,13 @@ test_spnego_mechanism_detection(void)
         TEST_PASS("NTLMSSP offer detection across mechTypes lists");
     } else {
         TEST_FAIL("NTLMSSP offer detection across mechTypes lists");
+    }
+
+    if (smb_auth_detect_mechanism(spnego_negoex_then_kerberos,
+                                  sizeof(spnego_negoex_then_kerberos)) == SMB_AUTH_MECH_NEGOEX) {
+        TEST_PASS("NEGOEX-first negTokenInit that also offers Kerberos is NEGOEX");
+    } else {
+        TEST_FAIL("NEGOEX-first negTokenInit that also offers Kerberos is NEGOEX");
     }
 } /* test_spnego_mechanism_detection */
 

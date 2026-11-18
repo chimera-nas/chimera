@@ -139,6 +139,10 @@ server is installed as a side effect of another package, disable and mask it.
 > needed. A client offering only Kerberos is refused with
 > `NT_STATUS_LOGON_FAILURE`.
 
+> **Note:** a client that opens with NEGOEX while also offering NTLMSSP is
+> steered to NTLMSSP with `kerberos_enabled` too, including when its list
+> offers Kerberos as well.
+
 > **Note:** the uid and gid resolved for a session are applied to files it
 > creates. The supplementary group list winbind returns is retrieved but is not
 > applied to the credential used for VFS operations, so do not rely on
