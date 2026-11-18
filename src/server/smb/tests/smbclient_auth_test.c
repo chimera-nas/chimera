@@ -849,14 +849,45 @@ run_ntlm_tests(void)
  * ============================================================================ */
 
 static char kerberos_auth_args[512];
+static char kerberos_desired_args[512];
+
+/* The smbclient arguments for a Kerberos logon as the realm's test user,
+ * under the given --use-kerberos policy.
+ *
+ * Samba 4.23+ ships a private Heimdal that cannot read credential caches
+ * created by the system MIT kinit.  When a password is available
+ * (KRB_PASSWORD), pass it directly so smbclient's bundled Heimdal acquires
+ * its own ticket from the KDC.  Fall back to ccache-only for environments
+ * without a password. */
+static void
+kerberos_format_args(
+    char       *args,
+    size_t      args_size,
+    const char *policy)
+{
+    const char *ccache    = getenv("KRB5CCNAME");
+    const char *krb_user  = getenv("KRB_USER");
+    const char *krb_realm = getenv("KRB_REALM");
+    const char *krb_pass  = getenv("KRB_PASSWORD");
+
+    if (krb_user && krb_realm && krb_pass) {
+        snprintf(args, args_size, "--use-kerberos=%s -U %s@%s%%%s",
+                 policy, krb_user, krb_realm, krb_pass);
+    } else if (krb_user && krb_realm) {
+        snprintf(args, args_size,
+                 "--use-kerberos=%s --use-krb5-ccache=%s -U %s@%s -N",
+                 policy, ccache, krb_user, krb_realm);
+    } else {
+        snprintf(args, args_size, "--use-kerberos=%s --use-krb5-ccache=%s -N",
+                 policy, ccache);
+    }
+} /* kerberos_format_args */
 
 static int
 verify_kerberos_environment(void)
 {
     const char *krb5_config = getenv("KRB5_CONFIG");
     const char *ccache      = getenv("KRB5CCNAME");
-    const char *krb_user    = getenv("KRB_USER");
-    const char *krb_realm   = getenv("KRB_REALM");
 
     if (!krb5_config) {
         fprintf(stderr, "  Skipping Kerberos tests - KRB5_CONFIG not set\n");
@@ -871,30 +902,8 @@ verify_kerberos_environment(void)
     fprintf(stderr, "  KRB5_CONFIG: %s\n", krb5_config);
     fprintf(stderr, "  KRB5CCNAME:  %s\n", ccache);
 
-    /* Samba 4.23+ ships a private Heimdal that cannot read credential
-    * caches created by the system MIT kinit.  When a password is
-    * available (KRB_PASSWORD), pass it directly so smbclient's
-    * bundled Heimdal acquires its own ticket from the KDC.
-    * Fall back to ccache-only for environments without a password. */
-    {
-        const char *krb_pass = getenv("KRB_PASSWORD");
-
-        if (krb_user && krb_realm && krb_pass) {
-            snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
-                     "--use-kerberos=required -U %s@%s%%%s",
-                     krb_user, krb_realm, krb_pass);
-        } else if (krb_user && krb_realm) {
-            snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
-                     "--use-kerberos=required"
-                     " --use-krb5-ccache=%s -U %s@%s -N",
-                     ccache, krb_user, krb_realm);
-        } else {
-            snprintf(kerberos_auth_args, sizeof(kerberos_auth_args),
-                     "--use-kerberos=required"
-                     " --use-krb5-ccache=%s -N",
-                     ccache);
-        }
-    }
+    kerberos_format_args(kerberos_auth_args, sizeof(kerberos_auth_args), "required");
+    kerberos_format_args(kerberos_desired_args, sizeof(kerberos_desired_args), "desired");
 
     return 0;
 } /* verify_kerberos_environment */
@@ -970,6 +979,32 @@ test_kerberos_file_operations(void)
     return 0;
 } /* test_kerberos_file_operations */
 
+/* --use-kerberos=desired makes smbclient offer NTLMSSP after Kerberos in its
+ * mechTypes list, which is the shape of a Windows client's first leg.  The
+ * token that negTokenInit carries is still the Kerberos one and must reach
+ * GSSAPI: a server that reads the NTLMSSP OID in the list as "this is NTLM"
+ * hands the AP-REQ to the NTLM parser and fails the leg.  smbclient's own NTLM
+ * fallback cannot rescue the logon here, because the realm's test user is not
+ * a built-in account and this mode runs without winbind, so a pass means the
+ * Kerberos leg was accepted. */
+static int
+test_kerberos_desired_logon(void)
+{
+    char output[4096];
+    int  rc;
+
+    fprintf(stderr, "\n  Testing Kerberos logon from a client that also offers NTLMSSP...\n");
+
+    rc = run_smbclient_with_output(kerberos_desired_args, "ls", output, sizeof(output));
+    if (rc != 0) {
+        fprintf(stderr, "    smbclient failed:\n%s\n", output);
+        test_fail("Kerberos logon with NTLMSSP also offered");
+        return -1;
+    }
+    test_pass("Kerberos logon with NTLMSSP also offered");
+    return 0;
+} /* test_kerberos_desired_logon */
+
 static int
 run_kerberos_tests(struct test_env *env)
 {
@@ -992,6 +1027,9 @@ run_kerberos_tests(struct test_env *env)
         failures++;
     }
     if (test_kerberos_file_operations() < 0) {
+        failures++;
+    }
+    if (test_kerberos_desired_logon() < 0) {
         failures++;
     }
 
@@ -1700,10 +1738,12 @@ main(
      * covers a missing wrapper variable, but this is the backstop: if the one
      * assertion in run_kerberos_refusal_tests() was itself skipped (e.g.
      * verify_kerberos_environment() still failed), tests_passed stays 0 with
-     * no failures, and that is a vacuous pass, not a PASS. */
-    if ((mode_expects_refusal(mode) || strcmp(mode, "kerberos-ntlm-fallback") == 0) &&
+     * no failures, and that is a vacuous pass, not a PASS.  The kerberos mode
+     * skips all of its tests the same way when the environment is missing. */
+    if ((mode_expects_refusal(mode) || strcmp(mode, "kerberos-ntlm-fallback") == 0 ||
+         strcmp(mode, "kerberos") == 0) &&
         tests_passed == 0 && failures == 0) {
-        fprintf(stderr, "\nSKIP: refusal mode ran no assertion\n");
+        fprintf(stderr, "\nSKIP: %s mode ran no assertion\n", mode);
         test_cleanup(&env, 1);
         return 77;
     }
