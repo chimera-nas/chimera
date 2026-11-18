@@ -818,6 +818,54 @@ chimera_smb_create_break_for_open(
     }
 } /* chimera_smb_create_break_for_open */
 
+/* The R/W/D access an open's share-mode claim holds.  MS-FSA runs the sharing
+ * check on the opens' granted access (2.1.5.1.2.2 "Algorithm to Check
+ * Sharing Access to an Existing Stream or Directory"): FILE_READ_DATA or
+ * FILE_EXECUTE is read, FILE_WRITE_DATA or FILE_APPEND_DATA is write, DELETE
+ * is delete.  EA and attribute rights do not count.  So a MAXIMUM_ALLOWED open
+ * claims what it was granted -- not write, on a READONLY file or a handle
+ * re-issued read-only.  An open whose grant is not resolved yet (the open of
+ * the share root, which reads the object's attributes after the open) claims
+ * from its DesiredAccess, generic rights and MAXIMUM_ALLOWED expanded to the
+ * data rights they can imply. */
+static inline uint8_t
+chimera_smb_create_claim_access(
+    struct chimera_smb_request *request,
+    uint32_t                    da)
+{
+    uint8_t claim = 0;
+
+    if (request->create.r_granted_valid) {
+        uint32_t ga = request->create.r_granted_access;
+
+        if (ga & (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE)) {
+            claim |= CHIMERA_CLAIM_R;
+        }
+        if (ga & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA)) {
+            claim |= CHIMERA_CLAIM_W;
+        }
+        if (ga & SMB2_DELETE) {
+            claim |= CHIMERA_CLAIM_D;
+        }
+        return claim;
+    }
+
+    if (da & (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE |
+              SMB2_GENERIC_READ | SMB2_GENERIC_EXECUTE |
+              SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
+        claim |= CHIMERA_CLAIM_R;
+    }
+    if (da & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
+              SMB2_GENERIC_WRITE |
+              SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
+        claim |= CHIMERA_CLAIM_W;
+    }
+    if (da & (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
+        claim |= CHIMERA_CLAIM_D;
+    }
+    return claim;
+} /* chimera_smb_create_claim_access */
+
 static inline struct chimera_smb_open_file *
 chimera_smb_create_gen_open_file(
     struct chimera_smb_request     *request,
@@ -1104,26 +1152,8 @@ chimera_smb_create_gen_open_file(
         struct chimera_vfs_claim_conflict conflict;
         enum chimera_vfs_claim_result     result;
 
-        /* Map desired_access -> R/W/D access.  Only data-access rights
-         * participate in share-mode conflicts (matching Windows and the
-         * legacy smb_sharemode_check_conflict): READ_DATA/EXECUTE are
-         * "read", WRITE_DATA/APPEND_DATA are "write", DELETE is "delete".
-         * EA and attribute rights (READ_EA, WRITE_EA, *_ATTRIBUTES) do NOT
-         * count.  Generic + MAXIMUM_ALLOWED expand to the data rights they
-         * imply, as smb_sharemode_expand_access used to do. */
-        if (da & (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE |
-                  SMB2_GENERIC_READ | SMB2_GENERIC_EXECUTE |
-                  SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
-            granted |= CHIMERA_CLAIM_R;
-        }
-        if (da & (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
-                  SMB2_GENERIC_WRITE |
-                  SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
-            granted |= CHIMERA_CLAIM_W;
-        }
-        if (da & (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
-            granted |= CHIMERA_CLAIM_D;
-        }
+        /* Map the open's access -> R/W/D (chimera_smb_create_claim_access). */
+        granted = chimera_smb_create_claim_access(request, da);
 
         /* Map share_access -> R/W/D deny.  Each access bit NOT shared
          * becomes a deny on the corresponding bit (D is 0x04 in the claim
@@ -2410,6 +2440,18 @@ chimera_smb_create_mkdir_open_callback(
         return;
     }
 
+    /* The access this open is granted, resolved before its share-mode claim
+     * is placed.  The creator of a new object holds full control, so
+     * MAXIMUM_ALLOWED resolves to the full mask; a specific-bits open was
+     * granted exactly what it requested. */
+    if (request->create.desired_access & SMB2_MAXIMUM_ALLOWED) {
+        request->create.r_granted_access = CHIMERA_ACE_MASK_ALL;
+    } else {
+        request->create.r_granted_access =
+            chimera_smb_create_granted_access(request, CHIMERA_ACE_MASK_ALL, 1, 1);
+    }
+    request->create.r_granted_valid = 1;
+
     open_file = chimera_smb_create_gen_open_file_normal(request,
                                                         request->create.parent_handle->fh,
                                                         request->create.parent_handle->fh_len,
@@ -2432,15 +2474,8 @@ chimera_smb_create_mkdir_open_callback(
      * completion paths do this; without it a freshly-created directory
      * handle carries a stale granted_access (a recycled open_file can hold
      * 0), which breaks any access decision keyed on it (e.g. the
-     * FILE_LIST_DIRECTORY gate on CHANGE_NOTIFY).  The creator of a new
-     * object holds full control, so MAXIMUM_ALLOWED resolves to the full
-     * mask; a specific-bits open was granted exactly what it requested. */
-    if (request->create.desired_access & SMB2_MAXIMUM_ALLOWED) {
-        open_file->granted_access = CHIMERA_ACE_MASK_ALL;
-    } else {
-        open_file->granted_access = chimera_smb_create_granted_access(request,
-                                                                      CHIMERA_ACE_MASK_ALL, 1, 1);
-    }
+     * FILE_LIST_DIRECTORY gate on CHANGE_NOTIFY). */
+    open_file->granted_access = request->create.r_granted_access;
     open_file->maximal_access = CHIMERA_ACE_MASK_ALL;
 
     chimera_smb_create_release_parent(request);
@@ -2720,9 +2755,7 @@ chimera_smb_stream_register_base_delete(
     uint32_t                          sa = open_file->share_access;
     uint8_t                           granted = 0, denied = 0;
 
-    if (da & (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
-        granted = CHIMERA_CLAIM_D;
-    }
+    granted = chimera_smb_create_claim_access(request, da) & CHIMERA_CLAIM_D;
     if (!(sa & SMB2_FILE_SHARE_DELETE)) {
         denied = CHIMERA_CLAIM_D;
     }
@@ -2889,6 +2922,7 @@ chimera_smb_create_open_stream_callback(
     request->create.r_granted_access =
         chimera_smb_create_granted_access(request, request->create.r_maximal_access,
                                           request->create.r_created, 0);
+    request->create.r_granted_valid = 1;
     chimera_smb_marshal_attrs(attr, &request->create.r_attrs);
 
     /* A truncating disposition owes the stream a content replacement, deferred
@@ -3552,6 +3586,7 @@ chimera_smb_create_open_at_callback(
         chimera_smb_create_granted_access(request, request->create.r_maximal_access,
                                           request->create.r_created,
                                           request->create.r_is_directory);
+    request->create.r_granted_valid = 1;
     chimera_smb_marshal_attrs(attr, &request->create.r_attrs);
 
     /* MS-SMB2 2.2.13.2 AlSi: for creates, overwrites, and supersedes (not
@@ -5967,6 +6002,7 @@ chimera_smb_create(struct chimera_smb_request *request)
     request->create.ro_retried             = 0;
     request->create.readonly_fenced        = 0;
     request->create.r_created              = 0;
+    request->create.r_granted_valid        = 0;
     request->create.access_retry_oh        = NULL;
     request->create.share_conflict_retries = 0;
     request->create.share_conflict_oh      = NULL;
