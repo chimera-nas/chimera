@@ -230,6 +230,7 @@ nfs4_session_inspect_snapshot(
     for (unsigned int i = 0; i < count; i++) {
         session = sessions[i];
         struct chimera_inspect_session *entry = &out[i];
+        memset(entry, 0, sizeof(*entry));
         for (unsigned int i = 0; i < NFS4_SESSIONID_SIZE; i++) {
             entry->session_id[i * 2]     = hex[session->nfs4_session_id[i] >> 4];
             entry->session_id[i * 2 + 1] = hex[session->nfs4_session_id[i] & 0xf];
@@ -321,6 +322,7 @@ nfs4_client_inspect_snapshot(
             break;
         }
         struct chimera_inspect_client *row = &out[count];
+        memset(row, 0, sizeof(*row));
         row->client_id    = client->nfs4_client_id;
         row->owner_length = client->nfs4_client_owner_len;
         unsigned int                   owner_bytes = row->owner_length < 64 ? row->owner_length : 64;
@@ -1993,6 +1995,13 @@ nfs4_create_session(
             for (uint32_t i = 0; i < session->replay_max_slots; i++) {
                 atomic_init(&session->replay_slots[i].state_word,
                             nfs4_slot_word(0, NFS4_SLOT_RESYNC));
+                atomic_init(&session->replay_slots[i].in_progress_since, 0);
+            }
+        } else {
+            for (uint32_t i = 0; i < session->replay_max_slots; i++) {
+                atomic_init(&session->replay_slots[i].state_word,
+                            nfs4_slot_word(0, NFS4_SLOT_UNUSED));
+                atomic_init(&session->replay_slots[i].in_progress_since, 0);
             }
         }
     }

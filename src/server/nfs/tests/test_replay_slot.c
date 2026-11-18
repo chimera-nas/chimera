@@ -143,6 +143,7 @@ test_session_inspect_snapshot(void)
     unsigned int                   total;
     bool                           is_replay;
 
+    memset(rows, 0xa5, sizeof(rows));
     CHECK(nfs4_session_inspect_snapshot(&table, rows, 2, &total) == 1);
     CHECK(total == 1);
     CHECK(rows[0].client_id == session->nfs4_session_clientid);
@@ -152,12 +153,29 @@ test_session_inspect_snapshot(void)
     CHECK(!rows[0].has_slots_in_use);
     CHECK(rows[0].slots_unused == TEST_SLOTS);
     CHECK(rows[0].slots_in_progress == 0);
+    CHECK(rows[0].replay_hits == 0);
+    CHECK(rows[0].connection_count == 0);
+    CHECK(rows[0].connections_truncated == 0);
+
+    struct chimera_inspect_client client_rows[2];
+    memset(client_rows, 0xa5, sizeof(client_rows));
+    CHECK(nfs4_client_inspect_snapshot(&table, client_rows, 2, &total,
+                                       UINT64_C(40000000000)) == 1);
+    CHECK(total == 1);
+    CHECK(client_rows[0].client_id == session->nfs4_session_clientid);
+    CHECK(client_rows[0].sessions == 1);
+    CHECK(client_rows[0].remote_address_count == 0);
+    CHECK(client_rows[0].remote_addresses_truncated == 0);
+    CHECK(client_rows[0].opens == 0);
+    CHECK(client_rows[0].locks == 0);
+    CHECK(client_rows[0].delegations == 0);
 
     nfs4_session_inspect_count_event(session, 0, NFS4_SESSION_INSPECT_REPLAY_HIT);
     nfs4_session_inspect_count_event(session, 1, NFS4_SESSION_INSPECT_REPLAY_HIT);
     nfs4_session_inspect_count_event(session, 1, NFS4_SESSION_INSPECT_REPLAY_HIT);
     nfs4_session_inspect_count_event(session, 3, NFS4_SESSION_INSPECT_DELAY_ERROR);
     nfs4_session_inspect_count_event(session, 4, NFS4_SESSION_INSPECT_BAD_SLOT);
+    memset(rows, 0xa5, sizeof(rows));
     CHECK(nfs4_session_inspect_snapshot(&table, rows, 2, &total) == 1);
     CHECK(rows[0].replay_hits == 3);
     CHECK(rows[0].delay_errors == 1);

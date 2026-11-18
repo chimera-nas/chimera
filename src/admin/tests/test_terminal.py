@@ -203,9 +203,16 @@ class Polling(unittest.TestCase):
                 self.calls += 1
                 if self.blocked: release.wait(4)
                 return snapshot()["threads"]
+            def get_live_threads(self, **kwargs):
+                self.calls += 1
+                return snapshot()["threads"]
             def get_connections(self, **kwargs):
                 self.calls += 1
                 return snapshot()["connections"]
+            def get_nfs_sessions(self, **kwargs):
+                self.calls += 1
+                return {"sessions": [], "server_instance_id": snapshot()["threads"]["server_instance_id"],
+                        "complete": True, "truncated": False, "total": 0}
             def close(self): self.closed = True
         clients = {"a": Client(), "b": Client(True)}
         options = args("--iterations", "2"); options.watch=True; options.interval=.05
@@ -216,12 +223,12 @@ class Polling(unittest.TestCase):
             while not group.views[0].done and time.monotonic() < deadline:
                 group.ready.wait(.02); group.update()
             self.assertTrue(group.views[0].done)
-            self.assertEqual(clients["a"].calls, 4)
+            self.assertEqual(clients["a"].calls, 8)
             self.assertEqual(clients["b"].calls, 1)
             model.refresh(group.views)
             for _ in range(20):
                 model.action("expand_all"); model.action("collapse_all"); model.lines(100, 2)
-            self.assertEqual(clients["a"].calls, 4)
+            self.assertEqual(clients["a"].calls, 8)
             started=time.monotonic(); group.close()
             self.assertLess(time.monotonic()-started, .5)
         finally:

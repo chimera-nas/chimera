@@ -166,7 +166,9 @@ class Poller(threading.Thread):
         self.client_factory = client_factory
         self.mailbox = queue.Queue(maxsize=2)
         self.stop_event = threading.Event()
-        self.budget = target.timeout * (2 if args.inspection_view == "dashboard" else 1) + 0.25
+        request_count = {"dashboard": 4, "threads": 2, "nfs_sessions": 2}.get(
+            args.inspection_view, 1)
+        self.budget = target.timeout * request_count + 0.25
 
     def publish(self, message):
         while not self.stop_event.is_set():

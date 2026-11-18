@@ -129,6 +129,14 @@ class FakeClient:
         if self.blocked: self.blocked.wait(4)
         return fixture("snapshot.json" if self.index == 0 else "snapshot-next.json")["threads"]
 
+    def get_live_threads(self, **kwargs):
+        return fixture("snapshot.json" if self.index == 0 else "snapshot-next.json")["threads"]
+
+    def get_nfs_sessions(self, **kwargs):
+        threads = fixture("snapshot.json" if self.index == 0 else "snapshot-next.json")["threads"]
+        return {"sessions": [], "server_instance_id": threads["server_instance_id"],
+                "complete": True, "truncated": False, "total": 0}
+
     def get_connections(self, **kwargs):
         data = fixture("snapshot.json" if self.index == 0 else "snapshot-next.json")["connections"]
         self.index += 1
