@@ -97,8 +97,12 @@ chimera_smb_set_reparse_rebind_cb(
         /* The delete-on-close reservation was armed on the original handle (and
          * does not fire on a plain release).  Re-arm it on the new handle so the
          * close still unlinks the link by name (the pike test_set_get create
-         * carries FILE_DELETE_ON_CLOSE). */
-        if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) {
+         * carries FILE_DELETE_ON_CLOSE).  Not for a stream open: its
+         * delete-on-close is the stream's, not this name's, and the VFS cannot
+         * decline here as it does elsewhere because `oh` is the new inode's
+         * handle, not a stream handle. */
+        if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) &&
+            !(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
             chimera_vfs_set_delete_on_close(
                 vfs_thread, oh,
                 open_file->parent_fh, open_file->parent_fh_len,

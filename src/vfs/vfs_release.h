@@ -73,7 +73,13 @@ chimera_vfs_get_cache_for_handle(
     return NULL;
 } /* chimera_vfs_get_cache_for_handle */
 
-/* Mark a VFS handle for delete-on-close. */
+/* Mark a VFS handle for delete-on-close.
+ *
+ * A named-stream handle is never marked.  A stream has no directory entry of
+ * its own, so the (parent, name) a caller holds for one is the base file's,
+ * and every last release that honors a marked handle would remove the whole
+ * file.  A protocol that deletes a stream when its open closes does that
+ * itself, with chimera_vfs_remove_stream. */
 static inline void
 chimera_vfs_set_delete_on_close(
     struct chimera_vfs_thread      *thread,
@@ -84,8 +90,13 @@ chimera_vfs_set_delete_on_close(
     uint16_t                        name_len,
     const struct chimera_vfs_cred  *cred)
 {
-    struct vfs_open_cache *cache = chimera_vfs_get_cache_for_handle(thread,
-                                                                    handle);
+    struct vfs_open_cache *cache;
+
+    if (handle->flags & CHIMERA_VFS_OPEN_HANDLE_STREAM) {
+        return;
+    }
+
+    cache = chimera_vfs_get_cache_for_handle(thread, handle);
 
     if (cache) {
         chimera_vfs_open_cache_set_doc(cache, handle,

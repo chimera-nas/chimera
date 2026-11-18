@@ -252,10 +252,15 @@ set_tests_properties(chimera/server/smb/mbt/info_probe_memfs PROPERTIES
 # lifecycle the corpus never enables -- CREATE with the file:stream syntax,
 # independent stream WRITE/READ, FILE_STREAM_INFORMATION enumeration, and
 # delete-on-close of a single stream -- exercising the shared VFS named-stream
-# storage that NFSv4 named attributes also project onto.
+# storage that NFSv4 named attributes also project onto.  The probe embeds
+# memfs to count the backend stream handles the server opens and closes;
+# ENABLE_EXPORTS lets the server's VFS find that vfs_memfs instead of loading
+# the memfs module.
 add_executable(smb2_stream_probe smb2_stream_probe.c)
 target_include_directories(smb2_stream_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(smb2_stream_probe chimera_server chimera_metrics chimera_crypto)
+target_link_libraries(smb2_stream_probe chimera_server chimera_metrics chimera_crypto
+    chimera_vfs_memfs_objs evpl)
+set_target_properties(smb2_stream_probe PROPERTIES ENABLE_EXPORTS ON)
 
 add_test(NAME chimera/server/smb/mbt/stream_probe_memfs
     COMMAND $<TARGET_FILE:smb2_stream_probe>)

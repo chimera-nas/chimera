@@ -1854,7 +1854,13 @@ chimera_smb_create_after_share(
     }
 
     /* Propagate delete-on-close to the VFS handle so the file is
-    * removed when the last reference (opencnt) drops to zero. */
+     * removed when the last reference (opencnt) drops to zero.
+     *
+     * For a named stream this marks nothing: parent_fh/name are the BASE
+     * file's, and chimera_vfs_set_delete_on_close declines a stream handle.
+     * CLOSE deletes a stream from the open's
+     * CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE alone, exactly as when that
+     * is set through FileDispositionInformation. */
     if (delete_on_close && oh) {
         chimera_vfs_set_delete_on_close(thread->vfs_thread, oh,
                                         parent_fh, parent_fh_len,
