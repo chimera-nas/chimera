@@ -119,7 +119,9 @@ chimera_smb_set_info_rename_callback(
          * while the backend rename was in flight. The request holds the open
          * alive until this callback releases it below. */
 
-        /* Update VFS handle DOC path so close deletes the new name */
+        /* Update VFS handle DOC path so close deletes the new name.  A file
+         * rename issued on a stream handle gets here too; the VFS declines to
+         * mark that handle, so the renamed base file is not deleted with it. */
         if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) &&
             open_file->handle) {
             chimera_vfs_set_delete_on_close(

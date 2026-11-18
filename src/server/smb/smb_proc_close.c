@@ -443,7 +443,8 @@ chimera_smb_close_release(struct chimera_smb_request *request)
     }
 
     /* A named stream flagged delete-on-close removes only the stream (never
-     * the base file) and never armed the VFS doc mechanism. */
+     * the base file).  Its handle is never armed for the VFS doc mechanism:
+     * chimera_vfs_set_delete_on_close declines a stream handle. */
     stream_delete = (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) &&
         (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) &&
         open_file->base_fh_len > 0;

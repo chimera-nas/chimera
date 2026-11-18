@@ -138,6 +138,7 @@
 #define ST_FILE_CLOSED                          0xC0000128u
 #define ST_BUFFER_OVERFLOW                      0x80000005u
 #define ST_NOT_A_REPARSE_POINT                  0xC0000275u
+#define ST_STOPPED_ON_SYMLINK                   0x8000002Du
 #define ST_NO_MORE_FILES                        0x80000006u
 #define ST_INVALID_INFO_CLASS                   0xC0000003u
 #define ST_BUFFER_TOO_SMALL                     0xC0000023u
@@ -4251,6 +4252,36 @@ smb2_ioctl(
     }
     return smb2c_xfer(c, 56 + (int) in_len);
 } /* smb2_ioctl */
+
+/* Build a symlink REPARSE_DATA_BUFFER (MS-FSCC 2.1.2.4) for `target`, the
+ * input of FSCTL_SET_REPARSE_POINT.  Returns the total length,
+ * 20 + 4 * strlen(target). */
+static inline int
+smb2_symlink_reparse_buffer(
+    uint8_t    *buf,
+    const char *target)
+{
+    int nlen = (int) strlen(target) * 2;   /* UTF-16LE */
+
+    p32(buf, 0, SMB2_IO_REPARSE_TAG_SYMLINK);
+    p16(buf, 4, (uint16_t) (12 + 2 * nlen));   /* ReparseDataLength */
+    p16(buf, 6, 0);                            /* Reserved */
+
+    /* SYMBOLIC_LINK_REPARSE_BUFFER: the PathBuffer carries the substitute name
+     * followed by the print name, both offsets relative to PathBuffer. */
+    p16(buf, 8, 0);                            /* SubstituteNameOffset */
+    p16(buf, 10, (uint16_t) nlen);             /* SubstituteNameLength */
+    p16(buf, 12, (uint16_t) nlen);             /* PrintNameOffset */
+    p16(buf, 14, (uint16_t) nlen);             /* PrintNameLength */
+    p32(buf, 16, 1);                           /* SYMLINK_FLAG_RELATIVE */
+
+    /* The parser skips SubstituteNameOffset bytes from just after the 12-byte
+     * symlink header, so PathBuffer begins at 8 + 12 = 20. */
+    utf16le(target, buf + 20);
+    utf16le(target, buf + 20 + nlen);
+
+    return 20 + 2 * nlen;
+} /* smb2_symlink_reparse_buffer */
 
 /* An IOCTL whose OUTPUT buffer the caller wants.
  *

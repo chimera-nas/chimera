@@ -545,37 +545,6 @@ probe_duplicate_extents(struct smb2_conn *c)
 #define ST_DUPLICATE_NAME                 0xC00000BDu
 #define SMB2_FILE_OPEN_REPARSE_POINT      0x00200000u
 
-/* Build a symlink REPARSE_DATA_BUFFER (MS-FSCC 2.1.2.4) for `target`.
- * Returns the total length. */
-static int
-build_symlink_reparse(
-    uint8_t    *buf,
-    const char *target)
-{
-    int nlen = (int) strlen(target) * 2;   /* UTF-16LE */
-    int i;
-
-    p32(buf, 0, SMB2_IO_REPARSE_TAG_SYMLINK);
-    p16(buf, 4, (uint16_t) (12 + 2 * nlen));   /* ReparseDataLength */
-    p16(buf, 6, 0);                            /* Reserved */
-
-    /* SYMBOLIC_LINK_REPARSE_BUFFER: the PathBuffer carries the substitute name
-     * followed by the print name, both offsets relative to PathBuffer. */
-    p16(buf, 8, 0);                            /* SubstituteNameOffset */
-    p16(buf, 10, (uint16_t) nlen);             /* SubstituteNameLength */
-    p16(buf, 12, (uint16_t) nlen);             /* PrintNameOffset */
-    p16(buf, 14, (uint16_t) nlen);             /* PrintNameLength */
-    p32(buf, 16, 1);                           /* SYMLINK_FLAG_RELATIVE */
-
-    utf16le(target, buf + 20);
-    utf16le(target, buf + 20 + nlen);
-
-    /* The parser skips SubstituteNameOffset bytes from just after the 12-byte
-     * symlink header, so PathBuffer begins at 8 + 12 = 20. */
-    (void) i;
-    return 20 + 2 * nlen;
-} /* build_symlink_reparse */
-
 static void probe_reparse_generic(
     struct smb2_conn *c);
 
@@ -602,7 +571,7 @@ probe_reparse(struct smb2_conn *c)
 
     /* Turn a file into a symlink. */
     make_file(c, "rp_link.bin", 0, 0, &co);
-    in_len = build_symlink_reparse(in, target);
+    in_len = smb2_symlink_reparse_buffer(in, target);
     st     = smb2_ioctl(c, SMB2_FSCTL_SET_REPARSE_POINT, co.file_id, in,
                         (uint32_t) in_len);
     CHECK(st == ST_SUCCESS, "SET_REPARSE_POINT(symlink -> '%s') -> 0x%08x",
