@@ -1586,6 +1586,66 @@ probe_ro_file_set_eof(struct smb2_conn *c)
     smb2_close(c, o.file_id);
 } /* probe_ro_file_set_eof */
 
+/* READ needs FILE_READ_DATA (or FILE_EXECUTE) in the handle's granted access
+ * (MS-SMB2 3.3.5.12).  A MAXIMUM_ALLOWED open of a file whose mode gives the
+ * caller no read right opens -- MAXIMUM_ALLOWED asks for no right in
+ * particular -- with a grant that excludes reading, so READ through it is
+ * refused.  Passthrough backends only: the mode is changed on the host (`dir`
+ * is the shared host directory). */
+static void
+probe_max_allowed_no_read(
+    struct smb2_conn *c,
+    const char       *dir)
+{
+#ifndef _WIN32
+    struct smb2_create_out o;
+    char                   path[600];
+    uint8_t                out[4];
+    uint32_t               st, ga, count = 0, n = 0;
+
+    printf("# max_allowed_no_read\n");
+    if (!dir || !dir[0]) {
+        printf("# skip max_allowed_no_read: memfs has no host file\n");
+        return;
+    }
+
+    st = oa_open(c, "nr1", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE nr1 -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_write(c, o.file_id, 0, "abc", 3, &count);
+    CHECK(st == ST_SUCCESS && count == 3, "setup: WRITE nr1 -> 0x%08x", st);
+    smb2_close(c, o.file_id);
+
+    snprintf(path, sizeof(path), "%s/nr1", dir);
+    if (chmod(path, 0000) != 0) {
+        CHECK(0, "setup: chmod 0000 %s: %s", path, strerror(errno));
+        return;
+    }
+
+    st = oa_open(c, "nr1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN nr1 (mode 0000) MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    ga = oa_access_info(c, o.file_id);
+    CHECK(!(ga & OA_FILE_READ_DATA), "  granted access 0x%08x has no READ_DATA",
+          ga);
+    st = smb2_read(c, o.file_id, 0, 3, out, &n);
+    CHECK(st == ST_ACCESS_DENIED, "  READ -> ACCESS_DENIED (0x%08x, %u bytes)",
+          st, n);
+    smb2_close(c, o.file_id);
+#else  /* ifndef _WIN32 */
+    (void) c;
+    (void) dir;
+    printf("# max_allowed_no_read\n");
+    printf("# skip max_allowed_no_read: needs a host file mode\n");
+#endif /* ifndef _WIN32 */
+} /* probe_max_allowed_no_read */
+
 /* Mount the share on a passthrough backend: a fresh host directory under
  * $CHIMERA_MBT_SCRATCH (default cwd).  Exits 77 when that filesystem cannot
  * produce file handles. */
@@ -1694,6 +1754,7 @@ main(
     probe_set_info_refused_after_long_path(c);
     probe_max_allowed_delete_via_parent(&env, c, pt_dir);
     probe_ro_file_set_eof(c);
+    probe_max_allowed_no_read(c, pt_dir);
 
     smb2_env_stop(&env);
 

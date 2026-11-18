@@ -321,16 +321,15 @@ chimera_smb_read(struct chimera_smb_request *request)
         return;
     }
 
-    /* Reject only when the open carries no access mask at all that could
-     * authorize a read.  Real clients commonly hold opens via the generic
-     * GENERIC_READ / GENERIC_EXECUTE / GENERIC_ALL bits or MAXIMUM_ALLOWED
-     * without explicit FILE_READ_DATA; only an open lacking all of these
-     * (which is what smbtorture's read.access test deliberately constructs)
-     * should be denied here. */
-    if (!(request->read.open_file->desired_access &
-          (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE |
-           SMB2_GENERIC_READ | SMB2_GENERIC_EXECUTE |
-           SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED))) {
+    /* MS-SMB2 3.3.5.12: a READ must be rejected with ACCESS_DENIED when the
+     * open was not granted read access.  Test the open's GrantedAccess, not
+     * the access it asked for: CREATE has already resolved the generic rights
+     * and MAXIMUM_ALLOWED to specific rights, so a MAXIMUM_ALLOWED open whose
+     * ACL evaluation excludes reading cannot read.  FILE_EXECUTE also
+     * authorizes a read, as on Windows (an executable image is read through
+     * an execute-only handle). */
+    if (!(request->read.open_file->granted_access &
+          (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE))) {
         chimera_smb_open_file_release(request, request->read.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
         return;
