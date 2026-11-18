@@ -10,6 +10,7 @@
 struct chimera_inspect_writer;
 struct chimera_inspect_sample;
 struct chimera_worker_stats;
+struct chimera_inspect_client;
 struct chimera_inspect_session {
     char         session_id[33];
     uint64_t     client_id;
@@ -36,8 +37,28 @@ struct chimera_inspect_session {
     struct {
         int      worker_id;
         uint64_t serial;
+        char     remote_family[16];
+        char     remote_address[64];
+        int      remote_port;
+        uint32_t remote_scope_id;
     } connections[64];
     int          has_slots_in_use;
+};
+struct chimera_inspect_client {
+    uint64_t     client_id;
+    char         owner_hex[129];
+    uint32_t     owner_length;
+    int          owner_truncated;
+    char         state[16];
+    uint64_t     lease_remaining_ms;
+    uint32_t     sessions;
+    uint64_t     opens;
+    uint64_t     locks;
+    uint64_t     delegations;
+    uint8_t      minor_version;
+    char         remote_addresses[8][128];
+    unsigned int remote_address_count;
+    int          remote_addresses_truncated;
 };
 struct chimera_inspect_slot {
     uint32_t slot;
@@ -92,6 +113,12 @@ struct chimera_server_protocol {
         struct chimera_inspect_slot *out,
         unsigned int                 capacity,
         unsigned int                *total);
+
+    unsigned int (*inspect_clients)(
+        void                          *data,
+        struct chimera_inspect_client *out,
+        unsigned int                   capacity,
+        unsigned int                  *total);
 
     void         (*inspect_register)(
         void                        *data,

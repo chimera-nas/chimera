@@ -147,6 +147,11 @@ SYMBOL_EXPORT int chimera_server_inspect_read_session_slots(
     struct chimera_inspect_slot   *out,
     unsigned int                   capacity,
     unsigned int                  *total);
+SYMBOL_EXPORT unsigned int chimera_server_inspect_read_nfs_clients(
+    struct chimera_server_inspect *inspect,
+    struct chimera_inspect_client *out,
+    unsigned int                   capacity,
+    unsigned int                  *total);
 SYMBOL_EXPORT const char * chimera_server_inspect_instance_id(
     struct chimera_server_inspect *inspect);
 /* Start/cancel/release are called only on the requesting worker. Callback is

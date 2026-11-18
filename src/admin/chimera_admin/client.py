@@ -128,6 +128,14 @@ class ChimeraAdminClient:
             params["client_id"] = client_id
         return self._inspection_get("/api/v1/nfs/sessions", params)
 
+    def get_nfs_clients(self, limit: int = 100, offset: int = 0) -> dict:
+        """Get a bounded, paged NFSv4.1+ client inspection snapshot."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1024:
+            raise ValueError("limit must be between 1 and 1024")
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise ValueError("offset must be nonnegative")
+        return self._inspection_get("/api/v1/nfs/clients", {"limit": limit, "offset": offset})
+
     def get_nfs_session_slots(self, session_id: str) -> dict:
         """Get the bounded slot table for one NFSv4.1+ session."""
         if not isinstance(session_id, str) or not session_id or "/" in session_id or "?" in session_id:

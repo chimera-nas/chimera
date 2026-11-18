@@ -478,7 +478,12 @@ main(
                 observed_v4 = 1;
             }
         }
-        ck(json_is_null(json_object_get(row, "per_connection_stats")), "P5/no-invented-connection-counters", NULL);
+        json_t *connection_stats = json_object_get(row, "per_connection_stats");
+        ck(json_is_object(connection_stats), "P5/observed-connection-counters", NULL);
+        ck(json_is_string(json_object_get(connection_stats, "rx_msgs")),
+           "P5/received-message-counter", NULL);
+        ck(json_is_string(json_object_get(connection_stats, "rx_bytes")),
+           "P5/received-byte-counter", NULL);
     }
     ck(observed_v3, "P5/observed-NFSv3", NULL);
     ck(observed_v4, "P5/mixed-NFSv3-and-NFSv4-on-one-connection", NULL);

@@ -47,6 +47,16 @@ def test_inspection_sdk_nfs_sessions(client):
     assert missing.value.status_code == 404
 
 
+def test_inspection_sdk_nfs_clients(client):
+    result = client.get_nfs_clients(limit=8, offset=0)
+    assert result["total"] == 0
+    assert result["clients"] == []
+    assert result["truncated"] is False
+    with pytest.raises(ChimeraAdminError) as error:
+        client._inspection_get("/api/v1/nfs/clients", {"unexpected": 1})
+    assert error.value.status_code == 400
+
+
 def test_inspection_cli_live_dashboard(client):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])

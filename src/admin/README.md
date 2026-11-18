@@ -116,3 +116,13 @@ grant and estimates `GRANT / average Write latency` when live latency is
 available. This estimate is a diagnostic bound; saturation can also reflect a
 slow backend. `inspect dashboard` also shows a sessions panel when NFS is
 enabled; NFSv3 has no session or client view.
+
+`GET /api/v1/nfs/clients` returns paged NFSv4 client records with the owner
+string as capped hex plus its original length, confirmed/unconfirmed/expired/
+courtesy state, lease time remaining, session/open/lock/delegation counts,
+minor version and remote connection addresses. It accepts `limit` and
+`offset`; invalid or unknown query parameters return 400. Each response has
+`total`, `truncated` and `complete` paging fields. The CLI view is
+`chimera-admin inspect nfs clients`; it supports the inspection input, watch,
+target, JSON, sorting, row-limit and wide-output options. The NFS inspection
+group is for NFSv4.1 and later; NFSv3 does not have client sessions.

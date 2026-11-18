@@ -126,6 +126,11 @@ chimera_rest_inspect_nfs_sessions(
                      session->connections[j].worker_id, session->connections[j].serial);
             json_t *connection = json_pack("{s:s,s:i}", "connection_id", connection_id,
                                            "worker_id", session->connections[j].worker_id);
+            json_object_set_new(connection, "remote", json_pack("{s:s,s:s,s:i,s:i}",
+                                                                "family", session->connections[j].remote_family,
+                                                                "address", session->connections[j].remote_address,
+                                                                "port", session->connections[j].remote_port,
+                                                                "scope_id", session->connections[j].remote_scope_id));
             json_array_append_new(connections, connection);
             int     found = 0;
             for (unsigned int k = 0; k < nworkers; k++) {
@@ -160,6 +165,110 @@ chimera_rest_inspect_nfs_sessions(
     free(rows);
     chimera_rest_send_json(thread->evpl, request, 200, result);
 } /* chimera_rest_inspect_nfs_sessions */
+
+void
+chimera_rest_inspect_nfs_clients(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    const char                 *query,
+    int                         query_len)
+{
+    struct chimera_server_inspect *inspect = chimera_server_get_inspect(thread->shared->server);
+    unsigned int                   limit = 100, offset = 0, total = 0;
+    int                            seen_limit = 0, seen_offset = 0;
+    char                          *query_copy = NULL;
+
+    if (query_len < 0 || query_len > 1024) {
+        chimera_rest_send_error(thread->evpl, request, 400, "Bad Request", "Invalid query string");
+        return;
+    }
+    if (query_len) {
+        query_copy = strndup(query, (size_t) query_len);
+        if (!query_copy) {
+            chimera_rest_send_error(thread->evpl, request, 503, "Service Unavailable", "Inspection allocation failed");
+            return;
+        }
+        char *save = NULL;
+        for (char *part = strtok_r(query_copy, "&", &save); part; part = strtok_r(NULL, "&", &save)) {
+            char              *equal = strchr(part, '=');
+            if (!equal || equal == part || !equal[1]) {
+                free(query_copy);
+                chimera_rest_send_error(thread->evpl, request, 400, "Bad Request", "Invalid query parameter");
+                return;
+            }
+            *equal++ = '\0';
+            char              *end = NULL;
+            errno = 0;
+            unsigned long long value = strtoull(equal, &end, 10);
+            if (errno || !end || *end) {
+                free(query_copy);
+                chimera_rest_send_error(thread->evpl, request, 400, "Bad Request", "Invalid numeric query parameter");
+                return;
+            }
+            if (!strcmp(part, "limit") && !seen_limit && value > 0 && value <= CHIMERA_INSPECT_ROWS) {
+                limit      = (unsigned int) value;
+                seen_limit = 1;
+            } else if (!strcmp(part, "offset") && !seen_offset && value <= UINT_MAX) {
+                offset      = (unsigned int) value;
+                seen_offset = 1;
+            } else {
+                free(query_copy);
+                chimera_rest_send_error(thread->evpl, request, 400, "Bad Request",
+                                        "Unknown or out-of-range query parameter");
+                return;
+            }
+        }
+        free(query_copy);
+    }
+
+    struct chimera_inspect_client *rows = calloc(CHIMERA_INSPECT_ROWS, sizeof(*rows));
+    if (!rows) {
+        chimera_rest_send_error(thread->evpl, request, 503, "Service Unavailable", "Inspection allocation failed");
+        return;
+    }
+    unsigned int                   count = chimera_server_inspect_read_nfs_clients(inspect, rows,
+                                                                                   CHIMERA_INSPECT_ROWS, &total);
+    json_t                        *result = json_object(), *clients = json_array();
+    unsigned int                   emitted = 0;
+    for (unsigned int i = offset; i < count && emitted < limit; i++) {
+        const struct chimera_inspect_client *row  = &rows[i];
+        json_t                              *item = json_pack("{s:s,s:i,s:b,s:s,s:i,s:i,s:i,s:b}",
+                                                              "owner_hex", row->owner_hex,
+                                                              "owner_length", row->owner_length,
+                                                              "owner_truncated", row->owner_truncated,
+                                                              "state", row->state,
+                                                              "lease_remaining_ms", (int) (row->lease_remaining_ms >
+                                                                                           INT_MAX ? INT_MAX : row->
+                                                                                           lease_remaining_ms),
+                                                              "sessions", row->sessions,
+                                                              "minor_version", row->minor_version,
+                                                              "remote_addresses_truncated", row->
+                                                              remote_addresses_truncated);
+        json_object_set_new(item, "client_id", decimal(row->client_id));
+        json_object_set_new(item, "opens", decimal(row->opens));
+        json_object_set_new(item, "locks", decimal(row->locks));
+        json_object_set_new(item, "delegations", decimal(row->delegations));
+        json_object_set_new(item, "remote_address_count", json_integer(row->remote_address_count));
+        json_t *addresses = json_array();
+        for (unsigned int j = 0; j < row->remote_address_count; j++) {
+            json_array_append_new(addresses, json_string(row->remote_addresses[j]));
+        }
+        json_object_set_new(item, "remote_addresses", addresses);
+        json_array_append_new(clients, item);
+        emitted++;
+    }
+    int truncated = total > count || total > offset + emitted;
+    json_object_set_new(result, "clients", clients);
+    json_object_set_new(result, "total", json_integer(total));
+    json_object_set_new(result, "offset", json_integer(offset));
+    json_object_set_new(result, "limit", json_integer(limit));
+    json_object_set_new(result, "truncated", json_boolean(truncated));
+    json_object_set_new(result, "complete", json_boolean(!truncated));
+    json_object_set_new(result, "server_instance_id",
+                        json_string(chimera_server_inspect_instance_id(inspect)));
+    free(rows);
+    chimera_rest_send_json(thread->evpl, request, 200, result);
+} /* chimera_rest_inspect_nfs_clients */
 
 struct rest_inspect_context {
     struct chimera_rest_thread       *thread;

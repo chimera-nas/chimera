@@ -595,6 +595,7 @@ chimera_rest_dispatch(
     int         inspect_connections  = path_len == 19 && !memcmp(url, "/api/v1/connections", 19);
     int         inspect_threads      = path_len == 15 && !memcmp(url, "/api/v1/threads", 15);
     int         inspect_nfs_sessions = path_len == 20 && !memcmp(url, "/api/v1/nfs/sessions", 20);
+    int         inspect_nfs_clients  = path_len == 19 && !memcmp(url, "/api/v1/nfs/clients", 19);
     int         inspect_nfs_slots    = path_len == 59 &&
         !memcmp(url, "/api/v1/nfs/sessions/", 21) &&
         !memcmp(url + path_len - 6, "/slots", 6);
@@ -618,6 +619,16 @@ chimera_rest_dispatch(
             chimera_rest_inspect_nfs_sessions(thread, request,
                                               query ? query + 1 : NULL,
                                               query ? url_len - path_len - 1 : 0);
+        }
+        return;
+    }
+    if (inspect_nfs_clients) {
+        if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        } else {
+            chimera_rest_inspect_nfs_clients(thread, request,
+                                             query ? query + 1 : NULL,
+                                             query ? url_len - path_len - 1 : 0);
         }
         return;
     }

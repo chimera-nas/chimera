@@ -76,6 +76,18 @@ class InspectionSemantics(unittest.TestCase):
         self.assertIn("IN_PROGRESS", output)
         self.assertIn("1500.000 ms", output)
 
+    def test_nfs_clients_saved_input_and_columns(self):
+        parsed = _build_parser().parse_args([
+            "inspect", "nfs", "clients", "--input",
+            str(ROOT / "examples" / "nfs-clients.json"), "--wide"])
+        snapshot = fetch(None, parsed)
+        output = render(snapshot, {}, parsed, width=160)
+        self.assertIn("NFSv4.1+ CLIENTS", output)
+        self.assertIn("confirmed", output)
+        self.assertIn("10.0.0.5:43210", output)
+        self.assertIn("6c696e75782d636c69656e74", output)
+        self.assertIn("DELEGATIONS", output)
+
     def test_dashboard_includes_nfs_sessions_when_nfs_is_enabled(self):
         snapshot = frames()
         snapshot["nfs_sessions"] = {

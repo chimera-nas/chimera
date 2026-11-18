@@ -56,6 +56,23 @@ main(void)
     char instance[64];
     snprintf(instance, sizeof(instance), "%s", json_string_value(json_object_get(snapshot, "server_instance_id")));
     json_decref(snapshot);
+    snapshot = get(api, "/api/v1/nfs/sessions?limit=2&offset=0", 200);
+    check(json_is_array(json_object_get(snapshot, "sessions")), "NFS session list");
+    check(json_is_integer(json_object_get(snapshot, "total")), "NFS session total");
+    check(json_is_true(json_object_get(snapshot, "complete")), "NFS session page complete");
+    json_decref(snapshot);
+    snapshot = get(api, "/api/v1/nfs/sessions?limit=2&offset=1", 200);
+    check(json_is_array(json_object_get(snapshot, "sessions")), "NFS session offset page");
+    json_decref(snapshot);
+    json_decref(get(api, "/api/v1/nfs/sessions/00000000000000000000000000000000/slots", 404));
+    snapshot = get(api, "/api/v1/nfs/clients?limit=2&offset=0", 200);
+    check(json_is_array(json_object_get(snapshot, "clients")), "NFS client list");
+    check(json_is_integer(json_object_get(snapshot, "total")), "NFS client total");
+    check(json_is_true(json_object_get(snapshot, "complete")), "NFS client page complete");
+    json_decref(snapshot);
+    snapshot = get(api, "/api/v1/nfs/clients?limit=2&offset=1", 200);
+    check(json_is_array(json_object_get(snapshot, "clients")), "NFS client offset page");
+    json_decref(snapshot);
     snapshot = get(api, "/api/v1/threads?live=1", 200);
     check(json_is_true(json_object_get(snapshot, "live")), "live snapshot marker");
     threads = json_object_get(snapshot, "threads");
@@ -103,7 +120,9 @@ main(void)
         "/api/v1/connections?service=invalid",     "/api/v1/connections?worker_id=0&worker_id=1",
         "/api/v1/connections?foo=x",               "/api/v1/connections?local_ip=%00",
         "/api/v1/connections?transport=tcp&",
-        "/api/v1/connections?service=",            "/api/v1/connections?remote_port=9999999999999999999"
+        "/api/v1/connections?service=",            "/api/v1/connections?remote_port=9999999999999999999",
+        "/api/v1/nfs/sessions?unknown=1",          "/api/v1/nfs/sessions?limit=0",
+        "/api/v1/nfs/clients?unknown=1",           "/api/v1/nfs/clients?limit=0"
     };
     for (unsigned int i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         json_decref(get(api, bad[i], 400));

@@ -17,7 +17,8 @@ import time
 from urllib.parse import urlsplit
 
 from .client import ChimeraAdminClient, ChimeraAdminError
-from .inspection import WatchState, _age_text, _integer, _metric_map, _rate_text, _table, complete, endpoint, fetch, protocol, safe
+from .inspection import (WatchState, _age_text, _integer, _metric_map, _rate_text, _render_nfs_clients,
+                         _render_nfs_sessions, _table, complete, endpoint, fetch, protocol, safe)
 from .presentation import terminal_width
 from .watch_keys import WatchKeys
 
@@ -313,6 +314,18 @@ def render_fleet(views, args, now):
                     section, snapshot.get("truncated", False), safe(snapshot.get("missing_workers", []))))
         if view.meta.get("restarted"):
             lines.append("  Warning: instance restart; this target's comparison baselines reset.")
+        if args.inspection_view == "nfs_sessions":
+            lines.extend("  " + line for line in _render_nfs_sessions(
+                view.snapshots.get("nfs_sessions", {}), view.meta, args,
+                str(view.error) if view.error else None).splitlines())
+            lines.append("")
+            continue
+        if args.inspection_view == "nfs_clients":
+            lines.extend("  " + line for line in _render_nfs_clients(
+                view.snapshots.get("nfs_clients", {}), args,
+                str(view.error) if view.error else None).splitlines())
+            lines.append("")
+            continue
         threads = view.snapshots.get("threads", {})
         connections = view.snapshots.get("connections", {})
         workers = list(threads.get("threads", []))

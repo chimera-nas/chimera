@@ -139,6 +139,11 @@ void chimera_rest_inspect_nfs_sessions(
     struct evpl_http_request   *request,
     const char                 *query,
     int                         query_len);
+void chimera_rest_inspect_nfs_clients(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    const char                 *query,
+    int                         query_len);
 void chimera_rest_inspect_nfs_slots(
     struct chimera_rest_thread *thread,
     struct evpl_http_request   *request,

@@ -1919,11 +1919,27 @@ nfs_inspect_session_slots(
                                                session_id, out, capacity, total);
 } /* nfs_inspect_session_slots */
 
+static unsigned int
+nfs_inspect_clients(
+    void                          *data,
+    struct chimera_inspect_client *out,
+    unsigned int                   capacity,
+    unsigned int                  *total)
+{
+    struct chimera_server_nfs_thread *thread        = data;
+    uint64_t                          lease_time_ns = (uint64_t) chimera_server_config_get_nfs4_lease_time(
+        thread->shared->config) * UINT64_C(1000000000);
+
+    return nfs4_client_inspect_snapshot(&thread->shared->nfs4_shared_clients,
+                                        out, capacity, total, lease_time_ns);
+} /* nfs_inspect_clients */
+
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .inspect               = nfs_inspect,
     .inspect_live          = nfs_inspect_live,
     .inspect_sessions      = nfs_inspect_sessions,
     .inspect_session_slots = nfs_inspect_session_slots,
+    .inspect_clients       = nfs_inspect_clients,
     .inspect_register      = nfs_inspect_register,
     .init                  = nfs_server_init,
     .destroy               = nfs_server_destroy,

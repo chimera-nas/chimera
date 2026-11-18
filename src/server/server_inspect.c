@@ -193,6 +193,30 @@ chimera_server_inspect_read_session_slots(
     return -1;
 } /* chimera_server_inspect_read_session_slots */
 
+SYMBOL_EXPORT unsigned int
+chimera_server_inspect_read_nfs_clients(
+    struct chimera_server_inspect *inspect,
+    struct chimera_inspect_client *out,
+    unsigned int                   capacity,
+    unsigned int                  *total)
+{
+    *total = 0;
+    if (!inspect->nworkers) {
+        return 0;
+    }
+    struct chimera_worker_stats *stats = &inspect->worker_stats[0];
+    if (!atomic_load_explicit(&stats->registered, memory_order_acquire)) {
+        return 0;
+    }
+    for (int i = 0; i < stats->nprotocols; i++) {
+        if (stats->contexts[i] && stats->protocols[i]->inspect_clients) {
+            return stats->protocols[i]->inspect_clients(stats->contexts[i], out,
+                                                        capacity, total);
+        }
+    }
+    return 0;
+} /* chimera_server_inspect_read_nfs_clients */
+
 SYMBOL_EXPORT const char *
 chimera_server_inspect_instance_id(struct chimera_server_inspect *inspect)
 {

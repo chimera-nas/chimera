@@ -636,6 +636,9 @@ nfs_client_alloc(
     c->minor         = minor;
     c->last_touch_ns = nfs_lease_now_ns();
     atomic_init(&c->recovery_stamp_ns, c->last_touch_ns);
+    atomic_init(&c->inspect_open_count, 0);
+    atomic_init(&c->inspect_lock_count, 0);
+    atomic_init(&c->inspect_delegation_count, 0);
     if (owner_len > NFS4_OPAQUE_LIMIT) {
         owner_len = NFS4_OPAQUE_LIMIT;
     }
@@ -698,6 +701,8 @@ open_state_destroy_locked(
     if (prev_destroyed != 0) {
         return;
     }
+
+    atomic_fetch_sub_explicit(&owner->client->inspect_open_count, 1, memory_order_relaxed);
 
     /* Unhash from the owner so no new acquire can find it through the
      * owner walk. */
@@ -1109,6 +1114,7 @@ nfs_open_state_create(
 
     evpl_mutex_lock(&owner->lock);
     HASH_ADD_KEYPTR(hh, owner->states_by_fh, state->fh, state->fh_len, state);
+    atomic_fetch_add_explicit(&client->inspect_open_count, 1, memory_order_relaxed);
     evpl_mutex_unlock(&owner->lock);
 
     /* Encode before dropping client->lock: once published, a concurrent
@@ -1707,6 +1713,7 @@ nfs_lock_state_create(
 
     LL_PREPEND2(open_state->locks, state, next_in_open);
     state->on_open_list = 1;
+    atomic_fetch_add_explicit(&client->inspect_lock_count, 1, memory_order_relaxed);
     evpl_mutex_unlock(&open_state->owner->lock);
 
     /* Encode before dropping client->lock: once published, a concurrent
@@ -1833,6 +1840,9 @@ lock_state_destroy_common(
     if (prev_destroyed != 0) {
         return;
     }
+
+    atomic_fetch_sub_explicit(&lock_owner->client->inspect_lock_count, 1,
+                              memory_order_relaxed);
 
     /* Flag-guarded unlinks: the expire/CLOSE cascade in
      * open_state_destroy_locked may race this and unlink either side
@@ -2034,6 +2044,7 @@ nfs_delegation_create(
 
     evpl_mutex_lock(&client->lock);
     LL_PREPEND2(client->delegations, deleg, next_in_client);
+    atomic_fetch_add_explicit(&client->inspect_delegation_count, 1, memory_order_relaxed);
     evpl_mutex_unlock(&client->lock);
 
     nfs4_stateid_encode(out_stateid, deleg->seqid,
@@ -2082,6 +2093,9 @@ delegation_destroy_common(
     if (prev_destroyed != 0) {
         return;
     }
+
+    atomic_fetch_sub_explicit(&deleg->client->inspect_delegation_count, 1,
+                              memory_order_relaxed);
 
     /* If this delegation was force-revoked, drop it from the client's
     * revoked count so SEQ4_STATUS_RECALLABLE_STATE_REVOKED clears. */

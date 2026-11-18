@@ -1,0 +1,26 @@
+{
+  "server_instance_id": "example-nfs-instance",
+  "complete": true,
+  "truncated": false,
+  "total": 1,
+  "offset": 0,
+  "limit": 100,
+  "clients": [
+    {
+      "client_id": "281474976710657",
+      "owner_hex": "6c696e75782d636c69656e74",
+      "owner_length": 12,
+      "owner_truncated": false,
+      "state": "confirmed",
+      "lease_remaining_ms": 30000,
+      "sessions": 1,
+      "opens": "2",
+      "locks": "1",
+      "delegations": "0",
+      "minor_version": 1,
+      "remote_addresses": ["10.0.0.5:43210"],
+      "remote_address_count": 1,
+      "remote_addresses_truncated": false
+    }
+  ]
+}

@@ -101,6 +101,24 @@ Session rows also expose `replay_hits`, `seq_misordered`, `bad_slot`,
 are sharded by worker and summed in the inspection reader; the CLI shows them
 in the `SESSION EVENTS` table.
 
+`GET /api/v1/nfs/clients` returns the bounded NFSv4 client table. It accepts
+`limit` (1–1,024, default 100) and `offset`; unknown or invalid parameters
+return 400. Each row includes the decimal `client_id`, `owner_hex`, original
+`owner_length` and `owner_truncated`, `state` (`confirmed`, `unconfirmed`,
+`expired`, or `courtesy`), `lease_remaining_ms`, `sessions`, `opens`, `locks`,
+`delegations`, `minor_version`, and up to eight `remote_addresses` with a
+`remote_addresses_truncated` flag. `total`, `offset`, `limit`, `truncated`, and
+`complete` describe paging. Owner strings are hex encoded and capped at 64
+bytes. State counts are lifecycle gauges; a concurrent create or destroy may
+make a snapshot briefly reflect adjacent moments.
+
+Use `chimera-admin inspect nfs clients` to display clients. `--input FILE`,
+`--watch`, `--interval`, `--iterations`, `--json`, `--quiet`, `--no-clear`,
+`--wide`, `--max-rows`, `--sort`, `--target`, and `--targets FILE` follow the
+other inspection views. `--wide` includes owner hex and minor version. These
+client and session views cover NFSv4.1 and later; NFSv3 has no sessions or
+clients.
+
 During `chimera-admin inspect nfs sessions --watch`, the CLI tracks each
 session's peak in-progress slots and reports when `INFL == GRANT` in most
 samples. If live VFS Write latency is available, it estimates a request rate as

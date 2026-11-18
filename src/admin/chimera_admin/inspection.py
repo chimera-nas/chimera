@@ -88,7 +88,10 @@ def add_inspection_commands(subparsers):
     sessions.set_defaults(inspection_view="nfs_sessions", target=None, targets=None, worker_id=None,
                          service=None, transport=None, remote_ip=None, remote_port=None,
                          local_ip=None, local_port=None)
-    sessions.add_argument("--input", metavar="FILE", help="Read a saved JSON snapshot instead of the API")
+    sessions_source = sessions.add_mutually_exclusive_group()
+    sessions_source.add_argument("--input", metavar="FILE", help="Read a saved JSON snapshot instead of the API")
+    sessions_source.add_argument("--targets", metavar="FILE", help="Monitor named management endpoints from a JSON targets file")
+    sessions.add_argument("--target", action="append", help="Select a named target; repeat to select several")
     sessions.add_argument("--client", dest="client_id", type=_nonnegative, help="Filter by NFS client ID")
     sessions.add_argument("--slots", metavar="SESSION_ID", help="Show the slot table for one session")
     sessions.add_argument("--watch", action="store_true", help="Refresh until Ctrl-C")
@@ -100,6 +103,24 @@ def add_inspection_commands(subparsers):
     sessions.add_argument("--max-rows", type=_nonnegative, default=20, help="Rows per text table; 0 shows all returned rows")
     sessions.add_argument("--wide", action="store_true", help="Include full identifiers and timestamps")
     sessions.add_argument("--sort", choices=["client", "inflight", "peak"], default="client")
+
+    clients = nfs_views.add_parser("clients", help="Inspect NFSv4.1 and later clients")
+    clients.set_defaults(inspection_view="nfs_clients", target=None, targets=None, worker_id=None,
+                        service=None, transport=None, remote_ip=None, remote_port=None,
+                        local_ip=None, local_port=None)
+    clients_source = clients.add_mutually_exclusive_group()
+    clients_source.add_argument("--input", metavar="FILE", help="Read a saved JSON snapshot instead of the API")
+    clients_source.add_argument("--targets", metavar="FILE", help="Monitor named management endpoints from a JSON targets file")
+    clients.add_argument("--target", action="append", help="Select a named target; repeat to select several")
+    clients.add_argument("--watch", action="store_true", help="Refresh until Ctrl-C")
+    clients.add_argument("--interval", type=_positive, default=2.0, help="Refresh interval, minimum 1s (default: 2)")
+    clients.add_argument("--iterations", type=_nonnegative, default=0, help="Stop after N poll attempts; 0 means unlimited in watch")
+    clients.add_argument("--json", action="store_true", help="JSON output; newline-delimited JSON in watch")
+    clients.add_argument("--quiet", action="store_true", help="Hide banners and explanatory notes")
+    clients.add_argument("--no-clear", action="store_true", help="Append watch frames on a terminal")
+    clients.add_argument("--max-rows", type=_nonnegative, default=20, help="Rows per text table; 0 shows all returned rows")
+    clients.add_argument("--wide", action="store_true", help="Include full identifiers and owner strings")
+    clients.add_argument("--sort", choices=["client", "state", "lease", "sessions", "opens"], default="client")
 
 
 def safe(value):
@@ -241,24 +262,29 @@ def _matches(row, args):
 def fetch(client, args):
     view = args.inspection_view
     result = {}
-    if view == "nfs_sessions":
+    if view in ("nfs_sessions", "nfs_clients"):
         if args.input:
             path = Path(args.input)
             if path.stat().st_size > 8 * 1024 * 1024:
                 raise ValueError("snapshot exceeds the 8 MiB input limit")
             raw = json.loads(path.read_text(encoding="utf-8"))
-            result[view] = raw.get("sessions_snapshot", raw)
-            live = raw.get("live_threads_snapshot", raw.get("live"))
-            if isinstance(live, dict):
-                result["live"] = valid(live, "threads")
-        elif args.slots:
+            key = "sessions_snapshot" if view == "nfs_sessions" else "clients_snapshot"
+            result[view] = raw.get(key, raw)
+            if view == "nfs_sessions":
+                live = raw.get("live_threads_snapshot", raw.get("live"))
+                if isinstance(live, dict):
+                    result["live"] = valid(live, "threads")
+        elif view == "nfs_sessions" and args.slots:
             result[view] = client.get_nfs_session_slots(args.slots)
-        else:
+        elif view == "nfs_sessions":
             result[view] = client.get_nfs_sessions(limit=1024, client_id=args.client_id)
             result["live"] = valid(client.get_live_threads(), "threads")
+        else:
+            result[view] = client.get_nfs_clients(limit=1024)
         snapshot = result[view]
-        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("sessions"), list):
-            raise ValueError("NFS session snapshot must contain a sessions array")
+        collection = "sessions" if view == "nfs_sessions" else "clients"
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get(collection), list):
+            raise ValueError("NFS {} snapshot must contain a {} array".format(collection, collection))
         return copy.deepcopy(result)
     if args.input:
         path = Path(args.input)
@@ -451,6 +477,8 @@ def render(snapshots, meta, args, error=None, stale_age=0, width=None):
         session_snapshot = copy.copy(snapshots.get("nfs_sessions", {}))
         session_snapshot["live"] = snapshots.get("live", {})
         return _render_nfs_sessions(session_snapshot, meta, args, error)
+    if args.inspection_view == "nfs_clients":
+        return _render_nfs_clients(snapshots.get("nfs_clients", {}), args, error)
     states = list(snapshots.values())
     instances = {s["server_instance_id"] for s in states}
     mixed = len(instances) > 1
@@ -688,6 +716,46 @@ def _render_nfs_sessions(snapshot, meta, args, error=None):
                 lines.append("Slot-saturated: INFL == GRANT in {} of {} samples; Write latency is unavailable for a throughput bound.".format(
                     counts["saturated"], counts["samples"]))
         lines.append("Peak is the maximum INFL observed across watch samples. A full slot table can also indicate a slow backend; compare with a run that negotiates more slots.")
+    return "\n".join(lines)
+
+
+def _render_nfs_clients(snapshot, args, error=None):
+    lines = [] if args.quiet else ["NFSv4.1+ CLIENTS"]
+    lines.append("{}  {}".format(
+        "{}:{}".format(safe(getattr(args, "host", "server")), safe(getattr(args, "port", ""))).rstrip(":"),
+        "STALE" if error else "LIVE" if args.watch and not args.input else "SNAPSHOT"))
+    if error:
+        lines.append("Refresh failed: {}".format(safe(error)))
+    clients = list(snapshot.get("clients", []))
+    if args.sort == "state":
+        clients.sort(key=lambda row: (str(row.get("state", "")), str(row.get("client_id", ""))))
+    elif args.sort == "lease":
+        clients.sort(key=lambda row: _integer(row.get("lease_remaining_ms")) or 0)
+    elif args.sort == "sessions":
+        clients.sort(key=lambda row: -(_integer(row.get("sessions")) or 0))
+    elif args.sort == "opens":
+        clients.sort(key=lambda row: -(_integer(row.get("opens")) or 0))
+    rows = []
+    for client in clients:
+        client_id = str(client.get("client_id", ""))
+        lease = _integer(client.get("lease_remaining_ms"))
+        lease_text = "--" if lease is None else "{}s".format(lease // 1000)
+        addresses = ",".join(safe(address) for address in client.get("remote_addresses", [])) or "--"
+        if client.get("remote_addresses_truncated"):
+            addresses += ",…" if addresses != "--" else "…"
+        rows.append([client_id if args.wide else client_id[:8], client.get("state", "--"),
+                     lease_text, client.get("sessions", "--"), client.get("opens", "--"),
+                     client.get("locks", "--"), client.get("delegations", "--"), addresses])
+    lines += ["", _table(["CLIENT", "STATE", "LEASE", "SESSIONS", "OPENS", "LOCKS",
+                         "DELEGATIONS", "REMOTE ADDRESSES"], rows, args.max_rows)]
+    if args.wide:
+        lines += ["", "CLIENT OWNERS", _table(
+            ["CLIENT", "OWNER HEX", "OWNER LENGTH", "TRUNCATED", "MINOR"],
+            [[str(client.get("client_id", "")), client.get("owner_hex", ""),
+              client.get("owner_length", "--"), client.get("owner_truncated", False),
+              client.get("minor_version", "--")] for client in clients], args.max_rows)]
+    if not args.quiet and snapshot.get("truncated"):
+        lines.append("Client results are truncated; use limit/offset through the REST API to page the full table.")
     return "\n".join(lines)
 
 

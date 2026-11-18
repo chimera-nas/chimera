@@ -275,12 +275,145 @@ nfs4_session_inspect_snapshot(
             unsigned int n = entry->connection_count++;
             entry->connections[n].worker_id = session->inspect_connections[j].worker_id;
             entry->connections[n].serial    = session->inspect_connections[j].serial;
+            snprintf(entry->connections[n].remote_family,
+                     sizeof(entry->connections[n].remote_family), "%s",
+                     session->inspect_connections[j].remote_family);
+            snprintf(entry->connections[n].remote_address,
+                     sizeof(entry->connections[n].remote_address), "%s",
+                     session->inspect_connections[j].remote_address);
+            entry->connections[n].remote_port     = session->inspect_connections[j].remote_port;
+            entry->connections[n].remote_scope_id = session->inspect_connections[j].remote_scope_id;
         }
         nfs4_session_put(session);
     }
     free(sessions);
     return count;
 } /* nfs4_session_inspect_snapshot */
+
+unsigned int
+nfs4_client_inspect_snapshot(
+    struct nfs4_client_table      *table,
+    struct chimera_inspect_client *out,
+    unsigned int                   capacity,
+    unsigned int                  *total,
+    uint64_t                       lease_time_ns)
+{
+    static const char   hex[] = "0123456789abcdef";
+    struct nfs_client **clients;
+    struct nfs4_client *client, *tmp;
+    unsigned int        count = 0;
+    struct timespec     now_ts;
+    uint64_t            now_ns;
+
+    *total = 0;
+    if (!capacity) {
+        return 0;
+    }
+    clients = calloc(capacity, sizeof(*clients));
+    if (!clients) {
+        return 0;
+    }
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    *total = HASH_CNT(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id);
+    HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, client, tmp)
+    {
+        if (count >= capacity) {
+            break;
+        }
+        struct chimera_inspect_client *row = &out[count];
+        row->client_id    = client->nfs4_client_id;
+        row->owner_length = client->nfs4_client_owner_len;
+        unsigned int                   owner_bytes = row->owner_length < 64 ? row->owner_length : 64;
+        row->owner_truncated = row->owner_length > owner_bytes;
+        for (unsigned int i = 0; i < owner_bytes; i++) {
+            row->owner_hex[i * 2]     = hex[client->nfs4_client_owner[i] >> 4];
+            row->owner_hex[i * 2 + 1] = hex[client->nfs4_client_owner[i] & 0xf];
+        }
+        row->owner_hex[owner_bytes * 2] = '\0';
+        row->sessions                   = client->nfs4_client_session_count;
+        snprintf(row->state, sizeof(row->state), "%s",
+                 client->nfs4_client_confirmed ? "confirmed" : "unconfirmed");
+        clients[count++] = nfs_client_get(client->unified);
+    }
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+
+    clock_gettime(CLOCK_MONOTONIC, &now_ts);
+    now_ns = (uint64_t) now_ts.tv_sec * UINT64_C(1000000000) + now_ts.tv_nsec;
+    for (unsigned int i = 0; i < count; i++) {
+        struct nfs_client             *unified = clients[i];
+        struct chimera_inspect_client *row     = &out[i];
+        if (unified) {
+            uint64_t last_touch = atomic_load_explicit(
+                (_Atomic uint64_t *) &unified->last_touch_ns, memory_order_relaxed);
+            uint64_t deadline = last_touch + lease_time_ns;
+            row->lease_remaining_ms = deadline > now_ns ? (deadline - now_ns) / UINT64_C(1000000) : 0;
+            row->opens              = atomic_load_explicit(&unified->inspect_open_count, memory_order_relaxed);
+            row->locks              = atomic_load_explicit(&unified->inspect_lock_count, memory_order_relaxed);
+            row->delegations        = atomic_load_explicit(&unified->inspect_delegation_count,
+                                                           memory_order_relaxed);
+            row->minor_version = unified->minor;
+            if (atomic_load_explicit(&unified->courtesy, memory_order_relaxed)) {
+                snprintf(row->state, sizeof(row->state), "courtesy");
+            } else if (!row->lease_remaining_ms) {
+                snprintf(row->state, sizeof(row->state), "expired");
+            }
+            nfs_client_put(unified);
+        }
+    }
+    free(clients);
+
+    /* Connection addresses come from the same bounded session snapshot. */
+    unsigned int                    session_capacity = 4096, session_total = 0;
+    struct chimera_inspect_session *sessions = calloc(session_capacity, sizeof(*sessions));
+    if (sessions) {
+        unsigned int n = nfs4_session_inspect_snapshot(table, sessions,
+                                                       session_capacity, &session_total);
+        for (unsigned int i = 0; i < n; i++) {
+            for (unsigned int j = 0; j < count; j++) {
+                if (sessions[i].client_id != out[j].client_id) {
+                    continue;
+                }
+                for (unsigned int k = 0; k < sessions[i].connection_count; k++) {
+                    const char *remote_family  = sessions[i].connections[k].remote_family;
+                    const char *remote_address = sessions[i].connections[k].remote_address;
+                    int         remote_port    = sessions[i].connections[k].remote_port;
+                    uint32_t    scope_id       = sessions[i].connections[k].remote_scope_id;
+                    if (!remote_address[0]) {
+                        continue;
+                    }
+                    char        address[128];
+                    if (remote_port < 0) {
+                        snprintf(address, sizeof(address), "%s:%s", remote_family, remote_address);
+                    } else if (!strcmp(remote_family, "ipv6") && scope_id) {
+                        snprintf(address, sizeof(address), "[%s%%%u]:%d", remote_address,
+                                 scope_id, remote_port);
+                    } else if (!strcmp(remote_family, "ipv6")) {
+                        snprintf(address, sizeof(address), "[%s]:%d", remote_address, remote_port);
+                    } else {
+                        snprintf(address, sizeof(address), "%s:%d", remote_address, remote_port);
+                    }
+                    int duplicate = 0;
+                    for (unsigned int a = 0; a < out[j].remote_address_count; a++) {
+                        duplicate |= !strcmp(out[j].remote_addresses[a], address);
+                    }
+                    if (!duplicate && out[j].remote_address_count < 8) {
+                        snprintf(out[j].remote_addresses[out[j].remote_address_count++], 128,
+                                 "%s", address);
+                    } else if (!duplicate) {
+                        out[j].remote_addresses_truncated = 1;
+                    }
+                }
+            }
+        }
+        if (session_total > n) {
+            for (unsigned int j = 0; j < count; j++) {
+                out[j].remote_addresses_truncated = 1;
+            }
+        }
+        free(sessions);
+    }
+    return count;
+} /* nfs4_client_inspect_snapshot */
 
 int
 nfs4_session_inspect_slots_snapshot(
@@ -329,7 +462,7 @@ nfs4_session_inspect_slots_snapshot(
     for (unsigned int i = 0; i < count; i++) {
         uint64_t             word  = atomic_load_explicit(&session->replay_slots[i].state_word, memory_order_acquire);
         enum nfs4_slot_state state = (enum nfs4_slot_state) (word & NFS4_SLOT_STATE_MASK);
-        const char          *name  = "unknown";
+        const char          *name;
         switch (state) {
             case NFS4_SLOT_UNUSED: name      = "UNUSED"; break;
             case NFS4_SLOT_IN_PROGRESS: name = "IN_PROGRESS"; break;
@@ -337,6 +470,7 @@ nfs4_session_inspect_slots_snapshot(
             case NFS4_SLOT_COMPLETED: name   = "COMPLETED"; break;
             case NFS4_SLOT_RESYNC: name      = "RESYNC"; break;
             case NFS4_SLOT_RESYNCING: name   = "RESYNCING"; break;
+            default: name                    = "unknown"; break;
         } /* switch */
         out[i].slot  = i;
         out[i].seqid = (uint32_t) (word >> NFS4_SLOT_SEQID_SHIFT);
@@ -763,6 +897,12 @@ nfs4_client_remove_sessions_locked(
         }
 
         HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, s);
+        struct nfs4_client *client_record;
+        HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+                  &client_id, sizeof(client_id), client_record);
+        if (client_record && client_record->nfs4_client_session_count) {
+            client_record->nfs4_client_session_count--;
+        }
         atomic_store_explicit(&s->destroyed, true, memory_order_release);
         nfs4_session_put(s);
     }
@@ -1890,6 +2030,7 @@ nfs4_create_session(
 
     HASH_ADD(nfs4_session_hh, table->nfs4_ct_sessions,
              nfs4_session_id, NFS4_SESSIONID_SIZE, session);
+    client->nfs4_client_session_count++;
 
  out:
     evpl_mutex_unlock(&table->nfs4_ct_lock);
@@ -1991,6 +2132,13 @@ nfs4_destroy_session(
 
     if (session) {
         HASH_DELETE(nfs4_session_hh, table->nfs4_ct_sessions, session);
+        struct nfs4_client *client_record;
+        HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+                  &session->nfs4_session_clientid, sizeof(session->nfs4_session_clientid),
+                  client_record);
+        if (client_record && client_record->nfs4_client_session_count) {
+            client_record->nfs4_client_session_count--;
+        }
         atomic_store_explicit(&session->destroyed, true,
                               memory_order_release);
     }
@@ -2106,6 +2254,15 @@ nfs4_session_bind_conn(
     if (index < 64) {
         session->inspect_connections[index].worker_id = identity.pool_index;
         session->inspect_connections[index].serial    = bind_info.serial;
+        snprintf(session->inspect_connections[index].remote_family,
+                 sizeof(session->inspect_connections[index].remote_family), "%s",
+                 bind_info.remote.family);
+        snprintf(session->inspect_connections[index].remote_address,
+                 sizeof(session->inspect_connections[index].remote_address), "%.*s",
+                 (int) sizeof(session->inspect_connections[index].remote_address) - 1,
+                 bind_info.remote.address);
+        session->inspect_connections[index].remote_port     = bind_info.remote.port;
+        session->inspect_connections[index].remote_scope_id = bind_info.remote.scope_id;
         atomic_store_explicit(&session->inspect_connections[index].ready, true,
                               memory_order_release);
     }

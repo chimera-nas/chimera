@@ -170,6 +170,7 @@ struct nfs4_client {
     uint64_t              nfs4_client_id;
     uint32_t              nfs4_client_owner_len;
     uint32_t              nfs4_client_refcnt;
+    uint32_t              nfs4_client_session_count;
     uint32_t              nfs4_client_proto;
     uint64_t              nfs4_client_verifier;
     struct UT_hash_handle nfs4_client_hh_by_owner;
@@ -318,6 +319,10 @@ struct nfs4_session {
         _Atomic bool ready;
         int          worker_id;
         uint64_t     serial;
+        char         remote_family[16];
+        char         remote_address[64];
+        int          remote_port;
+        uint32_t     remote_scope_id;
     } inspect_connections[64];
     uint32_t                           nfs4_session_implicit;
     struct nfs4_client                *nfs4_session_client;
@@ -399,6 +404,7 @@ struct nfs4_client_table {
 
 struct chimera_inspect_session;
 struct chimera_inspect_slot;
+struct chimera_inspect_client;
 struct nfs4_slot_state_counts {
     uint32_t in_progress;
     uint32_t cached;
@@ -416,6 +422,13 @@ nfs4_session_inspect_snapshot(
     struct chimera_inspect_session *out,
     unsigned int                    capacity,
     unsigned int                   *total);
+unsigned int
+nfs4_client_inspect_snapshot(
+    struct nfs4_client_table      *table,
+    struct chimera_inspect_client *out,
+    unsigned int                   capacity,
+    unsigned int                  *total,
+    uint64_t                       lease_time_ns);
 int nfs4_session_inspect_slots_snapshot(
     struct nfs4_client_table    *table,
     const char                  *session_id,
