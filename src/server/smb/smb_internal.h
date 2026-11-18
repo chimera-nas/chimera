@@ -785,6 +785,9 @@ struct chimera_smb_request {
             uint8_t                            r_is_directory;
             uint32_t                           r_granted_access;
             uint32_t                           r_maximal_access;
+            /* Set once r_granted_access is resolved for this open, before its
+            * share-mode claim is placed (chimera_smb_create_claim_access). */
+            uint8_t                            r_granted_valid;
             /* Deferred-response park (MS-SMB2 3.3.5.9 pending-open): when this open
              * triggered an ack-required lease break, its SUCCESS response is held
              * (via the async-interim path; the request links on conn->parked_
