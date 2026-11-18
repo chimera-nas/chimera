@@ -88,6 +88,22 @@ class InspectionSemantics(unittest.TestCase):
         self.assertIn("6c696e75782d636c69656e74", output)
         self.assertIn("DELEGATIONS", output)
 
+    def test_nfs_client_wide_addresses_group_ports_and_wrap_without_loss(self):
+        parsed = _build_parser().parse_args([
+            "inspect", "nfs", "clients", "--input",
+            str(ROOT / "examples" / "nfs-clients.json"), "--wide"])
+        snapshot = fetch(None, parsed)
+        client = snapshot["nfs_clients"]["clients"][0]
+        client["remote_addresses"] = [
+            "10.0.0.5:43210", "10.0.0.5:43211",
+            "[2001:db8::5]:43210", "[2001:db8::5]:43211"]
+        client["owner_hex"] = "ab" * 64
+        output = render(snapshot, {}, parsed, width=130)
+        self.assertIn("10.0.0.5:{43210,43211}", output)
+        self.assertIn("[2001:db8::5]:{43210,43211}", output)
+        self.assertIn("ab" * 32, output)
+        self.assertLessEqual(max(map(len, output.splitlines())), 130)
+
     def test_dashboard_includes_nfs_sessions_when_nfs_is_enabled(self):
         snapshot = frames()
         snapshot["nfs_sessions"] = {

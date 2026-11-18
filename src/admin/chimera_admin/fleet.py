@@ -325,7 +325,7 @@ def render_fleet(views, args, now):
         if args.inspection_view == "nfs_clients":
             lines.extend("  " + line for line in _render_nfs_clients(
                 view.snapshots.get("nfs_clients", {}), args,
-                str(view.error) if view.error else None).splitlines())
+                error=str(view.error) if view.error else None, width=width).splitlines())
             lines.append("")
             continue
         threads = view.snapshots.get("threads", {})

@@ -117,7 +117,9 @@ Use `chimera-admin inspect nfs clients` to display clients. `--input FILE`,
 `--wide`, `--max-rows`, `--sort`, `--target`, and `--targets FILE` follow the
 other inspection views. `--wide` includes owner hex and minor version. These
 client and session views cover NFSv4.1 and later; NFSv3 has no sessions or
-clients.
+clients. In the client table, connections from one address are grouped with
+their ports, and long address or owner fields wrap to additional lines instead
+of being cut off.
 
 During `chimera-admin inspect nfs sessions --watch`, the CLI tracks each
 session's peak in-progress slots and reports when `INFL == GRANT` in most

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import textwrap
 import time
 from .presentation import display_width
 from .watch_keys import WatchKeys
@@ -431,15 +432,32 @@ class WatchState:
         return meta
 
 
-def _table(headers, rows, max_rows, numeric=()):
+def _table(headers, rows, max_rows, numeric=(), width=None, wrap_columns=()):
     shown = rows if max_rows == 0 else rows[:max_rows]
-    cells = [[safe(c) for c in row] for row in shown]
-    widths = [max([display_width(h)] + [display_width(row[i]) for row in cells]) for i, h in enumerate(headers)]
+    cells = [[safe(c).splitlines() or [""] for c in row] for row in shown]
+    widths = [max([display_width(h)] + [display_width(line) for row in cells for line in row[i]])
+              for i, h in enumerate(headers)]
+    wrap_columns = set(wrap_columns)
+    if width and sum(widths) + 2 * (len(headers) - 1) > width and wrap_columns:
+        fixed = sum(value for i, value in enumerate(widths) if i not in wrap_columns)
+        available = max(1, width - fixed - 2 * (len(headers) - 1))
+        share = max(1, available // len(wrap_columns))
+        for i in wrap_columns:
+            widths[i] = max(display_width(headers[i]), min(widths[i], share))
+            for row in cells:
+                row[i] = [part for line in row[i]
+                          for part in (textwrap.wrap(line, widths[i], break_long_words=True,
+                                                     break_on_hyphens=False) or [""])]
     def aligned(value, i, right=False):
         padding = " " * max(0, widths[i] - display_width(value))
         return padding + value if right else value + padding
     lines = ["  ".join(aligned(h, i) for i, h in enumerate(headers)).rstrip()]
-    lines += ["  ".join(aligned(c, i, i in numeric) for i, c in enumerate(row)).rstrip() for row in cells]
+    for row in cells:
+        height = max((len(cell) for cell in row), default=1)
+        for line_number in range(height):
+            lines.append("  ".join(aligned(cell[line_number] if line_number < len(cell) else "",
+                                            i, i in numeric)
+                                for i, cell in enumerate(row)).rstrip())
     if not rows:
         lines.append("(no rows returned)")
     if len(shown) < len(rows):
@@ -473,18 +491,18 @@ def _age_text(value):
 
 
 def render(snapshots, meta, args, error=None, stale_age=0, width=None):
+    width = width or shutil.get_terminal_size((120, 24)).columns
     if args.inspection_view == "nfs_sessions":
         session_snapshot = copy.copy(snapshots.get("nfs_sessions", {}))
         session_snapshot["live"] = snapshots.get("live", {})
         return _render_nfs_sessions(session_snapshot, meta, args, error)
     if args.inspection_view == "nfs_clients":
-        return _render_nfs_clients(snapshots.get("nfs_clients", {}), args, error)
+        return _render_nfs_clients(snapshots.get("nfs_clients", {}), args, error, width)
     states = list(snapshots.values())
     instances = {s["server_instance_id"] for s in states}
     mixed = len(instances) > 1
     partial = any(not complete(s) for s in states) or mixed
     status = "STALE ({:.1f}s since last success)".format(stale_age) if error else ("PARTIAL" if partial else "LIVE" if args.watch and not args.input else "SNAPSHOT")
-    width = width or shutil.get_terminal_size((120, 24)).columns
     identity = "{}:{}".format(safe(getattr(args, "host", "server")), safe(getattr(args, "port", ""))).rstrip(":")
     sample_age = "{:.1f}s old".format(stale_age) if error else ("0.0s" if args.watch and not args.input else "--")
     lines = [] if getattr(args, "quiet", False) else ["INSPECTION {}".format(args.inspection_view.upper())]
@@ -719,7 +737,35 @@ def _render_nfs_sessions(snapshot, meta, args, error=None):
     return "\n".join(lines)
 
 
-def _render_nfs_clients(snapshot, args, error=None):
+def _group_remote_addresses(addresses):
+    grouped, order, other = {}, [], []
+    for address in addresses:
+        address = str(address)
+        host, port = None, None
+        if address.startswith("["):
+            close = address.rfind("]")
+            if close > 0 and address[close + 1:close + 2] == ":":
+                host, port = address[:close + 1], address[close + 2:]
+        else:
+            candidate, separator, candidate_port = address.rpartition(":")
+            if separator and ":" not in candidate:
+                host, port = candidate, candidate_port
+        if host is None or not port:
+            other.append(address)
+            continue
+        if host not in grouped:
+            grouped[host] = []
+            order.append(host)
+        if port not in grouped[host]:
+            grouped[host].append(port)
+    result = ["{}:{}".format(host, ports[0]) if len(ports) == 1 else
+              "{}:{{{}}}".format(host, ",".join(ports))
+              for host in order for ports in (grouped[host],)]
+    return result + other
+
+
+def _render_nfs_clients(snapshot, args, error=None, width=None):
+    width = width or shutil.get_terminal_size((120, 24)).columns
     lines = [] if args.quiet else ["NFSv4.1+ CLIENTS"]
     lines.append("{}  {}".format(
         "{}:{}".format(safe(getattr(args, "host", "server")), safe(getattr(args, "port", ""))).rstrip(":"),
@@ -740,20 +786,23 @@ def _render_nfs_clients(snapshot, args, error=None):
         client_id = str(client.get("client_id", ""))
         lease = _integer(client.get("lease_remaining_ms"))
         lease_text = "--" if lease is None else "{}s".format(lease // 1000)
-        addresses = ",".join(safe(address) for address in client.get("remote_addresses", [])) or "--"
+        addresses = ",".join(safe(address) for address in
+                              _group_remote_addresses(client.get("remote_addresses", []))) or "--"
         if client.get("remote_addresses_truncated"):
             addresses += ",…" if addresses != "--" else "…"
         rows.append([client_id if args.wide else client_id[:8], client.get("state", "--"),
                      lease_text, client.get("sessions", "--"), client.get("opens", "--"),
                      client.get("locks", "--"), client.get("delegations", "--"), addresses])
     lines += ["", _table(["CLIENT", "STATE", "LEASE", "SESSIONS", "OPENS", "LOCKS",
-                         "DELEGATIONS", "REMOTE ADDRESSES"], rows, args.max_rows)]
+                         "DELEGATIONS", "REMOTE ADDRESSES"], rows, args.max_rows,
+                         width=width, wrap_columns={7})]
     if args.wide:
         lines += ["", "CLIENT OWNERS", _table(
             ["CLIENT", "OWNER HEX", "OWNER LENGTH", "TRUNCATED", "MINOR"],
             [[str(client.get("client_id", "")), client.get("owner_hex", ""),
               client.get("owner_length", "--"), client.get("owner_truncated", False),
-              client.get("minor_version", "--")] for client in clients], args.max_rows)]
+              client.get("minor_version", "--")] for client in clients], args.max_rows,
+            width=width, wrap_columns={1})]
     if not args.quiet and snapshot.get("truncated"):
         lines.append("Client results are truncated; use limit/offset through the REST API to page the full table.")
     return "\n".join(lines)
