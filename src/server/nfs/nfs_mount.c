@@ -244,6 +244,93 @@ chimera_nfs_mount_lookup_complete(
     nfs_request_free(thread, req);
 } /* chimera_nfs_mount_lookup_complete */
 
+/*
+ * A path below an export name is resolved in two stages so that it cannot
+ * leave the export: the export's own path first, as the administrator wrote it
+ * (symlinks followed), then the client's suffix from the directory that names,
+ * following no symlink at all.  The suffix's "." and ".." components are
+ * refused before either stage runs (chimera_nfs_mount_has_dot_component).
+ */
+struct chimera_nfs_mount_ctx {
+    struct nfs_request *req;
+    char                suffix[];
+};
+
+/* True when `path` has a "." or ".." component.  Empty components ("//", a
+ * trailing "/") name nothing and are not counted. */
+static int
+chimera_nfs_mount_has_dot_component(const char *path)
+{
+    const char *p = path;
+    const char *start;
+
+    while (*p) {
+        while (*p == '/') {
+            p++;
+        }
+        start = p;
+        while (*p && *p != '/') {
+            p++;
+        }
+        if ((p - start == 1 && start[0] == '.') ||
+            (p - start == 2 && start[0] == '.' && start[1] == '.')) {
+            return 1;
+        }
+    }
+    return 0;
+} /* chimera_nfs_mount_has_dot_component */
+
+static void
+chimera_nfs_mount_suffix_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    /* ELOOP is CHIMERA_VFS_LOOKUP_NO_SYMLINKS refusing the suffix: it met a
+     * symlink, a way out of the export, or it holds more than one component
+     * on a path-only mount, where a symlink cannot be ruled out.  Either way
+     * the mount is refused. */
+    if (error_code == CHIMERA_VFS_ELOOP) {
+        error_code = CHIMERA_VFS_EACCES;
+    }
+
+    chimera_nfs_mount_lookup_complete(error_code, attr, private_data);
+} /* chimera_nfs_mount_suffix_complete */
+
+static void
+chimera_nfs_mount_export_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_nfs_mount_ctx     *ctx    = private_data;
+    struct nfs_request               *req    = ctx->req;
+    struct chimera_server_nfs_thread *thread = req->thread;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        free(ctx);
+        chimera_nfs_mount_lookup_complete(error_code, NULL, req);
+        return;
+    }
+
+    chimera_nfs_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH),
+                         "NFS mount: no file handle was returned");
+
+    /* The lookup copies the path and the starting handle, and the reply may
+    * be sent (and req freed) before it returns: touch only ctx after it. */
+    chimera_vfs_lookup(thread->vfs_thread,
+                       &req->cred,
+                       attr->va_fh,
+                       attr->va_fh_len,
+                       ctx->suffix,
+                       strlen(ctx->suffix),
+                       CHIMERA_VFS_ATTR_FH,
+                       CHIMERA_VFS_LOOKUP_NO_SYMLINKS,
+                       chimera_nfs_mount_suffix_complete,
+                       req);
+    free(ctx);
+} /* chimera_nfs_mount_export_complete */
+
 void
 chimera_nfs_mount_mnt(
     struct evpl               *evpl,
@@ -256,8 +343,13 @@ chimera_nfs_mount_mnt(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct chimera_nfs_mount_ctx     *ctx;
+    chimera_vfs_lookup_callback_t     callback;
+    void                             *callback_arg;
     int                               rc;
     char                             *full_path = NULL;
+    const char                       *suffix;
+    size_t                            suffix_offset, suffix_len;
     uint8_t                           root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                          root_fh_len;
     char                              hostname[64];
@@ -269,7 +361,8 @@ chimera_nfs_mount_mnt(
 
     chimera_nfs_map_cred_req(req, cred);
 
-    rc = chimera_nfs_find_export_path(shared, args->path.str, args->path.len, &full_path, &export);
+    rc = chimera_nfs_find_export_split(shared, args->path.str, args->path.len,
+                                       &full_path, &suffix_offset, &export);
     if (rc) {
         // Export not found, return error
         chimera_nfs_debug("NFS mount request for unknown export '%.*s'",
@@ -298,6 +391,18 @@ chimera_nfs_mount_mnt(
         return;
     }
 
+    /* The client's suffix below the export name may not climb out of it. */
+    suffix = full_path + suffix_offset;
+
+    if (chimera_nfs_mount_has_dot_component(suffix)) {
+        chimera_nfs_debug("NFS mount of '%.*s' refused: \".\" or \"..\" "
+                          "below the export name", args->path.len,
+                          args->path.str);
+        free(full_path);
+        chimera_nfs_mount_lookup_complete(CHIMERA_VFS_EACCES, NULL, req);
+        return;
+    }
+
     /*
      * Record the mount in the rmtab keyed by the client-requested path (which
      * is what UMNT will present and what showmount displays).  The export
@@ -313,6 +418,22 @@ chimera_nfs_mount_mnt(
     chimera_nfs_mount_copy_path(&args->path, directory, sizeof(directory));
     chimera_nfs_mount_record(shared, hostname, directory);
 
+    callback     = chimera_nfs_mount_lookup_complete;
+    callback_arg = req;
+
+    if (suffix[strspn(suffix, "/")] != '\0') {
+        /* A suffix that names something: resolve only the export's path here
+         * and the suffix from there (chimera_nfs_mount_export_complete). */
+        suffix_len = strlen(suffix);
+        ctx        = malloc(sizeof(*ctx) + suffix_len + 1);
+        chimera_nfs_abort_if(ctx == NULL, "Failed to allocate mount context");
+        ctx->req = req;
+        memcpy(ctx->suffix, suffix, suffix_len + 1);
+        full_path[suffix_offset] = '\0';
+        callback                 = chimera_nfs_mount_export_complete;
+        callback_arg             = ctx;
+    }
+
     chimera_vfs_get_root_fh(thread->vfs_thread->vfs, root_fh, &root_fh_len);
     chimera_vfs_lookup(thread->vfs_thread,
                        &req->cred,
@@ -322,8 +443,8 @@ chimera_nfs_mount_mnt(
                        strlen(full_path),
                        CHIMERA_VFS_ATTR_FH,
                        CHIMERA_VFS_LOOKUP_FOLLOW,
-                       chimera_nfs_mount_lookup_complete,
-                       req);
+                       callback,
+                       callback_arg);
     if (full_path) {
         free(full_path);
     }

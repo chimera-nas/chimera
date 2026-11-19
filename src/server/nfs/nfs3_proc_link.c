@@ -77,6 +77,14 @@ chimera_nfs3_link(
     if (res.status == NFS3_OK) {
         res.status = chimera_nfs3_check_rofs2(req, linkdir_export_id);
     }
+    if (res.status == NFS3_OK &&
+        !chimera_nfs3_name_ok(args->link.name.str, args->link.name.len)) {
+        res.status = NFS3ERR_ACCES;
+    }
+    if (res.status == NFS3_OK &&
+        chimera_nfs3_name_is_dot(args->link.name.str, args->link.name.len)) {
+        res.status = NFS3ERR_EXIST;
+    }
     if (res.status != NFS3_OK) {
         nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));

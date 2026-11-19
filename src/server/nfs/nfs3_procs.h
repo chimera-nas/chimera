@@ -126,6 +126,58 @@ chimera_nfs3_check_rofs2(
     return status;
 } /* chimera_nfs3_check_rofs2 */
 
+/*
+ * A filename3 names one entry of the directory it comes with.  The procedures
+ * that take one (LOOKUP, CREATE, MKDIR, SYMLINK, MKNOD, REMOVE, RMDIR, RENAME,
+ * LINK) refuse with NFS3ERR_ACCES, before any VFS call, a name that is empty or
+ * holds a '/' or a NUL: a passthrough backend handed "inside/../.." resolves it
+ * as a path, out of the export.  Unlike chimera_nfs4_validate_name, "." and
+ * ".." pass here: NFSv3 clients look them up, and LOOKUP answers them.  The
+ * other procedures refuse them with chimera_nfs3_name_is_dot.
+ * Returns non-zero when the name is acceptable.
+ */
+static inline int
+chimera_nfs3_name_ok(
+    const char *name,
+    uint32_t    len)
+{
+    uint32_t i;
+
+    if (len == 0) {
+        return 0;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (name[i] == '/' || name[i] == '\0') {
+            return 0;
+        }
+    }
+
+    return 1;
+} /* chimera_nfs3_name_ok */
+
+/*
+ * Non-zero when the name is "." or "..".  They name the directory and its
+ * parent, never an entry a client may make, remove or rename, and only LOOKUP
+ * answers them.  The creating procedures are the hazard: a backend that takes
+ * one as a new entry stores a name LOOKUP and REMOVE can never reach, and one
+ * that fills its reply by looking the name up hands back, for "..", the
+ * parent's handle, which at the root of an export of a subdirectory lies
+ * outside the export.  CREATE, MKDIR, SYMLINK, MKNOD and LINK therefore answer
+ * NFS3ERR_EXIST before any VFS call.  The VFS refuses REMOVE, RMDIR and RENAME
+ * of both names itself; answering here gives REMOVE and RMDIR the status
+ * Linux nfsd uses, NFS3ERR_ACCES, and RENAME the one RFC 1813 names,
+ * NFS3ERR_INVAL.
+ */
+static inline int
+chimera_nfs3_name_is_dot(
+    const char *name,
+    uint32_t    len)
+{
+    return (len == 1 && name[0] == '.') ||
+           (len == 2 && name[0] == '.' && name[1] == '.');
+} /* chimera_nfs3_name_is_dot */
+
 void chimera_nfs3_null(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,

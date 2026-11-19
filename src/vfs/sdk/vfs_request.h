@@ -60,6 +60,14 @@ struct chimera_vfs_handle_state;
 
 /* Flags for chimera_vfs_lookup */
 #define CHIMERA_VFS_LOOKUP_FOLLOW        (1U << 0) /* Follow symlinks in final component */
+/* Follow no symlink at all: the walk fails with CHIMERA_VFS_ELOOP at the first
+ * one it meets, intermediate or final.  Takes precedence over
+ * CHIMERA_VFS_LOOKUP_FOLLOW.  A path-only mount resolves the rest of the path
+ * in one call and so cannot be checked component by component: there the walk
+ * also fails with ELOOP whenever the rest of the path holds a '/'.  The flag
+ * does not confine the walk: ".." is still followed, so a caller that must
+ * stay below its starting directory refuses dot components itself. */
+#define CHIMERA_VFS_LOOKUP_NO_SYMLINKS   (1U << 1)
 
 /* Maximum number of symlinks to follow before returning ELOOP */
 #define CHIMERA_VFS_SYMLOOP_MAX          40

@@ -200,6 +200,14 @@ chimera_nfs4_rename(
         status = chimera_nfs4_validate_name(&args->newname);
     }
 
+    /* A rename from one export into another would move a directory out of
+     * the export whose id the client's handles to it keep, and ".." from one
+     * of them would walk up from its new place.  Refused as a rename across
+     * filesystems, as Linux nfsd does. */
+    if (status == NFS4_OK && req->saved_export_id != req->export_id) {
+        status = NFS4ERR_XDEV;
+    }
+
     if (status != NFS4_OK) {
         res->status = status;
         chimera_nfs4_compound_complete(req, status);
