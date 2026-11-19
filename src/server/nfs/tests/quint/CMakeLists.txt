@@ -105,6 +105,29 @@ foreach(backend memfs diskfs cairn linux io_uring)
         TIMEOUT 60)
 endforeach()
 
+# A subdirectory export confines its clients: "..", MOUNT sub-paths, names
+# that are not one component, and RENAME across exports.
+add_executable(nfs_export_dotdot_probe nfs_export_dotdot_probe.c)
+target_include_directories(nfs_export_dotdot_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs_export_dotdot_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs_export_dotdot_probe)
+foreach(backend memfs diskfs cairn linux io_uring)
+    if((backend STREQUAL "cairn" AND NOT CAIRN_ENABLED) OR
+       (backend STREQUAL "linux" AND NOT CHIMERA_LINUX) OR
+       (backend STREQUAL "io_uring" AND NOT CHIMERA_VFS_IO_URING))
+        continue()
+    endif()
+    add_test(NAME chimera/server/nfs/mbt/export_dotdot_probe_${backend}
+        COMMAND $<TARGET_FILE:nfs_export_dotdot_probe> -b ${backend})
+    set_tests_properties(chimera/server/nfs/mbt/export_dotdot_probe_${backend} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs_export_dotdot_probe_${backend}"
+        LABELS "functional;probe;nfs3_mbt;${backend}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 60)
+endforeach()
+
 add_executable(nfs4_deleg_probe nfs4_deleg_probe.c)
 target_include_directories(nfs4_deleg_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)

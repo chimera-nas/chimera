@@ -128,12 +128,15 @@ chimera_nfs4_lookupp_continue(
 
     /*
      * Export roots are mounted as entries in the NFSv4 namespace root.  A
-     * LOOKUPP from such a filehandle must return the namespace root FH -- the
-     * "/" export's real root when one is configured, the synthetic
-     * pseudo-root otherwise -- not the backend's physical parent handle.
+     * LOOKUPP from such a filehandle -- a mount root, or the root of an export
+     * whose path is a subdirectory of its mount -- must return the namespace
+     * root FH -- the "/" export's real root when one is configured, the
+     * synthetic pseudo-root otherwise -- not the backend's physical parent
+     * handle.
      */
     if (chimera_nfs4_fh_is_vfs_mount_root(thread->vfs, req->fh, req->fhlen) ||
-        chimera_nfs_dotdot_stays(req, req->fh, req->fhlen)) {
+        chimera_nfs_dotdot_stays(req, req->fh, req->fhlen) ||
+        req->at_export_root) {
         struct chimera_nfs_export root_export;
         uint32_t                  fhlen;
 
@@ -180,6 +183,40 @@ chimera_nfs4_lookupp_continue(
                         req);
 } /* chimera_nfs4_lookupp_continue */
 
+/*
+ * Resume once it is known whether the current filehandle is the root of a
+ * subdirectory export.  The flag is stored on every LOOKUPP, since the request
+ * is reused across the ops of a compound.
+ */
+static void
+chimera_nfs4_lookupp_export_root_resume(
+    struct nfs_request          *req,
+    enum chimera_nfs_export_root at)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct LOOKUPP4res               *res    = &req->res_compound.resarray[req->index].oplookupp;
+
+    if (at == CHIMERA_NFS_EXPORT_ROOT_UNKNOWN) {
+        /* Where the export's root is cannot be told, so neither can whether
+         * the parent lies inside the export. */
+        res->status = NFS4ERR_STALE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    req->at_export_root = at == CHIMERA_NFS_EXPORT_ROOT_YES;
+
+    if (thread->shared->root_export_id != 0) {
+        /* A "/" export exists: its root FH is needed both to recognize the
+         * namespace root (parent-less) and as the parent of sibling export
+         * roots. */
+        nfs4_root_export_fh_get(thread, req, chimera_nfs4_lookupp_continue);
+        return;
+    }
+
+    chimera_nfs4_lookupp_continue(CHIMERA_VFS_ENOENT, NULL, 0, thread, req);
+} /* chimera_nfs4_lookupp_export_root_resume */
+
 void
 chimera_nfs4_lookupp(
     struct chimera_server_nfs_thread *thread,
@@ -205,13 +242,6 @@ chimera_nfs4_lookupp(
         return;
     }
 
-    if (thread->shared->root_export_id != 0) {
-        /* A "/" export exists: its root FH is needed both to recognize the
-         * namespace root (parent-less) and as the parent of sibling export
-         * roots. */
-        nfs4_root_export_fh_get(thread, req, chimera_nfs4_lookupp_continue);
-        return;
-    }
-
-    chimera_nfs4_lookupp_continue(CHIMERA_VFS_ENOENT, NULL, 0, thread, req);
+    chimera_nfs_export_root_check(req, req->fh, req->fhlen,
+                                  chimera_nfs4_lookupp_export_root_resume);
 } /* chimera_nfs4_lookupp */

@@ -24,7 +24,7 @@ chimera_nfs3_readdirplus_callback(
     struct entryplus3                  *entry;
     struct nfs_nfs3_readdirplus_cursor *cursor;
     uint32_t                            entry_cur, dirinfo_cur, fh_cur = 0;
-    int                                 rc;
+    int                                 rc, bare;
 
     cursor = &req->readdirplus3_cursor;
 
@@ -38,9 +38,15 @@ chimera_nfs3_readdirplus_callback(
     rc = xdr_dbuf_alloc_string(&entry->name, name, namelen, req->encoding->dbuf);
     chimera_nfs_abort_if(rc, "Failed to allocate string");
 
-    chimera_nfs3_set_post_op_attr(&entry->name_attributes, attrs);
+    /* At the root of an export, or of a mount, what the backend holds for
+     * ".." is the directory above: outside the export, or not the directory a
+     * LOOKUP of ".." answers with.  The entry goes out with its name and
+     * fileid only, neither attributes nor handle, as Linux nfsd sends it. */
+    bare = req->at_export_root && namelen == 2 && name[0] == '.' && name[1] == '.';
 
-    if (attrs->va_set_mask & CHIMERA_VFS_ATTR_FH) {
+    chimera_nfs3_set_post_op_attr(&entry->name_attributes, bare ? NULL : attrs);
+
+    if (!bare && (attrs->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
         uint8_t wire[CHIMERA_NFS_FH_MAX];
         int     wirelen;
 
@@ -144,6 +150,34 @@ chimera_nfs3_readdirplus_complete(
 } /* chimera_nfs3_readdirplus_complete */ /* chimera_nfs3_readdirplus_complete */
 
 static void
+chimera_nfs3_readdirplus_resume(
+    struct nfs_request          *req,
+    enum chimera_nfs_export_root at)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct READDIRPLUS3args          *args   = req->args_readdirplus;
+    uint64_t                          cookieverf;
+
+    /* ".." goes out bare at the root of a subdirectory export, where the
+     * export's root cannot be told, and at the root of any mount. */
+    req->at_export_root = at != CHIMERA_NFS_EXPORT_ROOT_NO ||
+        chimera_nfs_fh_is_mount_root(req, req->handle->fh, req->handle->fh_len);
+
+    memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
+    chimera_vfs_readdir(thread->vfs_thread, &req->cred,
+                        req->handle,
+                        CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
+                        CHIMERA_NFS3_ATTR_MASK,
+                        args->cookie,
+                        cookieverf,
+                        CHIMERA_VFS_READDIR_EMIT_DOT,
+                        NULL, 0, /* no search-pattern filter */
+                        chimera_nfs3_readdirplus_callback,
+                        chimera_nfs3_readdirplus_complete,
+                        req);
+} /* chimera_nfs3_readdirplus_resume */
+
+static void
 chimera_nfs3_readdirplus_open_callback(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
@@ -153,27 +187,16 @@ chimera_nfs3_readdirplus_open_callback(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct evpl                      *evpl   = thread->evpl;
-    struct READDIRPLUS3args          *args   = req->args_readdirplus;
     struct READDIRPLUS3res           *res    = &req->res_readdirplus;
     int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        uint64_t cookieverf;
-        memcpy(&cookieverf, args->cookieverf, sizeof(cookieverf));
-        chimera_vfs_readdir(thread->vfs_thread, &req->cred,
-                            handle,
-                            CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
-                            CHIMERA_NFS3_ATTR_MASK,
-                            args->cookie,
-                            cookieverf,
-                            CHIMERA_VFS_READDIR_EMIT_DOT,
-                            NULL, 0, /* no search-pattern filter */
-                            chimera_nfs3_readdirplus_callback,
-                            chimera_nfs3_readdirplus_complete,
-                            req);
-
+        /* The ".." entry needs to know whether this directory is the root
+         * of a subdirectory export, so ask before listing. */
+        chimera_nfs_export_root_check(req, handle->fh, handle->fh_len,
+                                      chimera_nfs3_readdirplus_resume);
     } else {
         res->status = chimera_vfs_error_to_nfsstat3(error_code);
         chimera_nfs3_set_post_op_attr(&res->resfail.dir_attributes, NULL);

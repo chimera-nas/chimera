@@ -1520,12 +1520,13 @@ chimera_nfs_export_count(void *nfs_shared)
     return count;
 } /* chimera_nfs_export_counts */
 
-SYMBOL_EXPORT int
-chimera_nfs_find_export_path(
+int
+chimera_nfs_find_export_split(
     void                             *nfs_shared,
     const char                       *path,
     uint32_t                          path_len,
     char                            **out_full_path,
+    size_t                           *out_suffix_offset,
     const struct chimera_nfs_export **out_export)
 {
     struct chimera_server_nfs_shared *shared = nfs_shared;
@@ -1614,7 +1615,8 @@ chimera_nfs_find_export_path(
     }
     evpl_mutex_unlock(&shared->exports_lock);
     if (!export) {
-        *out_full_path = NULL;
+        *out_full_path     = NULL;
+        *out_suffix_offset = 0;
         if (out_export) {
             *out_export = NULL;
         }
@@ -1645,6 +1647,7 @@ chimera_nfs_find_export_path(
         if (need_slash) {
             full_path[pos++] = '/';
         }
+        *out_suffix_offset = pos;
         // Copy suffix (may not be null-terminated)
         if (suffix_len > 0) {
             memcpy(full_path + pos, suffix, suffix_len);
@@ -1654,10 +1657,26 @@ chimera_nfs_find_export_path(
     } else {
         full_path = strdup(export_path);
         chimera_nfs_abort_if(full_path == NULL, "Failed to allocate path");
+        *out_suffix_offset = export_path_len;
     }
     *out_full_path = full_path;
     return 0; // Success
-} /* chimera_nfs_get_export_path */
+} /* chimera_nfs_find_export_split */
+
+SYMBOL_EXPORT int
+chimera_nfs_find_export_path(
+    void                             *nfs_shared,
+    const char                       *path,
+    uint32_t                          path_len,
+    char                            **out_full_path,
+    const struct chimera_nfs_export **out_export)
+{
+    size_t suffix_offset;
+
+    return chimera_nfs_find_export_split(nfs_shared, path, path_len,
+                                         out_full_path, &suffix_offset,
+                                         out_export);
+} /* chimera_nfs_find_export_path */
 
 
 SYMBOL_EXPORT const struct chimera_nfs_export *
@@ -1860,3 +1879,176 @@ chimera_nfs_dotdot_stays(
 
     return stays;
 } /* chimera_nfs_dotdot_stays */
+
+int
+chimera_nfs_fh_is_mount_root(
+    struct nfs_request *req,
+    const uint8_t      *fh,
+    int                 fhlen)
+{
+    struct chimera_vfs_mount_table *table = req->thread->vfs_thread->vfs->mount_table;
+    struct chimera_vfs_mount       *mount;
+    int                             is_root;
+
+    if (fhlen < CHIMERA_VFS_MOUNT_ID_SIZE) {
+        return 0;
+    }
+
+    chimera_rcu_read_lock(&table->rcu);
+
+    mount = chimera_vfs_mount_table_lookup(table, fh);
+
+    is_root = mount && !mount->detached && mount->root_fh_len == fhlen &&
+        memcmp(mount->root_fh, fh, fhlen) == 0;
+
+    chimera_rcu_read_unlock(&table->rcu);
+
+    return is_root;
+} /* chimera_nfs_fh_is_mount_root */
+
+/*
+ * The root of an export whose path is a subdirectory of a mount is an ordinary
+ * directory, so chimera_nfs_dotdot_stays() cannot see it.  Resolve the
+ * export's path from the namespace root, as MOUNT does, and compare the
+ * result with the handle in hand.  The resolve runs as root, so a caller who
+ * may not search the directories above the export still gets the right
+ * answer.  When it fails the export's root is not known, and the caller is
+ * told so: answering "not the root" would let ".." climb out of the export
+ * from what was its root.
+ */
+
+struct chimera_nfs_export_root_ctx {
+    struct nfs_request          *req;
+    chimera_nfs_export_root_cb_t resume;
+    /* chimera_vfs_lookup() keeps a pointer to the credential rather than a
+     * copy, so it lives here until the lookup completes. */
+    struct chimera_vfs_cred      cred;
+    uint8_t                      fh[CHIMERA_VFS_FH_SIZE];
+    int                          fhlen;
+    char                         path[CHIMERA_VFS_PATH_MAX];
+};
+
+static void
+chimera_nfs_export_root_check_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_nfs_export_root_ctx *ctx = private_data;
+    enum chimera_nfs_export_root        at;
+
+    if (error_code != CHIMERA_VFS_OK || !attr ||
+        !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        chimera_nfs_debug("export id %u: path '%s' does not resolve (%d), "
+                          "\"..\" is refused in this export",
+                          ctx->req->export_id, ctx->path, error_code);
+        at = CHIMERA_NFS_EXPORT_ROOT_UNKNOWN;
+    } else if (attr->va_fh_len == (uint32_t) ctx->fhlen &&
+               memcmp(attr->va_fh, ctx->fh, ctx->fhlen) == 0) {
+        at = CHIMERA_NFS_EXPORT_ROOT_YES;
+    } else {
+        at = CHIMERA_NFS_EXPORT_ROOT_NO;
+    }
+
+    ctx->resume(ctx->req, at);
+    free(ctx);
+} /* chimera_nfs_export_root_check_complete */
+
+void
+chimera_nfs_export_root_check(
+    struct nfs_request          *req,
+    const uint8_t               *fh,
+    int                          fhlen,
+    chimera_nfs_export_root_cb_t resume)
+{
+    struct chimera_vfs_thread          *vfs_thread = req->thread->vfs_thread;
+    struct chimera_vfs_mount_table     *table      = vfs_thread->vfs->mount_table;
+    const struct chimera_nfs_export    *export;
+    struct chimera_vfs_mount           *mount;
+    struct chimera_nfs_export_root_ctx *ctx;
+    char                                epath[CHIMERA_VFS_PATH_MAX];
+    const char                         *path;
+    uint8_t                             root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                            root_fh_len;
+    int                                 elen, at_mount_path;
+
+    export = chimera_nfs_get_export_by_id(req->thread->shared, req->export_id);
+
+    if (!export) {
+        /* Export id 0 names no export, so there is nothing to stay inside.  A
+         * non-zero id with no record is an export since removed (its handles
+         * still decode): where its root was cannot be told. */
+        resume(req, req->export_id != 0 ? CHIMERA_NFS_EXPORT_ROOT_UNKNOWN :
+               CHIMERA_NFS_EXPORT_ROOT_NO);
+        return;
+    }
+
+    elen = chimera_vfs_mount_path_normalize(export->path, epath, sizeof(epath));
+
+    if (elen == 0) {
+        /* The export is the namespace root; nothing lies above it. */
+        resume(req, CHIMERA_NFS_EXPORT_ROOT_NO);
+        return;
+    }
+
+    if (elen > 0) {
+        chimera_rcu_read_lock(&table->rcu);
+
+        mount = fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE ?
+            chimera_vfs_mount_table_lookup(table, fh) : NULL;
+
+        at_mount_path = mount && mount->pathlen == (uint32_t) elen &&
+            memcmp(mount->path, epath, elen) == 0;
+
+        chimera_rcu_read_unlock(&table->rcu);
+
+        if (at_mount_path) {
+            /* The export is the whole of fh's mount: its root is the mount
+             * root, which chimera_nfs_dotdot_stays() owns. */
+            resume(req, CHIMERA_NFS_EXPORT_ROOT_NO);
+            return;
+        }
+
+        path = epath;
+    } else {
+        /* The path did not normalize (a "." or ".." component, or too long),
+         * so it cannot be compared with a mount path: resolve it as it is
+         * written. */
+        path = export->path;
+        while (path[0] == '/') {
+            path++;
+        }
+    }
+
+    if (fhlen < 0 || fhlen > CHIMERA_VFS_FH_SIZE) {
+        /* Not a VFS handle -- a negative length, or one too long to copy for
+         * the comparison. */
+        resume(req, CHIMERA_NFS_EXPORT_ROOT_UNKNOWN);
+        return;
+    }
+
+    ctx = calloc(1, sizeof(*ctx));
+    chimera_nfs_abort_if(ctx == NULL, "Failed to allocate export root context");
+
+    /* Copy out everything the completion needs: the export may be reclaimed
+     * while the lookup is in flight, and `fh` belongs to the caller. */
+    ctx->req    = req;
+    ctx->resume = resume;
+    memcpy(ctx->fh, fh, fhlen);
+    ctx->fhlen = fhlen;
+    snprintf(ctx->path, sizeof(ctx->path), "%s", path);
+    chimera_vfs_cred_init_unix(&ctx->cred, 0, 0, 0, NULL);
+
+    chimera_vfs_get_root_fh(vfs_thread->vfs, root_fh, &root_fh_len);
+
+    chimera_vfs_lookup(vfs_thread,
+                       &ctx->cred,
+                       root_fh,
+                       root_fh_len,
+                       ctx->path,
+                       strlen(ctx->path),
+                       CHIMERA_VFS_ATTR_FH,
+                       CHIMERA_VFS_LOOKUP_FOLLOW,
+                       chimera_nfs_export_root_check_complete,
+                       ctx);
+} /* chimera_nfs_export_root_check */

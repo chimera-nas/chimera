@@ -685,6 +685,9 @@ nfs4_root_readdir_advance(struct nfs4_root_readdir_state *state)
         state->entry       = entry;
         state->lookup_done = 0;
 
+        /* No lookup flags, as LOOKUP of this entry passes none
+         * (nfs4_root_lookup_export): a symlink inside the export path is
+         * followed, a final one is not. */
         chimera_vfs_lookup(state->vfs_thread,
                            &req->cred,
                            state->root_fh,
@@ -692,7 +695,7 @@ nfs4_root_readdir_advance(struct nfs4_root_readdir_state *state)
                            export->path,
                            strlen(export->path),
                            CHIMERA_VFS_ATTR_FH,
-                           state->attrmask,
+                           0,
                            nfs4_root_readdir_lookup_callback,
                            state);
 
