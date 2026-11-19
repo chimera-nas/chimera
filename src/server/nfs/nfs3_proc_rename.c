@@ -110,6 +110,24 @@ chimera_nfs3_rename(
     if (res.status == NFS3_OK) {
         res.status = chimera_nfs3_check_rofs2(req, todir_export_id);
     }
+    /* A directory renamed out of its export keeps the export's id in the
+     * handles a client already holds, and ".." from one of them walks up from
+     * its new place, above the export.  Two exports are two filesystems to a
+     * client, so a rename from one into the other is refused as one across
+     * filesystems is, as Linux nfsd does. */
+    if (res.status == NFS3_OK && todir_export_id != req->export_id) {
+        res.status = NFS3ERR_XDEV;
+    }
+    if (res.status == NFS3_OK &&
+        (!chimera_nfs3_name_ok(args->from.name.str, args->from.name.len) ||
+         !chimera_nfs3_name_ok(args->to.name.str, args->to.name.len))) {
+        res.status = NFS3ERR_ACCES;
+    }
+    if (res.status == NFS3_OK &&
+        (chimera_nfs3_name_is_dot(args->from.name.str, args->from.name.len) ||
+         chimera_nfs3_name_is_dot(args->to.name.str, args->to.name.len))) {
+        res.status = NFS3ERR_INVAL;
+    }
     if (res.status != NFS3_OK) {
         nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));

@@ -150,6 +150,13 @@ struct nfs_request {
      * root). */
     uint16_t                          export_id;
     uint16_t                          saved_export_id;
+    /* Set by the resume of an op that needs the answer of
+     * chimera_nfs_export_root_check after the check -- the check itself does
+     * not write it.  NFSv4 LOOKUPP stores whether the current filehandle is
+     * the root of a subdirectory export; NFSv3 READDIRPLUS stores whether the
+     * directory's ".." entry goes out bare (see nfs3_proc_readdirplus.c).
+     * Meaningless outside that op; NFSv3 LOOKUP does not use it. */
+    uint8_t                           at_export_root;
     /* The request's RPC security flavor as a CHIMERA_NFS_SEC_* bit, derived
      * from the RPC credential at request entry.  Checked against the target
      * export's sec_allowed mask. */
@@ -844,13 +851,95 @@ chimera_nfs_fh_decode(
  * the request's export.  The VFS follows ".." from a mount's root to the
  * directory holding its mount point, as Linux does; like nfsd, the server
  * stops at the root of the mount the export sits on (or at any mount root
- * when the handle carries no export).  See nfs.c.
+ * when the handle carries no export).  This covers mount roots only: the root
+ * of an export whose path lies below its mount's root is an ordinary
+ * directory, recognized by chimera_nfs_export_root_check().  See nfs.c.
  */
 int
 chimera_nfs_dotdot_stays(
     struct nfs_request *req,
     const uint8_t      *fh,
     int                 fhlen);
+
+/*
+ * True when `fh` is the root of the VFS mount it lies on, whatever export the
+ * request carries.
+ */
+int
+chimera_nfs_fh_is_mount_root(
+    struct nfs_request *req,
+    const uint8_t      *fh,
+    int                 fhlen);
+
+/* The answer of chimera_nfs_export_root_check. */
+enum chimera_nfs_export_root {
+    /* Not the root of a subdirectory export: ".." is the VFS's to answer. */
+    CHIMERA_NFS_EXPORT_ROOT_NO = 0,
+    /* The root of the request's export, an ordinary directory of its mount:
+     * ".." would leave the export. */
+    CHIMERA_NFS_EXPORT_ROOT_YES,
+    /* The root of the request's export cannot be told, so neither can whether
+     * ".." from this handle would leave it.  The caller refuses ".." rather
+     * than answer either way. */
+    CHIMERA_NFS_EXPORT_ROOT_UNKNOWN,
+};
+
+/* Continuation for chimera_nfs_export_root_check, with its answer. */
+typedef void (*chimera_nfs_export_root_cb_t)(
+    struct nfs_request          *req,
+    enum chimera_nfs_export_root at);
+
+/*
+ * Ask whether `fh` is the root of the request's export where that root is an
+ * ordinary directory, and continue via resume(req, at).  resume may run
+ * synchronously.  `fh` is a VFS handle (the decoded form, not a wire handle);
+ * it is copied, so it need only be valid for the call.
+ *
+ * The answer is YES when `fh` is the root of the request's export AND that
+ * export sits below a mount root.
+ *
+ * It is UNKNOWN when the export's root cannot be found: a non-zero export id
+ * with no export record (a removed export), an export path that does not
+ * resolve for any reason (its directory renamed or removed, a backend error),
+ * or a handle length outside [0, CHIMERA_VFS_FH_SIZE] that reaches the
+ * resolve.  In that state the answer is UNKNOWN for every handle of the
+ * export, not only for what was its root.
+ *
+ * It is NO for any other handle, for export id 0, for an export of the
+ * namespace root, and for every handle on the mount of an export whose path
+ * compares equal to that mount's -- including the export's root, which is a
+ * mount root and belongs to chimera_nfs_dotdot_stays().  A caller needing "is
+ * this any export root" must ask both.
+ *
+ * Unless one of the early answers above applies, the export's path is
+ * resolved from the namespace root on every call, with a root credential.
+ * Nothing is cached, so the root is whatever directory the path names now: a
+ * handle to a directory that used to be the root and has been replaced at
+ * that path is an ordinary handle, as is one renamed out of the export.  See
+ * nfs.c.
+ */
+void
+chimera_nfs_export_root_check(
+    struct nfs_request          *req,
+    const uint8_t               *fh,
+    int                          fhlen,
+    chimera_nfs_export_root_cb_t resume);
+
+/*
+ * chimera_nfs_find_export_path(), also reporting in *out_suffix_offset where
+ * the client's part of the path begins in *out_full_path: the export's own
+ * path lies before it (with the separating '/', when one was added) and the
+ * client's suffix from it on -- an empty string when the client named the
+ * export itself.  MOUNT resolves the two parts separately (nfs_mount.c).
+ */
+int
+chimera_nfs_find_export_split(
+    void                             *nfs_shared,
+    const char                       *path,
+    uint32_t                          path_len,
+    char                            **out_full_path,
+    size_t                           *out_suffix_offset,
+    const struct chimera_nfs_export **out_export);
 
 /*
  * Set the request's current export (when known directly, e.g. resolved by name

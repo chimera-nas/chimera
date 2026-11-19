@@ -116,6 +116,14 @@ chimera_nfs3_rmdir(
     if (res.status == NFS3_OK) {
         res.status = chimera_nfs3_check_rofs(req, req->export_id);
     }
+    if (res.status == NFS3_OK &&
+        !chimera_nfs3_name_ok(args->object.name.str, args->object.name.len)) {
+        res.status = NFS3ERR_ACCES;
+    }
+    if (res.status == NFS3_OK &&
+        chimera_nfs3_name_is_dot(args->object.name.str, args->object.name.len)) {
+        res.status = NFS3ERR_ACCES;
+    }
     if (res.status != NFS3_OK) {
         nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));
