@@ -7,7 +7,7 @@
 	url = https://github.com/chimera-nas/xdrzcc.git
 [submodule "ext/libevpl"]
 	path = ext/libevpl
-	url = https://github.com/akamit91/libevpl.git
+	url = https://github.com/chimera-nas/libevpl.git
 [submodule "ext/ndrzcc"]
 	path = ext/ndrzcc
 	url = https://github.com/chimera-nas/ndrzcc.git
