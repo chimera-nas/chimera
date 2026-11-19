@@ -141,6 +141,7 @@ the canonical place to set them.
 | `smb_acl_inherited_canonicalize` | bool | `true` | Canonicalize inherited ACLs on SMB. |
 | `smb_replay_pending_windows` | bool | `false` | Answer a replayed durable-v2 CREATE that collides with a still-deferred CREATE the way Windows servers do (`STATUS_ACCESS_DENIED`, and no replay detection while the original waits on a share conflict). The default answers `STATUS_FILE_NOT_AVAILABLE`, which clients retry until the original create completes. MS-SMB2 does not specify this race; the two profiles are mutually exclusive. |
 | `metrics_port` | int | `9000` | Prometheus metrics port (`/metrics`). Make it distinct when running multiple daemons per host. |
+| `metrics_hostname` | string | `"0.0.0.0"` | Address the metrics endpoint listens on: an IPv4 or IPv6 literal or a hostname. `"::"` listens on all interfaces for both IPv4 and IPv6 where the kernel allows it. The endpoint is plain HTTP with no authentication, so set `"127.0.0.1"` or `"::1"` when only a local collector scrapes it. |
 | `rest_http_port` | int | - | HTTP port for the REST admin API. Set to enable it (examples use `8080`). |
 | `rest_https_port` | int | `0` | HTTPS port for the REST API (`0` = disabled). |
 | `rest_ssl_cert` | string | - | TLS certificate path. Auto-generated (self-signed) if HTTPS is enabled and this is unset. |

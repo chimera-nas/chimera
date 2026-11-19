@@ -112,7 +112,7 @@ ctl_env_open(
      * that one -- otherwise the server counts into a registry nothing
      * scrapes, and every metric reads zero over HTTP. */
     if (env->opts.metrics_enabled) {
-        env->metrics = chimera_metrics_init(CTL_METRICS_PORT,
+        env->metrics = chimera_metrics_init(NULL, CTL_METRICS_PORT,
                                             CHIMERA_TCP_FLAVOR_INPROC);
         env->registry = chimera_metrics_get(env->metrics);
     } else {
