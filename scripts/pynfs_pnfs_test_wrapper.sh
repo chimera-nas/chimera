@@ -4,12 +4,15 @@
 # SPDX-License-Identifier: Unlicense
 
 # Usage: pynfs_pnfs_test_wrapper.sh <chimera_binary> <pynfs_dir> <flag_args...>
+#        PNFS_TEST_SCRIPT=<script.py> pynfs_pnfs_test_wrapper.sh <chimera_binary> <pynfs_dir>
 #
 # Runs the pynfs NFSv4.1 flex-files (pNFS) suite against a chimera pNFS setup:
 #   1. A chimera *data server* (plain memfs, data_server mode) on 127.0.0.1:2050
 #   2. A chimera *metadata server* (pNFS enabled) on 127.0.0.1:2049 that
 #      nfs-mounts the data server and steers file data to it.
-#   3. pynfs testserver.py (minorversion 1) in the netns, with the given flags.
+#   3. pynfs testserver.py (minorversion 1) in the netns, with the given flags,
+#      or, when PNFS_TEST_SCRIPT is set, that standalone pynfs-based script
+#      (run as: <script> --host 127.0.0.1 --port 2049 --export share).
 
 set -u
 
@@ -141,6 +144,13 @@ echo "=== pNFS metadata server up on 127.0.0.1:${MDS_PORT} ==="
 
 # PYTHONPATH includes pynfs root for shared modules (rpc, xdr).
 export PYTHONPATH="${PYNFS_DIR}:${PYTHONPATH:-}"
+
+if [ -n "${PNFS_TEST_SCRIPT:-}" ]; then
+    timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
+        ip netns exec "${NETNS_NAME}" env PYNFS_DIR="${PYNFS_DIR}" \
+        python3 "${PNFS_TEST_SCRIPT}" --host 127.0.0.1 --port "${MDS_PORT}" --export share
+    exit $?
+fi
 
 TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
 PYNFS_DEP_ARGS=(--force)

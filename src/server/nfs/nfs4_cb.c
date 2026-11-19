@@ -156,7 +156,7 @@ nfs4_cb_recall_holder(
 
     nfs4_stateid_encode(&recall_stateid, holder->seqid, NFS4_STATEID_TYPE_LAYOUT,
                         holder->shard, holder->slot_idx, holder->generation,
-                        (uint32_t) client->client_id);
+                        holder->stateid_epoch);
 
     ctx         = calloc(1, sizeof(*ctx));
     ctx->thread = thread;

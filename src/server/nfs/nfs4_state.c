@@ -432,6 +432,14 @@ state_table_lookup_locked(
                 atomic_fetch_add_explicit(
                     &((struct nfs_delegation *) slot->state)->refcount, 1,
                     memory_order_acq_rel);
+            } else if (slot->type == NFS4_SLOT_TYPE_LAYOUT) {
+                /* nfs_state_table_release drops a LAYOUT reference, so the
+                 * acquire must take one: without it a FREE_STATEID (or any
+                 * op handed a layout stateid) releases a reference it never
+                 * held and the layout underflows on its later teardown. */
+                atomic_fetch_add_explicit(
+                    &((struct nfs_layout_state *) slot->state)->refcount, 1,
+                    memory_order_acq_rel);
             }
         }
         status = NFS4_OK;
@@ -1409,7 +1417,6 @@ nfs_layout_state_create(
     uint16_t                 fh_len,
     uint16_t                 export_id,
     uint32_t                 iomode,
-    uint32_t                 client_short_id,
     struct nfs_state_table  *table,
     struct nfs_layout_table *layout_table,
     struct stateid4         *out_stateid)
@@ -1430,14 +1437,15 @@ nfs_layout_state_create(
 
     st->client = client;
     memcpy(st->fh, fh, fh_len);
-    st->fh_len       = fh_len;
-    st->export_id    = export_id;
-    st->seqid        = 1;
-    st->iomode       = iomode;
-    st->shard        = shard;
-    st->slot_idx     = slot_idx;
-    st->generation   = gen;
-    st->global_table = layout_table;
+    st->fh_len        = fh_len;
+    st->export_id     = export_id;
+    st->seqid         = 1;
+    st->iomode        = iomode;
+    st->shard         = shard;
+    st->slot_idx      = slot_idx;
+    st->generation    = gen;
+    st->stateid_epoch = table->epoch;
+    st->global_table  = layout_table;
     atomic_init(&st->refcount, 1);
     atomic_init(&st->destroyed, 0);
 
@@ -1452,14 +1460,13 @@ nfs_layout_state_create(
     nfs_layout_table_register(layout_table, st);
 
     nfs4_stateid_encode(out_stateid, st->seqid, NFS4_STATEID_TYPE_LAYOUT,
-                        shard, slot_idx, gen, client_short_id);
+                        shard, slot_idx, gen, st->stateid_epoch);
     return st;
 } /* nfs_layout_state_create */
 
 void
 nfs_layout_state_bump(
     struct nfs_layout_state *st,
-    uint32_t                 client_short_id,
     struct stateid4         *out_stateid)
 {
     /* RFC 8881 §12.5.3: the server owns the layout stateid seqid and advances
@@ -1467,7 +1474,7 @@ nfs_layout_state_bump(
     st->seqid = nfs4_stateid_seqid_next(st->seqid);
     nfs4_stateid_encode(out_stateid, st->seqid, NFS4_STATEID_TYPE_LAYOUT,
                         st->shard, st->slot_idx, st->generation,
-                        client_short_id);
+                        st->stateid_epoch);
 } /* nfs_layout_state_bump */
 
 static void

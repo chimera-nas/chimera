@@ -481,6 +481,22 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
         ENVIRONMENT "PYTHONUNBUFFERED=1")
 endif()
 
+# pNFS: a layout stateid presented to READ, WRITE, READ_PLUS or WRITE_SAME on
+# the metadata server must be NFS4ERR_BAD_STATEID.  Layout stateids carry the
+# state table's epoch, so the generic stateid lookup resolves them, and a
+# handler that read the layout object as a lock state would dereference a wild
+# pointer.  Brings up a metadata server and a data server through the pNFS
+# wrapper; needs pynfs's nfs4.1 client and a network namespace.
+if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
+    add_test(NAME chimera/server/nfs/nfs4_pnfs_layout_stateid_io
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/pynfs_pnfs_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs)
+    set_tests_properties(chimera/server/nfs/nfs4_pnfs_layout_stateid_io PROPERTIES
+        TIMEOUT 180
+        ENVIRONMENT "PYTHONUNBUFFERED=1;PNFS_TEST_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/nfs4_pnfs_layout_stateid_io.py")
+endif()
+
 # Tag every test registered above with the 'nfs' label so these NFS server unit
 # tests can be run independently via `ctest -L nfs`.
 get_property(_nfs_tests DIRECTORY PROPERTY TESTS)

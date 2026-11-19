@@ -293,6 +293,18 @@ chimera_nfs4_write(
         return;
     }
 
+    /* Only open and lock stateids carry an open handle here (delegations
+     * were handled above).  A layout stateid names layout state, not an
+     * open, so it designates no state usable for I/O to this server; data
+     * servers are given the anonymous stateid (nfs4_pnfs.c). */
+    if (state_type != NFS4_SLOT_TYPE_OPEN && state_type != NFS4_SLOT_TYPE_LOCK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     if (state_type == NFS4_SLOT_TYPE_OPEN) {
         open_state = state_void;
     } else {

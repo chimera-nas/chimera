@@ -328,6 +328,15 @@ state from the state table now takes a reference, matching the reference
 `nfs_state_table_release()` drops, so FREE_STATEID on a layout and teardown
 racing it cannot underflow or free early.
 
+Because generic lookup now resolves layout stateids, every operation that
+accepts "any" stateid must handle the layout type. READ, WRITE, READ_PLUS and
+WRITE_SAME answer `NFS4ERR_BAD_STATEID` for a layout stateid: it names layout
+state, not an open, and the metadata server gives data servers the anonymous
+stateid, never the layout stateid. (Treating it as a lock state would read the
+layout object as one.) FREE_STATEID answers `NFS4ERR_LOCKS_HELD`; the other
+generic consumers check access through the file handle or only release the
+reference.
+
 ## Diagnostics
 
 `chimera-clientid decode [--json] <id>...` prints the fields of a Type 1 /
@@ -361,3 +370,6 @@ the backend and knows nothing about live ownership.
   them, a seqid bump keeps the identity, and acquire/release balance across a
   concurrent teardown.
 - `v40_stale_clientid`: the #1377 regression across a server crash.
+- `nfs4_pnfs_layout_stateid_io` (netns, pynfs, pNFS metadata and data
+  server): READ, WRITE, READ_PLUS and WRITE_SAME with a live layout stateid
+  answer `NFS4ERR_BAD_STATEID`, and the server keeps serving the open.

@@ -25,7 +25,7 @@ layout_shard_index(
     return h & (NFS_LAYOUT_TABLE_SHARDS - 1);
 } /* layout_shard_index */
 
-void
+SYMBOL_EXPORT void
 nfs_layout_table_init(struct nfs_layout_table *table)
 {
     int i;
@@ -36,7 +36,7 @@ nfs_layout_table_init(struct nfs_layout_table *table)
     }
 } /* nfs_layout_table_init */
 
-void
+SYMBOL_EXPORT void
 nfs_layout_table_destroy(struct nfs_layout_table *table)
 {
     int i;
