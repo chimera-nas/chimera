@@ -32,6 +32,7 @@
 
 struct chimera_metrics {
     int                        port;
+    char                      *hostname;
     enum chimera_tcp_flavor flavor;
     struct prometheus_metrics *metrics;
     struct evpl               *evpl;
@@ -146,7 +147,7 @@ chimera_metrics_thread_init(
     metrics->agent = evpl_http_init(evpl);
 
     metrics->endpoint = chimera_tcp_flavor_endpoint_create(metrics->flavor,
-                                                           "0.0.0.0",
+                                                           metrics->hostname,
                                                            metrics->port);
     metrics->listener = evpl_listener_create_named("chm_prom_listen");
 
@@ -155,10 +156,11 @@ chimera_metrics_thread_init(
     rc = evpl_listen(metrics->listener,
                      chimera_tcp_flavor_to_protocol(metrics->flavor),
                      metrics->endpoint);
-    chimera_metrics_abort_if(rc, "failed to listen for prometheus metrics on port %d",
-                             metrics->port);
+    chimera_metrics_abort_if(rc, "failed to listen for prometheus metrics on %s port %d",
+                             metrics->hostname, metrics->port);
 
-    chimera_metrics_info("Serving prometheus metrics on http://0.0.0.0:%d/metrics", metrics->port);
+    chimera_metrics_info("Serving prometheus metrics on %s port %d (/metrics)",
+                         metrics->hostname, metrics->port);
 
     return metrics;
 } /* chimera_metrics_thread_init */
@@ -180,13 +182,17 @@ chimera_metrics_thread_shutdown(
 
 SYMBOL_EXPORT struct chimera_metrics *
 chimera_metrics_init(
+    const char             *hostname,
     int                     port,
     enum chimera_tcp_flavor flavor)
 {
     struct chimera_metrics *metrics = calloc(1, sizeof(*metrics));
 
-    metrics->port   = port;
-    metrics->flavor = flavor;
+    /* Own a copy: the listener is created later, on the metrics thread, and
+     * the caller's string (e.g. from the parsed config) may be gone by then. */
+    metrics->hostname = strdup(hostname ? hostname : "0.0.0.0");
+    metrics->port     = port;
+    metrics->flavor   = flavor;
 
     metrics->thread = evpl_thread_create(chimera_thread_config("chm_metrics"),
                                          chimera_metrics_thread_init,
@@ -201,6 +207,7 @@ chimera_metrics_destroy(struct chimera_metrics *metrics)
 {
     evpl_thread_destroy(metrics->thread);
 
+    free(metrics->hostname);
     free(metrics);
 } /* chimera_metrics_destroy */
 

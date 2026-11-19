@@ -56,3 +56,13 @@ if(NOT WIN32)
                 $<TARGET_FILE:chimera>)
     set_tests_properties(chimera/daemon/log_file PROPERTIES TIMEOUT 120)
 endif()
+
+# metrics_hostname restricts the scrape endpoint to one address.  The test
+# binds 127.0.0.2, which only Linux routes to loopback without setup, and
+# then ::1 when the host has IPv6.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME chimera/daemon/metrics_hostname
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/daemon_metrics_hostname_test.py
+                $<TARGET_FILE:chimera>)
+    set_tests_properties(chimera/daemon/metrics_hostname PROPERTIES TIMEOUT 120)
+endif()

@@ -499,25 +499,34 @@ build_evpl_global_config(
 } /* build_evpl_global_config */
 
 /* Metrics port (default 9000); configurable so multiple daemons can share
- * a host (e.g. a pNFS MDS + data server).  The scrape endpoint follows the
- * same transport flavor as the rest of the server (common.tcp_flavor), read
- * straight from the parsed config -- server_config does not exist yet at
- * this point. */
+ * a host (e.g. a pNFS MDS + data server).  metrics_hostname (default all
+ * interfaces) lets a deployment keep the unauthenticated endpoint off the
+ * client network, e.g. on 127.0.0.1 behind a local collector.  The scrape
+ * endpoint follows the same transport flavor as the rest of the server
+ * (common.tcp_flavor), read straight from the parsed config -- server_config
+ * does not exist yet at this point. */
 static struct chimera_metrics *
 init_metrics(
     json_t *config,
     json_t *server_params)
 {
-    int metrics_port = 9000;
+    int         metrics_port     = 9000;
+    const char *metrics_hostname = NULL;
 
     if (server_params) {
         json_t *mp = json_object_get(server_params, "metrics_port");
         if (json_is_integer(mp)) {
             metrics_port = json_integer_value(mp);
         }
+
+        json_t *mh = json_object_get(server_params, "metrics_hostname");
+        if (json_is_string(mh)) {
+            metrics_hostname = json_string_value(mh);
+        }
     }
 
-    return chimera_metrics_init(metrics_port, chimera_common_tcp_flavor(config));
+    return chimera_metrics_init(metrics_hostname, metrics_port,
+                                chimera_common_tcp_flavor(config));
 } /* init_metrics */
 
 static void

@@ -14,12 +14,14 @@ struct chimera_metrics;
 
 /*
  * Start the Prometheus scrape endpoint (GET <port>/metrics) on its own evpl
- * thread.  `flavor` is the server's configured transport flavor, so an
- * in-process deployment (tests) reaches the endpoint over inproc without
- * binding a port; see chimera_tcp_flavor_endpoint_create for how a port names
- * an inproc endpoint.
+ * thread.  `hostname` is the address to listen on; NULL means all IPv4
+ * interfaces ("0.0.0.0").  The string is copied.  `flavor` is the server's
+ * configured transport flavor, so an in-process deployment (tests) reaches
+ * the endpoint over inproc without binding a port; see
+ * chimera_tcp_flavor_endpoint_create for how a port names an inproc endpoint.
  */
 SYMBOL_EXPORT struct chimera_metrics * chimera_metrics_init(
+    const char             *hostname,
     int                     port,
     enum chimera_tcp_flavor flavor);
 

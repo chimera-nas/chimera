@@ -1018,7 +1018,7 @@ mbt_env_open_opts(
     }
 
     if (opts && opts->metrics_port) {
-        env->metrics_server = chimera_metrics_init(opts->metrics_port,
+        env->metrics_server = chimera_metrics_init(NULL, opts->metrics_port,
                                                    CHIMERA_TCP_FLAVOR_INPROC);
         env->metrics = chimera_metrics_get(env->metrics_server);
     } else {
