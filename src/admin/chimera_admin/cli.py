@@ -18,21 +18,98 @@ Examples:
 """
 
 import argparse
+import getpass
 import json
+import os
+from pathlib import Path
 import sys
 
+from . import __version__
 from .client import ChimeraAdminClient, ChimeraAdminError
+from .inspection import add_inspection_commands, run_inspection
+from .presentation import table, terminal_width, value_text
+
+
+_RESOURCE_COLUMNS = {
+    "mount": (("NAME", "name"), ("MODULE", "module"), ("PATH", "path")),
+    "export": (("NAME", "name"), ("PATH", "path"), ("EXPORT ID", "export_id"),
+               ("ACCESS", "access"), ("SQUASH", "squash"), ("ANON UID", "anonuid"),
+               ("ANON GID", "anongid")),
+    "share": (("NAME", "name"), ("PATH", "path")),
+    "bucket": (("NAME", "name"), ("PATH", "path")),
+    "user": (("USERNAME", "username"), ("UID", "uid"), ("GID", "gid"),
+             ("SUPPLEMENTARY GIDS", "gids"), ("PINNED", "pinned")),
+}
+
+
+def _resource_output(resource, result, width=None):
+    """Format a resource list or get result without changing its API value."""
+    rows = result if isinstance(result, list) else [result]
+    fields = _RESOURCE_COLUMNS[resource]
+    width = width or terminal_width()
+    if width < 100 and resource == "export":
+        fields = fields[:5]
+    elif width < 100 and resource == "user":
+        fields = fields[:3]
+    headers = [header for header, _ in fields]
+    numeric = {index for index, (_, key) in enumerate(fields)
+               if key in ("export_id", "anonuid", "anongid", "uid", "gid")}
+    values = [[row.get(key) for _, key in fields] for row in rows]
+    lines = [table(headers, values, numeric=numeric)]
+    known = {key for _, key in fields}
+    if width < 100 and resource == "export":
+        lines += ["", "ANONYMOUS ID MAPPING", table(
+            ["NAME", "ANON UID", "ANON GID"],
+            [[row.get("name"), row.get("anonuid"), row.get("anongid")] for row in rows], numeric={1, 2})]
+        known.update(("anonuid", "anongid"))
+    elif width < 100 and resource == "user":
+        lines += ["", "USER DETAILS", table(
+            ["USERNAME", "SUPPLEMENTARY GIDS", "PINNED"],
+            [[row.get("username"), row.get("gids"), row.get("pinned")] for row in rows])]
+        known.update(("gids", "pinned"))
+    extras = []
+    for row in rows:
+        identity = row.get("name", row.get("username", ""))
+        for key, value in row.items():
+            if key not in known:
+                extras.append((identity, key, value))
+    if extras:
+        lines.extend(["", "DETAILS", table(
+            ["RESOURCE", "FIELD", "VALUE"],
+            [[identity, key, value_text(value)] for identity, key, value in extras])])
+    return "\n".join(lines)
+
+
+def _add_output_options(parser):
+    parser.add_argument("--json", action="store_true", help="Return the original API JSON")
+    parser.add_argument("--quiet", action="store_true", help="Hide non-data human-readable output")
+
+
+def _client_options(args) -> dict:
+    """Resolve credentials once before a terminal UI starts."""
+    token = Path(args.token_file).read_text(encoding="utf-8").strip() if args.token_file else os.environ.get("CHIMERA_ADMIN_TOKEN")
+    username = args.user or os.environ.get("CHIMERA_ADMIN_USER")
+    password = os.environ.get("CHIMERA_ADMIN_PASSWORD")
+    if username and token:
+        raise ValueError("choose a Bearer token or Basic credentials, not both")
+    if username and password is None:
+        password = getpass.getpass("Password for {}: ".format(username))
+    if token and ("\n" in token or "\r" in token):
+        raise ValueError("token must be one line")
+    timeout = args.timeout if args.timeout is not None else (3 if args.resource == "inspect" else 30)
+    return dict(
+        host=args.host,
+        port=args.port,
+        timeout=timeout,
+        verify_ssl=not args.no_verify_ssl,
+        use_https=args.https,
+        token=token, username=username, password=password, ca_file=args.ca_file,
+    )
 
 
 def _client(args) -> ChimeraAdminClient:
     """Build a client from parsed global arguments."""
-    return ChimeraAdminClient(
-        host=args.host,
-        port=args.port,
-        timeout=args.timeout,
-        verify_ssl=not args.no_verify_ssl,
-        use_https=args.https,
-    )
+    return ChimeraAdminClient(**_client_options(args))
 
 
 def _delete_and_msg(method, ident: str, noun: str) -> str:
@@ -53,10 +130,12 @@ def _add_crud_commands(sub, noun: str, label: str) -> None:
     actions = res.add_subparsers(dest="action", required=True)
 
     p = actions.add_parser("list", help=f"List {label}s")
+    _add_output_options(p)
     p.set_defaults(func=lambda c, a: getattr(c, f"list_{plural}")())
 
     p = actions.add_parser("get", help=f"Get a {label}")
     p.add_argument("name")
+    _add_output_options(p)
     p.set_defaults(func=lambda c, a: getattr(c, f"get_{noun}")(a.name))
 
     p = actions.add_parser("create", help=f"Create a {label}")
@@ -85,10 +164,12 @@ def _add_export_commands(sub) -> None:
     actions = res.add_subparsers(dest="action", required=True)
 
     p = actions.add_parser("list", help="List NFS exports")
+    _add_output_options(p)
     p.set_defaults(func=lambda c, a: c.list_exports())
 
     p = actions.add_parser("get", help="Get a NFS export")
     p.add_argument("name")
+    _add_output_options(p)
     p.set_defaults(func=lambda c, a: c.get_export(a.name))
 
     p = actions.add_parser("create", help="Create a NFS export")
@@ -129,10 +210,12 @@ def _add_user_commands(sub) -> None:
     actions = res.add_subparsers(dest="action", required=True)
 
     p = actions.add_parser("list", help="List users")
+    _add_output_options(p)
     p.set_defaults(func=lambda c, a: c.list_users())
 
     p = actions.add_parser("get", help="Get a user")
     p.add_argument("username")
+    _add_output_options(p)
     p.set_defaults(func=lambda c, a: c.get_user(a.username))
 
     p = actions.add_parser("create", help="Create a user")
@@ -161,10 +244,12 @@ def _add_mount_commands(sub) -> None:
     actions = res.add_subparsers(dest="action", required=True)
 
     p = actions.add_parser("list", help="List VFS mounts")
+    _add_output_options(p)
     p.set_defaults(func=lambda c, a: c.list_mounts())
 
     p = actions.add_parser("get", help="Get a VFS mount")
     p.add_argument("name")
+    _add_output_options(p)
     p.set_defaults(func=lambda c, a: c.get_mount(a.name))
 
     p = actions.add_parser("create", help="Create a VFS mount")
@@ -189,6 +274,10 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="python3 -m chimera_admin",
         description="Command-line client for the Chimera NAS REST API.")
     parser.add_argument(
+        "-V", "--version", action="version",
+        version="chimera-admin {}".format(__version__),
+        help="Show the chimera-admin CLI package version and exit")
+    parser.add_argument(
         "--host", default="localhost",
         help="Server hostname or IP (default: localhost)")
     parser.add_argument(
@@ -200,12 +289,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-verify-ssl", action="store_true",
         help="Do not verify TLS certificates")
     parser.add_argument(
-        "--timeout", type=int, default=30,
-        help="Request timeout in seconds (default: 30)")
+        "--timeout", type=int, default=None,
+        help="Request timeout in seconds (default: 3 for inspect, 30 otherwise)")
+    parser.add_argument("--token-file", help="Read a Bearer token from this file")
+    parser.add_argument("--user", help="Basic-auth username; prompts for a password")
+    parser.add_argument("--ca-file", help="CA bundle for HTTPS certificate verification")
 
     sub = parser.add_subparsers(dest="resource", required=True)
 
-    p = sub.add_parser("version", help="Show server version")
+    p = sub.add_parser("version", help="Show Chimera server version")
+    p.add_argument("--json", action="store_true", help="Return the original API JSON")
     p.set_defaults(func=lambda c, a: c.get_version())
 
     p = sub.add_parser(
@@ -217,6 +310,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_crud_commands(sub, "share", "SMB share")
     _add_crud_commands(sub, "bucket", "S3 bucket")
     _add_mount_commands(sub)
+    add_inspection_commands(sub)
 
     return parser
 
@@ -238,8 +332,18 @@ def main(argv=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    client = _client(args)
+    client = None
     try:
+        if args.resource == "inspect" and getattr(args, "interactive", False):
+            from .terminal import run_interactive
+            return run_interactive(args, lambda: _client_options(args))
+        if args.resource == "inspect" and args.targets:
+            from .fleet import run_fleet
+            return run_fleet(args)
+        if not (args.resource == "inspect" and args.input):
+            client = _client(args)
+        if args.resource == "inspect":
+            return run_inspection(client, args)
         result = args.func(client, args)
     except ChimeraAdminError as e:
         msg = str(e)
@@ -250,10 +354,21 @@ def main(argv=None) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except OSError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
-    _emit(result)
+    if args.resource == "version" and not args.json:
+        print("Chimera server version: {}".format(value_text(result.get("version"))))
+    elif args.resource in _RESOURCE_COLUMNS and args.action in ("list", "get") and not args.json:
+        print(_resource_output(args.resource, result))
+    else:
+        _emit(result)
     return 0
 
 

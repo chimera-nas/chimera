@@ -311,6 +311,17 @@ jobs:
                 ctest --output-on-failure --no-tests=error \
                       --output-junit /workspace/quick-test-diagnostics/results.xml \
                       --test-output-size-failed 65536 --timeout 600 -j "$(nproc)"
+              # Exercise the Python SDK and CLI against the daemon built from
+              # this pull request. The live tests skip unless
+              # CHIMERA_SERVER_BINARY explicitly selects the daemon.
+              python3 -m venv /tmp/chimera-admin-ci
+              /tmp/chimera-admin-ci/bin/python -m pip install \
+                --disable-pip-version-check -e "/workspace/src/admin[dev]"
+              CHIMERA_SERVER_BINARY=/build/src/daemon/chimera \
+              PYTHONPATH=/workspace/src/admin \
+              LLVM_PROFILE_FILE=/build/coverage/profraw/admin-%m-%p.profraw \
+                /tmp/chimera-admin-ci/bin/python -m pytest -q -rs \
+                  /workspace/src/admin/tests
               # Which of the changed files are worth an lcov export; empty
               # (or absent, on a non-PR run) means the export is skipped.
               : > /workspace/pr-sources.txt

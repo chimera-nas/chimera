@@ -501,6 +501,26 @@ issue_api(
         return res.status;
     }
 
+    if (strcmp(tag, "RThreads") == 0 || strcmp(tag, "RConnections") == 0) {
+        ctl_get(o->api, strcmp(tag, "RThreads") == 0 ? "/api/v1/threads" : "/api/v1/connections", &res);
+        json_t *snapshot = json_loadb(res.body, res.body_len, 0, NULL);
+        if (res.status == 200) {
+            json_t     *complete = json_object_get(snapshot, "complete");
+            json_t     *missing  = json_object_get(snapshot, "missing_workers");
+            const char *rows     = strcmp(tag, "RThreads") == 0 ? "threads" : "connections";
+            /* Partial snapshots are valid under scheduler contention. They
+            * must remain explicit, and these reads must preserve ctlst. */
+            if (!snapshot || !json_is_boolean(complete) || !json_is_array(missing) ||
+                !json_is_array(json_object_get(snapshot, rows)) ||
+                (json_is_true(complete) && (json_array_size(missing) ||
+                                            json_is_true(json_object_get(snapshot, "truncated"))))) {
+                fail(o, "inspection: invalid completeness envelope");
+            }
+        }
+        json_decref(snapshot);
+        return res.status;
+    }
+
     if (strcmp(tag, "RConfig") == 0) {
         ctl_get(o->api, "/api/v1/config", &res);
         return res.status;

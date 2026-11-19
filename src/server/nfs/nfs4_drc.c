@@ -712,6 +712,7 @@ nfs4_drc_reconstruct_session(
     }
 
     session = nfs4_create_session(table, rec->clientid, 0, slots, cached,
+                                  rec->fore.ca_maxrequests, max_slots,
                                   &rec->fore, &rec->back, sessionid, true);
     if (!session) {
         /* The record went away between the two lookups, or the slot table

@@ -369,7 +369,7 @@ test_cross_reboot_replay(void)
     nfs4_client_table_init(&table_a,1);
     clientid = nfs4_client_register(&table_a,owner,(int) sizeof(owner) - 1,
                                     0x1234ULL,40,NULL,NULL);
-    session = nfs4_create_session(&table_a,clientid,0,8,4096,
+    session = nfs4_create_session(&table_a,clientid,0,8,4096,8,8,
                                   NULL,NULL,NULL,true);
     CHECK(session != NULL);
     memcpy(sessionid,session->nfs4_session_id,NFS4_SESSIONID_SIZE);
@@ -471,7 +471,7 @@ rebuild_session_after_reboot(struct nfs4_client_table*table_b)
     nfs4_client_table_init(&table_a,1);
     clientid = nfs4_client_register(&table_a,owner,(int) sizeof(owner) - 1,
                                     0x1234ULL,40,NULL,NULL);
-    session = nfs4_create_session(&table_a,clientid,0,8,4096,
+    session = nfs4_create_session(&table_a,clientid,0,8,4096,8,8,
                                   NULL,NULL,NULL,true);
     CHECK(session != NULL);
     memcpy(sessionid,session->nfs4_session_id,NFS4_SESSIONID_SIZE);
@@ -977,7 +977,7 @@ test_cross_reboot_reclaim_complete(void)
     nfs4_client_table_init(&table_a,1);
     clientid = nfs4_client_register(&table_a,owner,(int) sizeof(owner) - 1,
                                     0x4321ULL,41,NULL,NULL);
-    session = nfs4_create_session(&table_a,clientid,0,8,4096,
+    session = nfs4_create_session(&table_a,clientid,0,8,4096,8,8,
                                   NULL,NULL,NULL,true);
     CHECK(session != NULL);
     memcpy(sessionid,session->nfs4_session_id,NFS4_SESSIONID_SIZE);
@@ -1292,7 +1292,7 @@ make_persistent_session(
     c->nfs4_client_confirmed = 1;
     evpl_mutex_unlock(&table->nfs4_ct_lock);
 
-    session = nfs4_create_session(table,clientid,0,8,4096,NULL,NULL,NULL,true);
+    session = nfs4_create_session(table,clientid,0,8,4096,8,8,NULL,NULL,NULL,true);
     CHECK(session != NULL);
 
     memset(srec,0,sizeof(*srec));

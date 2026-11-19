@@ -120,3 +120,31 @@ chimera_rest_export_options_to_json(
     const struct chimera_nfs_export *export,
     json_t *obj);
 
+
+#include "evpl/evpl_http.h"
+void chimera_rest_inspect(
+    struct chimera_rest_thread  *thread,
+    struct evpl_http_request    *request,
+    int                          connections,
+    const char                  *query,
+    int                          query_len,
+    evpl_http_notify_callback_t *notify_callback,
+    void                       **notify_data);
+void chimera_rest_inspect_live(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    int                         include_sessions);
+void chimera_rest_inspect_nfs_sessions(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    const char                 *query,
+    int                         query_len);
+void chimera_rest_inspect_nfs_clients(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    const char                 *query,
+    int                         query_len);
+void chimera_rest_inspect_nfs_slots(
+    struct chimera_rest_thread *thread,
+    struct evpl_http_request   *request,
+    const char                 *session_id);

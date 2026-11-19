@@ -2214,6 +2214,7 @@ struct chimera_server_smb_thread {
      * owning thread (accept / conn_free / resume doorbell all run here), so no
      * lock is needed. */
     struct chimera_smb_conn            *active_conns;
+    uint64_t                            inspection_connection_count;
 
     /* Process-global registry link: every SMB thread is chained here under
     * shared->threads_lock so the resume broadcast can reach every peer. */
@@ -3034,6 +3035,7 @@ chimera_smb_conn_free(
 
     /* Drop from the owning thread's active-connection list before returning the
      * conn to the pool (the resume doorbell walks active_conns). */
+    thread->inspection_connection_count--;
     DL_DELETE2(thread->active_conns, conn, active_prev, active_next);
 
     LL_PREPEND(thread->free_conns, conn);

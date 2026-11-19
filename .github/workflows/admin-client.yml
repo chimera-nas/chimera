@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Python admin client
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.8", "3.10", "3.12", "3.14"]
+    defaults:
+      run:
+        working-directory: src/admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[dev]'
+      - run: python -m pytest
+
+  wheel:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build
+      - run: python -m pip install dist/*.whl
+      - run: python -c 'from chimera_admin import ChimeraAdminClient; print(ChimeraAdminClient.__name__)'
+      - run: chimera-admin --help
+      - run: python -m chimera_admin --help

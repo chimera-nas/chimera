@@ -1909,3 +1909,31 @@ chimera_vfs_request_alloc_memory(
     request->memory = memory;
     return memory + 1;
 } /* chimera_vfs_request_alloc_memory */
+
+SYMBOL_EXPORT unsigned int
+chimera_vfs_inspect_counts(
+    struct chimera_vfs_thread   *thread,
+    unsigned int                 capacity,
+    struct chimera_vfs_op_count *counts)
+{
+    unsigned int n = 0;
+
+    if (!thread->metrics.op_latency_series) {
+        return 0;
+    }
+    for (int i = 0; i < CHIMERA_VFS_OP_NUM && n < capacity; i++) {
+        if (!thread->metrics.op_latency_series[i]) {
+            continue;
+        }
+        counts[n].name = chimera_vfs_op_name(i);
+        struct prometheus_histogram_instance *histogram = thread->metrics.op_latency_series[i];
+        counts[n].count        = atomic_load_explicit(&histogram->count, memory_order_relaxed);
+        counts[n].sum_ticks    = atomic_load_explicit(&histogram->sum, memory_order_relaxed);
+        counts[n].bucket_count = histogram->num_buckets < 64 ? (unsigned int) histogram->num_buckets : 64;
+        for (unsigned int bucket = 0; bucket < counts[n].bucket_count; bucket++) {
+            counts[n].buckets[bucket] = atomic_load_explicit(&histogram->buckets[bucket], memory_order_relaxed);
+        }
+        n++;
+    }
+    return n;
+} /* chimera_vfs_inspect_counts */

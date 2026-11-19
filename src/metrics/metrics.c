@@ -5,8 +5,11 @@
 #include "common/host_file.h"
 #include "common/thread_name.h"
 #include <stdio.h>
+#include <stdarg.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include "common/platform.h"
@@ -17,6 +20,13 @@
 #include "common/macros.h"
 #include "common/tcp_flavor.h"
 #include "prometheus-c.h"
+#include "server/server_inspect.h"
+
+#define CHIMERA_METRICS_MAX_WORKERS 4096
+
+struct worker_export_sample {
+    uint64_t cpu_ns, loop_iters, loop_iters_with_work;
+};
 
 #define chimera_metrics_debug(...) chimera_debug("metrics", __FILE__, __LINE__, __VA_ARGS__)
 #define chimera_metrics_info(...)  chimera_info("metrics", __FILE__, __LINE__, __VA_ARGS__)
@@ -31,16 +41,146 @@
         chimera_fatal_if(cond, "metrics", __FILE__, __LINE__, __VA_ARGS__)
 
 struct chimera_metrics {
-    int                        port;
-    enum chimera_tcp_flavor flavor;
-    struct prometheus_metrics *metrics;
-    struct evpl               *evpl;
-    struct evpl_thread        *thread;
-    struct evpl_endpoint      *endpoint;
-    struct evpl_listener      *listener;
-    struct evpl_http_agent    *agent;
-    struct evpl_http_server   *server;
+    int                          port;
+    enum chimera_tcp_flavor      flavor;
+    struct prometheus_metrics   *metrics;
+    struct evpl                 *evpl;
+    struct evpl_thread          *thread;
+    struct evpl_endpoint        *endpoint;
+    struct evpl_listener        *listener;
+    struct evpl_http_agent      *agent;
+    struct evpl_http_server     *server;
+    evpl_mutex_t                 inspect_lock;
+    _Atomic(struct chimera_server_inspect *) inspect;
+    struct worker_export_sample *previous;
+    uint64_t                     previous_sample_ns;
+    unsigned int                 previous_count;
 };
+
+static int
+append_worker_metrics(
+    struct chimera_metrics *metrics,
+    char                   *buffer,
+    size_t                  capacity,
+    size_t                 *offset)
+{
+    evpl_mutex_lock(&metrics->inspect_lock);
+    struct chimera_server_inspect *inspect = atomic_load_explicit(&metrics->inspect, memory_order_relaxed);
+
+    if (!inspect) {
+        evpl_mutex_unlock(&metrics->inspect_lock);
+        return 0;
+    }
+    struct chimera_worker_sample  *samples = calloc(CHIMERA_METRICS_MAX_WORKERS, sizeof(*samples));
+    if (!samples) {
+        evpl_mutex_unlock(&metrics->inspect_lock);
+        return -1;
+    }
+    unsigned int                   count = chimera_server_inspect_read_workers(inspect, samples,
+                                                                               CHIMERA_METRICS_MAX_WORKERS);
+    struct timespec                now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t                       sample_ns  = (uint64_t) now.tv_sec * UINT64_C(1000000000) + now.tv_nsec;
+    uint64_t                       elapsed_ns = metrics->previous_sample_ns && sample_ns > metrics->previous_sample_ns ?
+        sample_ns - metrics->previous_sample_ns : 0;
+#define APPEND(...) do { \
+            int written = snprintf(buffer + *offset, capacity - *offset, __VA_ARGS__); \
+            if (written < 0 || (size_t) written >= capacity - *offset) { \
+                free(samples); evpl_mutex_unlock(&metrics->inspect_lock); return -1; \
+            } \
+            *offset += (size_t) written; \
+} while (0)
+    APPEND("# HELP chimera_worker_cpu_ns_total Cumulative worker CPU time in nanoseconds.\n"
+           "# TYPE chimera_worker_cpu_ns_total counter\n"
+           "# HELP chimera_worker_loop_iterations_total Cumulative worker event-loop iterations.\n"
+           "# TYPE chimera_worker_loop_iterations_total counter\n"
+           "# HELP chimera_worker_loop_work_iterations_total Cumulative worker iterations that handled work.\n"
+           "# TYPE chimera_worker_loop_work_iterations_total counter\n"
+           "# HELP chimera_worker_cpu_percent CPU use between the last two scrapes.\n"
+           "# TYPE chimera_worker_cpu_percent gauge\n"
+           "# HELP chimera_worker_busy_percent Event-loop iterations with work between the last two scrapes.\n"
+           "# TYPE chimera_worker_busy_percent gauge\n"
+           "# HELP chimera_worker_rpc_accepts_total RPC connections accepted by the worker.\n"
+           "# TYPE chimera_worker_rpc_accepts_total counter\n"
+           "# HELP chimera_worker_rpc_live_connections Current accepted RPC connections on the worker.\n"
+           "# TYPE chimera_worker_rpc_live_connections gauge\n"
+           "# HELP chimera_worker_rpc_rx_bytes_total RPC bytes received by the worker.\n"
+           "# TYPE chimera_worker_rpc_rx_bytes_total counter\n"
+           "# HELP chimera_worker_rpc_tx_bytes_total RPC bytes transmitted by the worker.\n"
+           "# TYPE chimera_worker_rpc_tx_bytes_total counter\n"
+           "# HELP chimera_worker_listener_assigned_total Connections assigned to this worker by a listener.\n"
+           "# TYPE chimera_worker_listener_assigned_total counter\n"
+           "# HELP chimera_worker_rdma_remote_ip_accepts_total RDMA RPC accepts by remote IP and worker.\n"
+           "# TYPE chimera_worker_rdma_remote_ip_accepts_total counter\n"
+           "# HELP chimera_worker_rdma_remote_ip_overflow_accepts_total RDMA accepts beyond the per-worker IP table.\n"
+           "# TYPE chimera_worker_rdma_remote_ip_overflow_accepts_total counter\n"
+           "# HELP chimera_worker_vfs_operations_total VFS operation completions by worker and operation.\n"
+           "# TYPE chimera_worker_vfs_operations_total counter\n");
+    for (unsigned int i = 0; i < count; i++) {
+        APPEND("chimera_worker_cpu_ns_total{worker_id=\"%u\"} %" PRIu64 "\n"
+               "chimera_worker_loop_iterations_total{worker_id=\"%u\"} %" PRIu64 "\n"
+               "chimera_worker_loop_work_iterations_total{worker_id=\"%u\"} %" PRIu64 "\n",
+               i, samples[i].cpu_ns, i, samples[i].loop.loop_iters,
+               i, samples[i].loop.loop_iters_with_work);
+        if (i < metrics->previous_count && elapsed_ns && samples[i].cpu_ns >= metrics->previous[i].cpu_ns &&
+            samples[i].loop.loop_iters >= metrics->previous[i].loop_iters &&
+            samples[i].loop.loop_iters_with_work >= metrics->previous[i].loop_iters_with_work) {
+            uint64_t cpu_delta  = samples[i].cpu_ns - metrics->previous[i].cpu_ns;
+            uint64_t iter_delta = samples[i].loop.loop_iters - metrics->previous[i].loop_iters;
+            uint64_t work_delta = samples[i].loop.loop_iters_with_work - metrics->previous[i].loop_iters_with_work;
+            APPEND("chimera_worker_cpu_percent{worker_id=\"%u\"} %.6f\n",
+                   i, 100.0 * (double) cpu_delta / (double) elapsed_ns);
+            if (iter_delta) {
+                APPEND("chimera_worker_busy_percent{worker_id=\"%u\"} %.6f\n",
+                       i, 100.0 * (double) work_delta / (double) iter_delta);
+            }
+        }
+        metrics->previous[i].cpu_ns               = samples[i].cpu_ns;
+        metrics->previous[i].loop_iters           = samples[i].loop.loop_iters;
+        metrics->previous[i].loop_iters_with_work = samples[i].loop.loop_iters_with_work;
+        struct chimera_inspect_sample rpc = { 0 };
+        chimera_server_inspect_read_live_rpc(inspect, i, &rpc);
+        if (rpc.has_rpc) {
+            APPEND("chimera_worker_rpc_accepts_total{worker_id=\"%u\"} %" PRIu64 "\n"
+                   "chimera_worker_rpc_live_connections{worker_id=\"%u\"} %" PRIu64 "\n"
+                   "chimera_worker_rpc_rx_bytes_total{worker_id=\"%u\"} %" PRIu64 "\n"
+                   "chimera_worker_rpc_tx_bytes_total{worker_id=\"%u\"} %" PRIu64 "\n",
+                   i, rpc.rpc.accepts, i, rpc.rpc.active_connections,
+                   i, rpc.rpc.rx_bytes, i, rpc.rpc.tx_bytes);
+            for (unsigned int j = 0; j < rpc.rpc.nlisteners; j++) {
+                const char *policy = "unknown";
+                if (rpc.rpc.listeners[j].placement_policy == 1) {
+                    policy = "round_robin";
+                } else if (rpc.rpc.listeners[j].placement_policy == 2) {
+                    policy = "distributed";
+                }
+                APPEND(
+                    "chimera_worker_listener_assigned_total{worker_id=\"%u\",program=\"%u\",version=\"%u\",policy=\"%s\"} %"
+                    PRIu64 "\n",
+                    i, rpc.rpc.listeners[j].program, rpc.rpc.listeners[j].version,
+                    policy, rpc.rpc.listeners[j].assigned_total);
+            }
+            for (unsigned int j = 0; j < rpc.rpc.nrdma_remote_ips; j++) {
+                APPEND("chimera_worker_rdma_remote_ip_accepts_total{worker_id=\"%u\",remote_ip=\"%s\"} %" PRIu64 "\n",
+                       i, rpc.rpc.rdma_remote_ips[j].address, rpc.rpc.rdma_remote_ips[j].accepts);
+            }
+            APPEND("chimera_worker_rdma_remote_ip_overflow_accepts_total{worker_id=\"%u\"} %" PRIu64 "\n",
+                   i, rpc.rpc.rdma_remote_ip_overflow_accepts);
+        }
+        struct chimera_vfs_op_count vfs[CHIMERA_INSPECT_VFS_OPS];
+        unsigned int                nvfs = chimera_server_inspect_read_vfs(inspect, i, CHIMERA_INSPECT_VFS_OPS, vfs);
+        for (unsigned int j = 0; j < nvfs; j++) {
+            APPEND("chimera_worker_vfs_operations_total{worker_id=\"%u\",operation=\"%s\"} %" PRIu64 "\n",
+                   i, vfs[j].name, vfs[j].count);
+        }
+    }
+    metrics->previous_count     = count;
+    metrics->previous_sample_ns = sample_ns;
+    free(samples);
+    evpl_mutex_unlock(&metrics->inspect_lock);
+#undef APPEND
+    return 0;
+} /* append_worker_metrics */
 
 static void
 chimera_metrics_notify(
@@ -60,6 +200,7 @@ chimera_metrics_notify(
     ssize_t                 len;
     int                     evpl_len;
     int                     n;
+    size_t                  worker_metrics_len;
 
     switch (notify_type) {
         case EVPL_HTTP_NOTIFY_RECEIVE_COMPLETE:
@@ -94,6 +235,16 @@ chimera_metrics_notify(
                 evpl_http_server_dispatch_default(request, 500);
                 break;
             }
+
+            worker_metrics_len = 0;
+            if (append_worker_metrics(metrics, buf + len, (size_t) (cap - len), &worker_metrics_len) != 0) {
+                evpl_iovec_release(evpl, &iov);
+                evpl_http_server_set_response_length(request, 0);
+                evpl_http_server_dispatch_default(request, 500);
+                break;
+            }
+
+            len += (ssize_t) worker_metrics_len;
 
             evpl_len = evpl_metrics_scrape(buf + len, cap - len);
 
@@ -141,7 +292,9 @@ chimera_metrics_thread_init(
     struct chimera_metrics *metrics = private_data;
     int                     rc;
 
-    metrics->metrics = prometheus_metrics_create(NULL, NULL, 0);
+    metrics->metrics  = prometheus_metrics_create(NULL, NULL, 0);
+    metrics->previous = calloc(CHIMERA_METRICS_MAX_WORKERS, sizeof(*metrics->previous));
+    chimera_metrics_abort_if(!metrics->previous, "failed to allocate worker scrape history");
 
     metrics->agent = evpl_http_init(evpl);
 
@@ -170,6 +323,8 @@ chimera_metrics_thread_shutdown(
 {
     struct chimera_metrics *metrics = private_data;
 
+    free(metrics->previous);
+    evpl_mutex_destroy(&metrics->inspect_lock);
     prometheus_metrics_destroy(metrics->metrics);
 
     evpl_http_server_destroy(metrics->agent, metrics->server);
@@ -185,6 +340,8 @@ chimera_metrics_init(
 {
     struct chimera_metrics *metrics = calloc(1, sizeof(*metrics));
 
+    atomic_init(&metrics->inspect, NULL);
+    evpl_mutex_init(&metrics->inspect_lock, NULL);
     metrics->port   = port;
     metrics->flavor = flavor;
 
@@ -209,6 +366,16 @@ chimera_metrics_get(struct chimera_metrics *metrics)
 {
     return metrics->metrics;
 } /* chimera_metrics_get */
+
+SYMBOL_EXPORT void
+chimera_metrics_set_inspect(
+    struct chimera_metrics        *metrics,
+    struct chimera_server_inspect *inspect)
+{
+    evpl_mutex_lock(&metrics->inspect_lock);
+    atomic_store_explicit(&metrics->inspect, inspect, memory_order_relaxed);
+    evpl_mutex_unlock(&metrics->inspect_lock);
+} /* chimera_metrics_set_inspect */
 
 SYMBOL_EXPORT int
 chimera_metrics_dump_file(

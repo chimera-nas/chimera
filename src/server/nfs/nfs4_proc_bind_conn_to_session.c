@@ -124,7 +124,7 @@ chimera_nfs4_bind_conn_to_session(
      * unless it is already bound to this session).  This holds a ref before we
      * drop the lookup ref below, mirroring SEQUENCE. */
     if (bind_fore || bind_back) {
-        nfs4_session_bind_conn(req->conn, session);
+        nfs4_session_bind_conn(req->conn, session, thread);
     }
 
     if (bind_back) {

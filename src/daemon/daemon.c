@@ -45,6 +45,7 @@
 #include "common/common_config.h"
 #include "common/chimera_tracing.h"
 #include "metrics/metrics.h"
+#include "server/server_inspect.h"
 #include "daemon.h"
 
 static volatile sig_atomic_t SigInt;
@@ -2049,6 +2050,7 @@ shutdown_server(
     json_t                 *config,
     struct chimera_metrics *metrics)
 {
+    chimera_metrics_set_inspect(metrics, NULL);
     chimera_server_destroy(server);
 
     /* Flush and close tracing exporters after the server's threads have drained
@@ -2176,6 +2178,7 @@ main(
     apply_s3_anon_config(config, server_config);
 
     server = chimera_server_init(server_config, chimera_metrics_get(metrics));
+    chimera_metrics_set_inspect(metrics, chimera_server_get_inspect(server));
 
     load_users(config, server);
     load_s3_access_keys(config, server);

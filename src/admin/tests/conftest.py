@@ -21,23 +21,18 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def find_chimera_binary():
-    """Find the chimera daemon binary."""
-    # Look in common build directories
-    script_dir = Path(__file__).parent.parent.parent.parent
-    candidates = [
-        script_dir / "build" / "Debug" / "src" / "daemon" / "chimera",
-        script_dir / "build" / "Release" / "src" / "daemon" / "chimera",
-        Path("/build/Debug/src/daemon/chimera"),
-        Path("/build/Release/src/daemon/chimera"),
-    ]
-
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-
-    raise FileNotFoundError(
-        f"Could not find chimera binary. Searched: {candidates}"
-    )
+    """Return the explicitly selected Chimera server binary for live tests."""
+    binary = os.environ.get("CHIMERA_SERVER_BINARY")
+    if not binary:
+        pytest.skip(
+            "live server tests require CHIMERA_SERVER_BINARY to select a build"
+        )
+    candidate = Path(binary).expanduser().resolve()
+    if not candidate.is_file():
+        raise FileNotFoundError(
+            f"CHIMERA_SERVER_BINARY does not name a file: {candidate}"
+        )
+    return str(candidate)
 
 
 def wait_for_rest_api(

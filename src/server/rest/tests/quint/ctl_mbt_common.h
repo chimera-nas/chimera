@@ -44,6 +44,7 @@
 #include <inttypes.h>
 
 #include "server/server.h"
+#include "server/server_inspect.h"
 #include "common/tcp_flavor.h"
 #include "metrics/metrics.h"
 #include "prometheus-c.h"
@@ -142,6 +143,9 @@ ctl_env_open(
     }
 
     env->server = chimera_server_init(config, env->registry);
+    if (env->metrics) {
+        chimera_metrics_set_inspect(env->metrics, chimera_server_get_inspect(env->server));
+    }
     chimera_server_start(env->server);
 
     /* The client loop's idle poll interval.  Every wait in this harness is a
@@ -168,6 +172,9 @@ ctl_env_close(struct ctl_env *env)
     /* The server counts into the registry, so it goes first either way.  When
      * the scrape endpoint owns the registry, destroying it also destroys the
      * registry (on its own thread); otherwise this harness owns it. */
+    if (env->metrics) {
+        chimera_metrics_set_inspect(env->metrics, NULL);
+    }
     chimera_server_destroy(env->server);
 
     if (env->metrics) {

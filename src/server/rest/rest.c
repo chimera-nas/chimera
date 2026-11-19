@@ -588,6 +588,71 @@ chimera_rest_dispatch(
         }
     }
 
+    /* Only inspection routes split path/query; existing route behavior stays
+     * with its current path matching and authentication middleware. */
+    const char *query                = memchr(url, '?', url_len);
+    int         path_len             = query ? query - url : url_len;
+    int         inspect_connections  = path_len == 19 && !memcmp(url, "/api/v1/connections", 19);
+    int         inspect_threads      = path_len == 15 && !memcmp(url, "/api/v1/threads", 15);
+    int         inspect_nfs_sessions = path_len == 20 && !memcmp(url, "/api/v1/nfs/sessions", 20);
+    int         inspect_nfs_clients  = path_len == 19 && !memcmp(url, "/api/v1/nfs/clients", 19);
+    int         inspect_nfs_slots    = path_len == 59 &&
+        !memcmp(url, "/api/v1/nfs/sessions/", 21) &&
+        !memcmp(url + path_len - 6, "/slots", 6);
+    if (inspect_nfs_slots) {
+        if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        } else if (query) {
+            chimera_rest_send_error(evpl, request, 400, "Bad Request", "Unknown query parameter");
+        } else {
+            char session_id[33];
+            memcpy(session_id, url + 21, 32);
+            session_id[32] = '\0';
+            chimera_rest_inspect_nfs_slots(thread, request, session_id);
+        }
+        return;
+    }
+    if (inspect_nfs_sessions) {
+        if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        } else {
+            chimera_rest_inspect_nfs_sessions(thread, request,
+                                              query ? query + 1 : NULL,
+                                              query ? url_len - path_len - 1 : 0);
+        }
+        return;
+    }
+    if (inspect_nfs_clients) {
+        if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        } else {
+            chimera_rest_inspect_nfs_clients(thread, request,
+                                             query ? query + 1 : NULL,
+                                             query ? url_len - path_len - 1 : 0);
+        }
+        return;
+    }
+    if (inspect_connections || inspect_threads) {
+        if (req_type != EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        } else {
+            int query_len    = query ? url_len - path_len - 1 : 0;
+            int live_threads = inspect_threads && query_len >= 6 && query &&
+                !memcmp(query + 1, "live=1", 6) &&
+                (query_len == 6 || (query_len == 17 &&
+                                    !memcmp(query + 7, "&sessions=1", 11)));
+            if (live_threads) {
+                chimera_rest_inspect_live(thread, request,
+                                          query_len == 17 && !memcmp(query + 7, "&sessions=1", 11));
+            } else {
+                chimera_rest_inspect(thread, request, inspect_connections,
+                                     query ? query + 1 : NULL, query_len,
+                                     notify_callback, notify_data);
+            }
+        }
+        return;
+    }
+
     /* Config API: /api/v1/config */
     if (url_len == 14 && strncmp(url, "/api/v1/config", 14) == 0) {
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {

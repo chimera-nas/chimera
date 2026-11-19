@@ -370,6 +370,8 @@ module ctl {
             apiRead(RUserList, OK),
 
             apiRead(RConfig, OK),
+            apiRead(RThreads, OK),
+            apiRead(RConnections, OK),
         }
     }
 

@@ -126,7 +126,7 @@ chimera_nfs4_sequence(
     /* Bind this session to the conn (idempotent if already bound) and
      * drop the +1 ref returned by nfs4_session_lookup -- the conn's ref
      * keeps the session alive for the rest of this compound. */
-    nfs4_session_bind_conn(req->conn, session);
+    nfs4_session_bind_conn(req->conn, session, req->thread);
     nfs4_session_put(session);
 
     req->session = session;

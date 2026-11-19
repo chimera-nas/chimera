@@ -166,6 +166,7 @@ test_owner_state_lifecycle(void)
                                   &table,
                                   &sid);
     CHECK(state != NULL);
+    CHECK(atomic_load_explicit(&client->inspect_open_count, memory_order_relaxed) == 1);
     CHECK(state->seqid == 1);
     CHECK(sid.seqid == 1);
 
@@ -194,6 +195,7 @@ test_owner_state_lifecycle(void)
 
     /* Destroy + re-acquire should fail. */
     nfs_open_state_destroy(state, &table, NULL);
+    CHECK(atomic_load_explicit(&client->inspect_open_count, memory_order_relaxed) == 0);
     status = nfs_state_table_acquire(&table, &sid2, NFS4_SLOT_TYPE_OPEN,
                                      &acquired, &acquired_type);
     CHECK(status != NFS4_OK);
@@ -395,6 +397,8 @@ test_lock_state_free_interlock(void)
     lo = nfs_lock_owner_find_or_create(client, "lockowner-F", 11, &created);
     ls = nfs_lock_state_create(lo, os, NULL, &table, &lock_sid);
     CHECK(ls != NULL && ls->seqid == 1);
+    CHECK(atomic_load_explicit(&client->inspect_open_count, memory_order_relaxed) == 1);
+    CHECK(atomic_load_explicit(&client->inspect_lock_count, memory_order_relaxed) == 1);
 
     /* A LOCK is dispatched on the state: FREE_STATEID must wait for it. */
     CHECK(nfs_lock_state_lock_begin(ls));
@@ -426,10 +430,12 @@ test_lock_state_free_interlock(void)
     CHECK(!nfs_lock_state_lock_begin(ls));
     CHECK(nfs_lock_state_free(ls, 3, &table, NULL) == NFS4ERR_BAD_STATEID);
     nfs_state_table_release(&table, ls, NFS4_SLOT_TYPE_LOCK, NULL);
+    CHECK(atomic_load_explicit(&client->inspect_lock_count, memory_order_relaxed) == 0);
     CHECK(nfs_state_table_acquire(&table, &lock_sid, NFS4_SLOT_TYPE_LOCK,
                                   &acquired, &acquired_type) != NFS4_OK);
 
     nfs_open_state_destroy(os, &table, NULL);
+    CHECK(atomic_load_explicit(&client->inspect_open_count, memory_order_relaxed) == 0);
     nfs_lock_owner_put(lo);
     nfs_open_owner_put(oo);
     nfs_client_destroy(client, &table, NULL, true);

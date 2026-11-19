@@ -1826,7 +1826,7 @@ chimera_nfs4_open(
 
             if (found) {
                 client = found->client_unified;
-                nfs4_session_bind_conn(req->conn, found);
+                nfs4_session_bind_conn(req->conn, found, thread);
                 req->session = found;
                 /* Drop the +1 ref from find_by_clientid; the conn owns it. */
                 nfs4_session_put(found);

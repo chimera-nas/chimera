@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "common/thread.h"
+#include "server/server_inspect.h"
 #include <utlist.h>
 #include <fcntl.h>
 #ifdef _WIN32
@@ -426,6 +427,8 @@ nfs_server_init(
     shared->nsm_v1.recv_call_SM_NOTIFY     = chimera_nfs_sm_notify;
 
     nfs4_client_table_init(&shared->nfs4_shared_clients, shared->node_id);
+    nfs4_client_table_set_inspect_workers(&shared->nfs4_shared_clients,
+                                          (unsigned int) chimera_server_config_get_core_threads(config));
     nfs_state_table_init(&shared->nfs4_state_table, shared->node_id);
     nfs_layout_table_init(&shared->nfs4_layout_table);
     nfs3_drc_init(&shared->nfs3_drc, CHIMERA_KV_TYPE_NFS3_REPLY);
@@ -1771,13 +1774,179 @@ chimera_nfs_export_get_sec(const struct chimera_nfs_export *export)
     return export->sec_allowed;
 } /* chimera_nfs_export_get_sec */
 
+static enum chimera_inspect_service
+nfs_inspect_service(
+    struct chimera_server_nfs_shared *shared,
+    struct evpl_rpc2_server          *server)
+{
+    if (server == shared->mount_server) {
+        return CHIMERA_INSPECT_MOUNT;
+    }
+    if (server == shared->nlm_server) {
+        return CHIMERA_INSPECT_NLM;
+    }
+    if (server == shared->nsm_server) {
+        return CHIMERA_INSPECT_NSM;
+    }
+    if (server == shared->portmap_server) {
+        return CHIMERA_INSPECT_RPCBIND;
+    }
+    return CHIMERA_INSPECT_NFS;
+} /* nfs_inspect_service */
+struct nfs_inspect_context {
+    struct chimera_server_nfs_thread *thread;
+    struct chimera_inspect_writer    *writer;
+};
+static int
+nfs_inspect_connection(
+    const struct evpl_rpc2_connection_info *info,
+    void                                   *data)
+{
+    struct nfs_inspect_context       *context = data;
+    struct chimera_inspect_connection row     = { 0 };
+
+    row.bind           = info->bind;
+    row.service        = nfs_inspect_service(context->thread->shared, info->server);
+    row.minor_versions = info->application_tag;
+    row.rdma_framing   = info->rdma_framing;
+    row.rx_msgs        = info->rx_msgs;
+    row.tx_msgs        = info->tx_msgs;
+    row.rx_bytes       = info->rx_bytes;
+    row.tx_bytes       = info->tx_bytes;
+    row.requests_done  = info->requests_done;
+    row.inflight       = info->inflight;
+    row.nprograms      = info->nprograms;
+    for (int i = 0; i < info->nprograms; i++) {
+        row.programs[i] = info->programs[i].program;
+        row.versions[i] = info->programs[i].version;
+    }
+    return context->writer->emit(context->writer, &row);
+} /* nfs_inspect_connection */
+static int
+nfs_inspect_procedure(
+    const struct evpl_rpc2_procedure_stats *stats,
+    void                                   *data)
+{
+    struct chimera_inspect_sample *sample = data;
+
+    if (sample->nprocedures == CHIMERA_INSPECT_PROCEDURES) {
+        sample->truncated = 1; return 0;
+    }
+    sample->procedures[sample->nprocedures++] = *stats;
+    return 1;
+} /* nfs_inspect_procedure */
+static void
+nfs_inspect(
+    void                          *data,
+    struct chimera_inspect_writer *writer)
+{
+    struct chimera_server_nfs_thread *thread    = data;
+    struct chimera_server_nfs_shared *shared    = thread->shared;
+    struct chimera_inspect_sample    *sample    = writer->sample;
+    struct evpl_rpc2_server          *servers[] = { shared->nfs_server, shared->mount_server,
+                                                    shared->nlm_server,          shared->nsm_server, shared->
+                                                    portmap_server };
+
+    for (int i = 0; i < 5; i++) {
+        if (servers[i]) {
+            sample->connection_counts[i] = evpl_rpc2_server_connection_count(thread->rpc2_thread, servers[i]);
+        }
+    }
+    if (shared->nfs_rdma_server && shared->nfs_rdma_server != shared->nfs_server) {
+        sample->connection_counts[CHIMERA_INSPECT_NFS] += evpl_rpc2_server_connection_count(thread->rpc2_thread, shared
+                                                                                            ->nfs_rdma_server);
+    }
+    if (writer->filter->connections) {
+        struct nfs_inspect_context context = { thread, writer };
+        int                        truncated;
+        sample->scanned += evpl_rpc2_visit_connections(thread->rpc2_thread,
+                                                       CHIMERA_INSPECT_SCAN - sample->scanned, nfs_inspect_connection, &
+                                                       context, &truncated);
+        sample->truncated |= truncated;
+    } else {
+        sample->has_rpc = 1;
+        evpl_rpc2_get_thread_stats(thread->rpc2_thread, &sample->rpc);
+        evpl_rpc2_visit_procedure_stats(thread->rpc2_thread, nfs_inspect_procedure, sample);
+    }
+} /* nfs_inspect */
+
+static void
+nfs_inspect_register(
+    void                        *data,
+    struct chimera_worker_stats *stats)
+{
+    struct chimera_server_nfs_thread *thread = data;
+
+    evpl_rpc2_thread_set_worker_counters(thread->rpc2_thread, &stats->counters);
+} /* nfs_inspect_register */
+
+static void
+nfs_inspect_live(
+    void                          *data,
+    struct chimera_inspect_sample *sample)
+{
+    struct chimera_server_nfs_thread *thread = data;
+
+    sample->has_rpc = 1;
+    evpl_rpc2_get_thread_stats(thread->rpc2_thread, &sample->rpc);
+    evpl_rpc2_visit_procedure_stats(thread->rpc2_thread, nfs_inspect_procedure, sample);
+} /* nfs_inspect_live */
+
+static unsigned int
+nfs_inspect_sessions(
+    void                           *data,
+    struct chimera_inspect_session *out,
+    unsigned int                    capacity,
+    unsigned int                   *total)
+{
+    struct chimera_server_nfs_thread *thread = data;
+
+    return nfs4_session_inspect_snapshot(&thread->shared->nfs4_shared_clients,
+                                         out, capacity, total);
+} /* nfs_inspect_sessions */
+
+static int
+nfs_inspect_session_slots(
+    void                        *data,
+    const char                  *session_id,
+    struct chimera_inspect_slot *out,
+    unsigned int                 capacity,
+    unsigned int                *total)
+{
+    struct chimera_server_nfs_thread *thread = data;
+
+    return nfs4_session_inspect_slots_snapshot(&thread->shared->nfs4_shared_clients,
+                                               session_id, out, capacity, total);
+} /* nfs_inspect_session_slots */
+
+static unsigned int
+nfs_inspect_clients(
+    void                          *data,
+    struct chimera_inspect_client *out,
+    unsigned int                   capacity,
+    unsigned int                  *total)
+{
+    struct chimera_server_nfs_thread *thread        = data;
+    uint64_t                          lease_time_ns = (uint64_t) chimera_server_config_get_nfs4_lease_time(
+        thread->shared->config) * UINT64_C(1000000000);
+
+    return nfs4_client_inspect_snapshot(&thread->shared->nfs4_shared_clients,
+                                        out, capacity, total, lease_time_ns);
+} /* nfs_inspect_clients */
+
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
-    .init           = nfs_server_init,
-    .destroy        = nfs_server_destroy,
-    .start          = nfs_server_start,
-    .stop           = nfs_server_stop,
-    .thread_init    = nfs_server_thread_init,
-    .thread_destroy = nfs_server_thread_destroy,
+    .inspect               = nfs_inspect,
+    .inspect_live          = nfs_inspect_live,
+    .inspect_sessions      = nfs_inspect_sessions,
+    .inspect_session_slots = nfs_inspect_session_slots,
+    .inspect_clients       = nfs_inspect_clients,
+    .inspect_register      = nfs_inspect_register,
+    .init                  = nfs_server_init,
+    .destroy               = nfs_server_destroy,
+    .start                 = nfs_server_start,
+    .stop                  = nfs_server_stop,
+    .thread_init           = nfs_server_thread_init,
+    .thread_destroy        = nfs_server_thread_destroy,
 };
 
 int

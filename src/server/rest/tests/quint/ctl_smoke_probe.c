@@ -329,6 +329,14 @@ main(
     ck_status(&res, 200, "metrics/status");
     ck(res.body_len > 0 && strstr(res.body, "chimera_") != NULL,
        "metrics/carries-chimera-registry");
+    ck(strstr(res.body, "chimera_worker_cpu_ns_total") != NULL,
+       "metrics/carries-live-worker-cpu");
+    ck(strstr(res.body, "chimera_worker_busy_percent") != NULL,
+       "metrics-carries-live-worker-busy-ratio");
+    ck(strstr(res.body, "chimera_worker_listener_assigned_total") != NULL,
+       "metrics-carries-listener-assignment-counts");
+    ck(strstr(res.body, "chimera_worker_rdma_remote_ip_accepts_total") != NULL,
+       "metrics-carries-rdma-remote-ip-accepts");
     ck(strstr(res.body, "evpl_") != NULL,
        "metrics/carries-evpl-registry");
 

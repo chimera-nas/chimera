@@ -16,7 +16,7 @@ target_link_libraries(chimera_server_config chimera_common evpl)
 
 # The server proper.  It reaches its management plane (REST) only through the
 # hooks in server_mgmt.h: REST manages the server, so REST links it.
-add_library(chimera_server_core ${CHIMERA_LIBRARY_TYPE} server.c)
+add_library(chimera_server_core ${CHIMERA_LIBRARY_TYPE} server.c server_inspect.c)
 target_link_libraries(chimera_server_core chimera_server_config chimera_nfs chimera_s3 chimera_smb chimera_vfs chimera_common evpl ${CHIMERA_UNWIND_LIB} ${CHIMERA_OTEL_LIBS})
 # The VFS backends are loaded at runtime, not linked (src/vfs/CMakeLists.txt).
 add_dependencies(chimera_server_core chimera_vfs_modules)

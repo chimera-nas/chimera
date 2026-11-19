@@ -288,6 +288,11 @@ struct nfs_client {
     /* Count of this client's delegations that have been force-revoked and not
      * yet FREE_STATEID'd.  Drives SEQ4_STATUS_RECALLABLE_STATE_REVOKED. */
     _Atomic uint32_t         revoked_deleg_count;
+    /* Inspection gauges are maintained at state-object lifecycle boundaries;
+     * readers use relaxed loads and never walk mutex-protected lists. */
+    _Atomic uint64_t         inspect_open_count;
+    _Atomic uint64_t         inspect_lock_count;
+    _Atomic uint64_t         inspect_delegation_count;
 
     /* Failed over from a dead node and owes a reclaim: every session's
      * SEQUENCE raises SEQ4_STATUS_RESTART_RECLAIM_NEEDED until the client's

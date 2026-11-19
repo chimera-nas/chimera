@@ -197,6 +197,20 @@ metric_value(
     return -1;
 } /* metric_value */
 
+static void
+inspection_compound_cb(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct COMPOUND4res         *reply,
+    int                          status,
+    void                        *data)
+{
+    struct mbt_env *env = data;
+
+    env->res.rpc_err = status;
+    env->res.done    = 1;
+} /* inspection_compound_cb */
+
 int
 main(
     int   argc,
@@ -431,6 +445,72 @@ main(
             ck(after >= before + 8, "P4/nfs-getattr-count-advances", detail);
         }
     }
+
+    mbt_call_begin(&env);
+    env.nfs_v4.send_call_NFSPROC4_NULL(&env.nfs_v4.rpc2, env.evpl, env.nfs_conn,
+                                       &env.cred, 0, 0, NULL, 0, 0, mbt_null_cb, &env);
+    mbt_call_wait(&env);
+    uint64_t inspect_deadline = ctl_now_ms() + 3000;
+    do {
+        ctl_get(api, "/api/v1/connections?service=nfs", &res);
+    }while (res.status == 429 && ctl_now_ms() < inspect_deadline);
+    ck_http(&res, 200, "P5/inspection-status");
+    json_t  *inspection  = json_loadb(res.body, res.body_len, 0, NULL);
+    json_t  *connections = json_object_get(inspection, "connections");
+    int      observed_v3 = 0;
+    int      observed_v4 = 0;
+    for (size_t i = 0; i < json_array_size(connections); i++) {
+        json_t *row      = json_array_get(connections, i);
+        json_t *programs = json_object_get(row, "observed_rpc_programs");
+        ck(json_array_size(json_object_get(row, "nfs_minor_versions_seen")) == 0,
+           "P5/NULL-does-not-invent-minor-version", NULL);
+        for (size_t j = 0; j < json_array_size(programs); j++) {
+            json_t *program = json_array_get(programs, j);
+            if (json_integer_value(json_object_get(program, "program")) == 100003 &&
+                json_integer_value(json_object_get(program, "version")) == 3) {
+                observed_v3 = 1;
+            }
+        }
+        for (size_t j = 0; j < json_array_size(programs); j++) {
+            json_t *program = json_array_get(programs, j);
+            if (json_integer_value(json_object_get(program, "program")) == 100003 &&
+                json_integer_value(json_object_get(program, "version")) == 4) {
+                observed_v4 = 1;
+            }
+        }
+        json_t *connection_stats = json_object_get(row, "per_connection_stats");
+        ck(json_is_object(connection_stats), "P5/observed-connection-counters", NULL);
+        ck(json_is_string(json_object_get(connection_stats, "rx_msgs")),
+           "P5/received-message-counter", NULL);
+        ck(json_is_string(json_object_get(connection_stats, "rx_bytes")),
+           "P5/received-byte-counter", NULL);
+    }
+    ck(observed_v3, "P5/observed-NFSv3", NULL);
+    ck(observed_v4, "P5/mixed-NFSv3-and-NFSv4-on-one-connection", NULL);
+    json_decref(inspection);
+
+    for (int minor = 0; minor <= 3; minor++) {
+        struct COMPOUND4args args = { .minorversion = minor };
+        mbt_call_begin(&env);
+        env.nfs_v4.send_call_NFSPROC4_COMPOUND(&env.nfs_v4.rpc2, env.evpl, env.nfs_conn,
+                                               &env.cred, &args, 0, 0, NULL, 0, 0, inspection_compound_cb, &env);
+        mbt_call_wait(&env);
+    }
+    inspect_deadline = ctl_now_ms() + 3000;
+    do {
+        ctl_get(api, "/api/v1/connections?service=nfs", &res);
+    }while (res.status == 429 && ctl_now_ms() < inspect_deadline);
+    inspection  = json_loadb(res.body, res.body_len, 0, NULL);
+    connections = json_object_get(inspection, "connections");
+    int observed_minors = 0;
+    for (size_t i = 0; i < json_array_size(connections); i++) {
+        json_t *minors = json_object_get(json_array_get(connections, i), "nfs_minor_versions_seen");
+        if (json_array_size(minors) == 3) {
+            observed_minors = 1;
+        }
+    }
+    ck(observed_minors, "P5/only-supported-COMPOUND-minor-versions-observed", NULL);
+    json_decref(inspection);
 
     ctl_conn_close(scrape);
     ctl_conn_close(api);

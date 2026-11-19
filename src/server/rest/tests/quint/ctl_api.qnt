@@ -139,6 +139,8 @@ module ctlApi {
         | RUserGet(str)
         | RUserList
         | RConfig
+        | RThreads
+        | RConnections
 
     /// A request's outcome: the HTTP status, and the state it leaves behind.
     type ApiRes = { st: int, c: Ctl }
