@@ -15,7 +15,7 @@ if(IO_URING_ENABLED)
     chimera_add_netns_test(chimera/fio/fio_diskfs_io_uring_basic /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/diskfs_io_uring_basic.fio)
 endif()
 
-if(HAVE_LIBAIO)
+if(HAVE_LIBAIO_USABLE)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/diskfs_aio_basic.fio ${CMAKE_CURRENT_BINARY_DIR}/diskfs_aio_basic.fio)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/diskfs_aio_basic.json ${CMAKE_CURRENT_BINARY_DIR}/diskfs_aio_basic.json)
     chimera_add_netns_test(chimera/fio/fio_diskfs_aio_basic /usr/local/bin/fio ${CMAKE_CURRENT_BINARY_DIR}/diskfs_aio_basic.fio)
@@ -50,7 +50,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         )
     endif()
 
-    if(HAVE_LIBAIO)
+    if(HAVE_LIBAIO_USABLE)
         set_tests_properties(chimera/fio/fio_diskfs_aio_basic PROPERTIES
             ENVIRONMENT "CHIMERA_TEST_LD_PRELOAD=${ASAN_LIB};LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt"
         )

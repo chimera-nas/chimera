@@ -818,6 +818,7 @@ foreach(aback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtaux/batch_${aback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_${aback}"
         LABELS "quint;nfsaux_mbt;${aback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 
     # Over RPC-over-RDMA, as the NFS3 corpus runs above.  Only the NFS service
@@ -832,6 +833,7 @@ foreach(aback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtaux/batch_rdma_${aback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_rdma_${aback}"
         LABELS "quint;nfsaux_mbt;rdma;${aback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 endforeach()
 
@@ -903,6 +905,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_${rback}"
         LABELS "quint;nfsdrc_mbt;${rback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 
     add_test(NAME chimera/server/nfs/mbtdrc/batch_nodrc_${rback}
@@ -912,6 +915,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_nodrc_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_nodrc_${rback}"
         LABELS "quint;nfsdrc_mbt;${rback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 
     # Over RPC-over-RDMA.  This suite is the one that most needs the transport
@@ -927,6 +931,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_rdma_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_rdma_${rback}"
         LABELS "quint;nfsdrc_mbt;rdma;${rback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 
     add_test(NAME chimera/server/nfs/mbtdrc/batch_nodrc_rdma_${rback}
@@ -936,6 +941,7 @@ foreach(rback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtdrc/batch_nodrc_rdma_${rback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_nodrc_rdma_${rback}"
         LABELS "quint;nfsdrc_mbt;rdma;${rback}"
+        SKIP_RETURN_CODE 77
         TIMEOUT 600)
 endforeach()
 

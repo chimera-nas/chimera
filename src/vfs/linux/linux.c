@@ -562,6 +562,13 @@ chimera_linux_mount(
         return;
     }
 
+    if (linux_probe_open_by_handle(mount_fd) < 0) {
+        request->status = chimera_linux_errno_to_status(errno);
+        close(mount_fd);
+        request->complete(request);
+        return;
+    }
+
     r_attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
