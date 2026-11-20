@@ -16,6 +16,9 @@
 #include "vfs_open_cache.h"
 #include "common/snprintf.h"
 
+/* Name for an opcode number with no operation behind it. */
+#define CHIMERA_VFS_OP_NAME_UNKNOWN "Unknown"
+
 const char *
 chimera_vfs_op_name(unsigned int opcode)
 {
@@ -65,10 +68,16 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_READ_PLUS: return "ReadPlus";
         case CHIMERA_VFS_OP_WRITE_SAME: return "WriteSame";
         case CHIMERA_VFS_OP_RENAME_STREAM: return "RenameStream";
-        default: return "Unknown";
+        default: return CHIMERA_VFS_OP_NAME_UNKNOWN;
     } /* switch */
 
 } /* chimera_vfs_op_name */
+
+int
+chimera_vfs_op_is_named(unsigned int opcode)
+{
+    return strcmp(chimera_vfs_op_name(opcode), CHIMERA_VFS_OP_NAME_UNKNOWN) != 0;
+} /* chimera_vfs_op_is_named */
 
 #if CHIMERA_HAVE_OTEL
 

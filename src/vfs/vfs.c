@@ -914,7 +914,15 @@ chimera_vfs_init(
 
         vfs->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_series *));
 
+        /* Opcode numbers with no operation behind them (0, and the retired
+         * LOCK) have no name and get no series.  Giving them one would
+         * export duplicate name="Unknown" series, which Prometheus ingest
+         * drops. */
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
+            if (!chimera_vfs_op_is_named(i)) {
+                continue;
+            }
+
             vfs->metrics.op_latency_series[i] = prometheus_histogram_create_series(vfs->metrics.op_latency,
                                                                                    (const char *[]) { "name" },
                                                                                    (const char *[]) {
@@ -1334,7 +1342,9 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
     if (vfs->metrics.op_latency) {
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
-            prometheus_histogram_destroy_series(vfs->metrics.op_latency, vfs->metrics.op_latency_series[i]);
+            if (vfs->metrics.op_latency_series[i]) {
+                prometheus_histogram_destroy_series(vfs->metrics.op_latency, vfs->metrics.op_latency_series[i]);
+            }
         }
         free(vfs->metrics.op_latency_series);
         prometheus_histogram_destroy(vfs->metrics.metrics, vfs->metrics.op_latency);
@@ -1544,8 +1554,11 @@ chimera_vfs_thread_init(
         thread->metrics.op_latency_series = calloc(CHIMERA_VFS_OP_NUM, sizeof(struct prometheus_histogram_instance *));
 
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
-            thread->metrics.op_latency_series[i] = prometheus_histogram_series_create_instance(vfs->metrics.
-                                                                                               op_latency_series[i]);
+            struct prometheus_histogram_series *series = vfs->metrics.op_latency_series[i];
+
+            if (series) {
+                thread->metrics.op_latency_series[i] = prometheus_histogram_series_create_instance(series);
+            }
         }
     }
 
@@ -1624,8 +1637,10 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 
     if (thread->metrics.op_latency_series) {
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {
-            prometheus_histogram_series_destroy_instance(thread->vfs->metrics.op_latency_series[i],
-                                                         thread->metrics.op_latency_series[i]);
+            if (thread->metrics.op_latency_series[i]) {
+                prometheus_histogram_series_destroy_instance(thread->vfs->metrics.op_latency_series[i],
+                                                             thread->metrics.op_latency_series[i]);
+            }
         }
         free(thread->metrics.op_latency_series);
     }
