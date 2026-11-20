@@ -454,6 +454,7 @@ struct chimera_vfs_setattr_gate {
     void                           *private_data;
     struct chimera_claim_actor      actor;
     int                             actor_valid;
+    uint32_t                        granted;
 };
 
 _Static_assert(sizeof(struct chimera_vfs_setattr_gate) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
@@ -477,6 +478,10 @@ chimera_vfs_setattr_gate_complete(
     /* Recompute against the now-known current attributes so a no-op
      * owner/group restate does not demand WRITE_OWNER. */
     required = chimera_vfs_setattr_required(gate->set_attr, attr);
+
+    /* Rights the caller's protocol granted on this handle are not required
+     * again (chimera_vfs_setattr_granted). */
+    required &= ~gate->granted;
 
     /* POSIX: the file's owner (and the super-user) may always update its
      * timestamps -- to an explicit value or to "now" -- regardless of write
@@ -657,6 +662,7 @@ chimera_vfs_setattr_common(
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
     int                               fd_rights,
+    uint32_t                          granted,
     chimera_vfs_setattr_callback_t    callback,
     void                             *private_data,
     const struct chimera_claim_actor *actor)
@@ -674,7 +680,7 @@ chimera_vfs_setattr_common(
         /* Preliminary (current attrs unknown): worst-case required set, just to
          * decide whether the pre-step is needed.  The real check in the gate
          * callback recomputes once the current owner/group is known. */
-        required = chimera_vfs_setattr_required(set_attr, NULL);
+        required = chimera_vfs_setattr_required(set_attr, NULL) & ~granted;
 
         /* POSIX binds I/O rights at open: a descriptor-originated mutation
          * whose entire requirement is WRITE_DATA (ftruncate,
@@ -685,7 +691,9 @@ chimera_vfs_setattr_common(
          * current permissions even though the internal path-open may share
          * a cached handle with a user descriptor.  Anything needing more
          * than WRITE_DATA (chmod/chown/explicit timestamps) keeps the
-         * per-operation owner rules -- ownership does not bind at open. */
+         * per-operation owner rules -- ownership does not bind at open --
+         * except the FILE_WRITE_ATTRIBUTES a protocol granted at its own open
+         * (`granted`, chimera_vfs_setattr_granted), which is subtracted above. */
         if (fd_rights && required != 0 &&
             (required & ~(uint32_t) CHIMERA_ACE_WRITE_DATA) == 0 &&
             handle->granted_valid && handle->granted_bound &&
@@ -705,6 +713,7 @@ chimera_vfs_setattr_common(
             gate->callback       = callback;
             gate->private_data   = private_data;
             gate->actor_valid    = actor != NULL;
+            gate->granted        = granted;
             if (actor) {
                 gate->actor = *actor;
             }
@@ -735,7 +744,7 @@ chimera_vfs_setattr(
     void                           *private_data)
 {
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
-                               pre_attr_mask, post_attr_mask, 0,
+                               pre_attr_mask, post_attr_mask, 0, 0,
                                callback, private_data, NULL);
 } /* chimera_vfs_setattr */
 
@@ -755,7 +764,7 @@ chimera_vfs_fsetattr(
     void                           *private_data)
 {
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
-                               pre_attr_mask, post_attr_mask, 1,
+                               pre_attr_mask, post_attr_mask, 1, 0,
                                callback, private_data, NULL);
 } /* chimera_vfs_fsetattr */
 
@@ -772,7 +781,7 @@ chimera_vfs_fsetattr_owned(
     const struct chimera_claim_actor *actor)
 {
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
-                               pre_attr_mask, post_attr_mask, 1,
+                               pre_attr_mask, post_attr_mask, 1, 0,
                                callback, private_data, actor);
 } /* chimera_vfs_fsetattr_owned */
 
@@ -789,9 +798,40 @@ chimera_vfs_setattr_owned(
     const struct chimera_claim_actor *actor)
 {
     chimera_vfs_setattr_common(thread, cred, handle, set_attr,
-                               pre_attr_mask, post_attr_mask, 0,
+                               pre_attr_mask, post_attr_mask, 0, 0,
                                callback, private_data, actor);
 } /* chimera_vfs_setattr_owned */
+
+/* A setattr whose caller's protocol granted it access on this handle in its
+ * own access model, as SMB grants it at CREATE.  Only FILE_WRITE_ATTRIBUTES is
+ * taken from `granted`: it is not required again of the object's ACL or mode,
+ * so its holder may set explicit times and DOS attributes whoever owns the
+ * object.  Any other bit is ignored, so a grant of WRITE_ACL or WRITE_OWNER
+ * never skips the ownership rules.  `granted` only lifts that requirement:
+ * nothing here refuses a setattr because its right is missing from `granted`,
+ * and the rest is judged against the object as chimera_vfs_fsetattr_owned
+ * (fd_rights) or chimera_vfs_setattr_owned judges it.  On a backend that
+ * delegates DAC (CHIMERA_VFS_CAP_DELEGATES_DAC) the engine's gate does not run
+ * for these setattrs, so `granted` has no effect there. */
+SYMBOL_EXPORT void
+chimera_vfs_setattr_granted(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    struct chimera_vfs_attrs         *set_attr,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    int                               fd_rights,
+    uint32_t                          granted,
+    chimera_vfs_setattr_callback_t    callback,
+    void                             *private_data,
+    const struct chimera_claim_actor *actor)
+{
+    chimera_vfs_setattr_common(thread, cred, handle, set_attr,
+                               pre_attr_mask, post_attr_mask, !!fd_rights,
+                               granted & CHIMERA_ACE_WRITE_ATTRIBUTES,
+                               callback, private_data, actor);
+} /* chimera_vfs_setattr_granted */
 
 /* Publish metadata for an already authorized data mutation.  The original
  * operation owns its MDS claim until this finishes: do not re-authorize an

@@ -130,14 +130,18 @@ chimera_smb_read_callback(
         request->read.restore_attrs.va_set_mask = CHIMERA_VFS_ATTR_ATIME;
         request->read.restore_attrs.va_atime    = open_file->sticky_atime;
 
-        chimera_vfs_setattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            open_file->handle,
-                            &request->read.restore_attrs,
-                            0,
-                            0,
-                            chimera_smb_read_sticky_restore_callback,
-                            request);
+        chimera_vfs_setattr_granted(thread->vfs_thread,
+                                    &request->session_handle->session->cred,
+                                    open_file->handle,
+                                    &request->read.restore_attrs,
+                                    0,
+                                    0,
+                                    0,
+                                    chimera_smb_setattr_rights(open_file->granted_access,
+                                                               open_file->maximal_access),
+                                    chimera_smb_read_sticky_restore_callback,
+                                    request,
+                                    NULL);
         return;
     }
 

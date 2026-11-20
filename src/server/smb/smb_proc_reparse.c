@@ -430,14 +430,18 @@ chimera_smb_reparse_set_dos(
     attr->va_set_mask       = CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
     attr->va_dos_attributes = dos;
 
-    chimera_vfs_setattr(request->compound->thread->vfs_thread,
-                        &request->session_handle->session->cred,
-                        request->ioctl.rp_open_file->handle,
-                        attr,
-                        0,
-                        0,
-                        chimera_smb_reparse_setattr_cb,
-                        request);
+    chimera_vfs_setattr_granted(request->compound->thread->vfs_thread,
+                                &request->session_handle->session->cred,
+                                request->ioctl.rp_open_file->handle,
+                                attr,
+                                0,
+                                0,
+                                0,
+                                chimera_smb_setattr_rights(request->ioctl.rp_open_file->granted_access,
+                                                           request->ioctl.rp_open_file->maximal_access),
+                                chimera_smb_reparse_setattr_cb,
+                                request,
+                                NULL);
 } /* chimera_smb_reparse_set_dos */
 
 static void

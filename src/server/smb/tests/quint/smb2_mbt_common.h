@@ -195,10 +195,16 @@
 #define MBT_FILE_OVERWRITE_IF                   0x00000005u
 #define MBT_FILE_ALL_ACCESS                     0x001F01FFu
 #define MBT_FILE_READ_ATTRIBUTES                0x00000080u     /* attribute-only access */
+#define MBT_FILE_WRITE_ATTRIBUTES               0x00000100u
 #define MBT_FILE_LIST_DIRECTORY                 0x00000001u     /* == FILE_READ_DATA */
 #define MBT_READ_CONTROL                        0x00020000u
 #define MBT_MAXIMUM_ALLOWED                     0x02000000u
 #define MBT_GENERIC_READ                        0x80000000u
+#define MBT_GENERIC_WRITE                       0x40000000u
+#define MBT_GENERIC_EXECUTE                     0x20000000u
+#define MBT_FILE_READ_DATA                      0x00000001u
+#define MBT_FILE_WRITE_DATA                     0x00000002u
+#define MBT_SYNCHRONIZE                         0x00100000u
 #define MBT_FILE_READ_ACCESS                    0x00120089u     /* R data/attr/EA + SYNC */
 #define MBT_FILE_WRITE_ACCESS                   0x00120116u     /* W data/attr/EA + SYNC */
 #define MBT_DELETE                              0x00010000u
@@ -350,6 +356,9 @@ struct smb2_env_opts {
      * one iovec per block from a read, so this sets how many pieces a READ
      * reply is assembled from. */
     int memfs_block_size;
+    /* Configure the cairn module, rooted in the env's session directory, so a
+     * test can mkfs and mount a cairn filesystem beside memfs. */
+    int cairn;
 };
 
 /* Do the two profiles configure the server identically?  Compared field by
@@ -1466,6 +1475,14 @@ smb2_env_open_wire(
         snprintf(memfs_cfg, sizeof(memfs_cfg), "{\"block_size\": %d}",
                  opts->memfs_block_size);
         chimera_server_config_add_module(config, "memfs", NULL, memfs_cfg);
+    }
+
+    if (opts && opts->cairn) {
+        char cairn_cfg[sizeof(env->session_dir) + 64];
+
+        snprintf(cairn_cfg, sizeof(cairn_cfg),
+                 "{\"initialize\": true, \"path\": \"%s\"}", env->session_dir);
+        chimera_server_config_add_module(config, "cairn", NULL, cairn_cfg);
     }
 
     if (opts) {

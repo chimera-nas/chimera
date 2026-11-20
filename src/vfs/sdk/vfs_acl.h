@@ -238,6 +238,17 @@ CHIMERA_VFS_SDK_EXPORT int chimera_acl_from_mode(
     unsigned            max_aces);
 
 /*
+ * Whether `ace` is one chimera_acl_from_mode() could have emitted, for some
+ * mode: an OWNER@, GROUP@ or EVERYONE@ entry with no flags whose mask is
+ * exactly the one that function gives that principal for some r, w and x.
+ * Such entries are in POSIX terms, so a protocol with other semantics may
+ * present them in its own.  Recognised by shape alone: an entry a client
+ * wrote with exactly that mask is recognised too.
+ */
+CHIMERA_VFS_SDK_EXPORT int chimera_ace_is_from_mode(
+    const struct chimera_ace *ace);
+
+/*
  * Build a Windows-style default DACL from POSIX mode: the OWNER@ gets full
  * control; GROUP@/EVERYONE@ track the mode bits.  Used to seed objects created
  * over SMB with no explicit SD and no inheritable parent ACE, so a Windows

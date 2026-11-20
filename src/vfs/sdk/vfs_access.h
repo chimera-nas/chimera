@@ -10,11 +10,14 @@
  * Central access-control gate.
  *
  * A single implementation of "may this credential perform these operations on
- * this object" that every protocol server shares, so NFSv3, NFSv4 and SMB2 all
- * reach identical decisions regardless of which protocol stored the ACL.  The
- * caller supplies attributes it has already fetched (mode, uid, gid, and -- if
- * CHIMERA_VFS_ATTR_ACL is set -- the canonical ACL via va_acl); this routine
- * evaluates them with the shared engine in vfs_acl.c.
+ * this object" that every protocol server shares, evaluating the same stored
+ * ACL whichever protocol stored it.  The caller supplies attributes it has
+ * already fetched (mode, uid, gid, and -- if CHIMERA_VFS_ATTR_ACL is set -- the
+ * canonical ACL via va_acl); this routine evaluates them with the shared engine
+ * in vfs_acl.c.  NFS evaluates them as they stand.  The SMB server first
+ * presents the entries derived from the mode in Windows terms
+ * (chimera_smb_access_check), so for those entries SMB grants the Windows
+ * rights that the mode's r, w and x stand for, which NFS does not.
  */
 
 #include <stdint.h>

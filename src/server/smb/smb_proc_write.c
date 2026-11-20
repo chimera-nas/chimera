@@ -147,14 +147,18 @@ chimera_smb_write_callback(
     }
 
     if (request->write.restore_attrs.va_set_mask) {
-        chimera_vfs_setattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
-                            request->write.open_file->handle,
-                            &request->write.restore_attrs,
-                            0,
-                            0,
-                            chimera_smb_write_sticky_restore_callback,
-                            request);
+        chimera_vfs_setattr_granted(thread->vfs_thread,
+                                    &request->session_handle->session->cred,
+                                    request->write.open_file->handle,
+                                    &request->write.restore_attrs,
+                                    0,
+                                    0,
+                                    0,
+                                    chimera_smb_setattr_rights(request->write.open_file->granted_access,
+                                                               request->write.open_file->maximal_access),
+                                    chimera_smb_write_sticky_restore_callback,
+                                    request,
+                                    NULL);
         return;
     }
 

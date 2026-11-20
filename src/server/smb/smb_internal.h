@@ -3562,6 +3562,25 @@ chimera_smb_grant_remove_member(
     evpl_mutex_unlock(&grant->file->lock);
 } /* chimera_smb_grant_remove_member */
 
+/*
+ * The rights a setattr through an open holds from the open itself, for
+ * chimera_vfs_setattr_granted: a handle granted FILE_WRITE_ATTRIBUTES may set
+ * explicit times and DOS attributes, whoever owns the file.  The right counts
+ * only where the open's maximal access holds it too: what the object's
+ * descriptor grants, in the server's Windows-terms view, or full control for a
+ * directory this CREATE made (the creator's grant, MS-FSA 2.1.5.1.1).  That
+ * bound matters because not every CREATE path checks the access it records.
+ * A FILE_CREATE of a new named stream on an existing file is opened without
+ * that check.
+ */
+static inline uint32_t
+chimera_smb_setattr_rights(
+    uint32_t granted_access,
+    uint32_t maximal_access)
+{
+    return granted_access & maximal_access & SMB2_FILE_WRITE_ATTRIBUTES;
+} /* chimera_smb_setattr_rights */
+
 static inline void
 chimera_smb_open_file_release(
     struct chimera_smb_request   *request,

@@ -112,6 +112,21 @@ target_include_directories(smb_sd_sid_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/sd_sid_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_sd_sid_test)
 
+# The SMB access check on objects whose access comes from a POSIX mode, on a
+# backend that stores no ACL: a caller other than the owner is judged against
+# the mode in Windows terms.
+add_executable(smb_access_view_test smb_access_view_test.c)
+target_link_libraries(smb_access_view_test chimera_server chimera_smb chimera_vfs)
+target_include_directories(smb_access_view_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+# The only test of the no-ACL path for a caller other than the owner, and it
+# runs in milliseconds, so it is in the quick tier.
+set(_access_view_saved_tier "${CHIMERA_TEST_TIER}")
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/server/smb/access_view_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_access_view_test)
+set(CHIMERA_TEST_TIER "${_access_view_saved_tier}")
+
 # SMB2 request-parse hardening: checked cursor primitives, safe seek, and
 # CREATE-context bounds arithmetic against malformed/adversarial input.
 add_executable(smb_harden_test smb_harden_test.c)
