@@ -5,6 +5,7 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_ea.h"
+#include "smb_access.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
@@ -630,6 +631,26 @@ chimera_smb_set_info(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 3.3.5.21.1: the handle must have been granted the right the
+    * information class needs.  Checked against the grant CREATE resolved
+    * (generic rights expanded, MAXIMUM_ALLOWED evaluated and trimmed), so a
+    * MAXIMUM_ALLOWED handle on a READONLY file cannot change its size. */
+    if (request->set_info.info_type == SMB2_INFO_FILE) {
+        uint32_t required = chimera_smb_set_info_required_access(
+            request->set_info.info_class);
+
+        if (required && !(request->set_info.open_file->granted_access & required)) {
+            if (request->set_info.ea_buf) {
+                /* FileFullEaInformation's buffer, parsed for chimera_smb_set_ea. */
+                free(request->set_info.ea_buf);
+                request->set_info.ea_buf = NULL;
+            }
+            chimera_smb_open_file_release(request, request->set_info.open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+            return;
+        }
+    }
+
     switch (request->set_info.info_type) {
         case SMB2_INFO_FILE:
             switch (request->set_info.info_class) {
@@ -957,6 +978,13 @@ chimera_smb_parse_set_info(
         return -1;
     }
 
+    /* The request is pooled and set_info shares its storage with the other
+     * commands' fields, so the EA buffer is cleared here: only a
+     * FileFullEaInformation set allocates it, and chimera_smb_set_info frees
+     * it when the handle's grant refuses the request, whatever the class. */
+    request->set_info.ea_buf     = NULL;
+    request->set_info.ea_buf_len = 0;
+
     int prc = 0;
     prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->set_info.info_type);
     prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->set_info.info_class);
@@ -1019,8 +1047,6 @@ chimera_smb_parse_set_info(
                     /* Capture the client's FILE_FULL_EA_INFORMATION buffer; the
                      * process phase parses and applies it to the VFS xattr
                      * store one EA at a time. */
-                    request->set_info.ea_buf     = NULL;
-                    request->set_info.ea_buf_len = 0;
                     if (request->set_info.buffer_length > CHIMERA_SMB_EA_VALUE_MAX) {
                         request->status = SMB2_STATUS_EA_TOO_LARGE;
                         rc              = -1;

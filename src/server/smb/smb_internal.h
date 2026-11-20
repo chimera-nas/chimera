@@ -594,10 +594,30 @@ struct chimera_smb_request {
              * the file/dir (vs opened an existing one) — drives the OPENED vs
              * CREATED Create Action in the reply. */
             uint8_t                         r_created;
+            /* Set when this CREATE made the file itself.  For a named-stream
+             * CREATE that is the base file: r_created says only that the
+             * stream is new.  A MAXIMUM_ALLOWED open that made the file is
+             * granted full access (MS-FSA 2.1.5.1.1). */
+            uint8_t                         r_file_created;
             /* Bounded re-getattr budget for an ACCESS_DENIED that may be the
              * transient server-owned state of an object a concurrent CREATE is
              * still constructing (see chimera_smb_create_open_at_callback). */
             uint8_t                         access_retries;
+            /* Set when an open the backend refused read-write was re-issued
+             * read-only (see chimera_smb_may_reopen_read_only).  A file
+             * opened that way is not granted FILE_WRITE_DATA or
+             * FILE_APPEND_DATA; a directory keeps its grant
+             * (chimera_smb_max_allowed_trim). */
+            uint8_t                         ro_retried;
+            /* Set by the open callback when the existing file is fenced by
+             * FILE_ATTRIBUTE_READONLY (MS-FSA 2.1.5.1.2.1): a data-write or
+             * delete-on-close open is refused, and a MAXIMUM_ALLOWED grant
+             * loses FILE_WRITE_DATA, FILE_APPEND_DATA and FILE_DELETE_CHILD. */
+            uint8_t                         readonly_fenced;
+            /* Set, for a MAXIMUM_ALLOWED open, when the parent's descriptor
+             * grants the caller FILE_DELETE_CHILD: the grant then includes
+             * DELETE (MS-FSA 2.1.5.1.2.1). */
+            uint8_t                         r_parent_delete_child;
             /* Open handle parked across the access-retry getattr. */
             struct chimera_vfs_open_handle *access_retry_oh;
             /* Bounded retry budget + parked handle for a share conflict against a
@@ -765,6 +785,9 @@ struct chimera_smb_request {
             uint8_t                            r_is_directory;
             uint32_t                           r_granted_access;
             uint32_t                           r_maximal_access;
+            /* Set once r_granted_access is resolved for this open, before its
+            * share-mode claim is placed (chimera_smb_create_claim_access). */
+            uint8_t                            r_granted_valid;
             /* Deferred-response park (MS-SMB2 3.3.5.9 pending-open): when this open
              * triggered an ack-required lease break, its SUCCESS response is held
              * (via the async-interim path; the request links on conn->parked_
