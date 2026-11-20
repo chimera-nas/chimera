@@ -60,6 +60,33 @@ chimera_nfs3_lookup_complete(
 } /* chimera_nfs3_lookup_complete */
 
 static void
+chimera_nfs3_lookup_dotdot_resume(
+    struct nfs_request          *req,
+    enum chimera_nfs_export_root at)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+
+    if (at == CHIMERA_NFS_EXPORT_ROOT_UNKNOWN) {
+        /* Where the export's root is cannot be told, so neither can whether
+        * the parent lies inside the export.  Answering with the directory
+        * itself would make every directory of the export its own parent. */
+        chimera_nfs3_lookup_complete(CHIMERA_VFS_ESTALE, NULL, NULL, req);
+        return;
+    }
+
+    /* At the export root ".." would leave the export: answer with the
+     * directory itself. */
+    chimera_vfs_lookup_at(thread->vfs_thread, &req->cred,
+                          req->handle,
+                          at == CHIMERA_NFS_EXPORT_ROOT_YES ? "." : "..",
+                          at == CHIMERA_NFS_EXPORT_ROOT_YES ? 1 : 2,
+                          CHIMERA_VFS_ATTR_FH | CHIMERA_NFS3_ATTR_MASK,
+                          CHIMERA_NFS3_ATTR_MASK,
+                          chimera_nfs3_lookup_complete,
+                          req);
+} /* chimera_nfs3_lookup_dotdot_resume */
+
+static void
 chimera_nfs3_lookup_open_callback(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *handle,
@@ -85,6 +112,12 @@ chimera_nfs3_lookup_open_callback(
             chimera_nfs_dotdot_stays(req, handle->fh, handle->fh_len)) {
             name    = ".";
             namelen = 1;
+        } else if (namelen == 2 && name[0] == '.' && name[1] == '.') {
+            /* So would ".." from the root of an export below its mount's
+             * root, an ordinary directory; telling it apart takes a lookup. */
+            chimera_nfs_export_root_check(req, handle->fh, handle->fh_len,
+                                          chimera_nfs3_lookup_dotdot_resume);
+            return;
         }
 
         chimera_vfs_lookup_at(thread->vfs_thread, &req->cred,
@@ -131,6 +164,10 @@ chimera_nfs3_lookup(
     req->args_lookup = args;
 
     res.status = chimera_nfs3_decode_fh(req, args->what.dir.data.data, args->what.dir.data.len);
+    if (res.status == NFS3_OK &&
+        !chimera_nfs3_name_ok(args->what.name.str, args->what.name.len)) {
+        res.status = NFS3ERR_ACCES;
+    }
     if (res.status != NFS3_OK) {
         nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));

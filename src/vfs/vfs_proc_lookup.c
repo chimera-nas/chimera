@@ -151,6 +151,18 @@ chimera_vfs_lookup_open_dispatch(
         int         remlen     = strlen(remaining);
         int         prefix_len = chimera_vfs_dot_prefix_len(remaining, remlen);
 
+        /* The backend follows any symlink inside the path it is handed, so a
+        * caller that may meet none can be served only a single component,
+        * whose final entry chimera_vfs_lookup_pathonly_complete() checks. */
+        if ((lp_request->lookup.flags & CHIMERA_VFS_LOOKUP_NO_SYMLINKS) &&
+            memchr(remaining, '/', remlen)) {
+            chimera_vfs_release(thread, oh);
+            lp_request->lookup.callback(CHIMERA_VFS_ELOOP, NULL,
+                                        lp_request->lookup.private_data);
+            chimera_vfs_request_free(thread, lp_request);
+            return;
+        }
+
         /* A "." or ".." after a real component collapses lexically in the
          * backend, so resolve the component(s) before it first (following
          * symlinks, as POSIX does for a non-final component): a dangling chain
@@ -371,6 +383,14 @@ chimera_vfs_lookup_complete(
     /* Check if this is a symlink that needs to be followed */
     follow_symlink = 0;
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode)) {
+        if (lp_request->lookup.flags & CHIMERA_VFS_LOOKUP_NO_SYMLINKS) {
+            /* The caller may meet no symlink, intermediate or final. */
+            lp_request->lookup.callback(CHIMERA_VFS_ELOOP,
+                                        NULL,
+                                        lp_request->lookup.private_data);
+            chimera_vfs_request_free(thread, lp_request);
+            return;
+        }
         if (!final) {
             /* Always follow symlinks in path components */
             follow_symlink = 1;
@@ -613,6 +633,13 @@ chimera_vfs_lookup_pathonly_complete(
     void                         *priv       = lp_request->lookup.private_data;
 
     (void) dir_attr;
+
+    /* A caller that may meet no symlink is refused a final one too. */
+    if (error_code == CHIMERA_VFS_OK &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode) &&
+        (lp_request->lookup.flags & CHIMERA_VFS_LOOKUP_NO_SYMLINKS)) {
+        error_code = CHIMERA_VFS_ELOOP;
+    }
 
     /* Follow a final symbolic link if the caller asked to (stat, open) -- the
     * path-only mount returns the raw link entry, so the follow lives here. */
