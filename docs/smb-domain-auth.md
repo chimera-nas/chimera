@@ -139,6 +139,10 @@ server is installed as a side effect of another package, disable and mask it.
 > needed. A client offering only Kerberos is refused with
 > `NT_STATUS_LOGON_FAILURE`.
 
+> **Note:** a client that opens with NEGOEX while also offering NTLMSSP is
+> steered to NTLMSSP with `kerberos_enabled` too, including when its list
+> offers Kerberos as well.
+
 > **Note:** the uid and gid resolved for a session are applied to files it
 > creates. The supplementary group list winbind returns is retrieved but is not
 > applied to the credential used for VFS operations, so do not rely on
@@ -810,7 +814,7 @@ must fail with `NT_STATUS_LOGON_FAILURE` or `NT_STATUS_WRONG_PASSWORD`.
 | `adcli join` fails intermittently with `Message stream modified` | `--domain-controller` was given a name with no `ldap/` service principal, often a round-robin alias. | Use `--domain` and let adcli discover a controller. |
 | The join reports it cannot store the machine password, and `wbinfo --ping-dc` then fails | On samba 4.16 and newer, `net changesecretpw` can only upgrade an existing record. | Seed the two `secrets.tdb` records with `tdbtool` before joining. |
 | Kerberos works against the hostname but not `127.0.0.1` | The client derives the service principal from the name you gave it, and there is no `cifs/127.0.0.1` in the keytab. | Address the host by its real name. |
-| Kerberos is attempted even though `kerberos_enabled` is `false` | SPNEGO advertises Kerberos unconditionally. | Have clients select NTLM, e.g. `smbclient --use-kerberos=off`. |
+| Kerberos is attempted even though `kerberos_enabled` is `false` | The client holds, or can get, a ticket for the server name and opens with Kerberos anyway. Chimera's SPNEGO NEGOTIATE response offers NTLMSSP alone in this configuration. | Nothing to do for a client that also offers NTLMSSP: it is steered to NTLMSSP and logs on with its NTLM credential. A client that insists on Kerberos, e.g. `smbclient --use-kerberos=required`, is refused with `NT_STATUS_LOGON_FAILURE`; let it fall back to NTLM or enable Kerberos. |
 | `wbinfo -a` fails but `ntlm_auth` succeeds | `wbinfo -a` also tries an NTLMv1 challenge/response, which many domains disable. | Trust `ntlm_auth` and the `smbclient` tests. Clients normally log on with NTLMv2. A domain user's NTLMv1 logon (with extended session security) works only where the DC accepts NTLMv1: `ntlm auth = yes` on samba, a permissive LmCompatibilityLevel on Windows. |
 | Chimera fails to bind port 445 | `smbd` holds it. | `systemctl disable --now smbd nmbd` and `systemctl mask smbd nmbd`. |
 | `pdbedit` reports uid 4294967295 and `Failed to find a Unix account` | `ldapsam:trusted = yes` is missing. | Add it to `smb.conf` and restart winbind. |

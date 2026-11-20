@@ -36,6 +36,13 @@
  *   W12 3.0  + signing, no KEY_EXCH  -- the session key is the key-exchange
  *                                       key itself, as for every client that
  *                                       follows the server's flags
+ *   W16 3.1.1 + signing, steered     -- a Kerberos-first SPNEGO logon the
+ *                                       server steers to NTLMSSP, with the
+ *                                       extra round trip in the preauth hash
+ *                                       (the probe's server has Kerberos off)
+ *   W17 3.1.1 + signing, steered     -- the same from a NEGOEX-first client
+ *   W18 3.1.1 + signing, steered     -- the same from a NEGOEX-first client
+ *                                       whose list also offers Kerberos
  *
  * A bad-credential case (W9) pins the negative: authentication must FAIL, so
  * that a profile passing tells us the exchange was actually verified rather
@@ -118,6 +125,35 @@ static const struct smb2_wire_profile profiles[] = {
 };
 /* *INDENT-ON* */
 
+/* CREATE, WRITE, READ back the same bytes, CLOSE: the file I/O every
+ * profile ends with. */
+static void
+check_file_io(
+    struct smb2_conn *c,
+    const char       *name)
+{
+    static const char      payload[] = "WIREPROBE";
+    const uint32_t         len       = sizeof(payload) - 1;
+    struct smb2_create_out co;
+    uint8_t                rdbuf[64];
+    uint32_t               st, count = 0, rlen = 0;
+
+    st = smb2_create(c, "wire.txt", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
+    CHECK(st == ST_SUCCESS, "%s: CREATE -> 0x%08x", name, st);
+
+    st = smb2_write(c, co.file_id, 0, payload, len, &count);
+    CHECK(st == ST_SUCCESS && count == len,
+          "%s: WRITE %u bytes -> 0x%08x (count=%u)", name, len, st, count);
+
+    st = smb2_read(c, co.file_id, 0, len, rdbuf, &rlen);
+    CHECK(st == ST_SUCCESS && rlen == len && memcmp(rdbuf, payload, len) == 0,
+          "%s: READ returns the bytes written (len=%u)", name, rlen);
+
+    st = smb2_close(c, co.file_id);
+    CHECK(st == ST_SUCCESS, "%s: CLOSE -> 0x%08x", name, st);
+} /* check_file_io */
+
 /* Drive one profile through a complete session.  Returns the dialect actually
  * negotiated so the caller can assert the profile got the wire it asked for. */
 static uint16_t
@@ -126,14 +162,11 @@ run_profile(
     const char                     *user,
     const char                     *password)
 {
-    struct smb2_env        env;
-    struct smb2_env_opts   opts = { .leases = 1, .oplocks = 1 };
-    struct smb2_conn      *c;
-    struct smb2_create_out co;
-    const char             payload[] = "WIREPROBE";   /* 9 bytes, no NUL */
-    uint8_t                rdbuf[64];
-    uint32_t               st, count = 0, rlen = 0;
-    uint16_t               dialect;
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn    *c;
+    uint32_t             st;
+    uint16_t             dialect;
 
     printf("# --- %s ---\n", w->name);
 
@@ -155,20 +188,7 @@ run_profile(
            "signing_on=%d encrypt_on=%d\n",
            c->dialect, c->signing_alg, c->cipher, c->signing_on, c->encrypt_on);
 
-    st = smb2_create(c, "wire.txt", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
-                     MBT_FILE_SHARE_RWD, NULL, &co);
-    CHECK(st == ST_SUCCESS, "%s: CREATE -> 0x%08x", w->name, st);
-
-    st = smb2_write(c, co.file_id, 0, payload, 9, &count);
-    CHECK(st == ST_SUCCESS && count == 9,
-          "%s: WRITE 9 bytes -> 0x%08x (count=%u)", w->name, st, count);
-
-    st = smb2_read(c, co.file_id, 0, 9, rdbuf, &rlen);
-    CHECK(st == ST_SUCCESS && rlen == 9 && memcmp(rdbuf, payload, 9) == 0,
-          "%s: READ returns the bytes written (len=%u)", w->name, rlen);
-
-    st = smb2_close(c, co.file_id);
-    CHECK(st == ST_SUCCESS, "%s: CLOSE -> 0x%08x", w->name, st);
+    check_file_io(c, w->name);
 
     dialect = c->dialect;
 
@@ -302,6 +322,266 @@ run_bad_key_exchange(
     smb2_env_fs_teardown(&env, "fs0");
     smb2_env_stop(&env);
 } /* run_bad_key_exchange */
+
+/* ---- SPNEGO steering ---------------------------------------------------- */
+
+/* *INDENT-OFF* */
+/* negTokenInit, mechTypes [MS KRB5, KRB5, NEGOEX, NTLMSSP] with an opaque
+ * mechToken standing in for the AP-REQ: the first SESSION_SETUP leg of a
+ * domain-joined Windows client that holds a ticket for the server name. */
+static const uint8_t spnego_windows_kerberos_first[] = {
+    0x60, 0x46,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x3c,
+    0x30, 0x3a,
+    0xa0, 0x30,
+    0x30, 0x2e,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x1e,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
+/* negTokenInit, mechTypes [NEGOEX, NTLMSSP] with an opaque mechToken: the
+ * same client when it has no ticket for the server name. */
+static const uint8_t spnego_negoex_first[] = {
+    0x60, 0x30,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x26,
+    0x30, 0x24,
+    0xa0, 0x1a,
+    0x30, 0x18,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x1e,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
+/* negTokenInit, mechTypes [NEGOEX, KRB5, NTLMSSP] with an opaque mechToken:
+ * NEGOEX first from a client that also offers Kerberos. */
+static const uint8_t spnego_negoex_kerberos[] = {
+    0x60, 0x3b,
+    0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02,
+    0xa0, 0x31,
+    0x30, 0x2f,
+    0xa0, 0x25,
+    0x30, 0x23,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x1e,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+    0xa2, 0x06,
+    0x04, 0x04, 0xde, 0xad, 0xbe, 0xef,
+};
+
+/* The steering reply: negTokenResp { negState accept-incomplete,
+ * supportedMech NTLMSSP } and no responseToken. */
+static const uint8_t spnego_ntlmssp_hint[] = {
+    0xa1, 0x15,
+    0x30, 0x13,
+    0xa0, 0x03, 0x0a, 0x01, 0x01,
+    0xa1, 0x0c,
+    0x06, 0x0a, 0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x02, 0x0a,
+};
+
+/* The reply that completes the logon: negTokenResp { negState
+ * accept-completed }. */
+static const uint8_t spnego_accept_completed[] = {
+    0xa1, 0x07,
+    0x30, 0x05,
+    0xa0, 0x03, 0x0a, 0x01, 0x00,
+};
+/* *INDENT-ON* */
+
+static int
+der_len_size(int len)
+{
+    return len < 0x80 ? 1 : (len < 0x100 ? 2 : 3);
+} /* der_len_size */
+
+static int
+der_put_header(
+    uint8_t *o,
+    uint8_t  tag,
+    int      len)
+{
+    int n = 0;
+
+    o[n++] = tag;
+    if (len < 0x80) {
+        o[n++] = (uint8_t) len;
+    } else if (len < 0x100) {
+        o[n++] = 0x81;
+        o[n++] = (uint8_t) len;
+    } else {
+        o[n++] = 0x82;
+        o[n++] = (uint8_t) (len >> 8);
+        o[n++] = (uint8_t) len;
+    }
+    return n;
+} /* der_put_header */
+
+/* negTokenResp { responseToken tok }: how a client carries each token of the
+ * mechanism it was steered to (a1 L  30 L  a2 L  04 L tok). */
+static int
+spnego_response_token(
+    const uint8_t *tok,
+    int            tok_len,
+    uint8_t       *o)
+{
+    int octet = 1 + der_len_size(tok_len) + tok_len;
+    int a2    = 1 + der_len_size(octet) + octet;
+    int seq   = 1 + der_len_size(a2) + a2;
+    int n     = 0;
+
+    n += der_put_header(o + n, 0xa1, seq);
+    n += der_put_header(o + n, 0x30, a2);
+    n += der_put_header(o + n, 0xa2, octet);
+    n += der_put_header(o + n, 0x04, tok_len);
+    memcpy(o + n, tok, tok_len);
+    return n + tok_len;
+} /* spnego_response_token */
+
+/* The security buffer of the SESSION_SETUP response in c->rbuf, or NULL and
+ * a zero length when the response is too short to hold the one it declares. */
+static const uint8_t *
+session_setup_reply_token(
+    struct smb2_conn *c,
+    int              *len)
+{
+    const uint8_t *rbody = c->rbuf + 4 + SMB2_HDR_SIZE;
+    uint16_t       soff, slen;
+
+    *len = 0;
+    if (c->rlen < 4 + SMB2_HDR_SIZE + 8) {
+        return NULL;
+    }
+    soff = g16(rbody, 4);
+    slen = g16(rbody, 6);
+    if (4 + (int) soff + slen > c->rlen) {
+        return NULL;
+    }
+    *len = slen;
+    return c->rbuf + 4 + soff;
+} /* session_setup_reply_token */
+
+/* A complete steered logon.  The client opens with a negTokenInit whose
+ * optimistic mechanism the server does not accept but which also offers
+ * NTLMSSP.  The server must answer with the steering hint rather than refuse,
+ * and the client then runs NTLMSSP on the same SessionId, each token inside a
+ * negTokenResp:
+ *
+ *   negTokenInit              -> MORE_PROCESSING_REQUIRED, hint
+ *   NTLMSSP NEGOTIATE         -> MORE_PROCESSING_REQUIRED, CHALLENGE
+ *   NTLMSSP AUTHENTICATE      -> SUCCESS
+ *   signed file I/O
+ *
+ * At 3.1.1 the signing key is bound to the preauth-integrity hash, and the
+ * steering round trip is one more request and one more response in it.  If
+ * either side left that leg out, the keys would differ, so the signed
+ * TREE_CONNECT and the file I/O after it are what show the hash was kept
+ * right across the extra leg. */
+static void
+run_steered_logon(
+    const struct smb2_wire_profile *w,
+    const uint8_t                  *init_token,
+    int                             init_len)
+{
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { 0 };
+    struct smb2_conn    *c;
+    const uint8_t       *tok, *chal = NULL;
+    uint8_t              ntlm[2048], blob[2048];
+    uint8_t              preauth_at_auth[SMB2W_PREAUTH_HASH_SIZE];
+    uint64_t             session_id;
+    uint32_t             st;
+    int                  n, tok_len = 0, chal_len = 0, have_chal, i;
+
+    printf("# --- %s ---\n", w->name);
+
+    smb2_env_open_wire(&env, &opts, w);
+    smb2_env_fs_setup(&env, "fs0");
+
+    c = smb2_conn_open(&env);
+
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS, "%s: NEGOTIATE -> 0x%08x", w->name, st);
+    CHECK(c->dialect == w->max_dialect,
+          "%s: negotiated 0x%04x (wanted 0x%04x)", w->name, c->dialect, w->max_dialect);
+
+    /* Leg 1: the optimistic token the server cannot take. */
+    st = smb2c_session_setup_leg(c, init_token, init_len);
+    CHECK(st == ST_MORE_PROCESSING_REQUIRED,
+          "%s: the first leg is steered, not refused (0x%08x)", w->name, st);
+    if (st != ST_MORE_PROCESSING_REQUIRED) {
+        goto out;
+    }
+
+    session_id = g64(c->rbuf + 4, 40);
+    CHECK(session_id != 0, "%s: the steering reply carries a SessionId", w->name);
+
+    tok = session_setup_reply_token(c, &tok_len);
+    CHECK(tok && tok_len == (int) sizeof(spnego_ntlmssp_hint) &&
+          memcmp(tok, spnego_ntlmssp_hint, sizeof(spnego_ntlmssp_hint)) == 0,
+          "%s: the steering reply names NTLMSSP as supportedMech (%d bytes)",
+          w->name, tok_len);
+
+    c->session_id = session_id;
+
+    /* Leg 2: restart with NTLMSSP on the SessionId the hint came back with. */
+    n  = smb2w_ntlm_negotiate(ntlm, 0, 1);
+    n  = spnego_response_token(ntlm, n, blob);
+    st = smb2c_session_setup_leg(c, blob, n);
+    CHECK(st == ST_MORE_PROCESSING_REQUIRED,
+          "%s: NTLMSSP NEGOTIATE on the steered session -> 0x%08x", w->name, st);
+    if (st != ST_MORE_PROCESSING_REQUIRED) {
+        goto out;
+    }
+    CHECK(g64(c->rbuf + 4, 40) == session_id,
+          "%s: the CHALLENGE comes back on the same SessionId", w->name);
+
+    tok = session_setup_reply_token(c, &tok_len);
+    for (i = 0; tok && i + 8 <= tok_len; i++) {
+        if (memcmp(tok + i, "NTLMSSP\0", 8) == 0) {
+            chal     = tok + i;
+            chal_len = tok_len - i;
+            break;
+        }
+    }
+    have_chal = tok && tok[0] == 0xa1 && chal && chal_len >= 48 && g32(chal, 8) == 2;
+    CHECK(have_chal, "%s: the reply carries an NTLMSSP CHALLENGE in a negTokenResp (%d bytes)",
+          w->name, chal_len);
+    if (!have_chal) {
+        goto out;
+    }
+
+    /* Leg 3: AUTHENTICATE.  The session keys bind to the preauth hash as it
+     * stands once this request is folded in. */
+    n = smb2w_ntlm_auth_ntlmv2(chal, chal_len, SMB2W_USER, SMB2W_PASSWORD,
+                               SMB2W_DOMAIN, 1, ntlm, c->session_key);
+    n  = spnego_response_token(ntlm, n, blob);
+    st = smb2c_session_setup_leg_capture(c, blob, n, preauth_at_auth);
+    CHECK(st == ST_SUCCESS, "%s: AUTHENTICATE completes the logon (0x%08x)", w->name, st);
+    if (st != ST_SUCCESS) {
+        goto out;
+    }
+    tok = session_setup_reply_token(c, &tok_len);
+    CHECK(tok && tok_len == (int) sizeof(spnego_accept_completed) &&
+          memcmp(tok, spnego_accept_completed, sizeof(spnego_accept_completed)) == 0,
+          "%s: the final reply is negTokenResp accept-completed (%d bytes)",
+          w->name, tok_len);
+    smb2c_arm_protection(c, preauth_at_auth);
+
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: signed TREE_CONNECT -> 0x%08x", w->name, st);
+
+    check_file_io(c, w->name);
+
+ out:
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_steered_logon */
 
 static void
 run_profiles(
@@ -533,6 +813,21 @@ main(
         .name = "W14 key exchange with a 24-byte key", .max_dialect = 0x0300,
         .ntlmv2 = 1
     };
+    static const struct smb2_wire_profile steered_kerberos = {
+        .name = "W16 3.1.1 signed, Kerberos-first SPNEGO steered to NTLMSSP",
+        .max_dialect = 0x0311, .ntlmv2 = 1, .sign = 1,
+        .signing_alg = SMB2W_SIGN_AES_GMAC
+    };
+    static const struct smb2_wire_profile steered_negoex = {
+        .name = "W17 3.1.1 signed, NEGOEX-first SPNEGO steered to NTLMSSP",
+        .max_dialect = 0x0311, .ntlmv2 = 1, .sign = 1,
+        .signing_alg = SMB2W_SIGN_AES_GMAC
+    };
+    static const struct smb2_wire_profile steered_negoex_kerberos = {
+        .name = "W18 3.1.1 signed, NEGOEX-first SPNEGO offering Kerberos steered to NTLMSSP",
+        .max_dialect = 0x0311, .ntlmv2 = 1, .sign = 1,
+        .signing_alg = SMB2W_SIGN_AES_GMAC
+    };
     /* *INDENT-ON* */
 
     /* The server logs to stderr; keeping stdout unbuffered means a drop or an
@@ -552,6 +847,12 @@ main(
         run_bad_key_exchange(&short_key, SMB2W_USER, SMB2W_PASSWORD, 8, 0);
         run_bad_key_exchange(&past_end_key, SMB2W_USER, SMB2W_PASSWORD, 16, 1);
         run_bad_key_exchange(&long_key, SMB2W_USER, SMB2W_PASSWORD, 24, 0);
+        run_steered_logon(&steered_kerberos, spnego_windows_kerberos_first,
+                          sizeof(spnego_windows_kerberos_first));
+        run_steered_logon(&steered_negoex, spnego_negoex_first,
+                          sizeof(spnego_negoex_first));
+        run_steered_logon(&steered_negoex_kerberos, spnego_negoex_kerberos,
+                          sizeof(spnego_negoex_kerberos));
     }
 
     if (failures) {
