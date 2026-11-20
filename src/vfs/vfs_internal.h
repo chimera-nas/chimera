@@ -551,7 +551,8 @@ chimera_vfs_complete(struct chimera_vfs_request *request)
 
     request->elapsed_ns = prometheus_stopwatch_elapsed_ns(&request->start_time);
 
-    if (thread->metrics.op_latency_series) {
+    if (thread->metrics.op_latency_series &&
+        thread->metrics.op_latency_series[request->opcode]) {
         prometheus_time_histogram_sample(thread->metrics.op_latency_series[request->opcode],
                                          &request->start_time);
     }

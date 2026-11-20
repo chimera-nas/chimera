@@ -14,6 +14,12 @@ const char *
 chimera_vfs_op_name(
     unsigned int opcode);
 
+/* Nonzero when the opcode number has an operation behind it.  Slot 0 and
+ * the retired LOCK number do not. */
+int
+chimera_vfs_op_is_named(
+    unsigned int opcode);
+
 void __chimera_vfs_dump_request(
     struct chimera_vfs_request *request);
 void __chimera_vfs_dump_reply(
