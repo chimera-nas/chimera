@@ -357,6 +357,7 @@ jobs:
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-rocky9:buildcache-{0},mode=max', matrix.arch) || '' }}
           build-args: |
             UBUNTU_MIRROR=azure
+            ENABLE_DAOS=1
 
   build-rocky10:
     name: Build rocky10 ${{ matrix.arch }}

@@ -992,6 +992,55 @@ mbt_env_seconds(
     *out = (int) n;
     return 1;
 } /* mbt_env_seconds */
+/* The module connects to an existing container. It does not create one, and
+ * its mount path must be empty. reset drops the previous trace's namespace
+ * on the next mount. */
+static inline int
+daos_module_config(
+    char  *buf,
+    size_t len)
+{
+    const char *pool      = getenv("CHIMERA_DAOS_POOL");
+    const char *container = getenv("CHIMERA_DAOS_CONTAINER");
+    const char *uuid      = getenv("CHIMERA_DAOS_UUID");
+    const char *system    = getenv("CHIMERA_DAOS_SYSTEM");
+    const char *fields[4];
+    int         n;
+
+    if (!pool || !pool[0] || !container || !container[0] ||
+        !uuid || strlen(uuid) != 36) {
+        fprintf(stderr,
+                "SKIP: DAOS replay needs CHIMERA_DAOS_POOL, "
+                "CHIMERA_DAOS_CONTAINER, and CHIMERA_DAOS_UUID\n");
+        exit(77);
+    }
+    fields[0] = pool;
+    fields[1] = container;
+    fields[2] = uuid;
+    fields[3] = system ? system : "";
+    for (int i = 0; i < 4; i++) {
+        if (strpbrk(fields[i], "\\\"\n")) {
+            fprintf(stderr, "DAOS setting contains an unsafe character\n");
+            return 1;
+        }
+    }
+    if (system && system[0]) {
+        n = snprintf(buf, len,
+                     "{\"pool\":\"%s\",\"container\":\"%s\","
+                     "\"mount_uuid\":\"%s\",\"system\":\"%s\",\"reset\":true}",
+                     pool, container, uuid, system);
+    } else {
+        n = snprintf(buf, len,
+                     "{\"pool\":\"%s\",\"container\":\"%s\","
+                     "\"mount_uuid\":\"%s\",\"reset\":true}",
+                     pool, container, uuid);
+    }
+    if (n < 0 || (size_t) n >= len) {
+        fprintf(stderr, "DAOS config does not fit\n");
+        return 1;
+    }
+    return 0;
+} /* daos_module_config */
 
 static inline void
 mbt_env_open_opts(
@@ -1242,6 +1291,15 @@ mbt_env_open_opts(
         }
         snprintf(cfg, sizeof(cfg), "{\"initialize\":true,\"path\":\"%s\"}", dir);
         chimera_server_config_add_module(config, "cairn", NULL, cfg);
+    } else if (strcmp(env->module, "daos") == 0) {
+        char cfg[512];
+
+        if (daos_module_config(cfg, sizeof(cfg)) != 0) {
+            exit(1);
+        }
+        chimera_server_config_add_module(config, "daos", NULL, cfg);
+        chimera_server_config_set_sync_delegation(config, 1);
+        chimera_server_config_set_sync_delegation_threads(config, 4);
     } else if (opts && opts->memfs_config) {
         chimera_server_config_add_module(config, "memfs", NULL,
                                          opts->memfs_config);
@@ -1479,6 +1537,10 @@ mbt_env_open_opts(
  * and because the dir is left in place on teardown (only unmounted) its inode
  * is never reused mid-run, so cached FHs likewise cannot collide across
  * traces.  The whole session_dir is reaped at process exit. */
+static inline void mbt_daos_normalize_root(
+    struct mbt_env *env,
+    const char     *path);
+
 static inline void
 mbt_env_fs_setup_as(
     struct mbt_env *env,
@@ -1538,6 +1600,14 @@ mbt_env_fs_setup_as(
                     env->module, dir, mrc);
             _exit(1);
         }
+    } else if (strcmp(env->module, "daos") == 0) {
+        int mrc = chimera_server_mount(env->server, path + 1, env->module,
+                                       "", NULL);
+
+        if (mrc != 0) {
+            fprintf(stderr, "mount daos at %s failed: status=%d\n", path, mrc);
+            exit(1);
+        }
     } else {
         if (chimera_server_mkfs(env->server, env->module, fsname, NULL) != 0) {
             fprintf(stderr, "failed to create %s filesystem %s\n", env->module,
@@ -1580,6 +1650,9 @@ mbt_env_fs_setup_as(
             fprintf(stderr, "pnfs proxy: failed to export %s\n", path);
             exit(1);
         }
+    }
+    if (strcmp(env->module, "daos") == 0) {
+        mbt_daos_normalize_root(env, path);
     }
 } /* mbt_env_fs_setup_as */
 
@@ -1697,7 +1770,8 @@ mbt_env_fs_teardown_as(
      * mid-run, see mbt_env_fs_setup) and is reaped with the session_dir.
      * Unlike a leaked named fs, an unmounted host dir is inert -- the VFS does
      * not walk it -- so there is no quadratic cost. */
-    if (mbt_module_is_passthrough(env->module)) {
+    if (mbt_module_is_passthrough(env->module) ||
+        strcmp(env->module, "daos") == 0) {
         return;
     }
 
@@ -2312,6 +2386,56 @@ mbt_setattr(
     mbt_call_wait(env);
     return &env->res;
 } /* mbt_setattr */
+
+/* A DAOS trace reuses one container. Clearing its children does not put the
+ * export root back to the model's fsInit(0777, 0, 0). Do that here, after the
+ * export exists and before replay, so the next trace does not inherit the
+ * previous trace's mode or owner. */
+static inline void
+mbt_daos_normalize_root(
+    struct mbt_env *env,
+    const char     *path)
+{
+    uint32_t            saved_uid = env->cred.authsys.uid;
+    uint32_t            saved_gid = env->cred.authsys.gid;
+    struct mbt_fh       fh;
+    struct mbt_result  *res;
+    struct SETATTR3args args;
+
+    mbt_cred_set_uid(env, 0);
+    res = mbt_mnt(env, path);
+    if (res->rpc_err != 0 || res->status != MNT3_OK || !res->obj_fh.has) {
+        fprintf(stderr, "DAOS root mount %s failed: rpc_err=%d status=%u\n",
+                path, res->rpc_err, res->status);
+        exit(1);
+    }
+    fh = res->obj_fh;
+
+    mbt_call_begin(env);
+    args.object.data.data = (void *) fh.data;
+    args.object.data.len  = fh.len;
+    mbt_sattr3_default(&args.new_attributes);
+    args.new_attributes.mode.set_it = 1;
+    args.new_attributes.mode.mode   = 0777;
+    args.new_attributes.uid.set_it  = 1;
+    args.new_attributes.uid.uid     = 0;
+    args.new_attributes.gid.set_it  = 1;
+    args.new_attributes.gid.gid     = 0;
+    args.guard.check                = 0;
+    env->nfs_v3.send_call_NFSPROC3_SETATTR(&env->nfs_v3.rpc2, env->evpl,
+                                           env->nfs_conn, &env->cred, &args,
+                                           0, 0, NULL, 0, 0,
+                                           mbt_setattr_cb, env);
+    mbt_call_wait(env);
+    if (env->res.rpc_err != 0 || env->res.status != NFS3_OK) {
+        fprintf(stderr,
+                "DAOS root normalize %s failed: rpc_err=%d status=%u\n",
+                path, env->res.rpc_err, env->res.status);
+        exit(1);
+    }
+    env->cred.authsys.uid = saved_uid;
+    env->cred.authsys.gid = saved_gid;
+} /* mbt_daos_normalize_root */
 
 /* ---- ACCESS -------------------------------------------------------------- */
 

@@ -376,6 +376,25 @@ set_tests_properties(chimera/posix/mbt/batch_cairn PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
 
+# Not selected unless a DAOS engine is configured. The CI images do not
+# start one, and the client packages are not an engine.
+if(CHIMERA_DAOS_ENGINE)
+    specs_corpus(NAME    posix/daos
+                 FAMILY  posix
+                 CONFIG  ${CMAKE_CURRENT_SOURCE_DIR}/configs/daos.json
+                 OUT_DIR posix_daos_traces
+                 STRICT_OUT_DIR posix_daos_strict)
+    add_test(NAME chimera/posix/mbt/batch_daos
+        COMMAND $<TARGET_FILE:posix_mbt_replay>
+                --backend daos
+                --trace-dir ${posix_daos_traces})
+    set_tests_properties(chimera/posix/mbt/batch_daos PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_daos"
+        LABELS "quint;posix_mbt;daos"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
+
 # The same POSIX surface replayed through the NFS loopback: an in-process
 # chimera server exports a memfs filesystem over the inproc transport and the
 # posix client mounts it through the nfs proxy module (src/vfs/nfs) with
