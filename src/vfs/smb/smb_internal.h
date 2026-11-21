@@ -864,8 +864,10 @@ void smb_apply_attrs(
 /* Resolve a leaf `name` against an EXPLICIT parent fh into a full mount-relative
  * path in `out` ("" parent -> just the name).  This is the general joiner: the
  * rename destination joins against `rename_at.new_fh`, which is NOT request->fh
- * (that is the source parent).  Returns the normalized length, or -1 (caller
- * maps to ESTALE) when the fh's path id is not interned or the result overflows.
+ * (that is the source parent).  Returns the normalized length, or a negated
+ * vfs error the caller passes through as its status: -CHIMERA_VFS_ESTALE when
+ * the fh's path id is not interned, -CHIMERA_VFS_ENAMETOOLONG when the result
+ * does not fit `out_max`.
  * Does NOT reject "."/".." -- that is the whole-path passthrough too; the leaf
  * guard (smb_leaf_is_dot_or_dotdot) is applied by the caller before this. */
 int smb_fh_full_path(

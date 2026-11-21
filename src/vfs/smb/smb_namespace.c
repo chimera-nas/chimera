@@ -156,8 +156,8 @@ chimera_smb_rename_create_reply(
      * UTF-16LE with '\\' separators (smb_utf16le_encode does the '/'->'\\').  The
      * destination was joined against rename_at.new_fh UP FRONT and stashed; the
      * reply must NOT re-join against request->fh (the source parent) -- that is
-     * the dest-fh bug.  The joiner already bounded the length (overflow -> ESTALE
-     * before the source CREATE), so there is no ENAMETOOLONG branch here. */
+     * the dest-fh bug.  The joiner already bounded the length (overflow ->
+     * ENAMETOOLONG before the source CREATE), so there is no length check here. */
     name16_len = smb_utf16le_encode(state->rename_dst, state->rename_dst_len,
                                     name16);
 
@@ -249,8 +249,8 @@ chimera_smb_client_rename_at(
                                              state->rename_src,
                                              sizeof(state->rename_src));
     if (state->rename_src_len < 0) {
+        request->status       = (enum chimera_vfs_error) -state->rename_src_len;
         state->rename_src_len = 0;
-        request->status       = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -262,8 +262,8 @@ chimera_smb_client_rename_at(
                                              state->rename_dst,
                                              sizeof(state->rename_dst));
     if (state->rename_dst_len < 0) {
+        request->status       = (enum chimera_vfs_error) -state->rename_dst_len;
         state->rename_dst_len = 0;
-        request->status       = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -493,7 +493,7 @@ chimera_smb_client_symlink_at(
                                     request->symlink_at.namelen, fullpath,
                                     sizeof(fullpath));
     if (fullpath_len < 0) {
-        request->status = CHIMERA_VFS_ESTALE;
+        request->status = (enum chimera_vfs_error) -fullpath_len;
         request->complete(request);
         return;
     }
@@ -815,7 +815,7 @@ chimera_smb_client_mknod_at(
                                     request->mknod_at.name_len, fullpath,
                                     sizeof(fullpath));
     if (fullpath_len < 0) {
-        request->status = CHIMERA_VFS_ESTALE;
+        request->status = (enum chimera_vfs_error) -fullpath_len;
         request->complete(request);
         return;
     }
