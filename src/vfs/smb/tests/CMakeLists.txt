@@ -29,3 +29,19 @@ if(CHIMERA_LIMITS_TESTING)
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh
                 ${CMAKE_CURRENT_BINARY_DIR}/smb_create_gate_test)
 endif()
+
+# Path-only parent resolution from a non-root start: the path procs issued from
+# the vfs_smb mount's own root handle, which takes their whole-path arms.  The
+# test embeds memfs (and wraps it as the "nochk" module), found by dlsym, so
+# the binary exports its symbols.
+add_executable(smb_pathop_guard_test smb_pathop_guard_test.c)
+target_link_libraries(smb_pathop_guard_test chimera_server chimera_metrics
+                      chimera_vfs_memfs_objs)
+target_include_directories(smb_pathop_guard_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+set_target_properties(smb_pathop_guard_test PROPERTIES ENABLE_EXPORTS ON)
+
+if(CHIMERA_LIMITS_TESTING)
+    add_test(NAME chimera/vfs/smb/pathop_guard
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/smb_pathop_guard_test)
+endif()

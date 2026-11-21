@@ -222,6 +222,61 @@ op_two_path(
     return probe_call(r);
 } /* op_two_path */
 
+/* A row that must fail, reported by id ("ROW <id> PASS|FAIL") so a run's
+ * output shows that it was reached.  The errno is printed but not pinned: the
+ * driver reads errno for the path ops in the same call that makes the op, so
+ * the value it reports there is not reliable. */
+static void
+probe_refused_row(
+    const char *id,
+    json_t     *res)
+{
+    long long ret  = probe_ret(res);
+    long long err  = probe_field(res, "err");
+    int       pass = ret < 0;
+
+    fprintf(stderr, "smb_loopback_probe: ROW %s %s ret=%lld errno=%lld\n",
+            id, pass ? "PASS" : "FAIL", ret, err);
+    if (!pass) {
+        probe_fail(id, "unexpected result");
+    }
+    json_decref(res);
+} /* probe_refused_row */
+
+/* A creating open of `path` that must fail with `want` and leave nothing at
+ * `collapsed`, the name a lexical collapse of the path would have created. */
+static void
+probe_create_row(
+    const char *id,
+    const char *path,
+    long long   want,
+    const char *collapsed)
+{
+    json_t   *res = op_open(path, O_CREAT | O_WRONLY, 0644);
+    long long ret = probe_ret(res);
+    long long err = probe_field(res, "err");
+    json_t   *st;
+    int       absent, pass;
+
+    json_decref(res);
+    if (ret >= 0) {
+        json_decref(op_fd("close", (int) ret));
+    }
+
+    st     = op_stat(collapsed, 0);
+    absent = probe_ret(st) < 0;
+    json_decref(st);
+
+    pass = ret < 0 && err == want && absent;
+    fprintf(stderr, "smb_loopback_probe: ROW %s %s ret=%lld errno=%lld want=%lld "
+            "state=%s\n", id, pass ? "PASS" : "FAIL", ret, err, want,
+            absent ? "ok" : "bad");
+    if (!pass) {
+        probe_fail(id, absent ? "unexpected errno" :
+                   "the lexically collapsed name was created");
+    }
+} /* probe_create_row */
+
 /* Create an empty file, asserting both legs. */
 static void
 probe_touch(const char *path)
@@ -426,6 +481,38 @@ probe_working_surface(void)
     probe_ok("unlink /b/g", op_path("unlink", "/b/g"));
     probe_ok("rmdir /b", op_path("rmdir", "/b"));
     probe_ok("rmdir /a", op_path("rmdir", "/a"));
+
+    /* Not under a directory lease: there, resolving a path through the
+     * regular file /q/f (as these rows do, and as a plain stat of
+     * "/q/f/../x" does) leaves the later unlink of /q/f failing.  That is
+     * not specific to these rows. */
+    if (!g_smb_leases) {
+        /* A creating open resolves its parent in the core, as unlink does, so the
+         * two address the same object.  The backend collapses "f/.." lexically
+         * without looking at f; the core requires the parent to be a real
+         * directory.  So a create through a regular-file or missing prefix is
+         * refused, and nothing appears under the lexically collapsed name -- the
+         * same answer unlink gives for the same path.  From the namespace root these
+         * take the rebase route into the smb mount at "/". */
+        probe_ok("mkdir /q", op_mkdir("/q", 0755));
+        res = op_open("/q/f", O_CREAT | O_RDWR, 0644);
+        probe_ok("open /q/f O_CREAT", json_incref(res));
+        fd = probe_ret(res);
+        json_decref(res);
+        if (fd >= 0) {
+            probe_ok("close /q/f", op_fd("close", (int) fd));
+        }
+
+        probe_create_row("O-a", "/q/f/../x", ENOTDIR, "/q/x");
+        probe_refused_row("O-b", op_path("unlink", "/q/f/../x"));
+        probe_create_row("O-c", "/q/nx/../y", ENOENT, "/q/y");
+
+        /* Tolerant cleanup: a failing row may have created the collapsed name. */
+        json_decref(op_path("unlink", "/q/x"));
+        json_decref(op_path("unlink", "/q/y"));
+        probe_ok("unlink /q/f", op_path("unlink", "/q/f"));
+        probe_ok("rmdir /q", op_path("rmdir", "/q"));
+    }
 
     probe_ok("statvfs", op_path("statvfs", "/"));
 } /* probe_working_surface */
