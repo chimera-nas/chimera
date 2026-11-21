@@ -309,19 +309,31 @@ struct chimera_smb_op_state {
     int                               followed_pathlen;
     char                              followed_path[CHIMERA_SMB_PATH_MAX + 1];
 
-    /* Phase 1b: the parent-joined full mount-relative paths an op must evict on
+    /* The parent-joined full mount-relative paths an op must evict on
      * success.  remove/rename join their leaf against the core-resolved parent
      * handle, so the interned id is the JOINED path, not the raw leaf.  remove
-     * must not reuse `followed_path` (the follow shim owns that slot).  The
-     * `*_len` fields are zeroed at op start so a failure path cannot evict a
+     * must not reuse `followed_path` (the follow shim owns that slot, and it is
+     * live during the remove CREATE).  A remove and a rename are never the same
+     * request, so their buffers share storage; the `*_len` fields stay outside
+     * the union and are zeroed at op start so a failure path cannot evict a
      * recycled plugin_data leftover. */
     int                               remove_path_len;
-    char                              remove_path[CHIMERA_SMB_PATH_MAX + 1];
     int                               rename_src_len;
-    char                              rename_src[CHIMERA_SMB_PATH_MAX + 1];
     int                               rename_dst_len;
-    char                              rename_dst[CHIMERA_SMB_PATH_MAX + 1];
+    union {
+        char remove_path[CHIMERA_SMB_PATH_MAX + 1];
+        struct {
+            char rename_src[CHIMERA_SMB_PATH_MAX + 1];
+            char rename_dst[CHIMERA_SMB_PATH_MAX + 1];
+        };
+    };
 };
+
+/* The op state lives in request->plugin_data, so it must fit that buffer
+ * (CHIMERA_VFS_PLUGIN_DATA_SIZE, the size of plugin_data -- not the engine's
+ * gate scratch, which is a different buffer). */
+_Static_assert(sizeof(struct chimera_smb_op_state) <= CHIMERA_VFS_PLUGIN_DATA_SIZE,
+               "struct chimera_smb_op_state must fit request->plugin_data");
 
 /* The continuation invoked when the reply for a specific message_id arrives.
 * `body` is positioned at the SMB2 body (consumed == sizeof(smb2_header)). */
