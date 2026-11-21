@@ -564,8 +564,18 @@ chimera_vfs_open(
     unsigned int pathonly_metadata = (flags & CHIMERA_VFS_OPEN_PATH) &&
         !(flags & (CHIMERA_VFS_OPEN_CREATE | CHIMERA_VFS_OPEN_NOFOLLOW));
 
+    /* A creating open of a multi-component name has its parent resolved in
+     * the core (the create fallback below), as remove/rename/symlink/mknod/
+     * mkdir do: the backend would collapse a mid-path ".." lexically, so a
+     * create could land somewhere other than where an unlink of the same path
+     * would look, and somewhere other than the parent the engine's create gate
+     * checked.  Only a single-component create takes the whole-path and rebase
+     * arms.  A non-creating multi-component open keeps them, so its access is
+     * still decided by the remote server. */
     if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len) &&
-        !pathonly_metadata) {
+        !pathonly_metadata &&
+        !((flags & CHIMERA_VFS_OPEN_CREATE) &&
+          memchr(request->open.path, '/', request->open.pathlen))) {
         int i;
 
         request->open.name_offset = 0;
@@ -604,7 +614,10 @@ chimera_vfs_open(
                                                  request->open.parent_fh,
                                                  &request->open.parent_fh_len);
 
-        if (rebase >= 0 && rebase < request->open.pathlen && !pathonly_metadata) {
+        if (rebase >= 0 && rebase < request->open.pathlen && !pathonly_metadata &&
+            !((flags & CHIMERA_VFS_OPEN_CREATE) &&
+              memchr(request->open.path + rebase, '/',
+                     request->open.pathlen - rebase))) {
             const char *rslash = strrchr(request->open.path, '/');
 
             request->open.name_offset = rebase;
