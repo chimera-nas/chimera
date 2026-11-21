@@ -121,8 +121,13 @@ chimera_vfs_remove_parent_open_complete(
      * (the backend deletes by path) -- skip the child lookup that yields
      * nothing usable.  A path from the namespace root that was rebased into a
      * path-only mount keeps the lookup, whose answer (ENOTDIR, ELOOP) the
-     * backend's delete would lose. */
-    if (chimera_vfs_path_op_whole(thread, request->module, request->fh, request->fh_len)) {
+     * backend's delete would lose.
+     *
+     * The test is on the module serving the RESOLVED parent, not the one the
+     * start handle belongs to: a parent resolved with FOLLOW can sit in another
+     * mount (an absolute symlink out of the path-only mount), and a backend
+     * there relies on the core's child lookup for the ISDIR/ISNOTDIR check. */
+    if (chimera_vfs_path_op_whole(thread, oh->vfs_module, request->fh, request->fh_len)) {
         request->remove.child_fh_len = 0;
         chimera_vfs_remove_at(
             thread,
