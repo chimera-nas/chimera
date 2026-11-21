@@ -292,6 +292,10 @@ prep_cb(
                         }
                     }
                     break;
+                case OP_SEEK:
+                    p->st[i]    = r->opseek.sa_status;
+                    p->meas_idx = (int) i;
+                    break;
                 case OP_READ_PLUS:
                     p->st[i]    = r->opread_plus.rp_status;
                     p->meas_idx = (int) i;
@@ -786,6 +790,20 @@ op_read_plus(
     return a;
 } /* op_read_plus */
 
+/* SEEK (data) from offset 0 through `sid`. */
+static struct nfs_argop4
+op_seek(const struct stateid4 *sid)
+{
+    struct nfs_argop4 a;
+
+    memset(&a, 0, sizeof(a));
+    a.argop             = OP_SEEK;
+    a.opseek.sa_stateid = *sid;
+    a.opseek.sa_offset  = 0;
+    a.opseek.sa_what    = NFS4_CONTENT_DATA;
+    return a;
+} /* op_seek */
+
 /* WRITE_SAME of TRUNC_SIZE bytes at offset 0 through `sid`: 4 KiB blocks, a
  * 16-byte pattern at the start of each, no per-block-number stamping. */
 #define WS_BLOCK_SIZE 4096
@@ -1108,7 +1126,7 @@ run_cell(
 enum via { VIA_DELEG, VIA_OPEN, VIA_LOCK, VIA_ANON };
 enum meas {
     M_SETATTR_SIZE, M_SETATTR_MODE, M_WRITE, M_READ, M_READ_PLUS,
-    M_WRITE_SAME, M_ALLOCATE, M_DEALLOCATE, M_COPY
+    M_WRITE_SAME, M_ALLOCATE, M_DEALLOCATE, M_COPY, M_SEEK
 };
 static const struct {
     const char *label;
@@ -1143,6 +1161,9 @@ static const struct {
     { "setattr-mode-via-open-stateid-under-own-deleg", VIA_OPEN, M_SETATTR_MODE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK    },
     { "setattr-mode-via-anon-stateid-under-own-deleg", VIA_ANON, M_SETATTR_MODE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK    },
     { "setattr-mode-via-write-deleg-stateid-under-recall", VIA_DELEG, M_SETATTR_MODE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 1, NFS4_OK },
+    { "seek-via-read-deleg-stateid",         VIA_DELEG, M_SEEK,         OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK            },
+    { "seek-via-write-deleg-stateid",        VIA_DELEG, M_SEEK,         OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK            },
+    { "seek-via-open-stateid-under-deleg",   VIA_OPEN,  M_SEEK,         OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK            },
     { "read-plus-via-write-deleg-stateid",   VIA_DELEG, M_READ_PLUS,    OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
     { "read-plus-via-read-deleg-stateid",    VIA_DELEG, M_READ_PLUS,    OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK             },
     { "read-plus-via-deleg-stateid-of-other-file", VIA_DELEG, M_READ_PLUS, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
@@ -1174,6 +1195,7 @@ meas_name(enum meas op)
         case M_ALLOCATE:     return "ALLOCATE";
         case M_DEALLOCATE:   return "DEALLOCATE";
         case M_COPY:         return "COPY";
+        case M_SEEK:         return "SEEK";
         default:             return "?";
     } /* switch */
 } /* meas_name */
@@ -1183,7 +1205,7 @@ meas_name(enum meas op)
 static int
 meas_needs_fill(enum meas op)
 {
-    return op == M_READ || op == M_READ_PLUS || op == M_DEALLOCATE;
+    return op == M_READ || op == M_READ_PLUS || op == M_DEALLOCATE || op == M_SEEK;
 } /* meas_needs_fill */
 
 /* Only memfs implements READ_PLUS among the probe's backends; elsewhere the
@@ -1413,6 +1435,9 @@ run_deleg_cell(
         case M_READ_PLUS:
             ops[n++] = op_read_plus(&sid, TRUNC_SIZE);
             break;
+        case M_SEEK:
+            ops[n++] = op_seek(&sid);
+            break;
         case M_WRITE_SAME:
             ops[n++] = op_write_same(&sid);
             break;
@@ -1456,6 +1481,8 @@ run_deleg_cell(
                 snprintf(buf, sizeof(buf), "%s of %u bytes: eof=%d", opname,
                          TRUNC_SIZE, p.eof);
                 expect(label, p.eof, buf);
+            } else if (op == M_SEEK) {
+                /* the status is the measurement */
             } else if (op == M_SETATTR_MODE) {
                 snprintf(buf, sizeof(buf), "mode after %s: expected 0%o, "
                          "got 0%o%s", opname, 0600, p.mode,
