@@ -317,6 +317,63 @@ probe_working_surface(void)
     probe_eq("size reflects the truncate", probe_field(res, "size"), 2);
     json_decref(res);
 
+    /* Symlink and mknod at DEPTH (Phase 1b guard+fallback): a multi-component
+     * create path must have its parent resolved in the core, not resolved
+     * lexically by the backend.  The single-component /sym and /w/fifo rows
+     * (probe_pin_symlink / probe_pin_parent_handle_ops) never hit the guarded
+     * multi-component arm; these do.  Cleaned up before the rmdir of /w/sub.
+     *
+     * The symlink-at-depth sub-block is skipped under --leases: deleting a
+     * symlink (reparse) leaf at depth while a directory lease is held is a
+     * pre-existing project/main bug (it returns an unmapped protocol status),
+     * not something this change introduced -- tracked by task
+     * smb-reparse-leaf-delete-under-directory-lease.  The guard+fallback
+     * coverage it provides still runs in the 21 non-lease configs.  mknod at
+     * depth (a non-reparse delete) runs in every config. */
+    if (!g_smb_leases) {
+        res = probe_req("symlink");
+        probe_set_str(res, "path", "/w/sub/s");
+        probe_set_str(res, "target", "f");
+        probe_ok("symlink at depth", probe_call(res));
+        res = op_stat("/w/sub/s", 0);            /* lstat: the link itself */
+        {
+            const char *lt = json_string_value(json_object_get(res, "ftype"));
+
+            if (probe_ret(res) < 0 || !lt || strcmp(lt, "lnk") != 0) {
+                probe_fail("symlink at depth lstat", "expected an lnk at depth");
+            }
+        }
+        json_decref(res);
+        res = probe_req("readlink");
+        probe_set_str(res, "path", "/w/sub/s");
+        res = probe_call(res);
+        {
+            const char *lt = json_string_value(json_object_get(res, "target"));
+
+            if (probe_ret(res) < 0 || !lt || strcmp(lt, "f") != 0) {
+                probe_fail("readlink at depth", "did not return the target 'f'");
+            }
+        }
+        json_decref(res);
+        probe_ok("unlink symlink at depth", op_path("unlink", "/w/sub/s"));
+    }
+
+    res = probe_req("mknod");
+    probe_set_str(res, "path", "/w/sub/p");
+    probe_set_int(res, "mode", 0644);
+    probe_set_str(res, "ftype", "fifo");
+    probe_ok("mknod at depth", probe_call(res));
+    res = op_stat("/w/sub/p", 1);                /* it exists as a fifo */
+    {
+        const char *pt = json_string_value(json_object_get(res, "ftype"));
+
+        if (probe_ret(res) < 0 || !pt || strcmp(pt, "fifo") != 0) {
+            probe_fail("mknod at depth stat", "expected a fifo at depth");
+        }
+    }
+    json_decref(res);
+    probe_ok("unlink mknod at depth", op_path("unlink", "/w/sub/p"));
+
     /* Rename and remove, both at depth. */
     probe_ok("rename", op_two_path("rename", "/w/sub/f", "/w/sub/g"));
     probe_ok("stat the renamed file", op_stat("/w/sub/g", 1));
@@ -328,6 +385,47 @@ probe_working_surface(void)
     probe_ok("rmdir", op_path("rmdir", "/w/sub"));
     probe_err("rmdir of a missing name", op_path("rmdir", "/w/sub"));
     probe_err("stat of a missing name", op_stat("/w/missing", 1));
+
+    /* Cross-directory rename (Phase 1b): source parent != destination parent.
+     * This is the one shape the same-parent row above cannot test -- a dest join
+     * keyed on the SOURCE fh would create /a/g and leave /b/g absent.  A fresh
+     * /a,/b sibling tree so it does not depend on /w/sub (rmdir'd above). */
+    probe_ok("mkdir /a", op_mkdir("/a", 0755));
+    probe_ok("mkdir /b", op_mkdir("/b", 0755));
+
+    res = op_open("/a/f", O_CREAT | O_RDWR, 0644);
+    probe_ok("open /a/f O_CREAT", json_incref(res));
+    fd = probe_ret(res);
+    json_decref(res);
+    if (fd >= 0) {
+        json_t *w = probe_req("write");
+
+        probe_set_int(w, "fd", (int) fd);
+        probe_set_str(w, "data", "aGVsbG8=");     /* "hello", 5 bytes */
+        res = probe_call(w);
+        probe_eq("cross-dir write returns the byte count", probe_ret(res), 5);
+        json_decref(res);
+        probe_ok("close /a/f", op_fd("close", (int) fd));
+    }
+
+    probe_ok("rename /a/f -> /b/g", op_two_path("rename", "/a/f", "/b/g"));
+
+    /* The object moved to /b/g and carries the payload (same object, new name). */
+    res = op_stat("/b/g", 1);
+    probe_ok("stat /b/g", json_incref(res));
+    probe_eq("/b/g size reflects the write", probe_field(res, "size"), 5);
+    json_decref(res);
+
+    /* The old name is gone. */
+    probe_err("stat /a/f (old name gone)", op_stat("/a/f", 1));
+
+    /* DECISIVE: /a/g must NOT exist.  A source-keyed dest join would have joined
+     * the dest leaf "g" onto the SOURCE parent "a" and created /a/g. */
+    probe_err("stat /a/g (dest not keyed on source fh)", op_stat("/a/g", 1));
+
+    probe_ok("unlink /b/g", op_path("unlink", "/b/g"));
+    probe_ok("rmdir /b", op_path("rmdir", "/b"));
+    probe_ok("rmdir /a", op_path("rmdir", "/a"));
 
     probe_ok("statvfs", op_path("statvfs", "/"));
 } /* probe_working_surface */

@@ -38,8 +38,13 @@ smb_evict_pathid(
 
 /*
  * SMB2 namespace operations for the path-only SMB client: rename, symlink, and
- * mknod.  Each addresses files by the full mount-relative path carried in
- * request->X.name (and request->rename_at.new_name for rename) and drives a
+ * mknod.  Each pre-joins its leaf against the parent handle into a full
+ * mount-relative path before acting on it: symlink/mknod join request->X.name
+ * against request->fh; rename joins BOTH parents -- the source from request->fh
+ * and the destination from request->rename_at.new_fh (NOT request->fh, which is
+ * the source parent) -- stashing the joined paths in struct chimera_smb_op_state
+ * so the async SET_INFO reply encodes the joined destination into
+ * FileRenameInformation.FileName (RootDirectory stays 0).  Each drives a
  * transient SMB2 CREATE -> SET_INFO/IOCTL -> CLOSE chain, reusing the shared
  * helpers in smb_internal.h (smb_send_create / smb_send_close /
  * smb_parse_create_reply / smb_apply_attrs / struct chimera_smb_op_state).
@@ -105,10 +110,10 @@ chimera_smb_rename_set_info_reply(
     request->status = chimera_smb_status_to_errno(status);
 
     if (request->status == CHIMERA_VFS_OK) {
-        smb_evict_pathid(conn, request, request->rename_at.name,
-                         request->rename_at.namelen);
-        smb_evict_pathid(conn, request, request->rename_at.new_name,
-                         request->rename_at.new_namelen);
+        /* The interned ids are the JOINED full paths, not the raw leaves.  Evict
+        * those (the source id is dead; an overwritten destination id is too). */
+        smb_evict_pathid(conn, request, state->rename_src, state->rename_src_len);
+        smb_evict_pathid(conn, request, state->rename_dst, state->rename_dst_len);
     }
 
     /* Always CLOSE the transient source open, even if the rename failed. */
@@ -147,17 +152,14 @@ chimera_smb_rename_create_reply(
     smb_parse_create_reply(body, &r);
     state->file_id = r.file_id;
 
-    if (request->rename_at.new_namelen > CHIMERA_SMB_PATH_MAX) {
-        request->status = CHIMERA_VFS_ENAMETOOLONG;
-        /* Close the transient source open before bailing. */
-        smb_send_close(conn, request, &state->file_id, chimera_smb_rename_close_reply);
-        return;
-    }
-
     /* FileRenameInformation.FileName is the share-relative destination path in
-    * UTF-16LE with '\\' separators (smb_utf16le_encode does the '/'->'\\'). */
-    name16_len = smb_utf16le_encode(request->rename_at.new_name,
-                                    request->rename_at.new_namelen, name16);
+     * UTF-16LE with '\\' separators (smb_utf16le_encode does the '/'->'\\').  The
+     * destination was joined against rename_at.new_fh UP FRONT and stashed; the
+     * reply must NOT re-join against request->fh (the source parent) -- that is
+     * the dest-fh bug.  The joiner already bounded the length (overflow -> ESTALE
+     * before the source CREATE), so there is no ENAMETOOLONG branch here. */
+    name16_len = smb_utf16le_encode(state->rename_dst, state->rename_dst_len,
+                                    name16);
 
     /* FileRenameInformation buffer: ReplaceIfExists(1) + Reserved(7) +
      * RootDirectory(8) + FileNameLength(4) = 20 fixed, then FileName(UTF-16LE). */
@@ -202,11 +204,75 @@ chimera_smb_client_rename_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    /* Open the source by its full mount-relative path with DELETE (required to
-     * rename) + READ_ATTRIBUTES.  Cross-mount renames are already rejected by
-     * the VFS layer (EXDEV), so both paths are within this one share. */
+    struct chimera_smb_op_state *state  = request->plugin_data;
+    const uint8_t               *new_fh = request->rename_at.new_fh;
+
+    /* plugin_data is recycled; zero the eviction-stash lengths before any bail so
+     * the SET_INFO reply cannot evict a stale leftover on a failure path. */
+    state->rename_src_len = 0;
+    state->rename_dst_len = 0;
+
+    /* A "." / ".." leaf on either side would re-collapse its parent under
+     * smb_path_normalize, reconstructing the escape the Option C guard removed. */
+    if (smb_leaf_is_dot_or_dotdot(request->rename_at.name,
+                                  request->rename_at.namelen) ||
+        smb_leaf_is_dot_or_dotdot(request->rename_at.new_name,
+                                  request->rename_at.new_namelen)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    /* Cross-mount / cross-share guard.  The checked rename_at already returns
+     * EXDEV on a mount-id mismatch (vfs_proc_rename_at.c), but the _at_path twin
+     * and the cross-mount TODO can hand this backend a foreign new_fh; once the
+     * dest join uses new_fh, the backend must refuse it itself.  Length-guard
+     * BEFORE the memcmp so a malformed short new_fh cannot over-read.  Mask the
+     * NOFOLLOW bit (chimera_smb_fh_server_index does) so it never trips this. */
+    if (request->fh_len < CHIMERA_VFS_MOUNT_ID_SIZE ||
+        request->rename_at.new_fhlen < CHIMERA_VFS_MOUNT_ID_SIZE ||
+        memcmp(request->fh, new_fh, CHIMERA_VFS_MOUNT_ID_SIZE) != 0 ||
+        chimera_smb_fh_server_index(request->fh) !=
+        chimera_smb_fh_server_index(new_fh)) {
+        request->status = CHIMERA_VFS_EXDEV;
+        request->complete(request);
+        return;
+    }
+
+    /* Join BOTH parents up front, before opening the source: a doomed rename
+     * (stale/uninterned fh) then fails closed without a transient DELETE-open of
+     * the source.  Source joins against request->fh; DESTINATION against new_fh
+     * (NOT request->fh -- that is the source parent, the dest-fh bug). */
+    state->rename_src_len = smb_fh_full_path(conn, request->fh, request->fh_len,
+                                             request->rename_at.name,
+                                             request->rename_at.namelen,
+                                             state->rename_src,
+                                             sizeof(state->rename_src));
+    if (state->rename_src_len < 0) {
+        state->rename_src_len = 0;
+        request->status       = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    state->rename_dst_len = smb_fh_full_path(conn, new_fh,
+                                             request->rename_at.new_fhlen,
+                                             request->rename_at.new_name,
+                                             request->rename_at.new_namelen,
+                                             state->rename_dst,
+                                             sizeof(state->rename_dst));
+    if (state->rename_dst_len < 0) {
+        state->rename_dst_len = 0;
+        request->status       = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    /* Open the source by its joined full mount-relative path with DELETE
+     * (required to rename) + READ_ATTRIBUTES.  Keep OPEN_REPARSE_POINT: a leaf
+     * symlink is the object being renamed, not its target. */
     smb_send_create(conn, request,
-                    request->rename_at.name, request->rename_at.namelen,
+                    state->rename_src, state->rename_src_len,
                     SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_OPEN, SMB2_FILE_OPEN_REPARSE_POINT,
