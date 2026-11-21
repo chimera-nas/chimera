@@ -142,7 +142,8 @@ chimera_smb_path_table_clear(struct chimera_smb_client_server *server)
  * handle in request->fh.
  *
  * Most ops arrive rebased against the mount root (request->fh is the root fh),
- * where `name` already IS the full path.  But an *at op issued against a real
+ * where `name` already IS the full path (it is normalized, like every joined
+ * result, so "." / ".." / "//" are collapsed).  But an *at op issued against a real
  * directory descriptor (openat/unlinkat/utimensat with a dirfd) hands the
  * backend that directory's open-token handle as the parent and only the leaf as
  * `name`; a path-only backend must prefix the directory's path itself, since
@@ -229,7 +230,7 @@ smb_fh_full_path(
     }
 
     /* parent + '/' + name, except an empty parent (the share root itself, whose
-     * open-token path is "") joins to just the name. */
+     * open-token path is "") joins to just the (normalized) name. */
     n = plen + (plen ? 1 : 0) + namelen;
     if (n >= out_max) {
         return -CHIMERA_VFS_ENAMETOOLONG;
@@ -1841,7 +1842,7 @@ chimera_smb_client_open_at(
     int            path_len;
 
     /* Resolve the leaf against the parent handle (a dirfd-relative open); for a
-     * root-relative open this is just the name. */
+     * root-relative open this is the normalized name. */
     path_len = smb_at_full_path(conn, request, request->open_at.name,
                                 request->open_at.namelen, path, sizeof(path));
     if (path_len < 0) {
@@ -2177,7 +2178,7 @@ chimera_smb_client_mkdir_at(
                              &request->mkdir_at.r_attr);
 
     /* Resolve the leaf against the parent handle (a dirfd-relative create);
-     * for a root-relative create this is just the name. */
+     * for a root-relative create this is the normalized name. */
     fullpath_len = smb_at_full_path(conn, request, request->mkdir_at.name,
                                     request->mkdir_at.name_len, fullpath,
                                     sizeof(fullpath));
@@ -2281,7 +2282,8 @@ chimera_smb_client_remove_at(
     }
 
     /* A "." / ".." leaf would re-collapse the parent under smb_path_normalize,
-     * reconstructing the escape the Option C guard removed.  Reject before join. */
+     * so the delete would hit the grandparent rather than a child of the
+     * core-resolved parent.  Reject before join. */
     if (smb_leaf_is_dot_or_dotdot(request->remove_at.name,
                                   request->remove_at.namelen)) {
         request->status = CHIMERA_VFS_EINVAL;

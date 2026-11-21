@@ -372,18 +372,17 @@ probe_working_surface(void)
     probe_eq("size reflects the truncate", probe_field(res, "size"), 2);
     json_decref(res);
 
-    /* Symlink and mknod at DEPTH (Phase 1b guard+fallback): a multi-component
-     * create path must have its parent resolved in the core, not resolved
-     * lexically by the backend.  The single-component /sym and /w/fifo rows
-     * (probe_pin_symlink / probe_pin_parent_handle_ops) never hit the guarded
-     * multi-component arm; these do.  Cleaned up before the rmdir of /w/sub.
+    /* Symlink and mknod at DEPTH: a multi-component create resolves its
+     * parent in the core and creates the leaf against it.  From the namespace
+     * root, where every client op starts, that is the route on every version
+     * of the procs, so these are regression rows for the multi-component
+     * path; the symlink/mknod whole-path guards are reached only from a handle
+     * inside the path-only mount (chimera/vfs/smb/pathop_guard).  Cleaned up
+     * before the rmdir of /w/sub.
      *
      * The symlink-at-depth sub-block is skipped under --leases: deleting a
-     * symlink (reparse) leaf at depth while a directory lease is held is a
-     * pre-existing project/main bug (it returns an unmapped protocol status),
-     * not something this change introduced -- tracked by task
-     * smb-reparse-leaf-delete-under-directory-lease.  The guard+fallback
-     * coverage it provides still runs in the 21 non-lease configs.  mknod at
+     * symlink (reparse) leaf at depth while a directory lease is held returns
+     * an unmapped protocol status, independently of these rows.  mknod at
      * depth (a non-reparse delete) runs in every config. */
     if (!g_smb_leases) {
         res = probe_req("symlink");
@@ -441,7 +440,7 @@ probe_working_surface(void)
     probe_err("rmdir of a missing name", op_path("rmdir", "/w/sub"));
     probe_err("stat of a missing name", op_stat("/w/missing", 1));
 
-    /* Cross-directory rename (Phase 1b): source parent != destination parent.
+    /* Cross-directory rename: source parent != destination parent.
      * This is the one shape the same-parent row above cannot test -- a dest join
      * keyed on the SOURCE fh would create /a/g and leave /b/g absent.  A fresh
      * /a,/b sibling tree so it does not depend on /w/sub (rmdir'd above). */

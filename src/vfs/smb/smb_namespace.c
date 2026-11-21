@@ -160,8 +160,9 @@ chimera_smb_rename_create_reply(
      * UTF-16LE with '\\' separators (smb_utf16le_encode does the '/'->'\\').  The
      * destination was joined against rename_at.new_fh UP FRONT and stashed; the
      * reply must NOT re-join against request->fh (the source parent) -- that is
-     * the dest-fh bug.  The joiner already bounded the length (overflow ->
-     * ENAMETOOLONG before the source CREATE), so there is no length check here. */
+     * the destination's parent is rename_at.new_fh.  The joiner already bounded
+     * the length (overflow -> ENAMETOOLONG before the source CREATE), so there is
+     * no length check here. */
     name16_len = smb_utf16le_encode(state->rename_dst, state->rename_dst_len,
                                     name16);
 
@@ -217,7 +218,8 @@ chimera_smb_client_rename_at(
     state->rename_dst_len = 0;
 
     /* A "." / ".." leaf on either side would re-collapse its parent under
-     * smb_path_normalize, reconstructing the escape the Option C guard removed. */
+     * smb_path_normalize, so the op would act on the grandparent rather than on
+     * a child of the core-resolved parent. */
     if (smb_leaf_is_dot_or_dotdot(request->rename_at.name,
                                   request->rename_at.namelen) ||
         smb_leaf_is_dot_or_dotdot(request->rename_at.new_name,
@@ -228,13 +230,17 @@ chimera_smb_client_rename_at(
     }
 
     /* Cross-mount / cross-share guard.  The checked rename_at already returns
-     * EXDEV on a mount-id mismatch (vfs_proc_rename_at.c), but the _at_path twin
-     * and the cross-mount TODO can hand this backend a foreign new_fh; once the
-     * dest join uses new_fh, the backend must refuse it itself.  Length-guard
-     * BEFORE the memcmp so a malformed short new_fh cannot over-read.  Mask the
-     * NOFOLLOW bit (chimera_smb_fh_server_index does) so it never trips this. */
-    if (request->fh_len < CHIMERA_VFS_MOUNT_ID_SIZE ||
-        request->rename_at.new_fhlen < CHIMERA_VFS_MOUNT_ID_SIZE ||
+     * EXDEV on a mount-id mismatch (vfs_proc_rename_at.c), but the _at_path twin,
+     * and a rename whose old path is under a path-only mount while the new one
+     * is not (vfs_proc_rename.c has no path-only cross-mount route), can hand
+     * this backend a foreign new_fh; since the destination joins against
+     * new_fh, the backend must refuse it itself.  Length-guard BEFORE the memcmp
+     * and the server-index read so a malformed short fh cannot over-read: both
+     * handles must carry the mount id AND the server-index byte that follows it
+     * (CHIMERA_SMB_ROOT_FH_LEN).  Mask the NOFOLLOW bit
+     * (chimera_smb_fh_server_index does) so it never trips this. */
+    if (request->fh_len < CHIMERA_SMB_ROOT_FH_LEN ||
+        request->rename_at.new_fhlen < CHIMERA_SMB_ROOT_FH_LEN ||
         memcmp(request->fh, new_fh, CHIMERA_VFS_MOUNT_ID_SIZE) != 0 ||
         chimera_smb_fh_server_index(request->fh) !=
         chimera_smb_fh_server_index(new_fh)) {
@@ -246,7 +252,8 @@ chimera_smb_client_rename_at(
     /* Join BOTH parents up front, before opening the source: a doomed rename
      * (stale/uninterned fh) then fails closed without a transient DELETE-open of
      * the source.  Source joins against request->fh; DESTINATION against new_fh
-     * (NOT request->fh -- that is the source parent, the dest-fh bug). */
+     * (NOT request->fh -- that is the source parent; joining the destination
+     * there would put it in the source's directory). */
     state->rename_src_len = smb_fh_full_path(conn, request->fh, request->fh_len,
                                              request->rename_at.name,
                                              request->rename_at.namelen,
@@ -814,7 +821,7 @@ chimera_smb_client_mknod_at(
     }
 
     /* Resolve the leaf against the parent handle (a dirfd-relative create);
-     * for a root-relative create this is just the name. */
+     * for a root-relative create this is the normalized name. */
     fullpath_len = smb_at_full_path(conn, request, request->mknod_at.name,
                                     request->mknod_at.name_len, fullpath,
                                     sizeof(fullpath));

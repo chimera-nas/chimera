@@ -874,7 +874,7 @@ void smb_apply_attrs(
     uint64_t                          ino);
 
 /* Resolve a leaf `name` against an EXPLICIT parent fh into a full mount-relative
- * path in `out` ("" parent -> just the name).  This is the general joiner: the
+ * path in `out` ("" parent -> the normalized name).  This is the general joiner: the
  * rename destination joins against `rename_at.new_fh`, which is NOT request->fh
  * (that is the source parent).  Returns the normalized length, or a negated
  * vfs error the caller passes through as its status: -CHIMERA_VFS_ESTALE when
@@ -892,7 +892,7 @@ int smb_fh_full_path(
     int                             out_max);
 
 /* Resolve a dirfd-relative leaf `name` against the parent handle `request->fh`
- * into a full mount-relative path in `out` ("" parent -> just the name).
+ * into a full mount-relative path in `out` ("" parent -> the normalized name).
  * One-line wrapper over smb_fh_full_path forwarding request->fh/fh_len, so the
  * existing callers stay byte-identical. */
 int smb_at_full_path(
@@ -904,8 +904,9 @@ int smb_at_full_path(
     int                             out_max);
 
 /* A leaf of exactly "." or "..".  A joined leaf of ".." re-collapses under
- * smb_path_normalize (it pops the parent), reconstructing the escape the Option
- * C guard removed, so remove/rename reject such a leaf (EINVAL) BEFORE joining. */
+ * smb_path_normalize (it pops the parent), so the op would act outside the
+ * core-resolved parent; remove/rename reject such a leaf (EINVAL) BEFORE
+ * joining. */
 static inline int
 smb_leaf_is_dot_or_dotdot(
     const char *name,
