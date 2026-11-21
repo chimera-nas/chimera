@@ -17,7 +17,11 @@
  * Either way a cached open handle keyed by that path-id holds a dead server
  * file id, so the next open of the path would fail.  Evict it (both follow
  * variants, both open caches) so the next open re-resolves.  The path id is the
- * SMB proxy's, so this lives here rather than in the backend-agnostic core. */
+ * SMB proxy's, so this lives here rather than in the backend-agnostic core.
+ *
+ * The id is a pure hash of the path (chimera_smb_path_intern), so it is
+ * computed here without interning: a remove or rename of a path that was never
+ * opened must not leave a permanent path-table entry behind. */
 void
 smb_evict_pathid(
     struct chimera_smb_client_conn *conn,
@@ -25,7 +29,7 @@ smb_evict_pathid(
     const char                     *path,
     int                             pathlen)
 {
-    uint64_t id = chimera_smb_path_intern(conn->server, path, pathlen);
+    uint64_t id = XXH3_64bits(path, (size_t) pathlen);
     uint8_t  fh[CHIMERA_VFS_FH_SIZE];
     int      nf;
 
