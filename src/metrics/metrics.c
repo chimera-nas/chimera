@@ -8,6 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef __linux__
+#include <dirent.h>
+#include <unistd.h>
+#endif /* ifdef __linux__ */
 #ifdef _WIN32
 #include "common/platform.h"
 #endif /* ifdef _WIN32 */
@@ -30,18 +34,167 @@
 #define chimera_metrics_fatal_if(cond, ...) \
         chimera_fatal_if(cond, "metrics", __FILE__, __LINE__, __VA_ARGS__)
 
-struct chimera_metrics {
-    int                        port;
-    char                      *hostname;
-    enum chimera_tcp_flavor flavor;
-    struct prometheus_metrics *metrics;
-    struct evpl               *evpl;
-    struct evpl_thread        *thread;
-    struct evpl_endpoint      *endpoint;
-    struct evpl_listener      *listener;
-    struct evpl_http_agent    *agent;
-    struct evpl_http_server   *server;
+/* Worker threads whose CPU time is exported.  A default server has 16 (eight
+ * chm_core and eight chm_sync); threads past the limit are not exported. */
+#define CHIMERA_METRICS_MAX_CPU_THREADS 128
+
+struct chimera_metrics_thread_cpu {
+    char                                name[16];
+    uint64_t                            ticks;
+    int                                 seen;
+    struct prometheus_counter_series   *series;
+    struct prometheus_counter_instance *instance;
 };
+
+struct chimera_metrics {
+    int                               port;
+    char                             *hostname;
+    enum chimera_tcp_flavor           flavor;
+    struct prometheus_metrics        *metrics;
+    struct evpl                      *evpl;
+    struct evpl_thread               *thread;
+    struct evpl_endpoint             *endpoint;
+    struct evpl_listener             *listener;
+    struct evpl_http_agent           *agent;
+    struct evpl_http_server          *server;
+#ifdef __linux__
+    struct prometheus_counter        *thread_cpu;
+    uint64_t                          ns_per_tick;
+    int                               num_cpu_threads;
+    struct chimera_metrics_thread_cpu cpu_threads[CHIMERA_METRICS_MAX_CPU_THREADS];
+#endif /* ifdef __linux__ */
+};
+
+#ifdef __linux__
+
+/* The pools that do request work.  Helper threads (close, RCU reclaim,
+ * logging) are left out so the series count follows the configured worker
+ * counts and nothing else. */
+static int
+chimera_metrics_is_worker(const char *name)
+{
+    return strncmp(name, "chm_core_", 9) == 0 ||
+           strncmp(name, "chm_sync_", 9) == 0 ||
+           strncmp(name, "chm_async_", 10) == 0;
+} /* chimera_metrics_is_worker */
+
+/*
+ * Set chimera_thread_cpu_nanoseconds_total from the CPU time the kernel
+ * keeps for each thread.  Runs on the metrics thread just before a scrape:
+ * the workers are not involved and nothing is added to a request path.
+ * rate() of the counter is the fraction of a core a thread uses, which for
+ * an event loop is also how busy the loop is.
+ *
+ * /proc/self/task/<tid>/stat is "tid (name) state ..." with utime and stime
+ * as fields 14 and 15, in clock ticks.  Threads that share a name share a
+ * series and are summed.  A thread that has exited keeps its last value.
+ */
+static void
+chimera_metrics_refresh_thread_cpu(struct chimera_metrics *metrics)
+{
+    struct chimera_metrics_thread_cpu *thread;
+    const char                        *label_name = "thread";
+    const char                        *label_value;
+    struct dirent                     *entry;
+    DIR                               *dir;
+    FILE                              *fp;
+    char                               path[320], line[512];
+    char                              *open_paren, *close_paren;
+    unsigned long                      utime, stime;
+    int                                i;
+
+    dir = opendir("/proc/self/task");
+
+    if (!dir) {
+        return;
+    }
+
+    for (i = 0; i < metrics->num_cpu_threads; i++) {
+        metrics->cpu_threads[i].ticks = 0;
+        metrics->cpu_threads[i].seen  = 0;
+    }
+
+    while ((entry = readdir(dir))) {
+
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+            continue;
+        }
+
+        snprintf(path, sizeof(path), "/proc/self/task/%s/stat", entry->d_name);
+
+        fp = fopen(path, "r");
+
+        if (!fp) {
+            continue; /* the thread exited since readdir */
+        }
+
+        if (!fgets(line, sizeof(line), fp)) {
+            fclose(fp);
+            continue;
+        }
+
+        fclose(fp);
+
+        /* The name may itself contain parentheses, so take the last ')'. */
+        open_paren  = strchr(line, '(');
+        close_paren = strrchr(line, ')');
+
+        if (!open_paren || !close_paren || close_paren < open_paren) {
+            continue;
+        }
+
+        *close_paren = '\0';
+
+        if (!chimera_metrics_is_worker(open_paren + 1)) {
+            continue;
+        }
+
+        if (sscanf(close_paren + 1,
+                   " %*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu",
+                   &utime, &stime) != 2) {
+            continue;
+        }
+
+        thread = NULL;
+
+        for (i = 0; i < metrics->num_cpu_threads; i++) {
+            if (strcmp(metrics->cpu_threads[i].name, open_paren + 1) == 0) {
+                thread = &metrics->cpu_threads[i];
+                break;
+            }
+        }
+
+        if (!thread) {
+            if (metrics->num_cpu_threads == CHIMERA_METRICS_MAX_CPU_THREADS) {
+                continue;
+            }
+
+            thread = &metrics->cpu_threads[metrics->num_cpu_threads++];
+
+            snprintf(thread->name, sizeof(thread->name), "%s", open_paren + 1);
+
+            label_value    = thread->name;
+            thread->ticks  = 0;
+            thread->series = prometheus_counter_create_series(metrics->thread_cpu,
+                                                              &label_name, &label_value, 1);
+            thread->instance = prometheus_counter_series_create_instance(thread->series);
+        }
+
+        thread->ticks += utime + stime;
+        thread->seen   = 1;
+    }
+
+    closedir(dir);
+
+    for (i = 0; i < metrics->num_cpu_threads; i++) {
+        if (metrics->cpu_threads[i].seen) {
+            metrics->cpu_threads[i].instance->value =
+                metrics->cpu_threads[i].ticks * metrics->ns_per_tick;
+        }
+    }
+} /* chimera_metrics_refresh_thread_cpu */
+
+#endif /* ifdef __linux__ */
 
 static void
 chimera_metrics_notify(
@@ -87,6 +240,10 @@ chimera_metrics_notify(
              * use disjoint name prefixes (chimera_* vs evpl_*), so the
              * concatenation is a valid single exposition page.
              */
+#ifdef __linux__
+            chimera_metrics_refresh_thread_cpu(metrics);
+#endif /* ifdef __linux__ */
+
             len = prometheus_metrics_scrape(metrics->metrics, buf, cap);
 
             if (len < 0) {
@@ -144,6 +301,17 @@ chimera_metrics_thread_init(
 
     metrics->metrics = prometheus_metrics_create(NULL, NULL, 0);
 
+#ifdef __linux__
+    {
+        long clk_tck = sysconf(_SC_CLK_TCK);
+
+        metrics->ns_per_tick = 1000000000ULL / (clk_tck > 0 ? clk_tck : 100);
+    }
+    metrics->thread_cpu = prometheus_metrics_create_counter(
+        metrics->metrics, "chimera_thread_cpu_nanoseconds_total",
+        "CPU time used by each worker thread");
+#endif /* ifdef __linux__ */
+
     metrics->agent = evpl_http_init(evpl);
 
     metrics->endpoint = chimera_tcp_flavor_endpoint_create(metrics->flavor,
@@ -171,6 +339,16 @@ chimera_metrics_thread_shutdown(
     void        *private_data)
 {
     struct chimera_metrics *metrics = private_data;
+
+#ifdef __linux__
+    for (int i = 0; i < metrics->num_cpu_threads; i++) {
+        prometheus_counter_series_destroy_instance(metrics->cpu_threads[i].series,
+                                                   metrics->cpu_threads[i].instance);
+        prometheus_counter_destroy_series(metrics->thread_cpu,
+                                          metrics->cpu_threads[i].series);
+    }
+    prometheus_counter_destroy(metrics->metrics, metrics->thread_cpu);
+#endif /* ifdef __linux__ */
 
     prometheus_metrics_destroy(metrics->metrics);
 

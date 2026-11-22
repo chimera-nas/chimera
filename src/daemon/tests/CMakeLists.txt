@@ -75,3 +75,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                 $<TARGET_FILE:chimera>)
     set_tests_properties(chimera/daemon/rest_hostname PROPERTIES TIMEOUT 120)
 endif()
+
+# Worker thread CPU time is read from /proc at scrape time, so Linux only.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME chimera/daemon/thread_cpu
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/daemon_thread_cpu_test.py
+                $<TARGET_FILE:chimera>)
+    set_tests_properties(chimera/daemon/thread_cpu PROPERTIES TIMEOUT 120)
+endif()
