@@ -332,6 +332,25 @@ nfs_server_init(
         rm->bytes_in_use = prometheus_gauge_series_create_instance(rm->bytes_series);
     }
 
+    /* Number of NFSv4 clients and sessions currently registered. */
+    {
+        struct nfs4_table_metrics *tm = &shared->table_metrics;
+
+        tm->clients_gauge = prometheus_metrics_create_gauge(
+            metrics, "chimera_nfs4_clients",
+            "NFSv4 clients currently registered with the server");
+        tm->clients_series = prometheus_gauge_create_series(
+            tm->clients_gauge, NULL, NULL, 0);
+        tm->clients = prometheus_gauge_series_create_instance(tm->clients_series);
+
+        tm->sessions_gauge = prometheus_metrics_create_gauge(
+            metrics, "chimera_nfs4_sessions",
+            "NFSv4.1 sessions currently held by the server");
+        tm->sessions_series = prometheus_gauge_create_series(
+            tm->sessions_gauge, NULL, NULL, 0);
+        tm->sessions = prometheus_gauge_series_create_instance(tm->sessions_series);
+    }
+
     if (!external_portmap) {
         /* PORTMAP V2 */
         PORTMAP_V2_init(&shared->portmap_v2);
@@ -832,6 +851,29 @@ nfs_server_destroy(void *data)
 
     if (shared->op_histogram) {
         prometheus_histogram_destroy(shared->metrics, shared->op_histogram);
+    }
+
+    {
+        struct nfs4_table_metrics *tm = &shared->table_metrics;
+
+        if (tm->clients) {
+            prometheus_gauge_series_destroy_instance(tm->clients_series, tm->clients);
+        }
+        if (tm->clients_series) {
+            prometheus_gauge_destroy_series(tm->clients_gauge, tm->clients_series);
+        }
+        if (tm->clients_gauge) {
+            prometheus_gauge_destroy(shared->metrics, tm->clients_gauge);
+        }
+        if (tm->sessions) {
+            prometheus_gauge_series_destroy_instance(tm->sessions_series, tm->sessions);
+        }
+        if (tm->sessions_series) {
+            prometheus_gauge_destroy_series(tm->sessions_gauge, tm->sessions_series);
+        }
+        if (tm->sessions_gauge) {
+            prometheus_gauge_destroy(shared->metrics, tm->sessions_gauge);
+        }
     }
 
     {

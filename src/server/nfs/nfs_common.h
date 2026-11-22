@@ -343,6 +343,19 @@ struct nfs4_replay_metrics {
     struct prometheus_gauge_instance   *bytes_in_use;
 };
 
+/* Running totals for the NFSv4 client table: how many clients and sessions the
+ * server holds right now.  One number each per process, so the cardinality is
+ * fixed; per-client detail is not a metric.  The lease sweeper refreshes them
+ * once per sweep, so they lag by at most one sweep interval. */
+struct nfs4_table_metrics {
+    struct prometheus_gauge          *clients_gauge;
+    struct prometheus_gauge_series   *clients_series;
+    struct prometheus_gauge_instance *clients;
+    struct prometheus_gauge          *sessions_gauge;
+    struct prometheus_gauge_series   *sessions_series;
+    struct prometheus_gauge_instance *sessions;
+};
+
 /* The NFSv4.0 reply cache is keyed per connection; see nfs4_v40_drc.{c,h}.
  * The NFSv3 DRC (struct nfs3_drc) is keyed by client address, which is the only
  * client identity NFSv3 has. */
@@ -472,6 +485,7 @@ struct chimera_server_nfs_shared {
     struct prometheus_histogram        *op_histogram;
     struct prometheus_metrics          *metrics;
     struct nfs4_replay_metrics          replay_metrics;
+    struct nfs4_table_metrics           table_metrics;
     struct nfs4_v40_drc                 v40_drc;
     struct nfs3_drc                     nfs3_drc;
 
