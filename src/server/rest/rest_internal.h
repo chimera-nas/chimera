@@ -7,6 +7,7 @@
 #include <jansson.h>
 
 #include "common/logging.h"
+#include "evpl/evpl_http.h"
 #include "vfs/sdk/vfs_tcp_flavor.h"
 
 struct chimera_vfs_thread;
@@ -120,3 +121,13 @@ chimera_rest_export_options_to_json(
     const struct chimera_nfs_export *export,
     json_t *obj);
 
+/* GET /api/v1/connections.  Answers asynchronously: the notify callback and
+ * data are set when a collection was started. */
+void
+chimera_rest_inspect_connections(
+    struct chimera_rest_thread  *thread,
+    struct evpl_http_request    *request,
+    const char                  *query,
+    int                          query_len,
+    evpl_http_notify_callback_t *notify_callback,
+    void                       **notify_data);

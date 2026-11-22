@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "common/thread.h"
+#include "server/server_inspect.h"
 #include <utlist.h>
 #include <fcntl.h>
 #ifdef _WIN32
@@ -1832,7 +1833,77 @@ chimera_nfs_export_get_sec(const struct chimera_nfs_export *export)
     return export->sec_allowed;
 } /* chimera_nfs_export_get_sec */
 
+struct nfs_inspect_context {
+    struct chimera_server_nfs_shared *shared;
+    struct chimera_inspect_writer    *writer;
+};
+
+static enum chimera_inspect_service
+nfs_inspect_service(
+    const struct chimera_server_nfs_shared *shared,
+    const struct evpl_rpc2_server          *server)
+{
+    if (server == shared->mount_server) {
+        return CHIMERA_INSPECT_MOUNT;
+    }
+    if (server == shared->nlm_server) {
+        return CHIMERA_INSPECT_NLM;
+    }
+    if (server == shared->nsm_server) {
+        return CHIMERA_INSPECT_NSM;
+    }
+    if (server == shared->portmap_server) {
+        return CHIMERA_INSPECT_RPCBIND;
+    }
+    return CHIMERA_INSPECT_NFS;
+} /* nfs_inspect_service */
+
+static int
+nfs_inspect_connection(
+    const struct evpl_rpc2_connection_info *info,
+    void                                   *private_data)
+{
+    struct nfs_inspect_context       *context = private_data;
+    struct chimera_inspect_connection row     = { 0 };
+
+    row.bind           = info->bind;
+    row.service        = nfs_inspect_service(context->shared, info->server);
+    row.rx_msgs        = info->rx_msgs;
+    row.tx_msgs        = info->tx_msgs;
+    row.rx_bytes       = info->rx_bytes;
+    row.tx_bytes       = info->tx_bytes;
+    row.requests_done  = info->requests_done;
+    row.inflight       = info->inflight;
+    row.minor_versions = info->application_tag;
+    row.rdma_framing   = info->rdma_framing;
+    row.nprograms      = info->nprograms;
+
+    for (int i = 0; i < info->nprograms; i++) {
+        row.programs[i] = info->programs[i].program;
+        row.versions[i] = info->programs[i].version;
+    }
+
+    return context->writer->emit(context->writer, &row);
+} /* nfs_inspect_connection */
+
+static void
+nfs_inspect(
+    void                          *thread_private,
+    struct chimera_inspect_writer *writer)
+{
+    struct chimera_server_nfs_thread *thread  = thread_private;
+    struct nfs_inspect_context        context = { thread->shared, writer };
+    int                               truncated;
+
+    writer->sample->scanned += evpl_rpc2_visit_connections(
+        thread->rpc2_thread, CHIMERA_INSPECT_SCAN - writer->sample->scanned,
+        nfs_inspect_connection, &context, &truncated);
+
+    writer->sample->truncated |= truncated;
+} /* nfs_inspect */
+
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
+    .inspect        = nfs_inspect,
     .init           = nfs_server_init,
     .destroy        = nfs_server_destroy,
     .start          = nfs_server_start,

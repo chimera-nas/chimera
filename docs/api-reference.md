@@ -38,7 +38,9 @@ The same API is also available interactively:
 | 400  | Bad Request (malformed JSON or missing required field)           |
 | 404  | Not Found (unknown resource or unknown path)                     |
 | 405  | Method Not Allowed (valid path, unsupported method)              |
+| 429  | Too Many Requests (a connection listing is already running)      |
 | 500  | Internal Server Error (backend failed to create the resource)    |
+| 503  | Service Unavailable (no worker answered, or the server is stopping) |
 
 ### Error response
 
@@ -473,6 +475,89 @@ DELETE /api/v1/buckets/{name}
 
 ```bash
 curl -X DELETE http://localhost:8080/api/v1/buckets/export
+```
+
+---
+
+## Connections
+
+### List connections
+
+```
+GET /api/v1/connections
+```
+
+Lists the connections the server holds. Today that is the NFS service; SMB and
+S3 connections are not listed yet. The listing is read-only and is gathered
+only while a request is being served: each worker thread owns its connections,
+so each copies its own and the answers are combined. Nothing is added to the
+request path.
+
+Filters narrow the answer and are combined with AND. An unknown, repeated,
+empty or malformed filter returns `400`.
+
+| Query parameter | Description                                                              |
+|-----------------|--------------------------------------------------------------------------|
+| `worker_id`     | Only the connections owned by this worker thread                         |
+| `service`       | `nfs`, `mount`, `nlm`, `nsm` or `rpcbind`. Without it only `nfs` is listed |
+| `remote_ip`     | Peer address, an IPv4 or IPv6 literal                                    |
+| `remote_port`   | Peer port                                                                |
+| `local_ip`      | Local address, an IPv4 or IPv6 literal                                   |
+| `local_port`    | Local port                                                               |
+| `transport`     | `tcp`, `udp`, `rdma`, `unix`, `inproc` or `fabric`                       |
+
+**Response `200`**
+
+```json
+{
+  "server_instance_id": "6f1c9a3e-0b0f-4f3e-9d57-2d5d1c6a8f10",
+  "complete": true,
+  "truncated": false,
+  "missing_workers": [],
+  "connections": [
+    {
+      "connection_id": "1:7",
+      "worker_id": 1,
+      "worker_name": "chm_core_1",
+      "state": "open",
+      "service": "nfs",
+      "transport": "tcp",
+      "age_ms": "52031",
+      "local": { "family": "ipv4", "address": "10.0.0.5", "port": 2049 },
+      "remote": { "family": "ipv4", "address": "10.0.0.20", "port": 871 },
+      "stats": {
+        "rx_messages": "9120", "tx_messages": "9120",
+        "rx_bytes": "1398412", "tx_bytes": "27413056",
+        "requests_completed": "9120", "requests_in_flight": "0"
+      },
+      "observed_rpc_programs": [ { "program": 100003, "version": 4 } ],
+      "nfs_minor_versions_seen": [ 2 ],
+      "rpc_framing": "record_marking"
+    }
+  ]
+}
+```
+
+Counters can exceed 2^53, so they are decimal strings. `connection_id` names a
+connection only together with `server_instance_id`: a reconnect or a restart
+gives a new one. `nfs_minor_versions_seen` lists the NFSv4 minor versions a
+COMPOUND has used on the connection, and `observed_rpc_programs` the RPC
+programs and versions a call has been accepted for.
+
+At most 1,024 rows are returned, shared evenly between the workers asked: with
+8 workers each returns at most 128, so one busy worker can be cut short while
+the total is far below 1,024. Add `worker_id` to give one worker the whole
+budget, or a filter to narrow its rows. `complete` is false when a worker did
+not answer within one second or a limit was reached; `missing_workers` and
+`truncated` say which. Only one collection runs at a time, so a request made
+while another is outstanding returns `429` with a `Retry-After` header. `503`
+means no worker answered or the server is shutting down. There is no
+pagination and no history of closed connections: a connection missing from the
+list is only an observation about the transport, not proof that an NFSv4 lease
+expired.
+
+```bash
+curl 'http://localhost:8080/api/v1/connections?remote_ip=10.0.0.20'
 ```
 
 ---
