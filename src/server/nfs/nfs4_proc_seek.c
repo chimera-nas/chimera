@@ -213,9 +213,22 @@ chimera_nfs4_seek(
         return;
     }
 
+    /* A stateid belongs to the client that was issued it; another client's
+     * open, lock or delegation stateid is not valid here (as for READ). */
+    status = nfs_state_check_client(
+        state_void, state_type,
+        req->session ? req->session->client_unified : NULL);
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->sa_status = status;
+        chimera_nfs4_compound_complete(req, res->sa_status);
+        return;
+    }
+
     /* A delegation stateid authorizes the SEEK but carries no open handle
-    * (only open/lock states do).  Drop the ref and open the current FH on
-    * the fly, as for the special stateids; READ does the same.  A Linux
+    * (only open and lock states do).  Drop the ref and open the current FH
+    * on the fly, as for the special stateids; READ does the same.  A Linux
     * client holding a delegation sends the delegation stateid for I/O. */
     if (state_type == NFS4_SLOT_TYPE_DELEG) {
         struct nfs_delegation *deleg = state_void;
@@ -227,11 +240,6 @@ chimera_nfs4_seek(
              * either delegation type grants the read. */
             status = nfs_delegation_check_io_for_fh(deleg, req->fh, req->fhlen,
                                                     OPEN4_SHARE_ACCESS_READ);
-        }
-        if (status == NFS4_OK) {
-            /* The delegation holder's own SEEK must not recall its delegation. */
-            req->io_owner_valid     = true;
-            req->io_owner_client_id = deleg->client->client_id;
         }
         nfs_state_table_release(table, state_void, state_type, thread->vfs_thread);
         if (status != NFS4_OK) {
@@ -251,14 +259,11 @@ chimera_nfs4_seek(
 
     state_handle = nfs_state_io_handle(state_void, state_type, OPEN4_SHARE_ACCESS_READ);
 
-    /* nfs_state_io_handle() returns NULL when the open/lock state retains no
-     * backend handle (unknown state type, or an open without a usable
-     * handle).  chimera_vfs_seek() dereferences the handle, so refuse the
-     * request instead of crashing the server; READ answers the same way when
-     * the open's access mode does not allow reading. */
+    /* Defensive: a state with no backend handle (for example one being torn
+     * down) must not reach chimera_vfs_seek(), which dereferences it. */
     if (!state_handle) {
         nfs_state_table_release(table, state_void, state_type, thread->vfs_thread);
-        res->sa_status = NFS4ERR_OPENMODE;
+        res->sa_status = NFS4ERR_BAD_STATEID;
         chimera_nfs4_compound_complete(req, res->sa_status);
         return;
     }
