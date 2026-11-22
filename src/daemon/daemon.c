@@ -1111,6 +1111,14 @@ apply_rest_config(
         chimera_server_config_set_rest_http_port(server_config, rest_http_port);
     }
 
+    /* Address the REST listeners bind to; default all interfaces. */
+    json_t *rest_hostname_value = json_object_get(server_params, "rest_hostname");
+
+    if (rest_hostname_value && json_is_string(rest_hostname_value)) {
+        chimera_server_config_set_rest_hostname(server_config,
+                                                json_string_value(rest_hostname_value));
+    }
+
     /* Test-only: enable the /api/v1/debug/fsop endpoint that performs
      * server-side filesystem mutations (used to drive delegation recalls in
      * the pynfs DELEG16-20 tests). Default off; never enable in production. */

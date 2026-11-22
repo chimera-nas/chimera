@@ -109,6 +109,7 @@ struct chimera_server_config {
     int                                   rest_https_port;
     int                                   rest_debug_fsops;
     int                                   rest_auth_enabled;
+    char                                  rest_hostname[256];
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
     int                                   smb_persistent_handles;
