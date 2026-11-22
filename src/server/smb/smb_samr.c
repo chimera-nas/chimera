@@ -2,333 +2,227 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#include "smb_samr.h"
-#include "smb_dcerpc.h"
-#include "samr_ndr.h"
+/*
+ * SAMR (MS-SAMR) on libdcerpc, read-only foundation: connect, enumerate the
+ * server's two domains (the account domain named after the server, and
+ * Builtin) and resolve a domain name to its SID.
+ */
 
-/* SAMR interface 12345778-1234-abcd-ef00-0123456789ac v1.0 (note the trailing
- * ...ac, vs LSARPC's ...ab). */
-static const dce_if_uuid_t SAMR_INTERFACE = {
-    .if_uuid       = { 0x78, 0x57, 0x34, 0x12, 0x34, 0x12, 0xCD, 0xAB,
-                       0xEF, 0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xac },
-    .if_vers_major = 1,
-    .if_vers_minor = 0,
+#include <string.h>
+
+#include <dcerpc/samr.h>
+
+#include "smb_rpc_service.h"
+
+static int
+chimera_smb_samr_open_server(
+    struct dcerpc_pdu            *pdu,
+    struct dcerpc_context_handle *handle,
+    uint32_t                     *status)
+{
+    if (chimera_smb_rpc_handle_open(chimera_smb_rpc_state_of_pdu(pdu),
+                                    CHIMERA_SMB_RPC_HANDLE_SAMR_SERVER, handle)) {
+        memset(handle, 0, sizeof(*handle));
+        *status = CHIMERA_SMB_RPC_STATUS_INSUFFICIENT_RESOURCES;
+    } else {
+        *status = CHIMERA_SMB_RPC_STATUS_OK;
+    }
+
+    return 0;
+} /* chimera_smb_samr_open_server */
+
+static int
+chimera_smb_samr_server_valid(
+    struct dcerpc_pdu                  *pdu,
+    const struct dcerpc_context_handle *handle)
+{
+    return chimera_smb_rpc_handle_valid(chimera_smb_rpc_state_of_pdu(pdu),
+                                        CHIMERA_SMB_RPC_HANDLE_SAMR_SERVER, handle);
+} /* chimera_smb_samr_server_valid */
+
+/* SamrConnect (opnum 0). */
+static int
+chimera_smb_samr_connect(
+    struct dcerpc_context *dce,
+    struct dcerpc_pdu     *pdu,
+    void                  *reqv,
+    void                  *repv)
+{
+    struct samr_Connect_rep *rep = repv;
+
+    (void) dce;
+    (void) reqv;
+
+    return chimera_smb_samr_open_server(pdu, &rep->ServerHandle, &rep->status);
+} /* chimera_smb_samr_connect */
+
+/* SamrConnect2 (opnum 57). */
+static int
+chimera_smb_samr_connect2(
+    struct dcerpc_context *dce,
+    struct dcerpc_pdu     *pdu,
+    void                  *reqv,
+    void                  *repv)
+{
+    struct samr_Connect2_rep *rep = repv;
+
+    (void) dce;
+    (void) reqv;
+
+    return chimera_smb_samr_open_server(pdu, &rep->ServerHandle, &rep->status);
+} /* chimera_smb_samr_connect2 */
+
+/* SamrConnect5 (opnum 64). */
+static int
+chimera_smb_samr_connect5(
+    struct dcerpc_context *dce,
+    struct dcerpc_pdu     *pdu,
+    void                  *reqv,
+    void                  *repv)
+{
+    struct samr_Connect5_rep *rep = repv;
+
+    (void) dce;
+    (void) reqv;
+
+    /* Revision 3, no optional features. */
+    rep->OutVersion                           = 1;
+    rep->OutRevisionInfo.V1.Revision          = 3;
+    rep->OutRevisionInfo.V1.SupportedFeatures = 0;
+
+    return chimera_smb_samr_open_server(pdu, &rep->ServerHandle, &rep->status);
+} /* chimera_smb_samr_connect5 */
+
+/* SamrCloseHandle (opnum 1). */
+static int
+chimera_smb_samr_close_handle(
+    struct dcerpc_context *dce,
+    struct dcerpc_pdu     *pdu,
+    void                  *reqv,
+    void                  *repv)
+{
+    struct samr_CloseHandle_req *req = reqv;
+    struct samr_CloseHandle_rep *rep = repv;
+
+    (void) dce;
+
+    if (!chimera_smb_rpc_handle_close(chimera_smb_rpc_state_of_pdu(pdu),
+                                      CHIMERA_SMB_RPC_HANDLE_SAMR_SERVER,
+                                      &req->SamHandle)) {
+        return DCERPC_FAULT_CONTEXT_MISMATCH;
+    }
+
+    rep->status = CHIMERA_SMB_RPC_STATUS_OK;
+    return 0;
+} /* chimera_smb_samr_close_handle */
+
+/* SamrEnumerateDomainsInSamServer (opnum 6). */
+static int
+chimera_smb_samr_enum_domains(
+    struct dcerpc_context *dce,
+    struct dcerpc_pdu     *pdu,
+    void                  *reqv,
+    void                  *repv)
+{
+    struct samr_EnumerateDomainsInSamServer_req *req   = reqv;
+    struct samr_EnumerateDomainsInSamServer_rep *rep   = repv;
+    struct chimera_smb_rpc_state                *state = chimera_smb_rpc_state_of_pdu(pdu);
+    struct samr_SAMPR_RID_ENUMERATION           *e;
+
+    (void) dce;
+
+    if (!chimera_smb_samr_server_valid(pdu, &req->ServerHandle)) {
+        return DCERPC_FAULT_CONTEXT_MISMATCH;
+    }
+
+    e = dcerpc_alloc_data(pdu, 2 * sizeof(*e));
+
+    if (!e) {
+        return -1;
+    }
+
+    e[0].Name = chimera_smb_rpc_strdup(pdu, chimera_smb_rpc_host_identity(state->host));
+    e[1].Name = "Builtin";
+
+    if (!e[0].Name) {
+        return -1;
+    }
+
+    rep->Buffer.EntriesRead = 2;
+    rep->Buffer.Buffer      = e;
+    rep->CountReturned      = 2;
+    rep->EnumerationContext = 0;
+    rep->status             = CHIMERA_SMB_RPC_STATUS_OK;
+    return 0;
+} /* chimera_smb_samr_enum_domains */
+
+/* SamrLookupDomainInSamServer (opnum 5). */
+static int
+chimera_smb_samr_lookup_domain(
+    struct dcerpc_context *dce,
+    struct dcerpc_pdu     *pdu,
+    void                  *reqv,
+    void                  *repv)
+{
+    struct samr_LookupDomainInSamServer_req *req   = reqv;
+    struct samr_LookupDomainInSamServer_rep *rep   = repv;
+    struct chimera_smb_rpc_state            *state = chimera_smb_rpc_state_of_pdu(pdu);
+    RPC_SID                                  sid;
+
+    (void) dce;
+
+    if (!chimera_smb_samr_server_valid(pdu, &req->ServerHandle)) {
+        return DCERPC_FAULT_CONTEXT_MISMATCH;
+    }
+
+    if (req->Name && chimera_smb_rpc_strcasecmp(req->Name, "Builtin") == 0) {
+        chimera_smb_rpc_builtin_sid(&sid);
+    } else if (req->Name &&
+               chimera_smb_rpc_strcasecmp(req->Name, chimera_smb_rpc_host_identity(state->host)) == 0) {
+        chimera_smb_rpc_account_sid(&sid, state->host);
+    } else {
+        rep->status = CHIMERA_SMB_RPC_STATUS_NO_SUCH_DOMAIN;
+        return 0;
+    }
+
+    rep->DomainId = chimera_smb_rpc_sid_dup(pdu, &sid);
+
+    if (!rep->DomainId) {
+        return -1;
+    }
+
+    rep->status = CHIMERA_SMB_RPC_STATUS_OK;
+    return 0;
+} /* chimera_smb_samr_lookup_domain */
+
+static const struct dcerpc_stub chimera_smb_samr_stubs[] = {
+    { SAMR_CONNECT,                     "Connect",                          chimera_smb_samr_connect
+    },
+    { SAMR_CLOSEHANDLE,                 "CloseHandle",                      chimera_smb_samr_close_handle
+    },
+    { SAMR_LOOKUPDOMAININSAMSERVER,     "LookupDomainInSamServer",          chimera_smb_samr_lookup_domain
+    },
+    { SAMR_ENUMERATEDOMAINSINSAMSERVER, "EnumerateDomainsInSamServer",      chimera_smb_samr_enum_domains
+    },
+    { SAMR_CONNECT2,                    "Connect2",                         chimera_smb_samr_connect2
+    },
+    { SAMR_CONNECT5,                    "Connect5",                         chimera_smb_samr_connect5
+    },
+    { -1,                               NULL,                               NULL
+    }
 };
 
-#define SAMR_OP_CONNECT            0
-#define SAMR_OP_CLOSE              1
-#define SAMR_OP_LOOKUPDOMAIN       5
-#define SAMR_OP_ENUMDOMAINS        6
-#define SAMR_OP_CONNECT2           21
-#define SAMR_OP_CONNECT5           64
-
-#define SAMR_STATUS_NO_SUCH_DOMAIN 0xC00000DF
-
-#define SAMR_RPC_STUB_MAX          (65535 - (int) (sizeof(dce_common_t) + sizeof(dce_co_response_t)))
-
-/* ---- per-connection context (policy) handles ----
- * The same fixed per-connection set the LSARPC service uses (conn->rpc_handles):
- * a 16-byte all-zero slot is free; a handle not in the set faults
- * CONTEXT_MISMATCH. */
-static int
-chimera_smb_samr_handle_set(const uint8_t uuid[16])
+struct dcerpc_server *
+chimera_smb_samr_endpoint(void)
 {
-    for (int i = 0; i < 16; i++) {
-        if (uuid[i]) {
-            return 1;
-        }
-    }
-    return 0;
-} /* chimera_smb_samr_handle_set */
+    struct dcerpc_server *srv = dcerpc_server_create("samr");
 
-static int
-chimera_smb_samr_handle_open(
-    struct chimera_smb_conn *conn,
-    struct samr_handle      *h)
-{
-    for (int i = 0; i < CHIMERA_SMB_RPC_MAX_HANDLES; i++) {
-        uint64_t a, b;
-
-        if (chimera_smb_samr_handle_set(conn->rpc_handles[i])) {
-            continue;
-        }
-        a = chimera_rand64();
-        b = chimera_rand64();
-        memcpy(conn->rpc_handles[i], &a, 8);
-        memcpy(conn->rpc_handles[i] + 8, &b, 8);
-        conn->rpc_handles[i][0] |= 1;
-
-        h->handle_type = 0;
-        memcpy(h->uuid, conn->rpc_handles[i], 16);
-        return 0;
-    }
-    return -1;
-} /* chimera_smb_samr_handle_open */
-
-static int
-chimera_smb_samr_handle_slot(
-    struct chimera_smb_conn  *conn,
-    const struct samr_handle *h)
-{
-    if (!chimera_smb_samr_handle_set(h->uuid)) {
-        return -1;
-    }
-    for (int i = 0; i < CHIMERA_SMB_RPC_MAX_HANDLES; i++) {
-        if (memcmp(conn->rpc_handles[i], h->uuid, 16) == 0) {
-            return i;
-        }
-    }
-    return -1;
-} /* chimera_smb_samr_handle_slot */
-
-static int
-chimera_smb_samr_handle_valid(
-    struct chimera_smb_conn  *conn,
-    const struct samr_handle *h)
-{
-    return chimera_smb_samr_handle_slot(conn, h) >= 0;
-} /* chimera_smb_samr_handle_valid */
-
-static int
-chimera_smb_samr_handle_close(
-    struct chimera_smb_conn  *conn,
-    const struct samr_handle *h)
-{
-    int slot = chimera_smb_samr_handle_slot(conn, h);
-
-    if (slot < 0) {
-        return 0;
-    }
-    memset(conn->rpc_handles[slot], 0, 16);
-    return 1;
-} /* chimera_smb_samr_handle_close */
-
-/* ---- helpers ---- */
-static void
-chimera_smb_samr_set_ustr(
-    struct samr_String *s,
-    const char         *utf8)
-{
-    s->length = (uint16_t) (strlen(utf8) * 2);
-    s->size   = (uint16_t) (strlen(utf8) * 2);
-    s->buffer = (char *) utf8;
-} /* chimera_smb_samr_set_ustr */
-
-/* BUILTIN domain SID S-1-5-32. */
-static void
-chimera_smb_samr_builtin_sid(struct ndr_sid *sid)
-{
-    memset(sid, 0, sizeof(*sid));
-    sid->revision                = 1;
-    sid->identifier_authority[5] = 5;
-    sid->sub_authority_count     = 1;
-    sid->sub_authority[0]        = 32;
-} /* chimera_smb_samr_builtin_sid */
-
-/* The server's account-domain (machine) SID S-1-5-21-X-Y-Z. */
-static void
-chimera_smb_samr_account_sid(
-    struct ndr_sid                         *sid,
-    const struct chimera_server_smb_shared *shared)
-{
-    memset(sid, 0, sizeof(*sid));
-    sid->revision                = 1;
-    sid->identifier_authority[5] = 5;
-    sid->sub_authority_count     = 4;
-    sid->sub_authority[0]        = 21;
-    sid->sub_authority[1]        = shared->machine_domain_sub[0];
-    sid->sub_authority[2]        = shared->machine_domain_sub[1];
-    sid->sub_authority[3]        = shared->machine_domain_sub[2];
-} /* chimera_smb_samr_account_sid */
-
-/*
- * Business logic for the generated SAMR ops.  Read-only foundation: connect,
- * enumerate the server's two domains (the account domain named after the
- * server, and BUILTIN), and resolve a domain name to its SID.  Returns 0, or
- * DCE_RC_FAULT_CONTEXT_MISMATCH when handed a handle this connection did not
- * issue.
- */
-static int
-chimera_smb_samr_impl(
-    int                                     opnum,
-    const void                             *in,
-    void                                   *out,
-    struct ndr_dbuf                        *dbuf,
-    struct chimera_smb_conn                *conn,
-    const struct chimera_server_smb_shared *shared)
-{
-    const char *account_domain = shared->config.identity;
-
-    (void) in;
-
-    switch (opnum) {
-        case SAMR_OP_CONNECT: {
-            struct samr_Connect_out *o = out;
-            if (chimera_smb_samr_handle_open(conn, &o->connect_handle) != 0) {
-                memset(&o->connect_handle, 0, sizeof(o->connect_handle));
-                o->status = SAMR_STATUS_NO_SUCH_DOMAIN;
-            } else {
-                o->status = 0;
-            }
-            break;
-        }
-        case SAMR_OP_CONNECT2: {
-            struct samr_Connect2_out *o = out;
-            if (chimera_smb_samr_handle_open(conn, &o->connect_handle) != 0) {
-                memset(&o->connect_handle, 0, sizeof(o->connect_handle));
-                o->status = SAMR_STATUS_NO_SUCH_DOMAIN;
-            } else {
-                o->status = 0;
-            }
-            break;
-        }
-        case SAMR_OP_CONNECT5: {
-            struct samr_Connect5_out *o = out;
-            if (chimera_smb_samr_handle_open(conn, &o->connect_handle) != 0) {
-                memset(&o->connect_handle, 0, sizeof(o->connect_handle));
-                o->status = SAMR_STATUS_NO_SUCH_DOMAIN;
-                break;
-            }
-            /* Echo a level-1 revision info (the version the client negotiated). */
-            o->level_out                         = 1;
-            o->info_out.level                    = 1;
-            o->info_out.info1.client_version     = 1;
-            o->info_out.info1.supported_features = 0;
-            o->status                            = 0;
-            break;
-        }
-        case SAMR_OP_CLOSE: {
-            const struct samr_Close_in *li = in;
-            struct samr_Close_out      *o  = out;
-            if (!chimera_smb_samr_handle_close(conn, &li->handle)) {
-                return DCE_RC_FAULT_CONTEXT_MISMATCH;
-            }
-            o->handle.handle_type = 0;
-            memset(o->handle.uuid, 0, sizeof(o->handle.uuid));
-            o->status = 0;
-            break;
-        }
-        case SAMR_OP_ENUMDOMAINS: {
-            const struct samr_EnumDomains_in *li  = in;
-            struct samr_EnumDomains_out      *o   = out;
-            struct samr_SamArray             *sam = ndr_dbuf_alloc(dbuf, sizeof(*sam));
-            struct samr_SamEntry             *e   = ndr_dbuf_alloc(dbuf, 2 * sizeof(*e));
-
-            if (!chimera_smb_samr_handle_valid(conn, &li->connect_handle)) {
-                return DCE_RC_FAULT_CONTEXT_MISMATCH;
-            }
-
-            e[0].idx = 0;
-            chimera_smb_samr_set_ustr(&e[0].name, account_domain);
-            e[1].idx = 0;
-            chimera_smb_samr_set_ustr(&e[1].name, "Builtin");
-
-            sam->count       = 2;
-            sam->entries     = e;
-            o->sam           = sam;
-            o->num_entries   = 2;
-            o->resume_handle = 0;
-            o->status        = 0;
-            break;
-        }
-        case SAMR_OP_LOOKUPDOMAIN: {
-            const struct samr_LookupDomain_in *li  = in;
-            struct samr_LookupDomain_out      *o   = out;
-            const char                        *dom = li->domain_name.buffer;
-            struct ndr_sid                    *sid;
-
-            if (!chimera_smb_samr_handle_valid(conn, &li->connect_handle)) {
-                return DCE_RC_FAULT_CONTEXT_MISMATCH;
-            }
-
-            o->sid.sid = NULL;
-
-            if (!dom) {
-                o->status = SAMR_STATUS_NO_SUCH_DOMAIN;
-                break;
-            }
-
-            sid = ndr_dbuf_alloc(dbuf, sizeof(*sid));
-            if (strcasecmp(dom, "Builtin") == 0) {
-                chimera_smb_samr_builtin_sid(sid);
-                o->sid.sid = sid;
-                o->status  = 0;
-            } else if (strcasecmp(dom, account_domain) == 0) {
-                chimera_smb_samr_account_sid(sid, shared);
-                o->sid.sid = sid;
-                o->status  = 0;
-            } else {
-                o->status = SAMR_STATUS_NO_SUCH_DOMAIN;
-            }
-            break;
-        }
-        default:
-            break;
-    } /* switch */
-
-    return 0;
-} /* chimera_smb_samr_impl */
-
-static int
-chimera_smb_samr_handler(
-    int                       opnum,
-    struct evpl_iovec_cursor *cursor,
-    void                     *output,
-    void                     *private_data)
-{
-    struct chimera_smb_request       *request = private_data;
-    struct chimera_server_smb_shared *shared  = request->compound->thread->shared;
-    const struct ndr_op_desc         *op;
-    struct ndr_cursor                 c;
-    struct ndr_writer                 w;
-    struct ndr_dbuf                   dbuf;
-    void                             *in, *out;
-    int                               n;
-
-    op = ndr_find_op(samr_op_table, samr_op_count, opnum);
-    if (!op) {
-        return -1;
+    if (srv && dcerpc_server_add_interface(srv, &samr_interface, samr_procs,
+                                           chimera_smb_samr_stubs,
+                                           DCERPC_SERVER_ALL_NDR)) {
+        dcerpc_server_destroy(srv);
+        srv = NULL;
     }
 
-    ndr_cursor_init(&c, evpl_iovec_cursor_data(cursor),
-                    cursor->iov->length - cursor->offset);
-    ndr_dbuf_init(&dbuf, 4096);
-
-    in  = ndr_dbuf_alloc(&dbuf, op->in_size);
-    out = ndr_dbuf_alloc(&dbuf, op->out_size);
-
-    op->pull_in(&c, in, &dbuf);
-    n = chimera_smb_samr_impl(op->opnum, in, out, &dbuf,
-                              request->compound->conn, shared);
-
-    if (n < 0) {
-        ndr_dbuf_destroy(&dbuf);
-        return n;
-    }
-
-    ndr_writer_init(&w, output, SAMR_RPC_STUB_MAX);
-    n = op->push_out(&w, out);
-
-    ndr_dbuf_destroy(&dbuf);
-    return n;
-} /* chimera_smb_samr_handler */
-
-int
-chimera_smb_samr_transceive(
-    struct chimera_smb_request *request,
-    struct evpl_iovec          *input_iov,
-    int                         input_niov,
-    struct evpl_iovec          *output_iov)
-{
-    int status;
-
-    status = dce_rpc(&SAMR_INTERFACE, input_iov, input_niov, output_iov,
-                     chimera_smb_samr_handler, request);
-
-    if (status != 0) {
-        chimera_smb_error("SAMR RPC transceive failed");
-        return status;
-    }
-
-    return 0;
-} /* chimera_smb_samr_transceive */
+    return srv;
+} /* chimera_smb_samr_endpoint */

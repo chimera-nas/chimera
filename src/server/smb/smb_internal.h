@@ -38,6 +38,7 @@
 #include "smb_gssapi.h"
 #include "smb_sharemode.h"
 #include "smb_notify.h"
+#include "smb_rpc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_claim.h"
 #include "common/tcp_flavor.h"
@@ -1398,8 +1399,6 @@ struct chimera_smb_session_handle {
 
 struct chimera_smb_notify_request;
 
-#define CHIMERA_SMB_RPC_MAX_HANDLES                 16
-
 /* Ceiling on the credit balance the server will let a single connection
  * accumulate.  A response grants the credits the client asked for, but never so
  * many that the client's balance would exceed this -- otherwise a client that
@@ -1423,15 +1422,6 @@ struct chimera_smb_conn {
     uint8_t                           *ntlm_output;
     size_t                             ntlm_output_len;
     unsigned int                       flags;
-    /* DCE/RPC context (policy) handles currently open on this connection: each
-     * 16-byte slot holds an issued handle's id, an all-zero slot is free.  An op
-     * presented a handle not in this set -- issued on another connection,
-     * already closed, or never issued -- faults with
-     * nca_s_fault_context_mismatch.  Scoping the set to the connection is what
-     * makes a cross-connection use and a double-close fail (MS-LSAD,
-     * smbtorture rpc.handles).  16 slots is far more than the one or two policy
-     * handles a client holds at once. */
-    uint8_t                            rpc_handles[CHIMERA_SMB_RPC_MAX_HANDLES][16];
     /* Set under the owning thread's lease_break_lock while conn_free drains
      * this connection's queued lease-break notifications, so a break_cb racing
      * on another thread does not enqueue a send for a connection whose bind is
@@ -2294,14 +2284,13 @@ chimera_smb_open_file_free(
                          open_file->lock_entries,
                          "open file freed with claims still linked");
 
-    /* Release any undrained ncacn_np pipe response and reset the stash so a
-     * reused open_file (the free list does not zero) starts clean. */
-    if (open_file->rpc_resp) {
-        free(open_file->rpc_resp);
-        open_file->rpc_resp = NULL;
+    /* Tear down a named pipe's DCE/RPC state (its context handles and any
+     * undrained output go with it) and clear the field, since the free list
+     * reuses opens without zeroing them. */
+    if (open_file->rpc_pipe) {
+        chimera_smb_rpc_pipe_close(open_file->rpc_pipe);
+        open_file->rpc_pipe = NULL;
     }
-    open_file->rpc_resp_len = 0;
-    open_file->rpc_resp_off = 0;
     LL_PREPEND(thread->free_open_files, open_file);
 } /* chimera_smb_open_file_free */
 
@@ -2721,10 +2710,6 @@ chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
     } else {
         conn = calloc(1, sizeof(*conn));
     }
-
-    /* No RPC context handles open yet; clear the set since the connection pool
-    * does not zero on reuse (a stale slot would validate a foreign handle). */
-    memset(conn->rpc_handles, 0, sizeof(conn->rpc_handles));
 
     return conn;
 } /* chimera_smb_conn_alloc */

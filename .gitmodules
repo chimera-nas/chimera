@@ -8,9 +8,9 @@
 [submodule "ext/libevpl"]
 	path = ext/libevpl
 	url = https://github.com/chimera-nas/libevpl.git
-[submodule "ext/ndrzcc"]
-	path = ext/ndrzcc
-	url = https://github.com/chimera-nas/ndrzcc.git
 [submodule "ext/specs"]
 	path = ext/specs
 	url = https://github.com/chimera-nas/specs
+[submodule "ext/libsmb2"]
+	path = ext/libsmb2
+	url = https://github.com/sahlberg/libsmb2.git

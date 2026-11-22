@@ -231,12 +231,13 @@ chimera_smb_rdma_read_callback(
 
 
 /*
- * DCE/RPC over a named pipe (ncacn_np), SMB2 WRITE leg: feed the written request
- * PDU through the pipe's transceive handler and stash the response for the
- * client's following SMB2 READ(s) to drain.  This is the WRITE/READ transport
- * Windows and smbtorture use, distinct from the single-shot
- * FSCTL_PIPE_TRANSCEIVE IOCTL transport.  A request PDU is assumed to arrive in
- * one WRITE (true for the small LSARPC/SRVSVC calls in scope).
+ * DCE/RPC over a named pipe (ncacn_np), SMB2 WRITE leg: hand the written bytes
+ * to the pipe's DCE/RPC server (smb_rpc.h), which processes every complete PDU
+ * and keeps a partial one for the next WRITE.  The replies are queued on the
+ * pipe for the client's following READs -- or for a READ already parked
+ * waiting on this pipe, which is completed now.  This is the WRITE/READ
+ * transport Windows and smbtorture use, alongside the single-shot
+ * FSCTL_PIPE_TRANSCEIVE.
  */
 static void
 chimera_smb_pipe_write(struct chimera_smb_request *request)
@@ -244,34 +245,22 @@ chimera_smb_pipe_write(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread    = request->compound->thread;
     struct evpl                      *evpl      = thread->evpl;
     struct chimera_smb_open_file     *open_file = request->write.open_file;
-    struct evpl_iovec                 output_iov;
     int                               status;
 
-    evpl_iovec_alloc(evpl, 65535, 8, 1, 0, &output_iov);
-
-    status = open_file->pipe_transceive(request, request->write.iov,
-                                        request->write.niov, &output_iov);
+    status = chimera_smb_rpc_pipe_write(open_file->rpc_pipe, request->write.iov,
+                                        request->write.niov);
 
     evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
 
     if (unlikely(status != 0)) {
-        evpl_iovec_release(evpl, &output_iov);
+        /* Not DCE/RPC: libdcerpc dropped what it had buffered. */
         chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 
-    /* Replace any still-undrained prior response, then copy the new PDU into a
-     * stable heap buffer (the evpl iovec is thread-local and released now). */
-    if (open_file->rpc_resp) {
-        free(open_file->rpc_resp);
-    }
-    open_file->rpc_resp_len = output_iov.length;
-    open_file->rpc_resp_off = 0;
-    open_file->rpc_resp     = malloc(output_iov.length ? output_iov.length : 1);
-    memcpy(open_file->rpc_resp, output_iov.data, output_iov.length);
+    chimera_smb_pipe_read_wake(request->compound->conn, open_file);
 
-    evpl_iovec_release(evpl, &output_iov);
     chimera_smb_open_file_release(request, open_file);
 
     /* chimera_smb_write_reply reports request->write.length bytes accepted. */

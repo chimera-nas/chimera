@@ -140,35 +140,17 @@ enum chimera_smb_open_file_type {
     CHIMERA_SMB_OPEN_FILE_TYPE_PIPE,
 };
 
-enum chimera_smb_pipe_magic {
-    CHIMERA_SMB_OPEN_FILE_LSA_RPC,
-    CHIMERA_SMB_OPEN_FILE_SRV_RPC,
-    CHIMERA_SMB_OPEN_FILE_SAMR_RPC,
-    CHIMERA_SMB_OPEN_FILE_WKSSVC_RPC,
-};
-
-struct chimera_smb_request;
-
-typedef int (*chimera_smb_pipe_transceive_t)(
-    struct chimera_smb_request *request,
-    struct evpl_iovec          *input_iov,
-    int                         input_niov,
-    struct evpl_iovec          *output_iov);
+struct chimera_smb_rpc_pipe;
 
 struct chimera_smb_notify_state;
 struct chimera_smb_lock_entry;
 
 struct chimera_smb_open_file {
     enum chimera_smb_open_file_type  type;
-    enum chimera_smb_pipe_magic      pipe_magic;
-    chimera_smb_pipe_transceive_t    pipe_transceive;
-    /* DCE/RPC-over-named-pipe (ncacn_np) transport via SMB2 WRITE/READ: a WRITE
-     * runs the request PDU through pipe_transceive and stashes the response PDU
-     * here for one or more following READs to drain.  NULL when no response is
-     * pending.  (The IOCTL FSCTL_PIPE_TRANSCEIVE transport does not use this.) */
-    uint8_t                         *rpc_resp;
-    uint32_t                         rpc_resp_len;
-    uint32_t                         rpc_resp_off;
+    /* DCE/RPC over this named pipe (ncacn_np): WRITEs and the input of an
+     * FSCTL_PIPE_TRANSCEIVE go in, READs and the TRANSCEIVE output come out
+     * (smb_rpc.h).  NULL for a file open. */
+    struct chimera_smb_rpc_pipe     *rpc_pipe;
     struct UT_hash_handle            hh;
     struct chimera_smb_file_id       file_id;
     struct chimera_vfs_open_handle  *handle;

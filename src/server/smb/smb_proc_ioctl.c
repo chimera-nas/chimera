@@ -160,29 +160,41 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 return;
             }
 
-            evpl_iovec_alloc(
-                thread->evpl,
-                65535,
-                8,
-                1,
-                0, &request->ioctl.output_iov);
-
-            status = open_file->pipe_transceive(request,
+            /* The request PDU goes into the pipe and the first reply fragment
+             * comes back, up to MaxOutputResponse.  A fragment that does not
+             * fit is returned in part with STATUS_BUFFER_OVERFLOW and the
+             * client READs the rest (MS-SMB2 3.3.5.15.8, MS-FSCC 2.3.49). */
+            status = chimera_smb_rpc_pipe_write(open_file->rpc_pipe,
                                                 request->ioctl.input_iov,
-                                                request->ioctl.input_niov,
-                                                &request->ioctl.output_iov);
-
-            chimera_smb_open_file_release(request, open_file);
+                                                request->ioctl.input_niov);
 
             evpl_iovecs_release(thread->evpl, request->ioctl.input_iov, request->ioctl.input_niov);
 
             if (status != 0) {
-                evpl_iovec_release(thread->evpl, &request->ioctl.output_iov);
-                chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
                 return;
             }
 
-            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            {
+                uint32_t cap  = request->ioctl.max_output_response;
+                int      more = 0;
+
+                if (cap > 65536) {
+                    cap = 65536;   /* a fragment is at most 64KiB */
+                }
+
+                evpl_iovec_alloc(thread->evpl, cap ? cap : 1, 8, 1, 0,
+                                 &request->ioctl.output_iov);
+
+                request->ioctl.output_iov.length = chimera_smb_rpc_pipe_read(
+                    open_file->rpc_pipe, request->ioctl.output_iov.data, cap, &more);
+
+                chimera_smb_open_file_release(request, open_file);
+
+                chimera_smb_complete_request(request, more ? SMB2_STATUS_BUFFER_OVERFLOW :
+                                             SMB2_STATUS_SUCCESS);
+            }
             break;
 
         case SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO:

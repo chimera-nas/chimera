@@ -232,34 +232,79 @@ chimera_smb_read_send(struct chimera_smb_request *request)
 } /* chimera_smb_read_send */
 
 /*
- * DCE/RPC over a named pipe (ncacn_np), SMB2 READ leg: drain the response PDU a
- * prior SMB2 WRITE stashed via chimera_smb_pipe_write.  Serves up to the
- * requested length, advancing an offset so a client may read the response in
- * several chunks; the stash is freed once fully drained.
+ * DCE/RPC over a named pipe (ncacn_np), SMB2 READ leg.
  *
- * A read with no buffered response is a blocking message-mode pipe read: it does
+ * Fill a READ from the pipe's pending output (smb_rpc.h): up to the requested
+ * length of the current fragment.  A fragment that does not fit is a message
+ * the client must keep reading: STATUS_BUFFER_OVERFLOW with the part that fit,
+ * as Windows answers a message-mode pipe read.  Returns 0, leaving the request
+ * untouched, when there is nothing to read.
+ */
+static int
+chimera_smb_pipe_read_fill(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file,
+    uint32_t                     *status)
+{
+    struct evpl *evpl = request->compound->thread->evpl;
+    uint32_t     cap, n;
+    int          more = 0;
+
+    if (!chimera_smb_rpc_pipe_has_output(open_file->rpc_pipe)) {
+        return 0;
+    }
+
+    /* A fragment is at most 64KiB (frag_len is 16 bits). */
+    cap = request->read.length < 65536 ? request->read.length : 65536;
+
+    if (cap == 0) {
+        return 0;
+    }
+
+    request->read.niov = evpl_iovec_alloc(evpl, cap, 8, 1, 0, request->read.iov);
+    n                  = chimera_smb_rpc_pipe_read(open_file->rpc_pipe,
+                                                   request->read.iov[0].data, cap, &more);
+
+    if (n == 0) {
+        evpl_iovecs_release(evpl, request->read.iov, request->read.niov);
+        request->read.niov = 0;
+        return 0;
+    }
+
+    request->read.iov[0].length = n;
+    request->read.r_length      = n;
+    *status                     = more ? SMB2_STATUS_BUFFER_OVERFLOW : SMB2_STATUS_SUCCESS;
+    return 1;
+} /* chimera_smb_pipe_read_fill */
+
+/*
+ * A READ with no output pending is a blocking message-mode pipe read: it does
  * not complete now.  Such reads are made async (STATUS_PENDING) up to a
  * per-connection ceiling; past it they fail with INSUFFICIENT_RESOURCES.  This
- * is the contract smb2.credits.*_ipc_max_async_credits asserts (and a parked
- * read stays parked until the client cancels it or the connection tears down).
+ * is the contract smb2.credits.*_ipc_max_async_credits asserts.  A parked read
+ * completes when a WRITE produces output (chimera_smb_pipe_read_wake), or when
+ * the client cancels it or the connection tears down.
  */
 static void
 chimera_smb_pipe_read(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread    = request->compound->thread;
-    struct evpl                      *evpl      = thread->evpl;
     struct chimera_smb_open_file     *open_file = request->read.open_file;
-    uint32_t                          avail, n;
+    uint32_t                          status;
 
-    avail = open_file->rpc_resp_len - open_file->rpc_resp_off;
-    n     = request->read.length < avail ? request->read.length : avail;
+    if (chimera_smb_pipe_read_fill(request, open_file, &status)) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, status);
+        return;
+    }
 
-    if (n == 0) {
+    {
         struct chimera_smb_conn          *conn   = request->compound->conn;
         struct chimera_server_smb_shared *shared = thread->shared;
 
         /* The fid stays open; once parked the request needs nothing from the
-         * open until it is cancelled, so drop our handle reference now. */
+         * open until it is woken or cancelled, so drop our handle reference
+         * now. */
         chimera_smb_open_file_release(request, open_file);
 
         if (conn->async_outstanding >=
@@ -272,25 +317,39 @@ chimera_smb_pipe_read(struct chimera_smb_request *request)
         conn->async_outstanding++;
         request->async.pipe_read = 1;
         chimera_smb_async_interim_begin(request);
-        return;
     }
-
-    request->read.niov = evpl_iovec_alloc(evpl, n, 8, 1, 0, request->read.iov);
-    memcpy(request->read.iov[0].data,
-           open_file->rpc_resp + open_file->rpc_resp_off, n);
-    request->read.r_length   = n;
-    open_file->rpc_resp_off += n;
-
-    if (open_file->rpc_resp_off >= open_file->rpc_resp_len) {
-        free(open_file->rpc_resp);
-        open_file->rpc_resp     = NULL;
-        open_file->rpc_resp_len = 0;
-        open_file->rpc_resp_off = 0;
-    }
-
-    chimera_smb_open_file_release(request, open_file);
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_pipe_read */
+
+void
+chimera_smb_pipe_read_wake(
+    struct chimera_smb_conn      *conn,
+    struct chimera_smb_open_file *open_file)
+{
+    struct chimera_smb_request *parked;
+    uint32_t                    status;
+
+    /* Completing a parked request unlinks it, so rescan after each one. */
+    for (;;) {
+        for (parked = conn->parked_requests; parked;
+             parked = parked->async.park_next) {
+            if (parked->async.pipe_read &&
+                parked->read.file_id.pid == open_file->file_id.pid &&
+                parked->read.file_id.vid == open_file->file_id.vid) {
+                break;
+            }
+        }
+
+        if (!parked || !chimera_smb_pipe_read_fill(parked, open_file, &status)) {
+            return;
+        }
+
+        parked->async.pipe_read = 0;
+        if (conn->async_outstanding) {
+            conn->async_outstanding--;
+        }
+        chimera_smb_complete_request(parked, status);
+    }
+} /* chimera_smb_pipe_read_wake */
 
 void
 chimera_smb_read(struct chimera_smb_request *request)
