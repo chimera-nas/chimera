@@ -64,12 +64,16 @@ static int failures = 0;
 
 /* The exact masks the server reports, in Windows terms.  An exact match also
  * shows the view hands a reader or writer nothing beyond its generic rights
- * (no WRITE_DAC, WRITE_OWNER, DELETE, FILE_EXECUTE or FILE_DELETE_CHILD). */
+ * (no WRITE_DAC, WRITE_OWNER, DELETE, FILE_EXECUTE or FILE_DELETE_CHILD).  A
+ * MAXIMUM_ALLOWED grant may also hold DELETE through the parent directory
+ * (parent_delete). */
 #define MASK_GENERIC_R    0x00120089u /* FILE_GENERIC_READ */
 #define MASK_GENERIC_RW   0x0012019fu /* FILE_GENERIC_READ | FILE_GENERIC_WRITE */
 #define MASK_OWNER_RW_ACE 0x001e019fu /* the owner entry of rw-: also WRITE_DAC,
                                        * WRITE_OWNER */
 #define MASK_OWNER_RW     0x001f019fu /* what that owner holds: also DELETE */
+#define MASK_DELETE       0x00010000u
+#define MASK_DELETE_CHILD 0x00000040u
 
 #define CHECK(cond, ...)                             \
         do {                                         \
@@ -570,6 +574,37 @@ open_maximal(
     return co.status;
 } /* open_maximal */
 
+/* DELETE, if the share root, which holds the files these checks open, grants
+ * the caller FILE_DELETE_CHILD: a MAXIMUM_ALLOWED grant then includes DELETE
+ * (MS-FSA 2.1.5.1.2.1), beyond what the file's own descriptor grants. */
+static uint32_t
+parent_delete(struct smb2_conn *c)
+{
+    static const uint8_t   mxac[4] = { 'M', 'x', 'A', 'c' };
+    struct smb2_cctx       ctx     = { mxac, 4, NULL, 0 };
+    struct smb2_create_out co;
+    uint32_t               maximal = 0;
+
+    smb2c_send(c, smb2c_build_create_full(c, "", MBT_FILE_OPEN,
+                                          MBT_FILE_READ_ATTRIBUTES,
+                                          MBT_FILE_SHARE_RWD,
+                                          MBT_FILE_DIRECTORY_FILE, 0,
+                                          NULL, &ctx, 1));
+    smb2c_wait(c);
+    smb2c_parse_create(c, &co);
+    if (co.status != ST_SUCCESS) {
+        return 0;
+    }
+    for (int i = 0; i < co.nctx; i++) {
+        if (co.ctx[i].name_len == 4 && memcmp(co.ctx[i].name, mxac, 4) == 0 &&
+            co.ctx[i].data_len >= 8 && g32(co.ctx[i].data, 0) == ST_SUCCESS) {
+            maximal = g32(co.ctx[i].data, 4);
+        }
+    }
+    smb2_close(c, co.file_id);
+    return (maximal & MASK_DELETE_CHILD) ? MASK_DELETE : 0;
+} /* parent_delete */
+
 /* Set FileBasicInformation through `file_id`: an explicit LastWriteTime and
  * the HIDDEN attribute, the other times left as they are. */
 static uint32_t
@@ -808,6 +843,7 @@ run_checks(
     const char       *leg)
 {
     uint32_t st, st2, granted, maximal;
+    uint32_t pdel = parent_delete(c);
     uint64_t eof;
 
     /* Another user's file whose "other" bits allow reading. */
@@ -887,7 +923,7 @@ run_checks(
     /* What the descriptor grants, as MAXIMUM_ALLOWED and the MxAc maximal
      * access report it: a writer holds FILE_WRITE_ATTRIBUTES with the w bit. */
     st = open_granted(c, "grp_0664.bin", MBT_MAXIMUM_ALLOWED, &granted);
-    CHECK(st == ST_SUCCESS && granted == MASK_GENERIC_RW,
+    CHECK(st == ST_SUCCESS && granted == (MASK_GENERIC_RW | pdel),
           "%s: MAXIMUM_ALLOWED of a group-writable 0664 file grants exactly "
           "FILE_GENERIC_READ|FILE_GENERIC_WRITE (0x%08x) -> 0x%08x", leg, granted, st);
 
@@ -898,7 +934,7 @@ run_checks(
           "WRITE_OWNER and DELETE (0x%08x) -> 0x%08x", leg, granted, st);
 
     st = open_granted(c, "root_0644.bin", MBT_MAXIMUM_ALLOWED, &granted);
-    CHECK(st == ST_SUCCESS && granted == MASK_GENERIC_R,
+    CHECK(st == ST_SUCCESS && granted == (MASK_GENERIC_R | pdel),
           "%s: MAXIMUM_ALLOWED of another user's 0644 file grants exactly "
           "FILE_GENERIC_READ (0x%08x) -> 0x%08x", leg, granted, st);
 
@@ -1127,7 +1163,7 @@ run_checks(
           "-> 0x%08x", leg, st);
 
     st = open_granted(c, "chmod_0664.bin", MBT_MAXIMUM_ALLOWED, &granted);
-    CHECK(st == ST_SUCCESS && granted == MASK_GENERIC_RW,
+    CHECK(st == ST_SUCCESS && granted == (MASK_GENERIC_RW | pdel),
           "%s: MAXIMUM_ALLOWED of that file grants exactly "
           "FILE_GENERIC_READ|FILE_GENERIC_WRITE (0x%08x) -> 0x%08x", leg, granted, st);
 
@@ -1243,6 +1279,7 @@ run_nonowner_checks(
     const char       *leg)
 {
     uint32_t st, granted, maximal;
+    uint32_t pdel = parent_delete(c);
 
     st = open_status(c, "root_0644.bin", MBT_GENERIC_READ, MBT_FILE_NON_DIRECTORY_FILE);
     CHECK(st == ST_SUCCESS,
@@ -1267,7 +1304,7 @@ run_nonowner_checks(
           "%s: GENERIC_WRITE of a group-writable 0664 file -> 0x%08x", leg, st);
 
     st = open_granted(c, "grp_0664.bin", MBT_MAXIMUM_ALLOWED, &granted);
-    CHECK(st == ST_SUCCESS && granted == MASK_GENERIC_RW,
+    CHECK(st == ST_SUCCESS && granted == (MASK_GENERIC_RW | pdel),
           "%s: MAXIMUM_ALLOWED of a group-writable 0664 file grants exactly "
           "FILE_GENERIC_READ|FILE_GENERIC_WRITE (0x%08x) -> 0x%08x", leg, granted, st);
 
