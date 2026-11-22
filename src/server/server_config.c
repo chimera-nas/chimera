@@ -118,7 +118,8 @@ chimera_server_config_init(void)
     config->smb_signing_required = 0;
 
     /* SMB3 transport encryption is off by default; the "smb_encryption" config
-     * flag enables (1) or requires (2) it. */
+     * setting offers it (CHIMERA_SMB_ENCRYPTION_AVAILABLE), enables it
+     * (_ENABLED) or requires it (_REQUIRED). */
     config->smb_encryption = 0;
 
     /* SMB3 transport compression is off by default; the "smb_compression" flag

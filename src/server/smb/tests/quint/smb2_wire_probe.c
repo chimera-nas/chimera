@@ -46,6 +46,20 @@
  * as a bad token (MS-NLMP 3.2.5.1.2) rather than keyed with the wrong key.
  * W12 is the allowed side of that refusal: no KEY_EXCH, no key, accepted.
  *
+ * The E profiles pin each smb_encryption mode, as the server presents it and
+ * as it answers:
+ *   E1, E2    off: no ENCRYPTION_CAPABILITIES context (3.1.1), no
+ *             SMB2_GLOBAL_CAP_ENCRYPTION (3.0)
+ *   E8, E12   off with a share marked encrypt_data: the cipher (3.1.1) or the
+ *             capability (3.0) is offered, and the share's I/O is encrypted
+ *   E3-E5     available: the session is not ENCRYPT_DATA; encrypted requests
+ *             are answered encrypted, cleartext ones in cleartext
+ *   E11       available with a 3.0 client that only signs: let in, cleartext
+ *   E6, E7    enabled and required: the session is ENCRYPT_DATA, every reply
+ *             encrypted
+ *   E9, E10   a compressed READ reply to an encrypted request, under available
+ *             and under an encrypt_data share, is compressed and encrypted
+ *
  * With --winbind (run under scripts/ad_test_wrapper.sh) W2-W4 and W7 (as
  * WB2-WB4 and WB7), W10, W11 and W12 run again as a domain user that the
  * server validates through winbind.  winbind returns only the session base
@@ -326,6 +340,423 @@ run_profiles(
     }
 } /* run_profiles */
 
+/* SMB2_SESSION_FLAG_ENCRYPT_DATA (MS-SMB2 2.2.6): the server requires the
+ * session's traffic to be encrypted. */
+#define WIRE_SESSION_FLAG_ENCRYPT_DATA 0x0004
+
+/* One CREATE / WRITE / READ / CLOSE round on an established tree, so a check
+ * can say "I/O works" in one line. */
+static void
+wire_io(
+    struct smb2_conn *c,
+    const char       *name,
+    const char       *step)
+{
+    struct smb2_create_out co;
+    const char             payload[] = "WIREPROBE";   /* 9 bytes, no NUL */
+    uint8_t                rdbuf[64];
+    uint32_t               st, count = 0, rlen = 0;
+
+    st = smb2_create(c, "wire.txt", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
+    CHECK(st == ST_SUCCESS, "%s: %s CREATE -> 0x%08x", name, step, st);
+    st = smb2_write(c, co.file_id, 0, payload, 9, &count);
+    CHECK(st == ST_SUCCESS && count == 9,
+          "%s: %s WRITE -> 0x%08x (count=%u)", name, step, st, count);
+    st = smb2_read(c, co.file_id, 0, 9, rdbuf, &rlen);
+    CHECK(st == ST_SUCCESS && rlen == 9 && memcmp(rdbuf, payload, 9) == 0,
+          "%s: %s READ returns the bytes written (len=%u)", name, step, rlen);
+    st = smb2_close(c, co.file_id);
+    CHECK(st == ST_SUCCESS, "%s: %s CLOSE -> 0x%08x", name, step, st);
+} /* wire_io */
+
+/* With smb_encryption off the server must not claim to encrypt: a 3.1.1
+ * NEGOTIATE that carries an ENCRYPTION_CAPABILITIES context gets none back
+ * (MS-SMB2 3.3.5.4: "If IsEncryptionSupported is FALSE, the server MUST
+ * ignore the context"), and a 3.0 client that advertises
+ * SMB2_GLOBAL_CAP_ENCRYPTION does not get it echoed.  A client that sees
+ * neither knows at NEGOTIATE that the server does not encrypt, instead of
+ * encrypting anyway and being disconnected. */
+static void
+run_encryption_off(void)
+{
+    /* *INDENT-OFF* */
+    static const struct smb2_wire_profile off311 = {
+        .name = "E1 3.1.1 server encryption off",
+        .max_dialect = 0x0311, .ntlmv2 = 1, .sign = 1,
+        .signing_alg = SMB2W_SIGN_AES_GMAC,
+        .server_encryption = SMB2W_SERVER_ENC_OFF
+    };
+    static const struct smb2_wire_profile off30 = {
+        .name = "E2 3.0 server encryption off",
+        .max_dialect = 0x0300, .ntlmv2 = 1, .encrypt = 1,
+        .server_encryption = SMB2W_SERVER_ENC_OFF
+    };
+    /* *INDENT-ON* */
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn    *c;
+    uint32_t             st;
+
+    printf("# --- %s ---\n", off311.name);
+    smb2_env_open_wire(&env, &opts, &off311);
+    smb2_env_fs_setup(&env, "fs0");
+    c  = smb2_conn_open(&env);
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS && c->dialect == 0x0311,
+          "%s: NEGOTIATE 3.1.1 -> 0x%08x (0x%04x)", off311.name, st, c->dialect);
+    CHECK(!c->encryption_ctx,
+          "%s: no ENCRYPTION_CAPABILITIES context in the response", off311.name);
+    st = smb2_session_setup(c);
+    CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", off311.name, st);
+    CHECK(!(c->session_flags & WIRE_SESSION_FLAG_ENCRYPT_DATA),
+          "%s: session not marked ENCRYPT_DATA (0x%04x)", off311.name,
+          c->session_flags);
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", off311.name, st);
+    wire_io(c, off311.name, "signed");
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+
+    /* NEGOTIATE only: this client advertises encryption and would encrypt
+     * after SESSION_SETUP, which is exactly what the missing capability tells
+     * it not to do. */
+    printf("# --- %s ---\n", off30.name);
+    smb2_env_open_wire(&env, &opts, &off30);
+    smb2_env_fs_setup(&env, "fs0");
+    c  = smb2_conn_open(&env);
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS && c->dialect == 0x0300,
+          "%s: NEGOTIATE 3.0 -> 0x%08x (0x%04x)", off30.name, st, c->dialect);
+    CHECK(!(c->server_caps & SMB2_GLOBAL_CAP_ENCRYPTION),
+          "%s: SMB2_GLOBAL_CAP_ENCRYPTION not echoed (caps 0x%08x)",
+          off30.name, c->server_caps);
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_encryption_off */
+
+/* smb_encryption "available": the server offers encryption but does not ask
+ * for it.  A client that encrypts on its own is answered encrypted; the
+ * session is not marked ENCRYPT_DATA, so the same session's cleartext
+ * requests are answered in cleartext. */
+static void
+run_encryption_available(const struct smb2_wire_profile *w)
+{
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn    *c;
+    uint32_t             st, before;
+
+    printf("# --- %s ---\n", w->name);
+    smb2_env_open_wire(&env, &opts, w);
+    smb2_env_fs_setup(&env, "fs0");
+    c  = smb2_conn_open(&env);
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS && c->dialect == w->max_dialect,
+          "%s: NEGOTIATE -> 0x%08x (0x%04x)", w->name, st, c->dialect);
+    if (w->max_dialect == 0x0311) {
+        CHECK(c->encryption_ctx && c->cipher == w->cipher,
+              "%s: ENCRYPTION_CAPABILITIES context selects 0x%04x (got %d, 0x%04x)",
+              w->name, w->cipher, c->encryption_ctx, c->cipher);
+    } else {
+        CHECK(c->server_caps & SMB2_GLOBAL_CAP_ENCRYPTION,
+              "%s: SMB2_GLOBAL_CAP_ENCRYPTION echoed (caps 0x%08x)",
+              w->name, c->server_caps);
+    }
+    st = smb2_session_setup(c);
+    CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", w->name, st);
+    CHECK(!(c->session_flags & WIRE_SESSION_FLAG_ENCRYPT_DATA),
+          "%s: session not marked ENCRYPT_DATA (0x%04x)", w->name,
+          c->session_flags);
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", w->name, st);
+
+    /* The client encrypts on its own (the profile arms it at SESSION_SETUP). */
+    before = c->encrypted_replies;
+    wire_io(c, w->name, "encrypted");
+    CHECK(c->encrypted_replies >= before + 4,
+          "%s: encrypted requests answered encrypted (%u of 4)", w->name,
+          c->encrypted_replies - before);
+
+    /* The same session in cleartext, signed as a client that does not
+     * encrypt would. */
+    c->encrypt_on = 0;
+    c->signing_on = 1;
+    before        = c->encrypted_replies;
+    wire_io(c, w->name, "cleartext");
+    CHECK(c->encrypted_replies == before,
+          "%s: cleartext requests answered in cleartext (%u encrypted)",
+          w->name, c->encrypted_replies - before);
+
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_encryption_available */
+
+/* "enabled" and "required" still force encryption: the session is marked
+ * ENCRYPT_DATA. */
+static void
+run_encryption_forced(const struct smb2_wire_profile *w)
+{
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn    *c;
+    uint32_t             st, before;
+
+    printf("# --- %s ---\n", w->name);
+    smb2_env_open_wire(&env, &opts, w);
+    smb2_env_fs_setup(&env, "fs0");
+    c  = smb2_conn_open(&env);
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS, "%s: NEGOTIATE -> 0x%08x", w->name, st);
+    st = smb2_session_setup(c);
+    CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", w->name, st);
+    CHECK(c->session_flags & WIRE_SESSION_FLAG_ENCRYPT_DATA,
+          "%s: session marked ENCRYPT_DATA (0x%04x)", w->name, c->session_flags);
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", w->name, st);
+    before = c->encrypted_replies;
+    wire_io(c, w->name, "encrypted");
+    CHECK(c->encrypted_replies >= before + 4,
+          "%s: requests answered encrypted (%u of 4)", w->name,
+          c->encrypted_replies - before);
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_encryption_forced */
+
+/* Off, but the share is marked encrypt_data: the server still supports
+ * encryption (MS-SMB2 IsEncryptionSupported), so the client is told so -- a
+ * 3.1.1 client by a cipher in the ENCRYPTION_CAPABILITIES context, a 3.0 or
+ * 3.0.2 client by SMB2_GLOBAL_CAP_ENCRYPTION -- and can reach the share
+ * encrypted.  The session itself is not encrypt-all; the share is what asks
+ * for encryption. */
+static void
+run_encryption_off_share(const struct smb2_wire_profile *w)
+{
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn    *c;
+    uint32_t             st, before;
+
+    printf("# --- %s ---\n", w->name);
+    smb2_env_open_wire(&env, &opts, w);
+    smb2_env_fs_setup(&env, "fs0");
+    CHECK(chimera_server_share_set_encrypt_data(env.server, "share") == 0,
+          "%s: share marked encrypt_data", w->name);
+    c  = smb2_conn_open(&env);
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS && c->dialect == w->max_dialect,
+          "%s: NEGOTIATE -> 0x%08x (0x%04x)", w->name, st, c->dialect);
+    if (w->max_dialect == 0x0311) {
+        CHECK(c->encryption_ctx && c->cipher == w->cipher,
+              "%s: ENCRYPTION_CAPABILITIES context selects 0x%04x (got %d, 0x%04x)",
+              w->name, w->cipher, c->encryption_ctx, c->cipher);
+    } else {
+        CHECK(c->server_caps & SMB2_GLOBAL_CAP_ENCRYPTION,
+              "%s: SMB2_GLOBAL_CAP_ENCRYPTION echoed (caps 0x%08x)",
+              w->name, c->server_caps);
+    }
+    st = smb2_session_setup(c);
+    CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", w->name, st);
+    CHECK(!(c->session_flags & WIRE_SESSION_FLAG_ENCRYPT_DATA),
+          "%s: session not marked ENCRYPT_DATA (0x%04x)", w->name,
+          c->session_flags);
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", w->name, st);
+    before = c->encrypted_replies;
+    wire_io(c, w->name, "encrypted");
+    CHECK(c->encrypted_replies >= before + 4,
+          "%s: encrypted requests answered encrypted (%u of 4)", w->name,
+          c->encrypted_replies - before);
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_encryption_off_share */
+
+/* "available" lets in a client that does not encrypt at all: a 3.0 client
+ * that signs and never advertises encryption gets a session that is not
+ * ENCRYPT_DATA, and its cleartext requests are answered in cleartext. */
+static void
+run_encryption_available_cleartext(void)
+{
+    /* *INDENT-OFF* */
+    static const struct smb2_wire_profile w = {
+        .name = "E11 3.0 server encryption available, client signs only",
+        .max_dialect = 0x0300, .ntlmv2 = 1, .sign = 1,
+        .server_encryption = SMB2W_SERVER_ENC_AVAILABLE
+    };
+    /* *INDENT-ON* */
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn    *c;
+    uint32_t             st;
+
+    printf("# --- %s ---\n", w.name);
+    smb2_env_open_wire(&env, &opts, &w);
+    smb2_env_fs_setup(&env, "fs0");
+    c  = smb2_conn_open(&env);
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS && c->dialect == 0x0300,
+          "%s: NEGOTIATE 3.0 -> 0x%08x (0x%04x)", w.name, st, c->dialect);
+    st = smb2_session_setup(c);
+    CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", w.name, st);
+    CHECK(!(c->session_flags & WIRE_SESSION_FLAG_ENCRYPT_DATA),
+          "%s: session not marked ENCRYPT_DATA (0x%04x)", w.name,
+          c->session_flags);
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", w.name, st);
+    wire_io(c, w.name, "signed");
+    CHECK(c->encrypted_replies == 0,
+          "%s: answered in cleartext (%u encrypted)", w.name,
+          c->encrypted_replies);
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_encryption_available_cleartext */
+
+/* A READ that asks for a compressed reply, on a request the client
+ * encrypted, is answered compressed AND encrypted (MS-SMB2 3.3.4.1.4,
+ * compress-then-encrypt 3.1.4.4), whether the encryption came from the
+ * client's own choice under "available" or from a share marked
+ * encrypt_data.  Neither marks the session ENCRYPT_DATA, which is the case a
+ * compression decision keyed on that flag alone sends in cleartext. */
+static void
+run_encryption_compressed(
+    const struct smb2_wire_profile *w,
+    int                             share_encrypt)
+{
+    struct smb2_env        env;
+    struct smb2_env_opts   opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn      *c;
+    struct smb2_create_out co;
+    static uint8_t         payload[32 * 1024];
+    static uint8_t         readback[16 * 1024];
+    uint32_t               st, count = 0, rlen = 0, enc0, comp0;
+    int                    off;
+
+    for (off = 0; off < (int) sizeof(payload); off++) {
+        payload[off] = (uint8_t) ("WIREPROBE"[off % 9]);
+    }
+
+    printf("# --- %s ---\n", w->name);
+    smb2_env_open_wire(&env, &opts, w);
+    smb2_env_fs_setup(&env, "fs0");
+    if (share_encrypt) {
+        CHECK(chimera_server_share_set_encrypt_data(env.server, "share") == 0,
+              "%s: share marked encrypt_data", w->name);
+    }
+    c  = smb2_conn_open(&env);
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS && c->compress_on && c->encryption_ctx &&
+          c->cipher == w->cipher,
+          "%s: NEGOTIATE selects compression and 0x%04x (0x%08x, comp %d, ctx %d)",
+          w->name, w->cipher, st, c->compress_on, c->encryption_ctx);
+    st = smb2_session_setup(c);
+    CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", w->name, st);
+    CHECK(!(c->session_flags & WIRE_SESSION_FLAG_ENCRYPT_DATA),
+          "%s: session not marked ENCRYPT_DATA (0x%04x)", w->name,
+          c->session_flags);
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", w->name, st);
+    st = smb2_create(c, "comp.dat", MBT_FILE_OPEN_IF, MBT_FILE_ALL_ACCESS,
+                     MBT_FILE_SHARE_RWD, NULL, &co);
+    CHECK(st == ST_SUCCESS, "%s: CREATE -> 0x%08x", w->name, st);
+    for (off = 0; off < (int) sizeof(payload); off += 16384) {
+        st = smb2_write(c, co.file_id, (uint64_t) off, payload + off, 16384,
+                        &count);
+        CHECK(st == ST_SUCCESS && count == 16384,
+              "%s: WRITE at %d -> 0x%08x (count=%u)", w->name, off, st, count);
+    }
+
+    enc0  = c->encrypted_replies;
+    comp0 = c->compressed_replies;
+    st    = smb2_read(c, co.file_id, 0, sizeof(readback), readback, &rlen);
+    CHECK(st == ST_SUCCESS && rlen == sizeof(readback) &&
+          memcmp(readback, payload, sizeof(readback)) == 0,
+          "%s: READ returns the bytes written (0x%08x, len=%u)", w->name, st,
+          rlen);
+    CHECK(c->compressed_replies - comp0 == 1,
+          "%s: READ reply compressed (%u)", w->name,
+          c->compressed_replies - comp0);
+    CHECK(c->encrypted_replies - enc0 == 1,
+          "%s: compressed READ reply encrypted (%u)", w->name,
+          c->encrypted_replies - enc0);
+    st = smb2_close(c, co.file_id);
+    CHECK(st == ST_SUCCESS, "%s: CLOSE -> 0x%08x", w->name, st);
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_encryption_compressed */
+
+static void
+run_encryption_modes(void)
+{
+    /* *INDENT-OFF* */
+    static const struct smb2_wire_profile available[] = {
+        { .name = "E3 3.1.1 server encryption available, aes-128-gcm",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+          .cipher = SMB2W_CIPHER_AES128_GCM,
+          .signing_alg = SMB2W_SIGN_AES_GMAC,
+          .server_encryption = SMB2W_SERVER_ENC_AVAILABLE },
+        { .name = "E4 3.0 server encryption available",
+          .max_dialect = 0x0300, .ntlmv2 = 1, .encrypt = 1,
+          .server_encryption = SMB2W_SERVER_ENC_AVAILABLE },
+        { .name = "E5 3.0.2 server encryption available",
+          .max_dialect = 0x0302, .ntlmv2 = 1, .encrypt = 1,
+          .server_encryption = SMB2W_SERVER_ENC_AVAILABLE },
+    };
+    static const struct smb2_wire_profile forced[] = {
+        { .name = "E6 3.1.1 server encryption enabled",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+          .cipher = SMB2W_CIPHER_AES128_GCM,
+          .signing_alg = SMB2W_SIGN_AES_GMAC,
+          .server_encryption = SMB2W_SERVER_ENC_ENABLED },
+        { .name = "E7 3.1.1 server encryption required",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+          .cipher = SMB2W_CIPHER_AES128_GCM,
+          .signing_alg = SMB2W_SIGN_AES_GMAC,
+          .server_encryption = SMB2W_SERVER_ENC_REQUIRED },
+    };
+    static const struct smb2_wire_profile off_share[] = {
+        { .name = "E8 3.1.1 server encryption off, share encrypt_data",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+          .cipher = SMB2W_CIPHER_AES128_GCM,
+          .signing_alg = SMB2W_SIGN_AES_GMAC,
+          .server_encryption = SMB2W_SERVER_ENC_OFF },
+        { .name = "E12 3.0 server encryption off, share encrypt_data",
+          .max_dialect = 0x0300, .ntlmv2 = 1, .encrypt = 1,
+          .server_encryption = SMB2W_SERVER_ENC_OFF },
+    };
+    static const struct smb2_wire_profile comp_available = {
+        .name = "E9 3.1.1 server encryption available, compressed READ",
+        .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+        .cipher = SMB2W_CIPHER_AES128_GCM,
+        .signing_alg = SMB2W_SIGN_AES_GMAC,
+        .compress = 1, .compress_alg = SMB2_COMPRESSION_LZ77,
+        .server_encryption = SMB2W_SERVER_ENC_AVAILABLE
+    };
+    static const struct smb2_wire_profile comp_share = {
+        .name = "E10 3.1.1 server encryption off, share encrypt_data, compressed READ",
+        .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+        .cipher = SMB2W_CIPHER_AES128_GCM,
+        .signing_alg = SMB2W_SIGN_AES_GMAC,
+        .compress = 1, .compress_alg = SMB2_COMPRESSION_LZ77,
+        .server_encryption = SMB2W_SERVER_ENC_OFF
+    };
+    /* *INDENT-ON* */
+    unsigned int i;
+
+    run_encryption_off();
+    for (i = 0; i < sizeof(off_share) / sizeof(off_share[0]); i++) {
+        run_encryption_off_share(&off_share[i]);
+    }
+    for (i = 0; i < sizeof(available) / sizeof(available[0]); i++) {
+        run_encryption_available(&available[i]);
+    }
+    for (i = 0; i < sizeof(forced) / sizeof(forced[0]); i++) {
+        run_encryption_forced(&forced[i]);
+    }
+    run_encryption_compressed(&comp_available, 0);
+    run_encryption_compressed(&comp_share, 1);
+    run_encryption_available_cleartext();
+} /* run_encryption_modes */
+
 #ifdef SMB2W_WBSTUB
 /* The account the stub answers for. */
 #define WINBIND_USER        WBSTUB_USER
@@ -552,6 +983,7 @@ main(
         run_bad_key_exchange(&short_key, SMB2W_USER, SMB2W_PASSWORD, 8, 0);
         run_bad_key_exchange(&past_end_key, SMB2W_USER, SMB2W_PASSWORD, 16, 1);
         run_bad_key_exchange(&long_key, SMB2W_USER, SMB2W_PASSWORD, 24, 0);
+        run_encryption_modes();
     }
 
     if (failures) {

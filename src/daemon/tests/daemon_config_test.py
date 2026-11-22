@@ -166,6 +166,15 @@ def main():
              {"smb_multichannel": [{"address": 5, "speed": 10}]},
              None, "address on interface 0 must be a string"),
         ])
+        # smb_encryption is a security setting: a typo must stop the daemon
+        # rather than leave encryption off, and an integer outside the four
+        # modes must not quietly become one of them.
+        for label, value in [("unknown string", "requried"), ("integer 4", 4),
+                             ("integer -1", -1), ("real", 1.0),
+                             ("object", {"mode": "required"})]:
+            cases.append((f"smb_encryption {label}", {"/e": {"path": "/data"}},
+                          {"smb_encryption": value}, None,
+                          "Invalid smb_encryption value"))
         for name, exports, extra, sections, expect in cases:
             write_config(exports, extra, sections)
             with subprocess.Popen(
@@ -214,10 +223,12 @@ def main():
         smb_nics[15]["address"] = "2001:db8::1"
 
         # Lexical ordering must not let an automatic ID steal the pinned ID.
+        # smb_encryption "available" rides along: the startup line naming the
+        # mode shows it was read as available.
         write_config({
             "/a_auto": {"path": "/data", "root_squash": True},
             "/b_pinned": {"path": "/data", "export_id": 1, "sec": ["krb5"]},
-        }, {"smb_multichannel": smb_nics})
+        }, {"smb_multichannel": smb_nics, "smb_encryption": "available"})
         with (root / "daemon.log").open("w+b") as log:
             proc = subprocess.Popen(
                 [daemon, "-c", str(config_path)], stdout=log, stderr=log,
@@ -258,6 +269,9 @@ def main():
                 assert text.count("is above any current link rate") == 1, text
                 assert "interface 1 speed 1000000 Gbps" in text, text
                 print("PASS: smb_multichannel boundaries accepted", flush=True)
+                assert "Invalid smb_encryption value" not in text, text
+                assert "SMB encryption: available" in text, text
+                print("PASS: smb_encryption \"available\" accepted", flush=True)
             finally:
                 if proc.poll() is None:
                     proc.kill()

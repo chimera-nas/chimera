@@ -122,6 +122,13 @@ SYMBOL_EXPORT int
 chimera_server_config_get_smb_signing_required(
     const struct chimera_server_config *config);
 
+/* smb_encryption modes, the only values the setter takes.  "available" is
+ * last so that 0, 1 and 2 keep their meaning in the integer form. */
+#define CHIMERA_SMB_ENCRYPTION_OFF       0  /* not offered (per-share encrypt_data aside) */
+#define CHIMERA_SMB_ENCRYPTION_ENABLED   1  /* offered; capable clients' sessions encrypt-all */
+#define CHIMERA_SMB_ENCRYPTION_REQUIRED  2  /* as enabled; sessions that cannot encrypt refused */
+#define CHIMERA_SMB_ENCRYPTION_AVAILABLE 3  /* offered; a client encrypts only if it chooses to */
+
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_encryption(
     struct chimera_server_config *config,

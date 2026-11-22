@@ -99,7 +99,7 @@ static const char                *g_smb_vers;
  * (everything off).  See smb_loopback_probe.c for what each combination is
  * expected to prove. */
 static int                        g_smb_sign_required;  /* advertise SIGNING_REQUIRED */
-static int                        g_smb_encryption;     /* 0 off, 1 offer, 2 require   */
+static int                        g_smb_encryption;     /* 0 off, 1 enabled, 2 required */
 static int                        g_smb_compression;    /* offer compression           */
 static int                        g_smb_leases;         /* grant oplocks + leases      */
 static int                        g_smb_seal;           /* client asks to encrypt      */

@@ -696,25 +696,55 @@ apply_smb_config(
         chimera_server_config_set_smb_min_dialect(server_config, min_dialect);
     }
 
-    /* smb_encryption: "off"|"enabled"|"required" (or a boolean/integer 0/1/2). */
+    /* smb_encryption: "off"|"available"|"enabled"|"required" (or a boolean, or
+     * the integer 0 off, 1 enabled, 2 required, 3 available).  "available"
+     * offers encryption without forcing it: a client may encrypt, the others
+     * stay in cleartext.  Any other value refuses to start: a typo in a
+     * security setting must not leave encryption off. */
     json_value = json_object_get(server_params, "smb_encryption");
-    if (json_is_string(json_value)) {
-        const char *enc  = json_string_value(json_value);
-        int         mode = 0;
-        if (strcmp(enc, "required") == 0) {
-            mode = 2;
-        } else if (strcmp(enc, "enabled") == 0 || strcmp(enc, "on") == 0) {
-            mode = 1;
-        } else if (strcmp(enc, "off") == 0 || strcmp(enc, "disabled") == 0) {
-            mode = 0;
-        } else {
-            chimera_server_error("Invalid smb_encryption value '%s' (expected off/enabled/required)", enc);
+    if (json_value) {
+        static const char *const mode_names[] = {
+            [CHIMERA_SMB_ENCRYPTION_OFF]       = "off",
+            [CHIMERA_SMB_ENCRYPTION_ENABLED]   = "enabled",
+            [CHIMERA_SMB_ENCRYPTION_REQUIRED]  = "required",
+            [CHIMERA_SMB_ENCRYPTION_AVAILABLE] = "available",
+        };
+        int                      mode = -1;
+
+        if (json_is_string(json_value)) {
+            const char *enc = json_string_value(json_value);
+
+            if (strcmp(enc, "required") == 0) {
+                mode = CHIMERA_SMB_ENCRYPTION_REQUIRED;
+            } else if (strcmp(enc, "enabled") == 0 || strcmp(enc, "on") == 0) {
+                mode = CHIMERA_SMB_ENCRYPTION_ENABLED;
+            } else if (strcmp(enc, "available") == 0) {
+                mode = CHIMERA_SMB_ENCRYPTION_AVAILABLE;
+            } else if (strcmp(enc, "off") == 0 || strcmp(enc, "disabled") == 0) {
+                mode = CHIMERA_SMB_ENCRYPTION_OFF;
+            }
+        } else if (json_is_integer(json_value)) {
+            json_int_t v = json_integer_value(json_value);
+
+            if (v >= CHIMERA_SMB_ENCRYPTION_OFF && v <= CHIMERA_SMB_ENCRYPTION_AVAILABLE) {
+                mode = (int) v;
+            }
+        } else if (json_is_boolean(json_value)) {
+            mode = json_is_true(json_value) ? CHIMERA_SMB_ENCRYPTION_ENABLED
+                                             : CHIMERA_SMB_ENCRYPTION_OFF;
+        }
+
+        if (mode < 0) {
+            char *text = json_dumps(json_value, JSON_ENCODE_ANY);
+
+            chimera_server_error("Invalid smb_encryption value %s (expected "
+                                 "\"off\", \"available\", \"enabled\", \"required\", "
+                                 "a boolean, or 0-3)", text ? text : "?");
+            free(text);
+            startup_validation_fail();
         }
         chimera_server_config_set_smb_encryption(server_config, mode);
-    } else if (json_is_integer(json_value)) {
-        chimera_server_config_set_smb_encryption(server_config, (int) json_integer_value(json_value));
-    } else if (json_is_boolean(json_value)) {
-        chimera_server_config_set_smb_encryption(server_config, json_is_true(json_value) ? 1 : 0);
+        chimera_server_info("SMB encryption: %s", mode_names[mode]);
     }
 
     /* smb_compression: boolean (or integer 0/1) enabling SMB3 transport

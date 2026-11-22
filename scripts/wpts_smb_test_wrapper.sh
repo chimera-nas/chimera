@@ -455,11 +455,8 @@ fi
 # When encryption is enabled, advertise it to the driver so the Encryption cases
 # become applicable: declare support, the per-share encrypted share, and that
 # global encrypt-data is on. SutSupportedEncryptionAlgorithms is set
-# unconditionally in the fixture: even in baseline mode the SMB 3.1.1 NEGOTIATE
-# selects and echoes a CipherId from the client's offered list (transport
-# encryption is decided separately at SESSION_SETUP), so the driver must always
-# know the cipher set to validate the echoed Connection.CipherId
-# (BVT_Negotiate_SMB311).
+# unconditionally in the fixture: the driver validates against it the CipherId
+# the server echoes whenever it negotiates encryption.
 if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ]; then
     staged="${WPTS_STAGE_DIR}/CommonTestSuite.deployment.ptfconfig"
     sed -i \

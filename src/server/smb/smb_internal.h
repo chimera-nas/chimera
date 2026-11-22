@@ -252,8 +252,8 @@ struct chimera_smb_config {
      * (SMB2_SIGNING_REQUIRED) in NEGOTIATE and FSCTL_VALIDATE_NEGOTIATE_INFO,
      * so conforming clients sign every request. */
     int                            signing_required;
-    /* SMB3 transport encryption policy: 0 = off (no encryption advertised),
-     * 1 = enabled (offered, used when the client opts in), 2 = required. */
+    /* SMB3 transport encryption policy, a CHIMERA_SMB_ENCRYPTION_* mode:
+     * off, available, enabled or required. */
     int                            encryption;
     /* SMB3 transport compression: 0 = off (no compression advertised),
      * 1 = enabled (offered, used when the client opts in). */
@@ -1900,10 +1900,11 @@ struct chimera_server_smb_shared {
     evpl_mutex_t                      sessions_lock;
     struct chimera_smb_share         *shares;
     evpl_mutex_t                      shares_lock;
-    /* Set when any share has encrypt_data enabled.  Used by SESSION_SETUP to
-     * decide whether to derive per-session encryption keys even when the global
-     * smb_encryption knob is off (a client may still tree-connect to a
-     * per-share-encrypted share). */
+    /* Set when any share has encrypt_data enabled.  With smb_encryption off
+     * the server still supports encryption when this is set (a client may
+     * tree-connect to a per-share-encrypted share): NEGOTIATE then selects a
+     * cipher and, for 3.0/3.0.2, echoes SMB2_GLOBAL_CAP_ENCRYPTION, and
+     * SESSION_SETUP derives per-session encryption keys. */
     int                               any_share_encrypt;
     struct chimera_smb_tree          *free_trees;
     evpl_mutex_t                      trees_lock;
