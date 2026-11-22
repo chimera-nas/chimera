@@ -790,9 +790,11 @@ op_read_plus(
     return a;
 } /* op_read_plus */
 
-/* SEEK (data) from offset 0 through `sid`. */
+/* SEEK (data, or hole if `hole`) from offset 0 through `sid`. */
 static struct nfs_argop4
-op_seek(const struct stateid4 *sid)
+op_seek(
+    const struct stateid4 *sid,
+    int                    hole)
 {
     struct nfs_argop4 a;
 
@@ -800,7 +802,7 @@ op_seek(const struct stateid4 *sid)
     a.argop             = OP_SEEK;
     a.opseek.sa_stateid = *sid;
     a.opseek.sa_offset  = 0;
-    a.opseek.sa_what    = NFS4_CONTENT_DATA;
+    a.opseek.sa_what    = hole ? NFS4_CONTENT_HOLE : NFS4_CONTENT_DATA;
     return a;
 } /* op_seek */
 
@@ -1126,7 +1128,7 @@ run_cell(
 enum via { VIA_DELEG, VIA_OPEN, VIA_LOCK, VIA_ANON };
 enum meas {
     M_SETATTR_SIZE, M_SETATTR_MODE, M_WRITE, M_READ, M_READ_PLUS,
-    M_WRITE_SAME, M_ALLOCATE, M_DEALLOCATE, M_COPY, M_SEEK
+    M_WRITE_SAME, M_ALLOCATE, M_DEALLOCATE, M_COPY, M_SEEK, M_SEEK_HOLE
 };
 static const struct {
     const char *label;
@@ -1140,6 +1142,8 @@ static const struct {
                               * holder sends the measured op, and stays
                               * the holder's until it returns it */
     uint32_t    expect;
+    int         foreign;     /* the measured op is sent by the OTHER client,
+                              * with the holder's stateid */
 } deleg_cells[] = {
     { "open-stateid-under-own-deleg",        VIA_OPEN,  M_SETATTR_SIZE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
     { "lock-stateid-under-own-deleg",        VIA_LOCK,  M_SETATTR_SIZE, OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
@@ -1164,6 +1168,9 @@ static const struct {
     { "seek-via-read-deleg-stateid",         VIA_DELEG, M_SEEK,         OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK            },
     { "seek-via-write-deleg-stateid",        VIA_DELEG, M_SEEK,         OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK            },
     { "seek-via-open-stateid-under-deleg",   VIA_OPEN,  M_SEEK,         OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK            },
+    { "seek-hole-via-read-deleg-stateid",    VIA_DELEG, M_SEEK_HOLE,    OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK            },
+    { "seek-via-deleg-stateid-of-other-file", VIA_DELEG, M_SEEK,        OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
+    { "seek-via-deleg-stateid-of-another-client", VIA_DELEG, M_SEEK,    OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4ERR_BAD_STATEID, 1 },
     { "read-plus-via-write-deleg-stateid",   VIA_DELEG, M_READ_PLUS,    OPEN4_SHARE_ACCESS_BOTH, 0, 0, 0, NFS4_OK             },
     { "read-plus-via-read-deleg-stateid",    VIA_DELEG, M_READ_PLUS,    OPEN4_SHARE_ACCESS_READ, 0, 0, 0, NFS4_OK             },
     { "read-plus-via-deleg-stateid-of-other-file", VIA_DELEG, M_READ_PLUS, OPEN4_SHARE_ACCESS_BOTH, 0, 1, 0, NFS4ERR_BAD_STATEID },
@@ -1196,6 +1203,7 @@ meas_name(enum meas op)
         case M_DEALLOCATE:   return "DEALLOCATE";
         case M_COPY:         return "COPY";
         case M_SEEK:         return "SEEK";
+        case M_SEEK_HOLE:    return "SEEK(hole)";
         default:             return "?";
     } /* switch */
 } /* meas_name */
@@ -1205,7 +1213,8 @@ meas_name(enum meas op)
 static int
 meas_needs_fill(enum meas op)
 {
-    return op == M_READ || op == M_READ_PLUS || op == M_DEALLOCATE || op == M_SEEK;
+    return op == M_READ || op == M_READ_PLUS || op == M_DEALLOCATE || op == M_SEEK ||
+           op == M_SEEK_HOLE;
 } /* meas_needs_fill */
 
 /* Only memfs implements READ_PLUS among the probe's backends; elsewhere the
@@ -1436,7 +1445,10 @@ run_deleg_cell(
             ops[n++] = op_read_plus(&sid, TRUNC_SIZE);
             break;
         case M_SEEK:
-            ops[n++] = op_seek(&sid);
+            ops[n++] = op_seek(&sid, 0);
+            break;
+        case M_SEEK_HOLE:
+            ops[n++] = op_seek(&sid, 1);
             break;
         case M_WRITE_SAME:
             ops[n++] = op_write_same(&sid);
@@ -1455,7 +1467,7 @@ run_deleg_cell(
             break;
     } /* switch */
     ops[n++] = (op == M_SETATTR_MODE) ? op_getattr_mode() : op_getattr_size();
-    p        = pc_compound(pc, ops, n, 1);
+    p        = pc_compound(deleg_cells[i].foreign ? other : pc, ops, n, 1);
 
     if (p.meas_idx < 0) {
         snprintf(buf, sizeof(buf),
@@ -1481,7 +1493,7 @@ run_deleg_cell(
                 snprintf(buf, sizeof(buf), "%s of %u bytes: eof=%d", opname,
                          TRUNC_SIZE, p.eof);
                 expect(label, p.eof, buf);
-            } else if (op == M_SEEK) {
+            } else if (op == M_SEEK || op == M_SEEK_HOLE) {
                 /* the status is the measurement */
             } else if (op == M_SETATTR_MODE) {
                 snprintf(buf, sizeof(buf), "mode after %s: expected 0%o, "
