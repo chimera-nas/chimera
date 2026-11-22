@@ -1179,6 +1179,413 @@ probe_max_allowed_creator(
     smb2_close(c, o.file_id);
 } /* probe_max_allowed_creator */
 
+#define OA_FILE_DISPOSITION_EX_T 0x40u
+
+/* ---- SET_INFO access checks ----------------------------------------------
+ *
+ * MS-SMB2 3.3.5.21.1: a SET_INFO of FileBasicInformation needs
+ * FILE_WRITE_ATTRIBUTES in the handle's granted access; FileEndOfFile- and
+ * FileAllocationInformation need FILE_WRITE_DATA; FileDispositionInformation
+ * (and its Ex form) needs DELETE; FileFullEaInformation needs FILE_WRITE_EA.
+ * Otherwise STATUS_ACCESS_DENIED, and nothing changes. */
+
+/* SET_INFO of one class through `fid` with a small valid buffer. */
+static uint32_t
+oa_set_class(
+    struct smb2_conn *c,
+    const uint8_t     fid[16],
+    uint8_t           info_class)
+{
+    uint8_t buf[40];
+    size_t  len;
+
+    memset(buf, 0, sizeof(buf));
+    switch (info_class) {
+        case SMB2_FILE_BASIC_INFO_T:
+            /* LastWriteTime only; the other fields 0 leave them unchanged. */
+            p64(buf, 16, 132223104000000000ull);
+            len = 40;
+            break;
+        case SMB2_FILE_ENDOFFILE_INFO_T:
+        case SMB2_FILE_ALLOCATION_INFO_T:
+            len = 8;                    /* size 0 */
+            break;
+        case SMB2_FILE_DISPOSITION_T:
+            buf[0] = 1;                 /* DeletePending */
+            len    = 1;
+            break;
+        case OA_FILE_DISPOSITION_EX_T:
+            p32(buf, 0, 1);             /* FILE_DISPOSITION_DELETE */
+            len = 4;
+            break;
+        case SMB2_FILE_FULL_EA_INFO_T:
+            /* { Next 0, Flags 0, NameLen 8, ValueLen 2, "PROBE.EA\0", "v1" } */
+            buf[5] = 8;
+            buf[6] = 2;
+            memcpy(buf + 8, "PROBE.EA", 8);
+            memcpy(buf + 17, "v1", 2);
+            len = 20;
+            break;
+        default:
+            return 0xFFFFFFFFu;
+    } /* switch */
+    return smb2_set_info(c, SMB2_INFO_FILE_T, info_class, fid, buf, len);
+} /* oa_set_class */
+
+static void
+probe_set_info_access(struct smb2_conn *c)
+{
+    /* *INDENT-OFF* */
+    static const struct {
+        uint8_t     info_class;
+        const char *name;
+    } classes[] = {
+        { SMB2_FILE_BASIC_INFO_T,      "FileBasicInformation"         },
+        { SMB2_FILE_ENDOFFILE_INFO_T,  "FileEndOfFileInformation"     },
+        { SMB2_FILE_ALLOCATION_INFO_T, "FileAllocationInformation"    },
+        { SMB2_FILE_DISPOSITION_T,     "FileDispositionInformation"   },
+        { OA_FILE_DISPOSITION_EX_T,    "FileDispositionInformationEx" },
+        { SMB2_FILE_FULL_EA_INFO_T,    "FileFullEaInformation"        },
+    };
+    /* *INDENT-ON* */
+    struct smb2_create_out o;
+    uint8_t                out[4];
+    uint32_t               st, count = 0, n = 0;
+    size_t                 i;
+
+    printf("# set_info_access\n");
+    st = oa_open(c, "si1", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE si1 -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_write(c, o.file_id, 0, "abc", 3, &count);
+    CHECK(st == ST_SUCCESS && count == 3, "setup: WRITE si1 -> 0x%08x", st);
+    smb2_close(c, o.file_id);
+
+    /* FILE_READ_DATA holds none of the rights the classes need. */
+    st = oa_open(c, "si1", MBT_FILE_OPEN, OA_FILE_READ_DATA,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN si1 FILE_READ_DATA -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    for (i = 0; i < sizeof(classes) / sizeof(classes[0]); i++) {
+        st = oa_set_class(c, o.file_id, classes[i].info_class);
+        CHECK(st == ST_ACCESS_DENIED, "  SET %s -> ACCESS_DENIED (0x%08x)",
+              classes[i].name, st);
+    }
+    smb2_close(c, o.file_id);
+
+    /* Nothing changed: the file is still there with its content. */
+    st = oa_open(c, "si1", MBT_FILE_OPEN, OA_FILE_READ_DATA,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "  reopen si1 -> 0x%08x (not deleted)", st);
+    if (st == ST_SUCCESS) {
+        st = smb2_read(c, o.file_id, 0, 3, out, &n);
+        CHECK(st == ST_SUCCESS && n == 3 && memcmp(out, "abc", 3) == 0,
+              "  READ -> 0x%08x (%u bytes), content unchanged", st, n);
+        smb2_close(c, o.file_id);
+    }
+
+    /* With the rights, each class is accepted. */
+    st = oa_open(c, "si1", MBT_FILE_OPEN,
+                 OA_FILE_READ_DATA | OA_FILE_WRITE_DATA |
+                 OA_FILE_WRITE_ATTRIBUTES | OA_FILE_WRITE_EA | MBT_DELETE,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN si1 with the rights -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    for (i = 0; i < sizeof(classes) / sizeof(classes[0]); i++) {
+        st = oa_set_class(c, o.file_id, classes[i].info_class);
+        CHECK(st == ST_SUCCESS, "  SET %s -> 0x%08x", classes[i].name, st);
+    }
+    smb2_close(c, o.file_id);
+} /* probe_set_info_access */
+
+/* The owner of a file re-opens it MAXIMUM_ALLOWED: the handle can set the
+ * file's times and attributes, as the same caller's FILE_WRITE_ATTRIBUTES
+ * handle can.  On the passthrough backends the file carries a mode and no ACL,
+ * and the mode evaluation behind MAXIMUM_ALLOWED has no FILE_WRITE_ATTRIBUTES
+ * of its own.  With the owner write bit clear it has no FILE_WRITE_EA either,
+ * and the handle can still set the file's EAs, as the same caller's
+ * FILE_WRITE_EA handle can. */
+static void
+probe_max_allowed_owner_set_basic(
+    struct smb2_conn *c,
+    const char       *dir)
+{
+    struct smb2_create_out o;
+    uint32_t               st, ga, mx = 0;
+
+    printf("# max_allowed_owner_set_basic\n");
+    st = oa_open(c, "mo1", MBT_FILE_CREATE, MBT_FILE_ALL_ACCESS,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE mo1 -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(c, o.file_id);
+
+    st = oa_open(c, "mo1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, &mx, &o);
+    CHECK(st == ST_SUCCESS, "OPEN mo1 MAXIMUM_ALLOWED as its owner -> 0x%08x",
+          st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    CHECK(mx & OA_FILE_WRITE_ATTRIBUTES,
+          "  MxAc includes WRITE_ATTRIBUTES (0x%08x)", mx);
+    ga = oa_access_info(c, o.file_id);
+    CHECK(ga & OA_FILE_WRITE_ATTRIBUTES,
+          "  granted access 0x%08x includes WRITE_ATTRIBUTES", ga);
+    st = oa_set_class(c, o.file_id, SMB2_FILE_BASIC_INFO_T);
+    CHECK(st == ST_SUCCESS, "  SET FileBasicInformation -> 0x%08x", st);
+    smb2_close(c, o.file_id);
+
+#ifndef _WIN32
+    /* The same with the owner write bit clear on the host: the mode gives the
+     * owner no FILE_WRITE_EA either, which its FILE_WRITE_EA handle is granted
+     * when it asks for the right by name. */
+    {
+        char path[600];
+
+        if (!dir || !dir[0]) {
+            return;
+        }
+        snprintf(path, sizeof(path), "%s/mo1", dir);
+        if (chmod(path, 0444) != 0) {
+            CHECK(0, "setup: chmod 0444 %s: %s", path, strerror(errno));
+            return;
+        }
+        st = oa_open(c, "mo1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED,
+                     MBT_FILE_NON_DIRECTORY_FILE, 0, &mx, &o);
+        CHECK(st == ST_SUCCESS, "OPEN mo1 (mode 0444) MAXIMUM_ALLOWED as its "
+              "owner -> 0x%08x", st);
+        if (st != ST_SUCCESS) {
+            return;
+        }
+        ga = oa_access_info(c, o.file_id);
+        CHECK(ga & OA_FILE_WRITE_EA,
+              "  granted access 0x%08x includes WRITE_EA", ga);
+        st = oa_set_class(c, o.file_id, SMB2_FILE_FULL_EA_INFO_T);
+        CHECK(st == ST_SUCCESS, "  SET FileFullEaInformation -> 0x%08x", st);
+        smb2_close(c, o.file_id);
+    }
+#endif /* ifndef _WIN32 */
+} /* probe_max_allowed_owner_set_basic */
+
+/* A refused SET_INFO on a request the command before it left dirty.  Requests
+ * are pooled and the commands' fields share storage: the path of the CREATE
+ * sent first lies where SET_INFO keeps its EA buffer pointer, which the
+ * refusal must not free unless this SET_INFO allocated it. */
+static void
+probe_set_info_refused_after_long_path(struct smb2_conn *c)
+{
+    struct smb2_create_out o, o2;
+    char                   path[3301];
+    uint32_t               st;
+    size_t                 i;
+
+    printf("# set_info_refused_after_long_path\n");
+    st = oa_open(c, "si2", MBT_FILE_CREATE, OA_FILE_READ_DATA,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE si2 FILE_READ_DATA -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+
+    /* "aaaaaaa\" repeated: 3300 bytes of a path that does not exist. */
+    for (i = 0; i < sizeof(path) - 1; i++) {
+        path[i] = (i % 8 == 7) ? '\\' : 'a';
+    }
+    path[sizeof(path) - 2] = 'a';
+    path[sizeof(path) - 1] = 0;
+    st                     = oa_open(c, path, MBT_FILE_OPEN, OA_FILE_READ_DATA, 0, 0, NULL, &o2);
+    CHECK(st != ST_SUCCESS, "OPEN of a 3300-byte path that does not exist "
+          "-> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o2.file_id);
+    }
+
+    st = oa_set_class(c, o.file_id, SMB2_FILE_BASIC_INFO_T);
+    CHECK(st == ST_ACCESS_DENIED, "SET FileBasicInformation through the "
+          "FILE_READ_DATA handle -> ACCESS_DENIED (0x%08x)", st);
+    smb2_close(c, o.file_id);
+} /* probe_set_info_refused_after_long_path */
+
+/* A MAXIMUM_ALLOWED grant includes DELETE when the parent directory grants
+ * FILE_DELETE_CHILD, though the file's own descriptor does not grant DELETE
+ * (MS-FSA 2.1.5.1.2.1).  So a caller who does not own the file can delete it
+ * through a MAXIMUM_ALLOWED handle, as through an explicit DELETE open: SET
+ * FileDispositionInformation succeeds and the file is gone on close.  A second
+ * user owns the file; this connection's anonymous user opens it.  memfs only:
+ * the descriptors are set by the CREATE's SecD context. */
+static void
+probe_max_allowed_delete_via_parent(
+    struct smb2_env  *env,
+    struct smb2_conn *c,
+    const char       *dir)
+{
+    struct smb2_conn      *other;
+    struct smb2_create_out o;
+    uint32_t               st, ga;
+
+    printf("# max_allowed_delete_via_parent\n");
+    if (dir && dir[0]) {
+        printf("# skip max_allowed_delete_via_parent: memfs only\n");
+        return;
+    }
+    other = oa_other_conn(env);
+    if (!other) {
+        return;
+    }
+
+    st = oa_create_with_dacl(c, "pd", MBT_FILE_DIRECTORY_FILE,
+                             MBT_FILE_ALL_ACCESS, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE directory pd, Everyone full access "
+          "-> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(c, o.file_id);
+
+    st = oa_create_with_dacl(other, "pd\\dp1", MBT_FILE_NON_DIRECTORY_FILE,
+                             0x00120089u, &o);
+    CHECK(st == ST_SUCCESS, "setup: %s CREATEs pd\\dp1, Everyone read only "
+          "-> 0x%08x", OA_OTHER_USER, st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(other, o.file_id);
+
+    st = oa_open(c, "pd\\dp1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN pd\\dp1 MAXIMUM_ALLOWED as a non-owner "
+          "-> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    ga = oa_access_info(c, o.file_id);
+    CHECK(ga & MBT_DELETE, "  granted access 0x%08x includes DELETE", ga);
+    st = smb2_set_disposition(c, o.file_id, 1);
+    CHECK(st == ST_SUCCESS, "  SET Disposition -> 0x%08x", st);
+    smb2_close(c, o.file_id);
+
+    st = oa_open(c, "pd\\dp1", MBT_FILE_OPEN, OA_FILE_READ_DATA, 0, 0, NULL,
+                 &o);
+    CHECK(st == ST_OBJECT_NAME_NOT_FOUND, "  pd\\dp1 is gone -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+
+    /* The same for a directory a FILE_OPEN_IF directory create finds already
+     * there: that open goes through the directory create's path. */
+    st = oa_create_with_dacl(other, "pd\\dd1", MBT_FILE_DIRECTORY_FILE,
+                             0x00120089u, &o);
+    CHECK(st == ST_SUCCESS, "setup: %s CREATEs directory pd\\dd1, Everyone read "
+          "only -> 0x%08x", OA_OTHER_USER, st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(other, o.file_id);
+
+    st = oa_open(c, "pd\\dd1", MBT_FILE_OPEN_IF, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN_IF directory pd\\dd1 MAXIMUM_ALLOWED as a "
+          "non-owner -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    ga = oa_access_info(c, o.file_id);
+    CHECK(ga & MBT_DELETE, "  granted access 0x%08x includes DELETE", ga);
+    st = smb2_set_disposition(c, o.file_id, 1);
+    CHECK(st == ST_SUCCESS, "  SET Disposition -> 0x%08x", st);
+    smb2_close(c, o.file_id);
+
+    st = oa_open(c, "pd\\dd1", MBT_FILE_OPEN, OA_FILE_READ_DATA,
+                 MBT_FILE_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_OBJECT_NAME_NOT_FOUND, "  pd\\dd1 is gone -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+
+    /* A parent that does not grant FILE_DELETE_CHILD adds no DELETE: the
+     * grant has none, and SET Disposition is refused. */
+    st = oa_create_with_dacl(c, "pn", MBT_FILE_DIRECTORY_FILE,
+                             0x0012008bu, &o);
+    CHECK(st == ST_SUCCESS, "setup: CREATE directory pn, Everyone read and add "
+          "file, no FILE_DELETE_CHILD -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(c, o.file_id);
+
+    st = oa_create_with_dacl(other, "pn\\np1", MBT_FILE_NON_DIRECTORY_FILE,
+                             0x00120089u, &o);
+    CHECK(st == ST_SUCCESS, "setup: %s CREATEs pn\\np1, Everyone read only "
+          "-> 0x%08x", OA_OTHER_USER, st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    smb2_close(other, o.file_id);
+
+    st = oa_open(c, "pn\\np1", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN pn\\np1 MAXIMUM_ALLOWED as a non-owner "
+          "-> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    ga = oa_access_info(c, o.file_id);
+    CHECK(!(ga & MBT_DELETE), "  granted access 0x%08x has no DELETE", ga);
+    st = smb2_set_disposition(c, o.file_id, 1);
+    CHECK(st == ST_ACCESS_DENIED, "  SET Disposition -> 0x%08x", st);
+    smb2_close(c, o.file_id);
+
+    st = oa_open(c, "pn\\np1", MBT_FILE_OPEN, OA_FILE_READ_DATA, 0, 0, NULL,
+                 &o);
+    CHECK(st == ST_SUCCESS, "  pn\\np1 is still there -> 0x%08x", st);
+    if (st == ST_SUCCESS) {
+        smb2_close(c, o.file_id);
+    }
+} /* probe_max_allowed_delete_via_parent */
+
+/* A READONLY file opened MAXIMUM_ALLOWED: the trimmed grant has no
+ * FILE_WRITE_DATA, so a size change through the handle is refused like a
+ * WRITE, and the file keeps its content. */
+static void
+probe_ro_file_set_eof(struct smb2_conn *c)
+{
+    struct smb2_create_out o;
+    uint8_t                out[4];
+    uint32_t               st, n = 0;
+
+    printf("# ro_file_set_eof\n");
+    if (!keeps_dos_attrs) {
+        printf("# skip ro_file_set_eof: backend keeps no DOS attributes\n");
+        return;
+    }
+    if (!oa_make_readonly_file(c, "r5")) {
+        return;
+    }
+    st = oa_open(c, "r5", MBT_FILE_OPEN, MBT_MAXIMUM_ALLOWED,
+                 MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
+    CHECK(st == ST_SUCCESS, "OPEN READONLY r5 MAXIMUM_ALLOWED -> 0x%08x", st);
+    if (st != ST_SUCCESS) {
+        return;
+    }
+    st = smb2_set_eof(c, o.file_id, 0);
+    CHECK(st == ST_ACCESS_DENIED, "  SET EndOfFile 0 -> ACCESS_DENIED (0x%08x)",
+          st);
+    st = smb2_read(c, o.file_id, 0, 3, out, &n);
+    CHECK(st == ST_SUCCESS && n == 3, "  READ -> 0x%08x (%u bytes), not truncated",
+          st, n);
+    smb2_close(c, o.file_id);
+} /* probe_ro_file_set_eof */
+
 /* Mount the share on a passthrough backend: a fresh host directory under
  * $CHIMERA_MBT_SCRATCH (default cwd).  Exits 77 when that filesystem cannot
  * produce file handles. */
@@ -1282,6 +1689,11 @@ main(
     probe_max_allowed_explicit_write(c, pt_dir);
     probe_max_allowed_new_stream(&env, c, pt_dir);
     probe_max_allowed_creator(c, pt_dir);
+    probe_set_info_access(c);
+    probe_max_allowed_owner_set_basic(c, pt_dir);
+    probe_set_info_refused_after_long_path(c);
+    probe_max_allowed_delete_via_parent(&env, c, pt_dir);
+    probe_ro_file_set_eof(c);
 
     smb2_env_stop(&env);
 

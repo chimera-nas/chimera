@@ -214,6 +214,25 @@ main(void)
     CHECK(chimera_smb_max_allowed_trim(FILE_ALL, false, true, true) == 0x001f01b9u,
           "a READONLY file on a read-only handle loses the same three bits");
 
+    /* chimera_smb_set_info_required_access(info_class): the right a SET_INFO
+     * of a file information class needs (MS-SMB2 3.3.5.21.1). */
+    CHECK(chimera_smb_set_info_required_access(SMB2_FILE_BASIC_INFO) ==
+          SMB2_FILE_WRITE_ATTRIBUTES, "FileBasicInformation needs WRITE_ATTRIBUTES");
+    CHECK(chimera_smb_set_info_required_access(SMB2_FILE_ENDOFFILE_INFO) ==
+          SMB2_FILE_WRITE_DATA, "FileEndOfFileInformation needs WRITE_DATA");
+    CHECK(chimera_smb_set_info_required_access(SMB2_FILE_ALLOCATION_INFO) ==
+          SMB2_FILE_WRITE_DATA, "FileAllocationInformation needs WRITE_DATA");
+    CHECK(chimera_smb_set_info_required_access(SMB2_FILE_DISPOSITION_INFO) ==
+          SMB2_DELETE, "FileDispositionInformation needs DELETE");
+    CHECK(chimera_smb_set_info_required_access(SMB2_FILE_DISPOSITION_INFO_EX) ==
+          SMB2_DELETE, "FileDispositionInformationEx needs DELETE");
+    CHECK(chimera_smb_set_info_required_access(SMB2_FILE_FULL_EA_INFO) ==
+          SMB2_FILE_WRITE_EA, "FileFullEaInformation needs WRITE_EA");
+    CHECK(chimera_smb_set_info_required_access(SMB2_FILE_POSITION_INFO) == 0,
+          "FilePositionInformation needs nothing");
+    CHECK(chimera_smb_set_info_required_access(SMB2_FILE_MODE_INFO) == 0,
+          "FileModeInformation needs nothing");
+
     fprintf(stderr, "smb_access_test: %d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;
 } /* main */

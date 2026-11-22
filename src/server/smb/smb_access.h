@@ -13,15 +13,10 @@
 /* The DesiredAccess bits that let an open write file data.  Only these need a
  * writable backend handle: the metadata-write rights (attributes, EAs, the
  * security descriptor, delete) are carried out by operations that do not need
- * a descriptor open for writing.  MS-FSA requires FILE_WRITE_DATA for the
- * SET_INFO classes that change data (2.1.5.15.1 "FileAllocationInformation",
- * 2.1.5.15.5 "FileEndOfFileInformation"), but SET_INFO does not check the
- * handle's granted access yet, so a size change can still arrive through a
- * read-only handle -- including a MAXIMUM_ALLOWED handle whose grant
- * chimera_smb_max_allowed_trim trimmed.  It takes effect there: linux and
- * io_uring fall back from ftruncate to a truncate by path
- * (/proc/self/fd/N), and the other backends do not look at the handle's
- * access mode.  MAXIMUM_ALLOWED is included because its grant can hold
+ * a descriptor open for writing.  The SET_INFO classes that change data need
+ * FILE_WRITE_DATA in the handle's granted access
+ * (chimera_smb_set_info_required_access), which only a read-write open is
+ * granted.  MAXIMUM_ALLOWED is included because its grant can hold
  * FILE_WRITE_DATA. */
 #define SMB2_DATA_WRITE_ACCESS (SMB2_FILE_WRITE_DATA | \
                                 SMB2_FILE_APPEND_DATA | \
@@ -209,3 +204,28 @@ chimera_smb_may_reopen_read_only(
             return false;
     } /* switch */
 } /* chimera_smb_may_reopen_read_only */
+
+/* The access right a SET_INFO of file information class `info_class` needs in
+ * the handle's granted access (MS-SMB2 3.3.5.21.1 "Handling
+ * SMB2_0_INFO_FILE"), or 0 for a class that needs none here.  Without it the
+ * request fails STATUS_ACCESS_DENIED.  FileDispositionInformationEx is the
+ * same operation as FileDispositionInformation and needs DELETE too.
+ * FileRenameInformation's DELETE check is made by its own handler. */
+static inline uint32_t
+chimera_smb_set_info_required_access(uint8_t info_class)
+{
+    switch (info_class) {
+        case SMB2_FILE_BASIC_INFO:
+            return SMB2_FILE_WRITE_ATTRIBUTES;
+        case SMB2_FILE_ENDOFFILE_INFO:
+        case SMB2_FILE_ALLOCATION_INFO:
+            return SMB2_FILE_WRITE_DATA;
+        case SMB2_FILE_DISPOSITION_INFO:
+        case SMB2_FILE_DISPOSITION_INFO_EX:
+            return SMB2_DELETE;
+        case SMB2_FILE_FULL_EA_INFO:
+            return SMB2_FILE_WRITE_EA;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_smb_set_info_required_access */
