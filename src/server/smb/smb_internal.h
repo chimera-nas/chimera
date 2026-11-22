@@ -252,8 +252,8 @@ struct chimera_smb_config {
      * (SMB2_SIGNING_REQUIRED) in NEGOTIATE and FSCTL_VALIDATE_NEGOTIATE_INFO,
      * so conforming clients sign every request. */
     int                            signing_required;
-    /* SMB3 transport encryption policy: 0 = off (no encryption advertised),
-     * 1 = enabled (offered, used when the client opts in), 2 = required. */
+    /* SMB3 transport encryption policy, a CHIMERA_SMB_ENCRYPTION_* mode:
+     * off, available, enabled or required. */
     int                            encryption;
     /* SMB3 transport compression: 0 = off (no compression advertised),
      * 1 = enabled (offered, used when the client opts in). */
@@ -1900,10 +1900,11 @@ struct chimera_server_smb_shared {
     evpl_mutex_t                      sessions_lock;
     struct chimera_smb_share         *shares;
     evpl_mutex_t                      shares_lock;
-    /* Set when any share has encrypt_data enabled.  Used by SESSION_SETUP to
-     * decide whether to derive per-session encryption keys even when the global
-     * smb_encryption knob is off (a client may still tree-connect to a
-     * per-share-encrypted share). */
+    /* Set when any share has encrypt_data enabled.  With smb_encryption off
+     * the server still supports encryption when this is set (a client may
+     * tree-connect to a per-share-encrypted share): NEGOTIATE then selects a
+     * cipher and, for 3.0/3.0.2, echoes SMB2_GLOBAL_CAP_ENCRYPTION, and
+     * SESSION_SETUP derives per-session encryption keys. */
     int                               any_share_encrypt;
     struct chimera_smb_tree          *free_trees;
     evpl_mutex_t                      trees_lock;
@@ -3748,3 +3749,34 @@ chimera_smb_open_file_close(
 
     return open_file;
 } /* chimera_smb_open_file_remove */
+
+/* Is a reply on this session encrypted?  MS-SMB2 3.3.4.1.4: when the request
+ * arrived encrypted, when the session is encrypt-all (Session.EncryptData), or
+ * when its tree's share is marked encrypt_data (Share.EncryptData).  A session
+ * with no keys never encrypts.  handshake is set for a NEGOTIATE or
+ * SESSION_SETUP reply, which precedes the keys and is encrypted only when its
+ * request was.  The one rule for every reply path: the compound reply
+ * (chimera_smb_reply_encrypt_session in smb.c, for both its compression and
+ * encryption decisions) and the async one (chimera_smb_secure_send_snapshot). */
+static inline int
+chimera_smb_reply_encrypts(
+    const struct chimera_smb_session *session,
+    int                               received_encrypted,
+    int                               handshake,
+    const struct chimera_smb_tree    *tree)
+{
+    if (!session || session->enc_key_len == 0) {
+        return 0;
+    }
+
+    if (received_encrypted) {
+        return 1;
+    }
+
+    if (handshake) {
+        return 0;
+    }
+
+    return (session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA) ||
+           (tree && tree->share && tree->share->encrypt_data);
+} /* chimera_smb_reply_encrypts */

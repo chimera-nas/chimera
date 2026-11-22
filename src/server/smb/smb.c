@@ -595,6 +595,30 @@ static inline void
 chimera_smb_compound_advance(
     struct chimera_smb_compound *compound);
 
+/* The session whose keys encrypt this compound's reply, or NULL when the
+ * reply goes out in cleartext: chimera_smb_reply_encrypts for the compound's
+ * first request.  Both the compression decision and the encryption path ask
+ * this, so a compressed reply can never leave in cleartext when the
+ * encryption path would have encrypted it. */
+static inline struct chimera_smb_session *
+chimera_smb_reply_encrypt_session(struct chimera_smb_compound *compound)
+{
+    struct chimera_smb_request *req0;
+    struct chimera_smb_session *session;
+
+    if (compound->num_requests == 0 || !compound->requests[0]->session_handle) {
+        return NULL;
+    }
+
+    req0    = compound->requests[0];
+    session = req0->session_handle->session;
+
+    return chimera_smb_reply_encrypts(session, compound->received_encrypted,
+                                      req0->smb2_hdr.command == SMB2_NEGOTIATE ||
+                                      req0->smb2_hdr.command == SMB2_SESSION_SETUP,
+                                      req0->tree) ? session : NULL;
+} /* chimera_smb_reply_encrypt_session */
+
 static inline void
 chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 {
@@ -991,21 +1015,8 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
      * encryption that is also compressible is compressed first and then
      * encrypted (MS-SMB2 §3.1.4.4 compress-then-encrypt) by the encryption path
      * itself; the plain-compression branch below only fires when not encrypting. */
-    int will_encrypt = 0;
-    {
-        struct chimera_smb_session *enc_session = NULL;
-
-        if (compound->num_requests > 0 && compound->requests[0]->session_handle) {
-            enc_session = compound->requests[0]->session_handle->session;
-        }
-        if (enc_session && (enc_session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA)) {
-            uint16_t cmd0 = compound->requests[0]->smb2_hdr.command;
-            if (compound->received_encrypted ||
-                (cmd0 != SMB2_NEGOTIATE && cmd0 != SMB2_SESSION_SETUP)) {
-                will_encrypt = 1;
-            }
-        }
-    }
+    struct chimera_smb_session *enc_session  = chimera_smb_reply_encrypt_session(compound);
+    int                         will_encrypt = enc_session != NULL;
 
     /* SMB3 transport compression applicability (MS-SMB2 §3.3.5.12).  When the
      * connection negotiated a full-message codec and a single READ asked for a
@@ -1073,102 +1084,81 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     }
 
     /* SMB3 transport encryption: wrap the signed reply in a TRANSFORM header
-     * when the request arrived encrypted, when the session negotiated global
-     * encryption, or when it targets a per-share-encrypted tree.  The NEGOTIATE
-     * / SESSION_SETUP responses themselves precede key establishment and are
-     * always sent signed-but-plaintext. */
-    {
-        struct chimera_smb_session *enc_session = NULL;
+     * when chimera_smb_reply_encrypt_session says so (above). */
+    if (enc_session) {
+        struct evpl_iovec  enc_iov;
+        struct evpl_iovec  comp_iov;
+        struct evpl_iovec *enc_src_iov  = reply_iov;
+        int                enc_src_niov = reply_niov;
+        int                enc_src_len  = reply_payload_length;
+        int                have_comp    = 0;
+        uint64_t           nonce;
+        int                enc_total;
 
-        if (compound->num_requests > 0 && compound->requests[0]->session_handle) {
-            enc_session = compound->requests[0]->session_handle->session;
+        if (chimera_smb_conn_is_direct(conn)) {
+            /* SMB-Direct encryption is not yet implemented. */
+            chimera_smb_error("SMB3 encryption over RDMA is not supported");
+            evpl_iovecs_release(evpl, reply_iov, reply_niov);
+            evpl_close(evpl, conn->bind);
+            chimera_smb_compound_free(thread, compound);
+            return;
         }
 
-        if (enc_session && enc_session->enc_key_len > 0) {
-            uint16_t                 cmd0         = compound->requests[0]->smb2_hdr.command;
-            struct chimera_smb_tree *tree0        = compound->requests[0]->tree;
-            int                      tree_encrypt = tree0 && tree0->share &&
-                tree0->share->encrypt_data;
+        /* Compress-then-encrypt (MS-SMB2 §3.1.4.4): when a READ asked for
+         * a compressed response on an encrypted session, compress the data
+         * buffer into a COMPRESSION_TRANSFORM message and encrypt that.  A
+         * payload that would not shrink leaves comp unused and the original
+         * plaintext reply is encrypted as-is. */
+        if (comp_applicable) {
+            int comp_total;
 
-            if (compound->received_encrypted ||
-                (cmd0 != SMB2_NEGOTIATE && cmd0 != SMB2_SESSION_SETUP &&
-                 ((enc_session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA) ||
-                  tree_encrypt))) {
-                struct evpl_iovec  enc_iov;
-                struct evpl_iovec  comp_iov;
-                struct evpl_iovec *enc_src_iov  = reply_iov;
-                int                enc_src_niov = reply_niov;
-                int                enc_src_len  = reply_payload_length;
-                int                have_comp    = 0;
-                uint64_t           nonce;
-                int                enc_total;
-
-                if (chimera_smb_conn_is_direct(conn)) {
-                    /* SMB-Direct encryption is not yet implemented. */
-                    chimera_smb_error("SMB3 encryption over RDMA is not supported");
-                    evpl_iovecs_release(evpl, reply_iov, reply_niov);
-                    evpl_close(evpl, conn->bind);
-                    chimera_smb_compound_free(thread, compound);
-                    return;
-                }
-
-                /* Compress-then-encrypt (MS-SMB2 §3.1.4.4): when a READ asked for
-                 * a compressed response on an encrypted session, compress the data
-                 * buffer into a COMPRESSION_TRANSFORM message and encrypt that.  A
-                 * payload that would not shrink leaves comp unused and the original
-                 * plaintext reply is encrypted as-is. */
-                if (comp_applicable) {
-                    int comp_total;
-
-                    if (chimera_smb_compress_message(thread->compress_ctx, evpl,
-                                                     comp_alg, comp_chained,
-                                                     comp_buf_off, reply_iov, reply_niov,
-                                                     reply_payload_length, reply_hdr_len,
-                                                     &comp_iov, &comp_total) == 0) {
-                        enc_src_iov  = &comp_iov;
-                        enc_src_niov = 1;
-                        enc_src_len  = comp_total;
-                        have_comp    = 1;
-                    }
-                }
-
-                nonce = atomic_fetch_add(&enc_session->enc_nonce_counter, 1);
-
-                rc = chimera_smb_encrypt_compound(thread->encrypt_ctx, evpl,
-                                                  enc_session->cipher_id,
-                                                  enc_session->enc_key,
-                                                  enc_session->enc_key_len,
-                                                  nonce, enc_session->session_id,
-                                                  enc_src_iov, enc_src_niov,
-                                                  enc_src_len, reply_hdr_len,
-                                                  &enc_iov);
-
-                if (have_comp) {
-                    evpl_iovec_release(evpl, &comp_iov);
-                }
-
-                if (rc != 0) {
-                    evpl_iovecs_release(evpl, reply_iov, reply_niov);
-                    evpl_close(evpl, conn->bind);
-                    chimera_smb_compound_free(thread, compound);
-                    return;
-                }
-
-                enc_total = reply_hdr_len + (int) sizeof(struct smb2_transform_header) +
-                    enc_src_len;
-
-                /* The encrypted message length excludes the NetBIOS framing. */
-                netbios_hdr       = evpl_iovec_data(&enc_iov);
-                netbios_hdr->word = chimera_bswap32(
-                    (int) sizeof(struct smb2_transform_header) + enc_src_len);
-
-                evpl_sendv(evpl, conn->bind, &enc_iov, 1, enc_total, EVPL_SEND_FLAG_TAKE_REF);
-
-                evpl_iovecs_release(evpl, reply_iov, reply_niov);
-                chimera_smb_compound_free(thread, compound);
-                return;
+            if (chimera_smb_compress_message(thread->compress_ctx, evpl,
+                                             comp_alg, comp_chained,
+                                             comp_buf_off, reply_iov, reply_niov,
+                                             reply_payload_length, reply_hdr_len,
+                                             &comp_iov, &comp_total) == 0) {
+                enc_src_iov  = &comp_iov;
+                enc_src_niov = 1;
+                enc_src_len  = comp_total;
+                have_comp    = 1;
             }
         }
+
+        nonce = atomic_fetch_add(&enc_session->enc_nonce_counter, 1);
+
+        rc = chimera_smb_encrypt_compound(thread->encrypt_ctx, evpl,
+                                          enc_session->cipher_id,
+                                          enc_session->enc_key,
+                                          enc_session->enc_key_len,
+                                          nonce, enc_session->session_id,
+                                          enc_src_iov, enc_src_niov,
+                                          enc_src_len, reply_hdr_len,
+                                          &enc_iov);
+
+        if (have_comp) {
+            evpl_iovec_release(evpl, &comp_iov);
+        }
+
+        if (rc != 0) {
+            evpl_iovecs_release(evpl, reply_iov, reply_niov);
+            evpl_close(evpl, conn->bind);
+            chimera_smb_compound_free(thread, compound);
+            return;
+        }
+
+        enc_total = reply_hdr_len + (int) sizeof(struct smb2_transform_header) +
+            enc_src_len;
+
+        /* The encrypted message length excludes the NetBIOS framing. */
+        netbios_hdr       = evpl_iovec_data(&enc_iov);
+        netbios_hdr->word = chimera_bswap32(
+            (int) sizeof(struct smb2_transform_header) + enc_src_len);
+
+        evpl_sendv(evpl, conn->bind, &enc_iov, 1, enc_total, EVPL_SEND_FLAG_TAKE_REF);
+
+        evpl_iovecs_release(evpl, reply_iov, reply_niov);
+        chimera_smb_compound_free(thread, compound);
+        return;
     }
 
     if (chimera_smb_conn_is_direct(conn)) {

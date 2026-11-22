@@ -322,21 +322,17 @@ chimera_smb_client_session_setup_done(
     }
 
     /* SessionFlags carries SMB2_SESSION_FLAG_ENCRYPT_DATA when the server has
-     * decided this session is sealed.  That decision is the SERVER's alone: it
-     * is the side that must be able to decrypt, and a chimera server selects a
-     * 3.1.1 cipher for any client that offers one even when encryption is
-     * switched off in its config.  So a cipher having been negotiated is NOT
-     * evidence the peer expects ciphertext -- encrypting on that basis sends
-     * traffic the server drops, and the mount dies with EIO. */
+     * decided this session is sealed.  This client encrypts only then: a
+     * negotiated cipher on its own leaves the session in cleartext. */
     if (server->cipher_id && (session_flags & SMB2_SESSION_FLAG_ENCRYPT_DATA)) {
         server->encrypt_active = 1;
         chimera_smbclient_info("SMB session encryption active (cipher 0x%04x)",
                                server->cipher_id);
     }
 
-    /* seal= is a security REQUEST, so a server that will not seal is a failed
-     * mount, not a silent downgrade to cleartext (mount.cifs seal behaves the
-     * same way).  Refusing here is what makes seal=yes worth asking for. */
+    /* seal= is a security REQUEST, so a session the server did not seal is a
+     * failed mount, not a silent downgrade to cleartext.  Refusing here is what
+     * makes seal=yes worth asking for. */
     if (server->seal_requested && !server->encrypt_active) {
         chimera_smbclient_error(
             "seal=yes was requested but the server did not enable encryption "

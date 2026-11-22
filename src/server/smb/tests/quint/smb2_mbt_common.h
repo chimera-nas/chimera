@@ -381,6 +381,14 @@ smb2_env_opts_eq(
            a->memfs_block_size == b->memfs_block_size;
 } /* smb2_env_opts_eq */
 
+/* smb2_wire_profile.server_encryption: the server's smb_encryption mode. */
+#define SMB2W_SERVER_ENC_DEFAULT   0  /* required if the profile encrypts, else off */
+#define SMB2W_SERVER_ENC_OFF       1
+#define SMB2W_SERVER_ENC_AVAILABLE 2
+#define SMB2W_SERVER_ENC_ENABLED   3
+#define SMB2W_SERVER_ENC_REQUIRED  4
+#define SMB2W_SERVER_ENC_INVALID   5  /* the setter is passed 4, outside the modes */
+
 /* How a connection is negotiated, authenticated and protected.
  *
  * The corpus does not model any of this -- it is the same SMB2 conversation
@@ -401,6 +409,11 @@ struct smb2_wire_profile {
     int         ntlmv2;
     int         sign;
     int         encrypt;
+    /* The server's smb_encryption mode, as SMB2W_SERVER_ENC_*.  The default
+     * (0) is "required" when the profile encrypts, off otherwise.  The other values set the mode explicitly, so a
+     * probe can pair a client that encrypts on its own with a server that only
+     * offers encryption, or with one that does not offer it at all. */
+    int         server_encryption;
     /* SMB3 transport compression (MS-SMB2 2.2.3.1.3).  Offering the context is
     * what makes the server's compression path reachable at all: it compresses
     * a reply only for a connection that advertised an algorithm it shares.
@@ -688,6 +701,18 @@ struct smb2_conn {
     int                             compress_on;
     uint16_t                        compress_alg;
     uint32_t                        compressed_replies;
+    /* What the server said about encryption, so a probe can assert on the
+     * offer itself and not only on whether encrypted I/O happened to work:
+     * the NEGOTIATE response's Capabilities, whether it carried an
+     * ENCRYPTION_CAPABILITIES context (3.1.1), and the final SESSION_SETUP
+     * response's SessionFlags (ENCRYPT_DATA is the server forcing it).
+     * encrypted_replies counts TRANSFORM-framed replies actually decrypted,
+     * which tells an encrypted answer from a cleartext one, including while
+     * encrypt_on is off. */
+    uint32_t                        server_caps;
+    int                             encryption_ctx;
+    uint16_t                        session_flags;
+    uint32_t                        encrypted_replies;
     /* Send REQUESTS compressed as well, which is what reaches the server's
      * inbound decompression -- the path that parses bytes it did not produce.
      * Opt-in per connection rather than implied by compress_on, so the ordinary
@@ -1036,12 +1061,22 @@ smb2c_deliver(
      * classification below (break? interim? which MessageId?) would
      * otherwise be reading ciphertext.  Breaks arrive encrypted too
      * once the session is protected, which is why this sits ahead of
-     * the break check rather than in the reply path. */
-    if (c->encrypt_on && off >= 4 + SMB2W_XFORM_SIZE &&
+     * the break check rather than in the reply path.  Any TRANSFORM is
+     * decrypted and counted, whether or not this client is encrypting its
+     * own requests right now: a probe that switches to cleartext must still
+     * see an encrypted answer as one. */
+    if (off >= 4 + SMB2W_XFORM_SIZE &&
         c->xbuf[4] == 0xFD && c->xbuf[5] == 'S' &&
         c->xbuf[6] == 'M' && c->xbuf[7] == 'B') {
-        int plen = smb2w_decrypt(c->cipher, c->recv_key, c->enc_key_len,
-                                 c->xbuf + 4, off - 4, c->dbuf);
+        int plen;
+
+        if (c->enc_key_len == 0) {
+            fprintf(stderr, "smb2 harness: TRANSFORM-framed reply on a "
+                    "connection with no encryption keys\n");
+            smb2c_exit(6);
+        }
+        plen = smb2w_decrypt(c->cipher, c->recv_key, c->enc_key_len,
+                             c->xbuf + 4, off - 4, c->dbuf);
 
         if (plen < 0) {
             fprintf(stderr, "smb2 harness: failed to decrypt a "
@@ -1050,6 +1085,7 @@ smb2c_deliver(
         }
         memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
         off = 4 + plen;
+        c->encrypted_replies++;
     }
     /* Then unwrap compression.  The server compresses BEFORE it
     * encrypts (MS-SMB2 3.1.4.4), so on the way in the order is
@@ -1428,8 +1464,29 @@ smb2_env_open_wire(
     } else {
         chimera_server_config_set_smb_signing_required(config, 0);
     }
-    if (env->wire && env->wire->encrypt) {
-        chimera_server_config_set_smb_encryption(config, 2);   /* required */
+    if (env->wire) {
+        switch (env->wire->server_encryption) {
+            case SMB2W_SERVER_ENC_OFF:
+                chimera_server_config_set_smb_encryption(config, CHIMERA_SMB_ENCRYPTION_OFF);
+                break;
+            case SMB2W_SERVER_ENC_AVAILABLE:
+                chimera_server_config_set_smb_encryption(config, CHIMERA_SMB_ENCRYPTION_AVAILABLE);
+                break;
+            case SMB2W_SERVER_ENC_ENABLED:
+                chimera_server_config_set_smb_encryption(config, CHIMERA_SMB_ENCRYPTION_ENABLED);
+                break;
+            case SMB2W_SERVER_ENC_REQUIRED:
+                chimera_server_config_set_smb_encryption(config, CHIMERA_SMB_ENCRYPTION_REQUIRED);
+                break;
+            case SMB2W_SERVER_ENC_INVALID:
+                chimera_server_config_set_smb_encryption(config, CHIMERA_SMB_ENCRYPTION_AVAILABLE + 1);
+                break;
+            default:
+                if (env->wire->encrypt) {
+                    chimera_server_config_set_smb_encryption(config, CHIMERA_SMB_ENCRYPTION_REQUIRED);
+                }
+                break;
+        } /* switch */
     }
     if (env->wire && env->wire->compress) {
         /* Off by default in the server, so without this the COMPRESSION
@@ -2601,11 +2658,14 @@ smb2_negotiate(struct smb2_conn *c)
     /* Offer 2.1 + 3.0 by default: 3.0 unlocks lease v2 (epochs) needed for the
      * cascade test, and stops short of 3.1.1's mandatory negotiate contexts.
      * A profile's max_dialect is a CEILING on that offer: 2.1 alone pins the
-     * pre-3.x signing algorithm, and 3.1.1 offers the full ladder and sends
-     * the negotiate contexts. */
+     * pre-3.x signing algorithm, 3.0.2 adds itself, and 3.1.1 offers the full
+     * ladder and sends the negotiate contexts. */
     dialects[nd++] = SMB2_DIALECT_0210;
     if (!w || w->max_dialect != SMB2_DIALECT_0210) {
         dialects[nd++] = SMB2_DIALECT_0300;
+    }
+    if (w && w->max_dialect == SMB2_DIALECT_0302) {
+        dialects[nd++] = SMB2_DIALECT_0302;
     }
     if (want311) {
         dialects[nd++] = SMB2_DIALECT_0302;
@@ -2706,7 +2766,9 @@ smb2_negotiate(struct smb2_conn *c)
     if (st == ST_SUCCESS) {
         const uint8_t *rb = c->rbuf + 4 + SMB2_HDR_SIZE;
 
-        c->dialect = g16(rb, 4);                    /* DialectRevision */
+        c->dialect        = g16(rb, 4);             /* DialectRevision */
+        c->server_caps    = g32(rb, 24);            /* Capabilities */
+        c->encryption_ctx = 0;
 
         /* Defaults for a dialect that carries no algorithm contexts: 2.x signs
          * with HMAC-SHA256, 3.0/3.0.2 with AES-CMAC (both implied by the
@@ -2729,7 +2791,8 @@ smb2_negotiate(struct smb2_conn *c)
                 uint16_t       dlen = g16(ctx, 2);
 
                 if (type == SMB2W_CTX_ENCRYPTION && dlen >= 4) {
-                    c->cipher = g16(ctx, 10);
+                    c->cipher         = g16(ctx, 10);
+                    c->encryption_ctx = 1;
                 } else if (type == SMB2W_CTX_SIGNING && dlen >= 4) {
                     c->signing_alg = g16(ctx, 10);
                 } else if (type == SMB2W_CTX_COMPRESSION && dlen >= 8) {
@@ -2895,6 +2958,7 @@ smb2_session_setup_as(
      * back that intermediate value. */
     st = smb2c_session_setup_leg_capture(c, blob, n, preauth_at_auth);
     if (st == ST_SUCCESS) {
+        c->session_flags = g16(c->rbuf + 4 + SMB2_HDR_SIZE, 2);  /* SessionFlags */
         smb2c_arm_protection(c, preauth_at_auth);
     }
     return st;
