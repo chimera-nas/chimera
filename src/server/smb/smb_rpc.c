@@ -91,6 +91,7 @@ chimera_smb_rpc_state_open(
 {
     struct chimera_smb_rpc_state *state;
     unsigned int                  i;
+    int                           level;
 
     for (i = 0; i < sizeof(chimera_smb_rpc_services) /
          sizeof(chimera_smb_rpc_services[0]); i++) {
@@ -117,7 +118,22 @@ chimera_smb_rpc_state_open(
         return NULL;
     }
 
-    dcerpc_server_set_log(state->srv, DCERPC_SERVER_LOG_INFO, chimera_smb_rpc_log, state);
+    /* With chimera at debug level, libdcerpc logs every call: its request
+     * and reply NDR stubs as hex dumps and transcoded to YAML.  Only ask for
+     * that then -- building the dumps costs a YAML transcoding per call. */
+    switch (chimera_smb_rpc_host_log_level()) {
+        case CHIMERA_SMB_RPC_LOG_DEBUG:
+            level = DCERPC_SERVER_LOG_DEBUG;
+            break;
+        case CHIMERA_SMB_RPC_LOG_INFO:
+            level = DCERPC_SERVER_LOG_INFO;
+            break;
+        default:
+            level = DCERPC_SERVER_LOG_ERROR;
+            break;
+    } /* switch */
+
+    dcerpc_server_set_log(state->srv, level, chimera_smb_rpc_log, state);
 
     state->rpc = dcerpc_server_pipe_create(state->srv, state);
 
