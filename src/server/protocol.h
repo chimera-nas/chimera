@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -6,11 +6,18 @@
 
 #include "evpl/evpl.h"
 
+struct chimera_inspect_writer;
 struct chimera_server_config;
 struct chimera_vfs;
 struct chimera_vfs_thread;
 struct prometheus_metrics;
 struct chimera_server_protocol {
+
+    /* Optional.  Copy this thread's connections into the writer (see
+     * server_inspect.h).  Runs on the thread that owns them. */
+    void  (*inspect)(
+        void                          *thread_private,
+        struct chimera_inspect_writer *writer);
 
     void *(*init)(
         const struct chimera_server_config *config,

@@ -59,11 +59,13 @@
 #include "common/common_config.h"
 #include "smb_common/smb2.h"
 #include "server_mgmt.h"
+#include "server_inspect.h"
 
 #include "server_config_internal.h"
 
 
 struct chimera_server {
+    struct chimera_server_inspect      *inspect;
     const struct chimera_server_config *config;
     struct chimera_vfs                 *vfs;
     struct evpl_threadpool             *pool;
@@ -82,11 +84,12 @@ struct chimera_server {
 };
 
 struct chimera_thread {
-    struct chimera_server     *server;
-    struct chimera_vfs_thread *vfs_thread;
-    void                      *protocol_private[CHIMERA_SERVER_MAX_PROTOCOLS];
-    void                      *mgmt_thread;
-    struct evpl_timer          watchdog;
+    struct chimera_inspect_endpoint *inspect;
+    struct chimera_server           *server;
+    struct chimera_vfs_thread       *vfs_thread;
+    void                            *protocol_private[CHIMERA_SERVER_MAX_PROTOCOLS];
+    void                            *mgmt_thread;
+    struct evpl_timer                watchdog;
 };
 
 static void
@@ -134,6 +137,11 @@ chimera_server_thread_init(
 
     thread->mgmt_thread = server->mgmt ?
         server->mgmt->thread_init(evpl, server->mgmt_private, thread->vfs_thread) : NULL;
+
+    thread->inspect = chimera_server_inspect_register(server->inspect, evpl,
+                                                      server->num_protocols,
+                                                      server->protocols,
+                                                      thread->protocol_private);
 
     evpl_mutex_lock(&server->lock);
     if (++server->threads_online == server->config->core_threads) {
@@ -1222,6 +1230,8 @@ chimera_server_thread_shutdown(
     struct chimera_server *server = thread->server;
     int                    i;
 
+    chimera_server_inspect_unregister(thread->inspect);
+
     /* Drain VFS thread first to ensure all in-flight operations complete
      * before we destroy the protocol threads (NFS/RPC2 connections).
      * This prevents use-after-free when VFS callbacks try to send RPC replies
@@ -1304,6 +1314,8 @@ chimera_server_init_with_mgmt(
 #endif /* ifndef _WIN32 */
 
     server = calloc(1, sizeof(*server));
+
+    server->inspect = chimera_server_inspect_create(config->core_threads);
 
     server->config = config;
 
@@ -1442,6 +1454,8 @@ chimera_server_destroy(struct chimera_server *server)
 {
     int i;
 
+    chimera_server_inspect_stop(server->inspect);
+
     for (i = 0; i < server->num_protocols; i++) {
         if (!server->protocol_private[i]) {
             continue;
@@ -1468,6 +1482,8 @@ chimera_server_destroy(struct chimera_server *server)
     if (server->mgmt) {
         server->mgmt->destroy(server->mgmt_private);
     }
+
+    chimera_server_inspect_destroy(server->inspect);
 
     free((void *) server->config);
     free(server);
@@ -1893,3 +1909,9 @@ chimera_server_advance_s3_cred_clock(
 {
     chimera_s3_advance_cred_clock(server->s3_shared, seconds);
 } /* chimera_server_advance_s3_cred_clock */
+
+SYMBOL_EXPORT struct chimera_server_inspect *
+chimera_server_get_inspect(struct chimera_server *server)
+{
+    return server->inspect;
+} /* chimera_server_get_inspect */

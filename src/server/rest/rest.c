@@ -588,6 +588,24 @@ chimera_rest_dispatch(
         }
     }
 
+    /* Connection inspection: GET /api/v1/connections[?filters] */
+    {
+        const char *query    = memchr(url, '?', url_len);
+        int         path_len = query ? query - url : url_len;
+
+        if (path_len == 19 && memcmp(url, "/api/v1/connections", 19) == 0) {
+            if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
+                chimera_rest_inspect_connections(thread, request,
+                                                 query ? query + 1 : NULL,
+                                                 query ? url_len - path_len - 1 : 0,
+                                                 notify_callback, notify_data);
+            } else {
+                chimera_rest_handle_method_not_allowed(evpl, request);
+            }
+            return;
+        }
+    }
+
     /* Config API: /api/v1/config */
     if (url_len == 14 && strncmp(url, "/api/v1/config", 14) == 0) {
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {

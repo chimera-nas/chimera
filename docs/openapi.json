@@ -877,6 +877,154 @@
           }
         }
       }
+    },
+    "/connections": {
+      "get": {
+        "summary": "List connections",
+        "operationId": "getConnections",
+        "tags": [
+          "Inspection"
+        ],
+        "description": "The connections the server holds, copied by the worker thread that owns each one. Filters are ANDed. At most 1,024 rows are returned, shared evenly between the workers asked (`worker_id` gives one worker the whole budget), and a collection that cannot cover every worker, or hits the row limit, says so in `complete`, `truncated` and `missing_workers`. Only one collection runs at a time. There is no pagination and no history of closed connections.",
+        "parameters": [
+          {
+            "name": "worker_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Only the connections owned by this worker thread."
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "nfs",
+                "mount",
+                "nlm",
+                "nsm",
+                "rpcbind"
+              ]
+            },
+            "description": "One service. Without it only nfs is listed; the mount, lock, status and portmap listeners are selected by name."
+          },
+          {
+            "name": "remote_ip",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Peer IPv4 or IPv6 address, numeric."
+          },
+          {
+            "name": "remote_port",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "description": "Peer port."
+          },
+          {
+            "name": "local_ip",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Local IPv4 or IPv6 address, numeric."
+          },
+          {
+            "name": "local_port",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "description": "Local port."
+          },
+          {
+            "name": "transport",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "tcp",
+                "udp",
+                "rdma",
+                "unix",
+                "inproc",
+                "fabric"
+              ]
+            },
+            "description": "Transport."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A complete or explicitly partial answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionsSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unknown, repeated, empty or malformed filter, or a worker that does not exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required."
+          },
+          "429": {
+            "description": "Another collection is still outstanding.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds before retrying."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No worker responded, or the server is shutting down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1290,6 +1438,163 @@
           "message": {
             "type": "string",
             "description": "Error message"
+          }
+        }
+      },
+      "InspectionEndpoint": {
+        "type": "object",
+        "properties": {
+          "family": {
+            "type": "string",
+            "enum": [
+              "ipv4",
+              "ipv6",
+              "unix",
+              "inproc",
+              "unknown"
+            ]
+          },
+          "address": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Null for endpoints without a port."
+          },
+          "scope_id": {
+            "type": "integer",
+            "description": "IPv6 scope, present when non-zero."
+          }
+        }
+      },
+      "InspectionConnection": {
+        "type": "object",
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "description": "worker_id:serial. Valid only with server_instance_id: a reconnect or a restart gives a new one."
+          },
+          "worker_id": {
+            "type": "integer"
+          },
+          "worker_name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closing"
+            ]
+          },
+          "service": {
+            "type": "string",
+            "enum": [
+              "nfs",
+              "mount",
+              "nlm",
+              "nsm",
+              "rpcbind"
+            ]
+          },
+          "transport": {
+            "type": "string"
+          },
+          "age_ms": {
+            "type": "string",
+            "description": "Unsigned 64-bit counter as a decimal string."
+          },
+          "local": {
+            "$ref": "#/components/schemas/InspectionEndpoint"
+          },
+          "remote": {
+            "$ref": "#/components/schemas/InspectionEndpoint"
+          },
+          "stats": {
+            "type": "object",
+            "properties": {
+              "rx_messages": {
+                "type": "string",
+                "description": "Unsigned 64-bit counter as a decimal string."
+              },
+              "tx_messages": {
+                "type": "string",
+                "description": "Unsigned 64-bit counter as a decimal string."
+              },
+              "rx_bytes": {
+                "type": "string",
+                "description": "Unsigned 64-bit counter as a decimal string."
+              },
+              "tx_bytes": {
+                "type": "string",
+                "description": "Unsigned 64-bit counter as a decimal string."
+              },
+              "requests_completed": {
+                "type": "string",
+                "description": "Unsigned 64-bit counter as a decimal string."
+              },
+              "requests_in_flight": {
+                "type": "string",
+                "description": "Unsigned 64-bit counter as a decimal string."
+              }
+            }
+          },
+          "observed_rpc_programs": {
+            "type": "array",
+            "description": "RPC programs a call has been accepted for on this connection.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "program": {
+                  "type": "integer"
+                },
+                "version": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "nfs_minor_versions_seen": {
+            "type": "array",
+            "description": "NFSv4 minor versions a COMPOUND has used on this connection.",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "rpc_framing": {
+            "type": "string",
+            "enum": [
+              "record_marking",
+              "rpc_rdma"
+            ]
+          }
+        }
+      },
+      "ConnectionsSnapshot": {
+        "type": "object",
+        "properties": {
+          "server_instance_id": {
+            "type": "string"
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "False when a worker did not answer in time or a limit was hit."
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "missing_workers": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "connections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InspectionConnection"
+            }
           }
         }
       }

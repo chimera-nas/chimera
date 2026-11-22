@@ -18,6 +18,7 @@ add_library(chimera_rest ${CHIMERA_LIBRARY_TYPE}
     rest_mounts.c
     rest_filesystems.c
     rest_config.c
+    rest_inspect.c
     rest_swagger.c
     rest_debug.c
     rest_auth.c

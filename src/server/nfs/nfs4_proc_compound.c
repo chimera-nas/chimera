@@ -644,6 +644,15 @@ chimera_nfs4_compound(
         return;
     }
 
+    /* Remember which NFSv4 minor versions this connection has used, for
+     * connection inspection.  Only the connection's own thread writes it. */
+    uint64_t minor_bit = 1ULL << args->minorversion;
+    uint64_t observed  = evpl_rpc2_conn_get_application_tag(conn);
+
+    if (!(observed & minor_bit)) {
+        evpl_rpc2_conn_set_application_tag(conn, observed | minor_bit);
+    }
+
     /* RFC 7530 §16.2.3: the COMPOUND tag is a utf8str_cs; a malformed tag
      * is rejected with NFS4ERR_INVAL before any operation runs. */
     if (args->tag.len &&

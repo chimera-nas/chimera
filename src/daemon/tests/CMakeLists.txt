@@ -83,3 +83,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                 $<TARGET_FILE:chimera>)
     set_tests_properties(chimera/daemon/thread_cpu PROPERTIES TIMEOUT 120)
 endif()
+
+# GET /api/v1/connections lists the NFS connections the server holds: their
+# addresses and counters, the filters, a closed connection leaving the list,
+# and the endpoint surviving abandoned and concurrent requests.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME chimera/daemon/connections
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/daemon_connections_test.py
+                $<TARGET_FILE:chimera>)
+    set_tests_properties(chimera/daemon/connections PROPERTIES TIMEOUT 180)
+endif()
