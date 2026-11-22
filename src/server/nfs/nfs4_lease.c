@@ -236,6 +236,13 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
 
     forget_count = nfs4_client_take_forgets_locked(table, &forget_ids);
 
+    if (shared->table_metrics.clients) {
+        prometheus_gauge_set(shared->table_metrics.clients,
+                             HASH_CNT(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id));
+        prometheus_gauge_set(shared->table_metrics.sessions,
+                             HASH_CNT(nfs4_session_hh, table->nfs4_ct_sessions));
+    }
+
     evpl_mutex_unlock(&table->nfs4_ct_lock);
 
     for (size_t i = 0; i < victim_count; i++) {
