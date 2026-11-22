@@ -33,11 +33,10 @@ chimera_smb_secure_send_snapshot(
     /* Encryption supersedes signing: when the session encrypts (global
      * EncryptData, a per-share encrypted tree, or the request itself arrived
      * inside a TRANSFORM) every response including this async one MUST be
-     * encrypted (MS-SMB2 §3.3.4.1.4) rather than signed. */
-    if (session && session->enc_key_len > 0 &&
-        (request->compound->received_encrypted ||
-         (session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA) ||
-         (tree && tree->share && tree->share->encrypt_data))) {
+     * encrypted (MS-SMB2 §3.3.4.1.4) rather than signed.  The same rule as the
+     * compound reply (chimera_smb_reply_encrypts). */
+    if (chimera_smb_reply_encrypts(session, request->compound->received_encrypted,
+                                   0, tree)) {
         snap->encrypt     = 1;
         snap->cipher_id   = session->cipher_id;
         snap->enc_key_len = session->enc_key_len;

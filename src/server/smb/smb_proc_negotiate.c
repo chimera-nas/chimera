@@ -4,6 +4,7 @@
 
 #include "common/crypto.h"
 
+#include "server/server.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
 
@@ -159,8 +160,14 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
      * instead and the capability bit MUST NOT be set (MS-SMB2 §3.3.5.4).  The
      * server echoes the capability only when the CLIENT also advertised it: per
      * §3.3.5.4 SMB2_GLOBAL_CAP_ENCRYPTION is set in the response only if it was
-     * set in the request (SMB2Model Encryption ClientNotSupportsEncryption). */
-    if (dialect >= 0x300 && dialect < 0x311 && shared->config.encryption &&
+     * set in the request (SMB2Model Encryption ClientNotSupportsEncryption).
+     * The server supports encryption (IsEncryptionSupported) when smb_encryption
+     * is on or any share is marked encrypt_data, the same rule as the 3.1.1
+     * cipher selection: with the mode off, a 3.0 client must still learn it
+     * can encrypt, or it can never reach an encrypt_data share. */
+    if (dialect >= 0x300 && dialect < 0x311 &&
+        (shared->config.encryption != CHIMERA_SMB_ENCRYPTION_OFF ||
+         shared->any_share_encrypt) &&
         (request->negotiate.capabilities & SMB2_GLOBAL_CAP_ENCRYPTION)) {
         conn->capabilities |= SMB2_GLOBAL_CAP_ENCRYPTION;
     }
@@ -347,9 +354,10 @@ build_signing_capabilities_response(
 
 /* Build the SMB2_ENCRYPTION_CAPABILITIES response context:
  *   CipherCount(2)=1, Ciphers[1](2)=selected cipher.
- * The selected cipher is echoed so the client's per-session nonce bookkeeping
- * is well-formed; Chimera does not activate encryption (see cipher selection
- * in chimera_smb_select_negotiated_algorithms). */
+ * A cipher is selected only when the server supports encryption (see cipher
+ * selection in chimera_smb_select_negotiated_algorithms); with none selected
+ * no context is sent, which tells the client the server does not encrypt
+ * (MS-SMB2 3.3.5.4). */
 static int
 build_encryption_capabilities_response(
     struct chimera_smb_conn    *conn,
@@ -413,11 +421,9 @@ build_compression_capabilities_response(
  *
  * PreauthIntegrity is implemented: the server selects SHA-512, returns a salt,
  * maintains Connection.PreauthIntegrityHashValue across NEGOTIATE/SESSION_SETUP
- * (smb.c), and derives the 3.1.1 signing key bound to that hash. AES-CMAC
- * signing negotiation is implemented. The encryption context echoes a selected
- * cipher (required so the client's session nonce bookkeeping is well-formed)
- * but Chimera does not activate encryption; GMAC, compression and
- * RdmaTransform contexts are not yet emitted. */
+ * (smb.c), and derives the 3.1.1 signing key bound to that hash. The
+ * encryption context carries the selected cipher and is sent only when one was
+ * selected; RdmaTransform contexts are not yet emitted. */
 static const struct chimera_smb_negotiate_response_emitter smb_negotiate_response_emitters[] = {
     { CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH,     SMB2_PREAUTH_INTEGRITY_CAPABILITIES,
       build_preauth_integrity_response },
@@ -959,20 +965,19 @@ chimera_smb_select_negotiated_algorithms(
         }
     }
 
-    /* SMB 3.1.1: when the client offers an ENCRYPTION_CAPABILITIES context, the
-     * server MUST select a cipher and echo it back in the response context (or
-     * return AES-128-CCM as a default per MS-SMB2 3.3.5.4).
+    /* SMB 3.1.1: select a cipher from the client's ENCRYPTION_CAPABILITIES
+     * context only when this server supports encryption at all -- any
+     * smb_encryption mode but off, or a share with encrypt_data.  MS-SMB2
+     * 3.3.5.4: "If IsEncryptionSupported is FALSE, the server MUST ignore the
+     * context", and the response then carries none, which is how the client
+     * learns that the server does not encrypt.
      *
-     * We select the cipher here unconditionally (even when encryption is
-     * disabled in config), because a Samba client (smbtorture) records
-     * Connection.CipherId from this context and uses it to size the per-session
-     * AEAD nonce space.  Leaving CipherId at 0 makes the client compute a zero
-     * nonce-space, and a later shallow-copy of the session
-     * (smb2.compound.related1, durable-open, replay) then aborts — crashing the
-     * client.  Whether traffic is actually encrypted is decided separately at
-     * SESSION_SETUP, gated on shared->config.encryption. */
+     * Whether a session is encrypt-all is decided separately at SESSION_SETUP
+     * (enabled and required force it; available leaves it to the client). */
     if (conn->dialect == SMB2_DIALECT_3_1_1 &&
-        (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_ENCRYPTION)) {
+        (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_ENCRYPTION) &&
+        (conn->thread->shared->config.encryption != CHIMERA_SMB_ENCRYPTION_OFF ||
+         conn->thread->shared->any_share_encrypt)) {
         static const uint16_t preferred[] = {
             SMB2_ENCRYPTION_AES_128_GCM,
             SMB2_ENCRYPTION_AES_256_GCM,
@@ -992,7 +997,7 @@ chimera_smb_select_negotiated_algorithms(
         }
     } else if (conn->dialect >= SMB2_DIALECT_3_0 &&
                conn->dialect < SMB2_DIALECT_3_1_1 &&
-               (conn->thread->shared->config.encryption
+               (conn->thread->shared->config.encryption != CHIMERA_SMB_ENCRYPTION_OFF
                 ? (request->negotiate.capabilities & SMB2_GLOBAL_CAP_ENCRYPTION)
                 : conn->thread->shared->any_share_encrypt)) {
         /* SMB 3.0/3.0.2 has no encryption-capabilities context; the only cipher

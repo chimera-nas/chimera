@@ -127,12 +127,12 @@ set_tests_properties(chimera/posix/smb/loopback_dialect_refused_2.0.2 PROPERTIES
 #
 #   name                       server demands            expected
 #   sign_required              SIGNING_REQUIRED          mount + probe (3.x signs)
-#   encrypt_enabled            encryption = 1 (offer)    mount + probe: the
+#   encrypt_enabled            encryption = 1 (enabled)  mount + probe: the
 #                                                        client offers no cipher
 #                                                        and mode 1 does not
 #                                                        insist, which is the
 #                                                        spec-correct degrade
-#   encrypt_required           encryption = 2 (require)  mount REFUSED
+#   encrypt_required           encryption = 2 (required) mount REFUSED
 #   compress_enabled           compression advertised    mount + probe: the
 #                                                        client never negotiates
 #                                                        it, so the share flag is
@@ -193,11 +193,9 @@ set_tests_properties(chimera/posix/smb/loopback_sealed_required PROPERTIES
 # seal= is a security request, so the two ways it cannot be met are refusals,
 # not silent downgrades to cleartext:
 #
-#   sealed_unsupported_by_server  the server has encryption off.  It still
-#                                 SELECTS a cipher for any 3.1.1 client that
-#                                 offers one, so a negotiated cipher is not
-#                                 evidence the peer expects ciphertext --
-#                                 encrypting anyway sends traffic it drops.
+#   sealed_unsupported_by_server  the server has encryption off, so it
+#                                 negotiates no cipher and cannot seal the
+#                                 session.
 #   sealed_2.1                    encryption does not exist below 3.0.
 #   signed_required_2.1           the server demands signing; the client
 #                                 deliberately never signs at 2.1, so there is

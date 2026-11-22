@@ -792,7 +792,28 @@ main(
              strstr(tests[i], "toG") != NULL) ||
             strstr(tests[i], "session.encryption") != NULL ||
             strstr(tests[i], "anon-encryption") != NULL) {
-            chimera_server_config_set_smb_encryption(config, 1);
+            chimera_server_config_set_smb_encryption(config,
+                                                     CHIMERA_SMB_ENCRYPTION_ENABLED);
+            break;
+        }
+    }
+
+    /* compound.related1, related2 and invalid2 call the Samba client's
+     * smbXcli_session_shallow_copy(), which sizes the copy's AEAD nonce space
+     * from the negotiated cipher and returns NULL when there is none; the test
+     * then dereferences the NULL and smbtorture crashes.  With encryption off
+     * the server negotiates no cipher (MS-SMB2 3.3.5.4), so these cases run
+     * with encryption "available": a cipher is negotiated, as with any server
+     * that supports encryption, and nothing is encrypted unless the client
+     * asks, which these cases do not.  ctest runs smb2.compound as one
+     * consolidated entry, so there every compound case runs at "available";
+     * none of them encrypts or depends on no cipher being negotiated. */
+    for (i = 0; i < num_tests; i++) {
+        if (strcmp(tests[i], "smb2.compound.related1") == 0 ||
+            strcmp(tests[i], "smb2.compound.related2") == 0 ||
+            strcmp(tests[i], "smb2.compound.invalid2") == 0) {
+            chimera_server_config_set_smb_encryption(config,
+                                                     CHIMERA_SMB_ENCRYPTION_AVAILABLE);
             break;
         }
     }
