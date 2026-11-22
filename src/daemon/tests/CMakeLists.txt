@@ -66,3 +66,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                 $<TARGET_FILE:chimera>)
     set_tests_properties(chimera/daemon/metrics_hostname PROPERTIES TIMEOUT 120)
 endif()
+
+# rest_hostname restricts the REST listener to one address, as
+# metrics_hostname does for the scrape endpoint.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME chimera/daemon/rest_hostname
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/daemon_rest_hostname_test.py
+                $<TARGET_FILE:chimera>)
+    set_tests_properties(chimera/daemon/rest_hostname PROPERTIES TIMEOUT 120)
+endif()

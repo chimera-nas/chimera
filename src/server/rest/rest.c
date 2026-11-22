@@ -801,6 +801,7 @@ chimera_rest_init(
     struct chimera_rest_server *rest;
     int                         http_port;
     int                         https_port;
+    const char                 *hostname;
 
     http_port  = chimera_server_config_get_rest_http_port(config);
     https_port = chimera_server_config_get_rest_https_port(config);
@@ -811,6 +812,8 @@ chimera_rest_init(
     }
 
     rest = calloc(1, sizeof(*rest));
+
+    hostname = chimera_server_config_get_rest_hostname(config);
 
     rest->http_port    = http_port;
     rest->https_port   = https_port;
@@ -840,16 +843,16 @@ chimera_rest_init(
          * API over inproc without binding a port.  TLS has no inproc form, so
          * the HTTPS listener below stays a real socket regardless. */
         rest->http_endpoint = chimera_tcp_flavor_endpoint_create(rest->flavor,
-                                                                 "0.0.0.0",
+                                                                 hostname,
                                                                  http_port);
         rest->http_listener = evpl_listener_create_named("chm_rest_listen");
-        chimera_rest_info("REST API HTTP initialized on port %d", http_port);
+        chimera_rest_info("REST API HTTP initialized on %s port %d", hostname, http_port);
     }
 
     if (https_port != 0) {
-        rest->https_endpoint = evpl_endpoint_create("0.0.0.0", https_port);
+        rest->https_endpoint = evpl_endpoint_create(hostname, https_port);
         rest->https_listener = evpl_listener_create_named("chm_rest_tls");
-        chimera_rest_info("REST API HTTPS initialized on port %d", https_port);
+        chimera_rest_info("REST API HTTPS initialized on %s port %d", hostname, https_port);
     }
 
     return rest;

@@ -86,6 +86,8 @@ chimera_server_config_init(void)
     config->rest_auth_enabled        = 1;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
+    snprintf(config->rest_hostname, sizeof(config->rest_hostname), "0.0.0.0");
+
     config->smb_num_dialects = 5;
     config->smb_dialects[0]  = SMB2_DIALECT_2_0_2;
     config->smb_dialects[1]  = SMB2_DIALECT_2_1;
@@ -1389,6 +1391,20 @@ chimera_server_config_get_rest_auth_enabled(const struct chimera_server_config *
 {
     return config->rest_auth_enabled;
 } /* chimera_server_config_get_rest_auth_enabled */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_hostname(
+    struct chimera_server_config *config,
+    const char                   *hostname)
+{
+    snprintf(config->rest_hostname, sizeof(config->rest_hostname), "%s", hostname);
+} /* chimera_server_config_set_rest_hostname */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_rest_hostname(const struct chimera_server_config *config)
+{
+    return config->rest_hostname;
+} /* chimera_server_config_get_rest_hostname */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_rest_https_port(

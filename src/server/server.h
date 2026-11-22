@@ -690,6 +690,15 @@ chimera_server_config_get_rest_http_port(
     const struct chimera_server_config *config);
 
 SYMBOL_EXPORT void
+chimera_server_config_set_rest_hostname(
+    struct chimera_server_config *config,
+    const char                   *hostname);
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_rest_hostname(
+    const struct chimera_server_config *config);
+
+SYMBOL_EXPORT void
 chimera_server_config_set_rest_https_port(
     struct chimera_server_config *config,
     int                           port);
