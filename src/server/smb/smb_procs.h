@@ -188,6 +188,11 @@ void chimera_smb_write(
 void chimera_smb_read(
     struct chimera_smb_request *request);
 
+/* Complete READs parked on named pipe open_file now that it has output. */
+void chimera_smb_pipe_read_wake(
+    struct chimera_smb_conn      *conn,
+    struct chimera_smb_open_file *open_file);
+
 void chimera_smb_flush(
     struct chimera_smb_request *request);
 

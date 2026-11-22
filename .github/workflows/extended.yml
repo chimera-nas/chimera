@@ -940,7 +940,7 @@ jobs:
       - name: Install dependencies
         run: |
           # macOS 26 has current Homebrew bottles; use the standard formula index.
-          # bison: Apple ships 2.3 and the ndrzcc grammar needs 3.x; the
+          # bison: Apple ships 2.3; xdrzcc's grammar gets Homebrew's; the
           # top-level CMakeLists already adds the keg-only Homebrew path.
           # libxcrypt: Darwin libc crypt(3) is DES-only, and REST auth needs
           # full crypt(5) $-scheme verification.

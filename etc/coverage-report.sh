@@ -36,7 +36,7 @@ COV_TOOL="${LLVM_COV:-llvm-cov}"
 # generated marshallers and libevpl ship.
 ignore_parts=('/usr/' '/3rdparty/' '/CMakeFiles/')
 
-# Generated sources (the xdrzcc/ndrzcc XDR/NDR marshallers, embedded asset
+# Generated sources (the xdrzcc XDR and libdcerpc NDR marshallers, embedded asset
 # blobs, etc.) are emitted into the build tree, whereas hand-written sources
 # live under the source tree -- so "compiled from under BUILD_DIR" is a reliable,
 # generator-agnostic way to spot generated code.

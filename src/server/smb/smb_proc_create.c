@@ -26,10 +26,6 @@
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_release.h"
 #include "smb_attr.h"
-#include "smb_lsarpc.h"
-#include "smb_srvsvc.h"
-#include "smb_samr.h"
-#include "smb_wkssvc.h"
 
 /* Final step of a successful create: apply any SMB2_CREATE_EA_BUFFER ("ExtA")
  * EAs to the new/opened object, then release the open and reply.  When no ExtA
@@ -820,7 +816,6 @@ static inline struct chimera_smb_open_file *
 chimera_smb_create_gen_open_file(
     struct chimera_smb_request     *request,
     enum chimera_smb_open_file_type type,
-    chimera_smb_pipe_transceive_t   transceive,
     uint64_t                        pid,
     const void                     *parent_fh,
     int                             parent_fh_len,
@@ -860,10 +855,10 @@ chimera_smb_create_gen_open_file(
     if (request->create.create_options & SMB2_FILE_OPEN_FOR_BACKUP_INTENT) {
         open_file->flags |= CHIMERA_SMB_OPEN_FILE_BACKUP_INTENT;
     }
-    open_file->position        = 0;
-    open_file->next_ea_index   = 0;
-    open_file->pipe_transceive = transceive;
-    open_file->refcnt          = 2;
+    open_file->position      = 0;
+    open_file->next_ea_index = 0;
+    open_file->rpc_pipe      = NULL;
+    open_file->refcnt        = 2;
     /* Seed MS-SMB2 §3.3.5.2.10 channel-sequence tracking from the CREATE's
      * sequence so the first mutating op is compared against the right baseline
      * (the open_file pool is reused without zeroing). */
@@ -1953,7 +1948,6 @@ chimera_smb_create_gen_open_file_normal(
 
     open_file = chimera_smb_create_gen_open_file(request,
                                                  CHIMERA_SMB_OPEN_FILE_TYPE_FILE,
-                                                 NULL,
                                                  pid,
                                                  parent_fh,
                                                  parent_fh_len,
@@ -1967,16 +1961,13 @@ chimera_smb_create_gen_open_file_normal(
 
 static inline struct chimera_smb_open_file *
 chimera_smb_create_gen_open_file_pipe(
-    struct chimera_smb_request   *request,
-    enum chimera_smb_pipe_magic   pipe_magic,
-    chimera_smb_pipe_transceive_t transceive,
-    const char                   *name,
-    int                           name_len)
+    struct chimera_smb_request *request,
+    const char                 *name,
+    int                         name_len)
 {
     return chimera_smb_create_gen_open_file(request,
                                             CHIMERA_SMB_OPEN_FILE_TYPE_PIPE,
-                                            transceive,
-                                            pipe_magic,
+                                            0,
                                             NULL,
                                             0,
                                             name,
@@ -5653,8 +5644,7 @@ chimera_smb_create(struct chimera_smb_request *request)
 {
     struct timespec               now;
     struct chimera_smb_open_file *open_file;
-    enum chimera_smb_pipe_magic   pipe_magic;
-    chimera_smb_pipe_transceive_t transceive;
+    struct chimera_smb_rpc_pipe  *rpc_pipe;
 
     request->create.has_stream           = 0;
     request->create.break_waiter_counted = 0;
@@ -5842,28 +5832,21 @@ chimera_smb_create(struct chimera_smb_request *request)
 
     if (request->tree->type == CHIMERA_SMB_TREE_TYPE_PIPE) {
 
-        if (strcasecmp(request->create.name, "lsarpc") == 0) {
-            pipe_magic = CHIMERA_SMB_OPEN_FILE_LSA_RPC;
-            transceive = chimera_smb_lsarpc_transceive;
-        } else if (strcasecmp(request->create.name, "srvsvc") == 0) {
-            pipe_magic = CHIMERA_SMB_OPEN_FILE_SRV_RPC;
-            transceive = chimera_smb_srvsvc_transceive;
-        } else if (strcasecmp(request->create.name, "samr") == 0) {
-            pipe_magic = CHIMERA_SMB_OPEN_FILE_SAMR_RPC;
-            transceive = chimera_smb_samr_transceive;
-        } else if (strcasecmp(request->create.name, "wkssvc") == 0) {
-            pipe_magic = CHIMERA_SMB_OPEN_FILE_WKSSVC_RPC;
-            transceive = chimera_smb_wkssvc_transceive;
-        } else {
+        /* NULL for a pipe no service is offered on (or on allocation
+         * failure, which a client cannot tell apart from that). */
+        rpc_pipe = chimera_smb_rpc_pipe_open(request->create.name,
+                                             request->compound->thread->shared,
+                                             &request->session_handle->session->cred);
+
+        if (!rpc_pipe) {
             chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
             return;
         }
 
         open_file = chimera_smb_create_gen_open_file_pipe(request,
-                                                          pipe_magic,
-                                                          transceive,
                                                           request->create.name,
                                                           request->create.name_len);
+        open_file->rpc_pipe = rpc_pipe;
 
         request->create.r_open_file = open_file;
 

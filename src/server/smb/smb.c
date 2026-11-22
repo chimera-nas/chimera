@@ -163,6 +163,12 @@ chimera_smb_server_init(
         return NULL;
     }
 
+    /* Register libdcerpc's coders while still single-threaded. */
+    if (chimera_smb_rpc_init() != 0) {
+        free(shared);
+        return NULL;
+    }
+
     shared->tcp_flavor   = chimera_server_config_get_tcp_flavor(config);
     shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
 
@@ -784,11 +790,17 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * BUFFER_OVERFLOW -- for FileFullEaInformation, the entries that fit,
          * and the client resumes from the next one.
          *
+         * And a READ of a message-mode named pipe whose message (a DCE/RPC
+         * fragment) is longer than the read: the part that fits comes back
+         * with BUFFER_OVERFLOW and the client reads the rest.
+         *
          * All other errors get the generic SMB2 ERROR Response. */
         if (chimera_smb_is_error_status(request->status) &&
             !(request->smb2_hdr.command == SMB2_IOCTL &&
               (request->ioctl.cc_limit_response ||
                request->status == SMB2_STATUS_BUFFER_OVERFLOW)) &&
+            !(request->smb2_hdr.command == SMB2_READ &&
+              request->status == SMB2_STATUS_BUFFER_OVERFLOW) &&
             !chimera_smb_query_info_partial(request)) {
             if (request->status == SMB2_STATUS_BUFFER_TOO_SMALL &&
                 request->smb2_hdr.command == SMB2_QUERY_INFO) {

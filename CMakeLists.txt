@@ -58,8 +58,8 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     list(APPEND CMAKE_LIBRARY_PATH ${HOMEBREW_PREFIX}/lib ${HOMEBREW_PREFIX}/opt/krb5/lib)
     list(APPEND CMAKE_INCLUDE_PATH ${HOMEBREW_PREFIX}/include ${HOMEBREW_PREFIX}/opt/krb5/include)
 
-    # Apple ships bison 2.3 (2006) in /usr/bin; the ndrzcc grammar needs the
-    # %code directive, which is bison 3.  Prefer Homebrew's keg-only bison.
+    # Apple ships bison 2.3 (2006) in /usr/bin.  Prefer Homebrew's current
+    # keg-only bison for the xdrzcc grammar.
     list(APPEND CMAKE_PROGRAM_PATH ${HOMEBREW_PREFIX}/opt/bison/bin ${HOMEBREW_PREFIX}/opt/flex/bin)
 
     # pkg-config needs to be pointed at the keg-only .pc files explicitly.
