@@ -164,10 +164,13 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
      * The server supports encryption (IsEncryptionSupported) when smb_encryption
      * is on or any share is marked encrypt_data, the same rule as the 3.1.1
      * cipher selection: with the mode off, a 3.0 client must still learn it
-     * can encrypt, or it can never reach an encrypt_data share. */
+     * can encrypt, or it can never reach an encrypt_data share.  These dialects
+     * have one cipher, AES-128-CCM (§3.1.4.3), so smb_encryption_ciphers must
+     * allow it. */
     if (dialect >= 0x300 && dialect < 0x311 &&
         (shared->config.encryption != CHIMERA_SMB_ENCRYPTION_OFF ||
          shared->any_share_encrypt) &&
+        (shared->config.encryption_ciphers & CHIMERA_SMB_CIPHER_AES_128_CCM) &&
         (request->negotiate.capabilities & SMB2_GLOBAL_CAP_ENCRYPTION)) {
         conn->capabilities |= SMB2_GLOBAL_CAP_ENCRYPTION;
     }
@@ -354,10 +357,10 @@ build_signing_capabilities_response(
 
 /* Build the SMB2_ENCRYPTION_CAPABILITIES response context:
  *   CipherCount(2)=1, Ciphers[1](2)=selected cipher.
- * A cipher is selected only when the server supports encryption (see cipher
- * selection in chimera_smb_select_negotiated_algorithms); with none selected
- * no context is sent, which tells the client the server does not encrypt
- * (MS-SMB2 3.3.5.4). */
+ * Only reached when the server processed the client's context (see cipher
+ * selection in chimera_smb_select_negotiated_algorithms).  With no common
+ * cipher the context still goes out, carrying cipher 0 (MS-SMB2 3.3.5.4), so
+ * the client can tell "no shared cipher" from "no encryption". */
 static int
 build_encryption_capabilities_response(
     struct chimera_smb_conn    *conn,
@@ -367,7 +370,7 @@ build_encryption_capabilities_response(
 {
     (void) request;
 
-    if (conn->negotiated.cipher_id == 0 || out_size < 4) {
+    if (out_size < 4) {
         return -1;
     }
 
@@ -417,13 +420,14 @@ build_compression_capabilities_response(
 
 /* The negotiate-response context emitters. Only consulted when the negotiated
  * dialect is 3.1.1; each entry emits only if the client sent the matching
- * request context (need_mask_bit).
+ * request context (need_mask_bit) and selection left that bit set (it clears
+ * the encryption bit when the server does not support encryption).
  *
  * PreauthIntegrity is implemented: the server selects SHA-512, returns a salt,
  * maintains Connection.PreauthIntegrityHashValue across NEGOTIATE/SESSION_SETUP
  * (smb.c), and derives the 3.1.1 signing key bound to that hash. The
- * encryption context carries the selected cipher and is sent only when one was
- * selected; RdmaTransform contexts are not yet emitted. */
+ * encryption context carries the selected cipher, or 0 when the client and
+ * server share none; RdmaTransform contexts are not yet emitted. */
 static const struct chimera_smb_negotiate_response_emitter smb_negotiate_response_emitters[] = {
     { CHIMERA_SMB_NEGOTIATE_CTX_PREAUTH,     SMB2_PREAUTH_INTEGRITY_CAPABILITIES,
       build_preauth_integrity_response },
@@ -973,35 +977,45 @@ chimera_smb_select_negotiated_algorithms(
      * learns that the server does not encrypt.
      *
      * Whether a session is encrypt-all is decided separately at SESSION_SETUP
-     * (enabled and required force it; available leaves it to the client). */
+     * (enabled and required force it; available leaves it to the client).
+     *
+     * The cipher is the first one in the client's list, which runs most
+     * preferred first (MS-SMB2 2.2.3.1.2), that smb_encryption_ciphers
+     * allows.  The setting is the security control; within it the client,
+     * which knows its own hardware, chooses.  With none in common the
+     * cipher stays 0 and the response context carries it. */
     if (conn->dialect == SMB2_DIALECT_3_1_1 &&
-        (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_ENCRYPTION) &&
-        (conn->thread->shared->config.encryption != CHIMERA_SMB_ENCRYPTION_OFF ||
-         conn->thread->shared->any_share_encrypt)) {
-        static const uint16_t preferred[] = {
-            SMB2_ENCRYPTION_AES_128_GCM,
-            SMB2_ENCRYPTION_AES_256_GCM,
-            SMB2_ENCRYPTION_AES_128_CCM,
-            SMB2_ENCRYPTION_AES_256_CCM,
-        };
-        int                   i, j;
+        (request->negotiate.ctx_present_mask & CHIMERA_SMB_NEGOTIATE_CTX_ENCRYPTION)) {
+        if (conn->thread->shared->config.encryption != CHIMERA_SMB_ENCRYPTION_OFF ||
+            conn->thread->shared->any_share_encrypt) {
+            uint32_t allowed = conn->thread->shared->config.encryption_ciphers;
+            int      j;
 
-        for (i = 0; i < (int) (sizeof(preferred) / sizeof(preferred[0])) &&
-             conn->negotiated.cipher_id == 0; i++) {
             for (j = 0; j < request->negotiate.encryption_in.cipher_count; j++) {
-                if (request->negotiate.encryption_in.ciphers[j] == preferred[i]) {
-                    conn->negotiated.cipher_id = preferred[i];
+                uint16_t id = request->negotiate.encryption_in.ciphers[j];
+
+                if (id >= SMB2_ENCRYPTION_AES_128_CCM &&
+                    id <= SMB2_ENCRYPTION_AES_256_GCM &&
+                    (allowed & (1u << (id - 1)))) {
+                    conn->negotiated.cipher_id = id;
                     break;
                 }
             }
+        } else {
+            /* Ignored: no response context. */
+            conn->negotiated.ctx_present_mask &= ~CHIMERA_SMB_NEGOTIATE_CTX_ENCRYPTION;
         }
     } else if (conn->dialect >= SMB2_DIALECT_3_0 &&
                conn->dialect < SMB2_DIALECT_3_1_1 &&
+               (conn->thread->shared->config.encryption_ciphers &
+                CHIMERA_SMB_CIPHER_AES_128_CCM) &&
                (conn->thread->shared->config.encryption != CHIMERA_SMB_ENCRYPTION_OFF
                 ? (request->negotiate.capabilities & SMB2_GLOBAL_CAP_ENCRYPTION)
                 : conn->thread->shared->any_share_encrypt)) {
         /* SMB 3.0/3.0.2 has no encryption-capabilities context; the only cipher
-         * is AES-128-CCM (MS-SMB2 §3.1.4.3).  Set it so SESSION_SETUP can derive
+         * is AES-128-CCM (MS-SMB2 §3.1.4.3), so a smb_encryption_ciphers that
+         * leaves it out leaves these dialects unencrypted (logged at startup).
+         * Set it so SESSION_SETUP can derive
          * keys when encryption is enabled globally OR a per-share-encrypted tree
          * may be reached on this connection.  Under GLOBAL (whole-session)
          * encryption the cipher is set only when the CLIENT advertised

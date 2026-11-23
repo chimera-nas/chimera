@@ -11,7 +11,11 @@
 #include <gssapi/gssapi_krb5.h>
 #endif // ifdef CHIMERA_HAVE_GSSAPI
 
-#define SMB_GSSAPI_SESSION_KEY_SIZE 16
+/* MS-SMB2 3.3.5.5.3: Session.SessionKey is the first 16 bytes of the GSS
+ * session key, right-padded with zeros; Session.FullSessionKey is all of it
+ * (32 bytes from an AES-256 Kerberos ticket). */
+#define SMB_GSSAPI_SESSION_KEY_SIZE      16
+#define SMB_GSSAPI_FULL_SESSION_KEY_SIZE 32
 
 struct chimera_smb_auth_config;
 
@@ -22,7 +26,8 @@ struct smb_gssapi_ctx {
     gss_cred_id_t server_cred;
 #endif // ifdef CHIMERA_HAVE_GSSAPI
     char          principal_name[256];
-    uint8_t       session_key[SMB_GSSAPI_SESSION_KEY_SIZE];
+    uint8_t       session_key[SMB_GSSAPI_FULL_SESSION_KEY_SIZE];
+    size_t        session_key_len;
     int           authenticated;
     int           initialized;
 };
@@ -51,7 +56,9 @@ smb_gssapi_process(
     uint8_t              **output,
     size_t                *output_len);
 
-// Get the session key after successful authentication
+// Copy the full GSS session key after successful authentication: at most
+// key_len bytes.  Returns the number of bytes copied, or -1 before
+// authentication completes.
 int
 smb_gssapi_get_session_key(
     struct smb_gssapi_ctx *ctx,

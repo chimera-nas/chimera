@@ -46,6 +46,14 @@ if(CHIMERA_NETNS_TESTING)
     set_tests_properties(chimera/server/smb/smbclient_kerberos PROPERTIES
         SKIP_RETURN_CODE 77)
 
+    # Kerberos sessions encrypted with AES-128-GCM, AES-256-GCM and AES-256-CCM:
+    # the AES-256 keys come from the full Kerberos session key.
+    add_test(NAME chimera/server/smb/smbclient_kerberos_encrypt
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/kerberos_test_wrapper.sh
+                ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=kerberos-encrypt)
+    set_tests_properties(chimera/server/smb/smbclient_kerberos_encrypt PROPERTIES
+        SKIP_RETURN_CODE 77)
+
     # Kerberos with winbind_enabled and no winbindd: the accepted context must be
     # refused with STATUS_LOGON_FAILURE, never established as uid 65534.
     add_test(NAME chimera/server/smb/smbclient_kerberos_winbind_down

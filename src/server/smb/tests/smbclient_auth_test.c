@@ -1151,6 +1151,102 @@ run_kerberos_refusal_tests(
     return failures;
 } /* run_kerberos_refusal_tests */
 
+/* One encrypted Kerberos session with a single cipher: smbclient insists on
+ * encryption and offers only `cipher`, so the session either runs under that
+ * cipher or fails.  A file written and read back proves both directions'
+ * keys agree.
+ *
+ * A Kerberos session key from an AES-256 ticket is 32 bytes.  For 3.1.1 with
+ * AES-256-CCM or AES-256-GCM the cipher keys are derived from all of it
+ * (MS-SMB2 3.3.5.5.3, Session.FullSessionKey); for every other cipher, from
+ * its first 16 bytes.  The AES-128 run is the control. */
+static int
+test_kerberos_encrypted_session(const char *cipher)
+{
+    char  args[1024];
+    char  name[128];
+    char  tmp_file[256];
+    char  back_file[256];
+    char  cmd[1024];
+    char  output[4096];
+    FILE *f;
+    int   rc;
+
+    snprintf(name, sizeof(name), "Kerberos encrypted session (%s)", cipher);
+    fprintf(stderr, "\n  Testing %s...\n", name);
+
+    snprintf(args, sizeof(args),
+             "%s --client-protection=encrypt -m SMB3_11"
+             " --option=\"client smb3 encryption algorithms = %s\"",
+             kerberos_auth_args, cipher);
+
+    snprintf(tmp_file, sizeof(tmp_file), "/tmp/smbclient_krbenc_%d.txt", getpid());
+    snprintf(back_file, sizeof(back_file), "/tmp/smbclient_krbenc_%d.back", getpid());
+    f = fopen(tmp_file, "w");
+    if (!f) {
+        test_fail(name);
+        return -1;
+    }
+    fprintf(f, "%s", TEST_CONTENT);
+    fclose(f);
+    unlink(back_file);
+
+    snprintf(cmd, sizeof(cmd), "put %s krbenc.txt; get krbenc.txt %s; rm krbenc.txt",
+             tmp_file, back_file);
+    rc = run_smbclient_with_output(args, cmd, output, sizeof(output));
+    fprintf(stderr, "%s", output);
+
+    f = fopen(back_file, "r");
+    if (f) {
+        char   buf[256] = { 0 };
+        size_t n        = fread(buf, 1, sizeof(buf) - 1, f);
+
+        fclose(f);
+        if (rc == 0 && n == strlen(TEST_CONTENT) && memcmp(buf, TEST_CONTENT, n) == 0) {
+            unlink(tmp_file);
+            unlink(back_file);
+            test_pass(name);
+            return 0;
+        }
+    }
+
+    unlink(tmp_file);
+    unlink(back_file);
+    test_fail(name);
+    return -1;
+} /* test_kerberos_encrypted_session */
+
+static int
+run_kerberos_encrypt_tests(struct test_env *env)
+{
+    int failures = 0;
+
+    fprintf(stderr, "\n========================================\n");
+    fprintf(stderr, "Kerberos Encryption Tests\n");
+    fprintf(stderr, "========================================\n");
+
+    if (!env->kerberos_enabled) {
+        fprintf(stderr, "  Skipping - Kerberos not enabled on server\n");
+        return 0;
+    }
+
+    if (verify_kerberos_environment() < 0) {
+        return 0; /* Skip, not fail */
+    }
+
+    if (test_kerberos_encrypted_session("AES-128-GCM") < 0) {
+        failures++;
+    }
+    if (test_kerberos_encrypted_session("AES-256-GCM") < 0) {
+        failures++;
+    }
+    if (test_kerberos_encrypted_session("AES-256-CCM") < 0) {
+        failures++;
+    }
+
+    return failures;
+} /* run_kerberos_encrypt_tests */
+
 /* ============================================================================
  * Winbind NTLM Tests
  * ============================================================================ */
@@ -1418,6 +1514,7 @@ static int
 mode_uses_kerberos(const char *mode)
 {
     return strcmp(mode, "kerberos") == 0 ||
+           strcmp(mode, "kerberos-encrypt") == 0 ||
            strcmp(mode, "kerberos-no-fallback") == 0 ||
            strcmp(mode, "kerberos-winbind-down") == 0 ||
            strcmp(mode, "all") == 0;
@@ -1453,6 +1550,8 @@ print_usage(const char *prog)
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --mode=ntlm      Test built-in NTLM only (default)\n");
     fprintf(stderr, "  --mode=kerberos  Test Kerberos (requires KDC setup)\n");
+    fprintf(stderr,
+            "  --mode=kerberos-encrypt       Kerberos sessions encrypted with each 3.1.1 cipher\n");
     fprintf(stderr,
             "  --mode=kerberos-winbind-down  Kerberos with winbind_enabled and no winbindd; logon must be refused\n");
     fprintf(stderr,
@@ -1508,7 +1607,8 @@ main(
     /* The refusal modes assert a security property: run with no KDC they would
      * pass vacuously, so they skip outright unless the Kerberos wrapper set the
      * environment up, and they need winbind to be genuinely absent. */
-    if (mode_expects_refusal(mode) || strcmp(mode, "kerberos-ntlm-fallback") == 0) {
+    if (mode_expects_refusal(mode) || strcmp(mode, "kerberos-ntlm-fallback") == 0 ||
+        strcmp(mode, "kerberos-encrypt") == 0) {
         if (!getenv("KRB5_KTNAME")) {
             fprintf(stderr, "\nSKIP: KRB5_KTNAME not set; run via scripts/kerberos_test_wrapper.sh\n");
             return 77;
@@ -1622,6 +1722,11 @@ main(
         fprintf(stderr, "Winbind enabled with no winbindd running: Kerberos logons must be refused\n");
     }
 
+    if (strcmp(mode, "kerberos-encrypt") == 0) {
+        /* Offer encryption without forcing it: the client asks for it. */
+        chimera_server_config_set_smb_encryption(config, CHIMERA_SMB_ENCRYPTION_AVAILABLE);
+    }
+
     if (strcmp(mode, "kerberos-no-fallback") == 0) {
         /* Neither winbind nor the fallback knob: the server has no identity
          * source for the principal and must refuse the logon. */
@@ -1683,6 +1788,10 @@ main(
         failures += run_kerberos_tests(&env);
     }
 
+    if (strcmp(mode, "kerberos-encrypt") == 0) {
+        failures += run_kerberos_encrypt_tests(&env);
+    }
+
     if (mode_expects_refusal(mode)) {
         failures += run_kerberos_refusal_tests(&env, mode);
     }
@@ -1701,7 +1810,8 @@ main(
      * assertion in run_kerberos_refusal_tests() was itself skipped (e.g.
      * verify_kerberos_environment() still failed), tests_passed stays 0 with
      * no failures, and that is a vacuous pass, not a PASS. */
-    if ((mode_expects_refusal(mode) || strcmp(mode, "kerberos-ntlm-fallback") == 0) &&
+    if ((mode_expects_refusal(mode) || strcmp(mode, "kerberos-ntlm-fallback") == 0 ||
+         strcmp(mode, "kerberos-encrypt") == 0) &&
         tests_passed == 0 && failures == 0) {
         fprintf(stderr, "\nSKIP: refusal mode ran no assertion\n");
         test_cleanup(&env, 1);

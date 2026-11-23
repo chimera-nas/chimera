@@ -117,6 +117,7 @@ struct chimera_server_config {
     int                                   smb_named_streams;
     int                                   smb_signing_required;
     int                                   smb_encryption;
+    uint32_t                              smb_encryption_ciphers;
     int                                   smb_compression;
     int                                   smb_leases;
     int                                   smb_oplocks;
