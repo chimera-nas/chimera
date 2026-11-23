@@ -586,6 +586,9 @@ struct smb2_conn {
     int                             closed_by_client;
 
     uint64_t                        session_id;
+    /* SESSION_SETUP's PreviousSessionId: a reconnect names the session it
+     * replaces (MS-SMB2 2.2.5).  0 for an ordinary logon. */
+    uint64_t                        prev_session_id;
     uint32_t                        tree_id;
     uint64_t                        msg_id;
     uint16_t                        dialect;
@@ -2855,6 +2858,7 @@ smb2c_session_setup_leg_capture(
     body[3] = 1;                      /* SecurityMode = SIGNING_ENABLED */
     p16(body, 12, sec_off);           /* SecurityBufferOffset */
     p16(body, 14, (uint16_t) blob_len); /* SecurityBufferLength */
+    p64(body, 16, c->prev_session_id);  /* PreviousSessionId */
     memcpy(body + 24, blob, blob_len);
 
     smb2c_send(c, 24 + blob_len);

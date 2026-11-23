@@ -765,6 +765,9 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                               "cipher 0x%04x)",
                               conn->dialect, conn->negotiated.cipher_id);
             chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+            evpl_iovecs_release(thread->evpl,
+                                request->session_setup.input_iov,
+                                request->session_setup.input_niov);
             return;
         }
 
@@ -832,6 +835,9 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             chimera_smb_session_handle_free(thread, request->session_handle);
             request->session_handle   = NULL;
             conn->last_session_handle = NULL;
+            evpl_iovecs_release(thread->evpl,
+                                request->session_setup.input_iov,
+                                request->session_setup.input_niov);
             return;
         }
 
