@@ -185,15 +185,21 @@ smb_gssapi_process(
 
         if (!GSS_ERROR(major) && data_set && data_set->count > 0) {
             size_t key_len = data_set->elements[0].length;
-            if (key_len > SMB_GSSAPI_SESSION_KEY_SIZE) {
-                key_len = SMB_GSSAPI_SESSION_KEY_SIZE;
+
+            /* Keep the whole key: 3.1.1 derives its AES-256 cipher keys from
+             * all of it (MS-SMB2 3.3.5.5.3, Session.FullSessionKey). */
+            if (key_len > SMB_GSSAPI_FULL_SESSION_KEY_SIZE) {
+                key_len = SMB_GSSAPI_FULL_SESSION_KEY_SIZE;
             }
+            memset(ctx->session_key, 0, sizeof(ctx->session_key));
             memcpy(ctx->session_key, data_set->elements[0].value, key_len);
+            ctx->session_key_len = key_len;
             gss_release_buffer_set(&minor, &data_set);
         } else {
             // Session key extraction failed - use zeros
             chimera_smb_debug("smb_gssapi: Failed to extract session key");
-            memset(ctx->session_key, 0, SMB_GSSAPI_SESSION_KEY_SIZE);
+            memset(ctx->session_key, 0, sizeof(ctx->session_key));
+            ctx->session_key_len = SMB_GSSAPI_SESSION_KEY_SIZE;
         }
 
         ctx->authenticated = 1;
@@ -219,11 +225,11 @@ smb_gssapi_get_session_key(
         return -1;
     }
 
-    size_t copy_len = key_len < SMB_GSSAPI_SESSION_KEY_SIZE ?
-        key_len : SMB_GSSAPI_SESSION_KEY_SIZE;
+    size_t copy_len = key_len < ctx->session_key_len ?
+        key_len : ctx->session_key_len;
 
     memcpy(key, ctx->session_key, copy_len);
-    return 0;
+    return (int) copy_len;
 } // smb_gssapi_get_session_key
 
 const char *

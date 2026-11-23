@@ -127,7 +127,7 @@ negotiate.py::CapPersistent::test_downlevel_no_advert,base,green,
 negotiate.py::CapPersistent::test_smb3,persistent,green,
 negotiate.py::CapPersistent::test_smb3_many_capabilities,persistent,green,
 negotiate.py::CapPersistent::test_smb3_no_advert,base,green,
-negotiate.py::NegotiateContext::test_encryption_capabilities_both_prefer_ccm,encryption,xfail,AssertionError: SMB2_AES_128_CCM not found in [SMB2_AES_128_GCM]
+negotiate.py::NegotiateContext::test_encryption_capabilities_both_prefer_ccm,encryption,green,
 negotiate.py::NegotiateContext::test_encryption_capabilities_both_prefer_gcm,encryption,green,
 negotiate.py::NegotiateContext::test_encryption_capabilities_ccm,encryption,green,
 negotiate.py::NegotiateContext::test_encryption_capabilities_gcm,encryption,green,

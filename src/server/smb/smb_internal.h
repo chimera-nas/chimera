@@ -255,6 +255,9 @@ struct chimera_smb_config {
     /* SMB3 transport encryption policy, a CHIMERA_SMB_ENCRYPTION_* mode:
      * off, available, enabled or required. */
     int                            encryption;
+    /* The ciphers the server may select: CHIMERA_SMB_CIPHER_* bits, one per
+     * MS-SMB2 cipher id (bit id - 1). */
+    uint32_t                       encryption_ciphers;
     /* SMB3 transport compression: 0 = off (no compression advertised),
      * 1 = enabled (offered, used when the client opts in). */
     int                            compression;

@@ -510,9 +510,10 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         char        sid_buf[SMB_WBCLIENT_SID_MAX_LEN];
         char        group_sid_buf[SMB_WBCLIENT_SID_MAX_LEN];
 
-        /* Raw session key saved for SMB3 encryption key derivation below; an
-         * anonymous/guest (null) session has no usable key and is never
-         * encrypted. */
+        /* Raw session key saved for SMB3 encryption key derivation below: the
+         * whole GSS key for Kerberos (Session.FullSessionKey), the 16-byte key
+         * for NTLM.  An anonymous/guest (null) session has no usable key and
+         * is never encrypted. */
         uint8_t     session_key_saved[32];
         size_t      session_key_saved_len = 0;
         int         is_anonymous          = (mech == SMB_AUTH_MECH_NTLM &&
@@ -622,18 +623,31 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                              username, uid, gid, sid ? sid : "none");
 
         } else if (mech == SMB_AUTH_MECH_KERBEROS) {
-            uint8_t session_key[SMB_GSSAPI_SESSION_KEY_SIZE];
+            uint8_t full_key[SMB_GSSAPI_FULL_SESSION_KEY_SIZE];
+            int     full_len = -1;
 
-            if (!is_reauth &&
-                smb_gssapi_get_session_key(&conn->gssapi_ctx, session_key, sizeof(session_key)) == 0) {
+            if (!is_reauth) {
+                full_len = smb_gssapi_get_session_key(&conn->gssapi_ctx, full_key,
+                                                      sizeof(full_key));
+            }
+            if (full_len > 0) {
+                /* Session.SessionKey: the first 16 bytes of the GSS key,
+                 * right-padded with zeros (MS-SMB2 3.3.5.5.3).  Signing always
+                 * uses it; the encryption block below picks between it and the
+                 * full key. */
+                uint8_t session_key[SMB_GSSAPI_SESSION_KEY_SIZE] = { 0 };
+
+                memcpy(session_key, full_key,
+                       full_len < SMB_GSSAPI_SESSION_KEY_SIZE ?
+                       (size_t) full_len : SMB_GSSAPI_SESSION_KEY_SIZE);
                 chimera_smb_derive_signing_key(conn->dialect,
                                                session_handle->signing_key,
                                                session_key,
                                                SMB_GSSAPI_SESSION_KEY_SIZE,
                                                conn->dialect == SMB2_DIALECT_3_1_1 ?
                                                conn->preauth_hash : NULL);
-                memcpy(session_key_saved, session_key, SMB_GSSAPI_SESSION_KEY_SIZE);
-                session_key_saved_len = SMB_GSSAPI_SESSION_KEY_SIZE;
+                memcpy(session_key_saved, full_key, (size_t) full_len);
+                session_key_saved_len = (size_t) full_len;
             }
 
             /* Identity resolved before session allocation (see above): a
@@ -721,12 +735,31 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             conn->dialect >= SMB2_DIALECT_3_0 &&
             session_key_saved_len > 0 &&
             !is_reauth && !is_binding) {
-            size_t klen = 0;
+            size_t   klen                               = 0;
+            uint8_t  kdk16[SMB_GSSAPI_SESSION_KEY_SIZE] = { 0 };
+            uint8_t *kdk                                = kdk16;
+            size_t   kdk_len                            = sizeof(kdk16);
+
+            /* MS-SMB2 3.3.5.5.3: 3.1.1 with AES-256-CCM or AES-256-GCM derives
+             * the cipher keys from Session.FullSessionKey, every other case
+             * from Session.SessionKey, its first 16 bytes.  The two differ only
+             * for a Kerberos key longer than 16 bytes; cutting it to 16 for
+             * AES-256 gave keys the client did not have. */
+            if (conn->dialect == SMB2_DIALECT_3_1_1 &&
+                (conn->negotiated.cipher_id == SMB2_ENCRYPTION_AES_256_CCM ||
+                 conn->negotiated.cipher_id == SMB2_ENCRYPTION_AES_256_GCM)) {
+                kdk     = session_key_saved;
+                kdk_len = session_key_saved_len;
+            } else {
+                memcpy(kdk16, session_key_saved,
+                       session_key_saved_len < sizeof(kdk16) ?
+                       session_key_saved_len : sizeof(kdk16));
+            }
 
             if (chimera_smb_derive_encryption_keys(
                     0 /* server */,
                     conn->dialect, conn->negotiated.cipher_id,
-                    session_key_saved, session_key_saved_len,
+                    kdk, kdk_len,
                     conn->dialect == SMB2_DIALECT_3_1_1 ? conn->preauth_hash : NULL,
                     session_handle->enc_key, session_handle->dec_key, &klen) == 0) {
                 session_handle->enc_key_len = klen;

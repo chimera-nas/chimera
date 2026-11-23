@@ -67,6 +67,14 @@
  * 3.3.5.5.1), L2 "required" refusing a client that does not encrypt, L3 a
  * mode outside the four refusing it the same way.
  *
+ * The C profiles pin cipher selection against smb_encryption_ciphers:
+ *   C1-C3     3.1.1 takes the first cipher in the client's list that the
+ *             server allows
+ *   C4, C5    3.1.1 with nothing in common: the context carries cipher 0;
+ *             available lets the session in, in cleartext, required refuses it
+ *   C6, C7    3.0 and 3.0.2 without AES-128-CCM: no capability; available lets
+ *             the session in, required refuses it
+ *
  * With --winbind (run under scripts/ad_test_wrapper.sh) W2-W4 and W7 (as
  * WB2-WB4 and WB7), W10, W11 and W12 run again as a domain user that the
  * server validates through winbind.  winbind returns only the session base
@@ -769,6 +777,60 @@ run_encryption_modes(void)
     run_encryption_available_cleartext();
 } /* run_encryption_modes */
 
+/* The server offers encryption but no cipher the client can use: a 3.1.1
+ * client gets an ENCRYPTION_CAPABILITIES context carrying cipher 0 (MS-SMB2
+ * 3.3.5.4), a 3.0/3.0.2 client no SMB2_GLOBAL_CAP_ENCRYPTION.  Under
+ * "available" the session goes on in cleartext; under "required" it is
+ * refused. */
+static void
+run_cipher_none(const struct smb2_wire_profile *w)
+{
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn    *c;
+    uint32_t             st, before;
+    int                  required = (w->server_encryption == SMB2W_SERVER_ENC_REQUIRED);
+
+    printf("# --- %s ---\n", w->name);
+    smb2_env_open_wire(&env, &opts, w);
+    smb2_env_fs_setup(&env, "fs0");
+    c  = smb2_conn_open(&env);
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS && c->dialect == w->max_dialect,
+          "%s: NEGOTIATE -> 0x%08x (0x%04x)", w->name, st, c->dialect);
+    if (w->max_dialect == 0x0311) {
+        CHECK(c->encryption_ctx && c->cipher == 0,
+              "%s: ENCRYPTION_CAPABILITIES context carries cipher 0 (got %d, 0x%04x)",
+              w->name, c->encryption_ctx, c->cipher);
+    } else {
+        CHECK(!(c->server_caps & SMB2_GLOBAL_CAP_ENCRYPTION),
+              "%s: no SMB2_GLOBAL_CAP_ENCRYPTION (caps 0x%08x)",
+              w->name, c->server_caps);
+    }
+    st = smb2_session_setup(c);
+    if (required) {
+        CHECK(st == ST_ACCESS_DENIED,
+              "%s: SESSION_SETUP refused -> 0x%08x", w->name, st);
+    } else {
+        CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", w->name, st);
+        CHECK(!(c->session_flags & WIRE_SESSION_FLAG_ENCRYPT_DATA),
+              "%s: session not marked ENCRYPT_DATA (0x%04x)", w->name,
+              c->session_flags);
+        /* A client with no cipher signs instead. */
+        c->encrypt_on = 0;
+        c->signing_on = 1;
+        st            = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+        CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", w->name, st);
+        before = c->encrypted_replies;
+        wire_io(c, w->name, "cleartext");
+        CHECK(c->encrypted_replies == before,
+              "%s: cleartext requests answered in cleartext (%u encrypted)",
+              w->name, c->encrypted_replies - before);
+    }
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_cipher_none */
+
 /* A SESSION_SETUP the server refuses after authenticating releases the
  * request's security buffer like any other: under AddressSanitizer a refusal
  * that skips it fails the run on the leak.  L2 is "required" refusing a
@@ -858,6 +920,73 @@ run_reconnect_other_dialect(void)
     smb2_env_fs_teardown(&env, "fs0");
     smb2_env_stop(&env);
 } /* run_reconnect_other_dialect */
+
+/* smb_encryption_ciphers: the server selects from the client's list in the
+ * client's order, skipping any cipher the setting leaves out. */
+static void
+run_cipher_list(void)
+{
+    /* *INDENT-OFF* */
+    static const struct smb2_wire_profile selected[] = {
+        /* .cipher is the cipher the server must select. */
+        { .name = "C1 3.1.1 client prefers aes-128-ccm over aes-128-gcm",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+          .ciphers = { SMB2W_CIPHER_AES128_CCM, SMB2W_CIPHER_AES128_GCM },
+          .ncipher = 2, .cipher = SMB2W_CIPHER_AES128_CCM,
+          .signing_alg = SMB2W_SIGN_AES_GMAC,
+          .server_encryption = SMB2W_SERVER_ENC_AVAILABLE },
+        { .name = "C2 3.1.1 server allows only aes-256-gcm, client lists it second",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+          .ciphers = { SMB2W_CIPHER_AES128_GCM, SMB2W_CIPHER_AES256_GCM },
+          .ncipher = 2, .cipher = SMB2W_CIPHER_AES256_GCM,
+          .signing_alg = SMB2W_SIGN_AES_GMAC,
+          .server_encryption = SMB2W_SERVER_ENC_AVAILABLE,
+          .server_ciphers = CHIMERA_SMB_CIPHER_AES_256_GCM },
+        { .name = "C3 3.1.1 client's first cipher not allowed, second taken",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+          .ciphers = { SMB2W_CIPHER_AES256_GCM, SMB2W_CIPHER_AES128_CCM,
+                       SMB2W_CIPHER_AES128_GCM },
+          .ncipher = 3, .cipher = SMB2W_CIPHER_AES128_CCM,
+          .signing_alg = SMB2W_SIGN_AES_GMAC,
+          .server_encryption = SMB2W_SERVER_ENC_AVAILABLE,
+          .server_ciphers = CHIMERA_SMB_CIPHER_AES_128_CCM |
+                            CHIMERA_SMB_CIPHER_AES_128_GCM },
+    };
+    static const struct smb2_wire_profile none[] = {
+        { .name = "C4 3.1.1 available, no allowed cipher in the client's list",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .sign = 1,
+          .ciphers = { SMB2W_CIPHER_AES128_GCM, SMB2W_CIPHER_AES128_CCM },
+          .ncipher = 2,
+          .signing_alg = SMB2W_SIGN_AES_GMAC,
+          .server_encryption = SMB2W_SERVER_ENC_AVAILABLE,
+          .server_ciphers = CHIMERA_SMB_CIPHER_AES_256_GCM },
+        { .name = "C5 3.1.1 required, no allowed cipher in the client's list",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .sign = 1,
+          .ciphers = { SMB2W_CIPHER_AES128_GCM },
+          .ncipher = 1,
+          .signing_alg = SMB2W_SIGN_AES_GMAC,
+          .server_encryption = SMB2W_SERVER_ENC_REQUIRED,
+          .server_ciphers = CHIMERA_SMB_CIPHER_AES_256_GCM },
+        { .name = "C6 3.0 available, aes-128-ccm not allowed",
+          .max_dialect = 0x0300, .ntlmv2 = 1, .encrypt = 1,
+          .server_encryption = SMB2W_SERVER_ENC_AVAILABLE,
+          .server_ciphers = CHIMERA_SMB_CIPHER_AES_128_GCM |
+                            CHIMERA_SMB_CIPHER_AES_256_GCM },
+        { .name = "C7 3.0.2 required, aes-128-ccm not allowed",
+          .max_dialect = 0x0302, .ntlmv2 = 1, .encrypt = 1,
+          .server_encryption = SMB2W_SERVER_ENC_REQUIRED,
+          .server_ciphers = CHIMERA_SMB_CIPHER_AES_256_GCM },
+    };
+    /* *INDENT-ON* */
+    unsigned int i;
+
+    for (i = 0; i < sizeof(selected) / sizeof(selected[0]); i++) {
+        run_encryption_available(&selected[i]);
+    }
+    for (i = 0; i < sizeof(none) / sizeof(none[0]); i++) {
+        run_cipher_none(&none[i]);
+    }
+} /* run_cipher_list */
 
 #ifdef SMB2W_WBSTUB
 /* The account the stub answers for. */
@@ -1086,6 +1215,7 @@ main(
         run_bad_key_exchange(&past_end_key, SMB2W_USER, SMB2W_PASSWORD, 16, 1);
         run_bad_key_exchange(&long_key, SMB2W_USER, SMB2W_PASSWORD, 24, 0);
         run_encryption_modes();
+        run_cipher_list();
         run_reconnect_other_dialect();
         run_required_refusal();
     }
