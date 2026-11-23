@@ -175,6 +175,17 @@ def main():
             cases.append((f"smb_encryption {label}", {"/e": {"path": "/data"}},
                           {"smb_encryption": value}, None,
                           "Invalid smb_encryption value"))
+        # The same for the cipher list: a misspelt cipher must not quietly
+        # drop out of it, and a list that leaves encryption on with no cipher
+        # to encrypt with is a contradiction, not a configuration.
+        for label, value, expect in [
+                ("unknown name", ["AES-128-GMC"], "Invalid smb_encryption_ciphers entry"),
+                ("non-string entry", [5], "Invalid smb_encryption_ciphers entry"),
+                ("string", "AES-128-GCM", "Invalid smb_encryption_ciphers"),
+                ("empty", [], "smb_encryption_ciphers allows no cipher")]:
+            cases.append((f"smb_encryption_ciphers {label}", {"/e": {"path": "/data"}},
+                          {"smb_encryption": "required", "smb_encryption_ciphers": value},
+                          None, expect))
         for name, exports, extra, sections, expect in cases:
             write_config(exports, extra, sections)
             with subprocess.Popen(
@@ -225,10 +236,14 @@ def main():
         # Lexical ordering must not let an automatic ID steal the pinned ID.
         # smb_encryption "available" rides along: the startup line naming the
         # mode shows it was read as available.
+        # So does an smb_encryption_ciphers list without AES-128-CCM, names in
+        # either case: the startup notice that SMB 3.0 and 3.0.2 cannot
+        # encrypt shows the list was read.
         write_config({
             "/a_auto": {"path": "/data", "root_squash": True},
             "/b_pinned": {"path": "/data", "export_id": 1, "sec": ["krb5"]},
-        }, {"smb_multichannel": smb_nics, "smb_encryption": "available"})
+        }, {"smb_multichannel": smb_nics, "smb_encryption": "available",
+            "smb_encryption_ciphers": ["AES-256-GCM", "aes-256-ccm"]})
         with (root / "daemon.log").open("w+b") as log:
             proc = subprocess.Popen(
                 [daemon, "-c", str(config_path)], stdout=log, stderr=log,
@@ -272,6 +287,9 @@ def main():
                 assert "Invalid smb_encryption value" not in text, text
                 assert "SMB encryption: available" in text, text
                 print("PASS: smb_encryption \"available\" accepted", flush=True)
+                assert "Invalid smb_encryption_ciphers" not in text, text
+                assert "SMB 3.0 and 3.0.2 clients cannot encrypt" in text, text
+                print("PASS: smb_encryption_ciphers accepted", flush=True)
             finally:
                 if proc.poll() is None:
                     proc.kill()

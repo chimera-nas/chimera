@@ -433,6 +433,13 @@ struct smb2_wire_profile {
     /* 3.1.1 preferences, offered in the negotiate contexts. */
     uint16_t    signing_alg;
     uint16_t    cipher;
+    /* A whole cipher list to offer instead of `cipher`, most preferred
+     * first (MS-SMB2 2.2.3.1.2).  ncipher 0 offers `cipher` alone. */
+    uint16_t    ciphers[4];
+    int         ncipher;
+    /* The server's smb_encryption_ciphers, as CHIMERA_SMB_CIPHER_* bits.  0
+     * keeps the server default (all four). */
+    uint32_t    server_ciphers;
     /* Authenticate through winbind against this NetBIOS domain instead of as
      * the registered local account: the server gets winbind enabled for the
      * domain, no local account is registered, and the AUTHENTICATE names the
@@ -1486,6 +1493,9 @@ smb2_env_open_wire(
                 }
                 break;
         } /* switch */
+        if (env->wire->server_ciphers) {
+            chimera_server_config_set_smb_encryption_ciphers(config, env->wire->server_ciphers);
+        }
     }
     if (env->wire && env->wire->compress) {
         /* Off by default in the server, so without this the COMPRESSION
@@ -2718,9 +2728,20 @@ smb2_negotiate(struct smb2_conn *c)
         count++;
 
         n = (n + 7) & ~7;
-        p16(data, 0, 1);                        /* CipherCount */
-        p16(data, 2, w->cipher ? w->cipher : SMB2W_CIPHER_AES128_GCM);
-        n = smb2c_neg_ctx(cx, n, SMB2W_CTX_ENCRYPTION, data, 4);
+        if (w->ncipher > 0) {
+            int k;
+
+            p16(data, 0, (uint16_t) w->ncipher);    /* CipherCount */
+            for (k = 0; k < w->ncipher; k++) {
+                p16(data, 2 + 2 * k, w->ciphers[k]);
+            }
+            n = smb2c_neg_ctx(cx, n, SMB2W_CTX_ENCRYPTION, data,
+                              (uint16_t) (2 + 2 * w->ncipher));
+        } else {
+            p16(data, 0, 1);                    /* CipherCount */
+            p16(data, 2, w->cipher ? w->cipher : SMB2W_CIPHER_AES128_GCM);
+            n = smb2c_neg_ctx(cx, n, SMB2W_CTX_ENCRYPTION, data, 4);
+        }
         count++;
 
         n = (n + 7) & ~7;

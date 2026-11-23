@@ -138,6 +138,27 @@ SYMBOL_EXPORT int
 chimera_server_config_get_smb_encryption(
     const struct chimera_server_config *config);
 
+/* smb_encryption_ciphers: the ciphers the server may select, one bit per
+ * MS-SMB2 cipher id (bit id - 1).  A cipher left out is never selected,
+ * whatever the client offers.  Default: all four. */
+#define CHIMERA_SMB_CIPHER_AES_128_CCM (1u << 0)
+#define CHIMERA_SMB_CIPHER_AES_128_GCM (1u << 1)
+#define CHIMERA_SMB_CIPHER_AES_256_CCM (1u << 2)
+#define CHIMERA_SMB_CIPHER_AES_256_GCM (1u << 3)
+#define CHIMERA_SMB_CIPHERS_ALL        (CHIMERA_SMB_CIPHER_AES_128_CCM | \
+                                        CHIMERA_SMB_CIPHER_AES_128_GCM | \
+                                        CHIMERA_SMB_CIPHER_AES_256_CCM | \
+                                        CHIMERA_SMB_CIPHER_AES_256_GCM)
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_encryption_ciphers(
+    struct chimera_server_config *config,
+    uint32_t                      ciphers);
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_smb_encryption_ciphers(
+    const struct chimera_server_config *config);
+
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_compression(
     struct chimera_server_config *config,

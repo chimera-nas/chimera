@@ -286,6 +286,7 @@ chimera_smb_server_init(
     shared->config.named_streams                = chimera_server_config_get_smb_named_streams(config);
     shared->config.signing_required             = chimera_server_config_get_smb_signing_required(config);
     shared->config.encryption                   = chimera_server_config_get_smb_encryption(config);
+    shared->config.encryption_ciphers           = chimera_server_config_get_smb_encryption_ciphers(config);
     shared->config.compression                  = chimera_server_config_get_smb_compression(config);
     shared->config.leases                       = chimera_server_config_get_smb_leases(config);
     shared->config.oplocks                      = chimera_server_config_get_smb_oplocks(config);

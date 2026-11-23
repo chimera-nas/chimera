@@ -747,6 +747,71 @@ apply_smb_config(
         chimera_server_info("SMB encryption: %s", mode_names[mode]);
     }
 
+    /* smb_encryption_ciphers: the ciphers the server may select, as an array
+     * of names, in either case: "AES-128-CCM", "AES-128-GCM", "AES-256-CCM",
+     * "AES-256-GCM".  Default: all four.  Their order does not matter: within
+     * the list the client's preference wins.  An unknown name, a value that is
+     * not such an array, or a list that allows no cipher while encryption is
+     * on refuses to start. */
+    json_value = json_object_get(server_params, "smb_encryption_ciphers");
+    if (json_is_array(json_value)) {
+        static const struct {
+            const char *name;
+            uint32_t    bit;
+        } ciphers[] = {
+            { "AES-128-CCM", CHIMERA_SMB_CIPHER_AES_128_CCM },
+            { "AES-128-GCM", CHIMERA_SMB_CIPHER_AES_128_GCM },
+            { "AES-256-CCM", CHIMERA_SMB_CIPHER_AES_256_CCM },
+            { "AES-256-GCM", CHIMERA_SMB_CIPHER_AES_256_GCM },
+        };
+        uint32_t allowed = 0;
+        size_t   index;
+        json_t  *entry;
+
+        json_array_foreach(json_value, index, entry)
+        {
+            const char *name  = json_string_value(entry);
+            int         found = 0;
+
+            for (unsigned int k = 0; name && k < sizeof(ciphers) / sizeof(ciphers[0]); k++) {
+                if (strcasecmp(name, ciphers[k].name) == 0) {
+                    allowed |= ciphers[k].bit;
+                    found    = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                chimera_server_error("Invalid smb_encryption_ciphers entry '%s' (expected "
+                                     "AES-128-CCM, AES-128-GCM, AES-256-CCM or AES-256-GCM)",
+                                     name ? name : "(not a string)");
+                startup_validation_fail();
+            }
+        }
+        chimera_server_config_set_smb_encryption_ciphers(server_config, allowed);
+    } else if (json_value) {
+        chimera_server_error("Invalid smb_encryption_ciphers: expected an array of cipher names");
+        startup_validation_fail();
+    }
+
+    /* With encryption on, a list that allows no cipher refuses to start.  SMB
+     * 3.0 and 3.0.2 have one cipher, AES-128-CCM (MS-SMB2 3.1.4.3); without it
+     * they still connect, unencrypted, and "required" refuses their sessions,
+     * which is logged. */
+    if (chimera_server_config_get_smb_encryption(server_config) != CHIMERA_SMB_ENCRYPTION_OFF) {
+        uint32_t allowed = chimera_server_config_get_smb_encryption_ciphers(server_config);
+
+        if (allowed == 0) {
+            chimera_server_error("smb_encryption_ciphers allows no cipher: no SMB client can encrypt");
+            startup_validation_fail();
+        } else if (!(allowed & CHIMERA_SMB_CIPHER_AES_128_CCM)) {
+            chimera_server_info("SMB 3.0 and 3.0.2 clients cannot encrypt: smb_encryption_ciphers "
+                                "does not allow AES-128-CCM%s",
+                                chimera_server_config_get_smb_encryption(server_config) ==
+                                CHIMERA_SMB_ENCRYPTION_REQUIRED ?
+                                ", and smb_encryption \"required\" refuses their sessions" : "");
+        }
+    }
+
     /* smb_compression: boolean (or integer 0/1) enabling SMB3 transport
      * compression negotiation. */
     json_value = json_object_get(server_params, "smb_compression");

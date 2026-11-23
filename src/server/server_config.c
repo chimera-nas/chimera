@@ -120,7 +120,8 @@ chimera_server_config_init(void)
     /* SMB3 transport encryption is off by default; the "smb_encryption" config
      * setting offers it (CHIMERA_SMB_ENCRYPTION_AVAILABLE), enables it
      * (_ENABLED) or requires it (_REQUIRED). */
-    config->smb_encryption = 0;
+    config->smb_encryption         = 0;
+    config->smb_encryption_ciphers = CHIMERA_SMB_CIPHERS_ALL;
 
     /* SMB3 transport compression is off by default; the "smb_compression" flag
      * enables (1) advertising/using it. */
@@ -501,6 +502,20 @@ chimera_server_config_get_smb_encryption(const struct chimera_server_config *con
 {
     return config->smb_encryption;
 } /* chimera_server_config_get_smb_encryption */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_encryption_ciphers(
+    struct chimera_server_config *config,
+    uint32_t                      ciphers)
+{
+    config->smb_encryption_ciphers = ciphers & CHIMERA_SMB_CIPHERS_ALL;
+} /* chimera_server_config_set_smb_encryption_ciphers */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_smb_encryption_ciphers(const struct chimera_server_config *config)
+{
+    return config->smb_encryption_ciphers;
+} /* chimera_server_config_get_smb_encryption_ciphers */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_compression(
