@@ -35,6 +35,7 @@ chimera_nfs4_create_complete(
     res->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), req->encoding->dbuf);
     chimera_nfs_abort_if(res->resok4.attrset == NULL, "Failed to allocate space");
     res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
+                                                     attr,
                                                      args->createattrs.num_attrmask,
                                                      args->createattrs.attrmask,
                                                      res->resok4.attrset);
@@ -79,7 +80,12 @@ chimera_nfs4_create_symlink_complete(
 
     res->resok4.attrset = xdr_dbuf_alloc_space(4 * sizeof(uint32_t), req->encoding->dbuf);
     chimera_nfs_abort_if(res->resok4.attrset == NULL, "Failed to allocate space");
+    /* The symlink completion is not handed the set attributes: `attr` is the
+     * new link's attributes, so the attrset reports what the request named
+     * that the link now has.  With nothing to hold the link's birth time
+     * against, time_create is never named here. */
     res->resok4.num_attrset = chimera_nfs4_mask2attr(attr,
+                                                     NULL,
                                                      args->createattrs.num_attrmask,
                                                      args->createattrs.attrmask,
                                                      res->resok4.attrset);

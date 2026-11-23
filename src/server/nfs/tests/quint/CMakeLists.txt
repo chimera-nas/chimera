@@ -184,6 +184,13 @@ target_link_libraries(nfs4_excl_create_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs4_excl_create_probe)
 
+add_executable(nfs4_settable_attrs_probe nfs4_settable_attrs_probe.c)
+target_include_directories(nfs4_settable_attrs_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_settable_attrs_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_settable_attrs_probe)
+
 add_executable(nfs4_lock_relock_probe nfs4_lock_relock_probe.c)
 target_include_directories(nfs4_lock_relock_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
@@ -482,6 +489,29 @@ foreach(backend memfs linux)
     set_tests_properties(chimera/server/nfs/mbt4/excl_create_probe_${backend}
         PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_excl_create_probe_${backend}"
+        LABELS "quint;nfs4_mbt;multiproto;${backend}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 90)
+endforeach()
+# Settable-attributes probe: every writable attribute supported_attrs
+# advertises is accepted by SETATTR, and every one it does not advertise is
+# NFS4ERR_ATTRNOTSUPP -- the macOS client puts archive, mode and time_create in
+# the createattrs of every OPEN and CREATE when they are advertised, so a
+# mismatch fails all its creates.  Follows time_create through SETATTR, OPEN
+# and CREATE on the backends that store a birth time and on the passthroughs
+# that cannot, and checks that its owner may set it and a user without the
+# WRITE_ATTRIBUTES right may not.  Needs no corpus.
+foreach(backend memfs diskfs cairn linux io_uring)
+    if((backend STREQUAL "cairn" AND NOT CAIRN_ENABLED) OR
+       (backend STREQUAL "linux" AND NOT CHIMERA_LINUX) OR
+       (backend STREQUAL "io_uring" AND NOT CHIMERA_VFS_IO_URING))
+        continue()
+    endif()
+    add_test(NAME chimera/server/nfs/mbt4/settable_attrs_probe_${backend}
+        COMMAND $<TARGET_FILE:nfs4_settable_attrs_probe> ${backend})
+    set_tests_properties(chimera/server/nfs/mbt4/settable_attrs_probe_${backend}
+        PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_settable_attrs_probe_${backend}"
         LABELS "quint;nfs4_mbt;multiproto;${backend}"
         SKIP_RETURN_CODE 77
         TIMEOUT 90)

@@ -71,6 +71,21 @@ chimera_nfs4_verify_complete(
         return;
     }
 
+    /* time_create is in supported_attrs, but an object whose backend keeps
+     * no birth time (the nfs proxy, or a filesystem whose statx reports
+     * none) comes back without one.  The marshalled attributes could then
+     * never match: VERIFY would answer NFS4ERR_NOT_SAME and NVERIFY NFS4_OK
+     * whatever the client sent.  An attribute the server does not support
+     * for this object is NFS4ERR_ATTRNOTSUPP (RFC 7530 sections 16.15.5 and
+     * 16.35.5). */
+    if (args->num_attrmask >= 2 &&
+        (args->attrmask[1] & (1U << (FATTR4_TIME_CREATE - 32))) &&
+        !(attr->va_set_mask & CHIMERA_VFS_ATTR_BTIME)) {
+        res->status = NFS4ERR_ATTRNOTSUPP;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     /* Marshal current attrs into the same on-wire format the client sent
      * us, restricted to the bits in the request mask. */
     uint32_t out_mask[3] = { 0, 0, 0 };
@@ -156,30 +171,6 @@ verify_validate_mask(
     uint32_t        num,
     const uint32_t *mask)
 {
-    static const uint32_t supported_word0 =
-        (1 << FATTR4_SUPPORTED_ATTRS) | (1 << FATTR4_TYPE) |
-        (1 << FATTR4_FH_EXPIRE_TYPE)  | (1 << FATTR4_CHANGE) |
-        (1 << FATTR4_SIZE)            | (1 << FATTR4_LINK_SUPPORT) |
-        (1 << FATTR4_SYMLINK_SUPPORT) | (1 << FATTR4_NAMED_ATTR) |
-        (1 << FATTR4_FSID)            | (1 << FATTR4_UNIQUE_HANDLES) |
-        (1 << FATTR4_LEASE_TIME)      | (1 << FATTR4_RDATTR_ERROR) |
-        (1 << FATTR4_ACL)             | (1 << FATTR4_ACLSUPPORT)      | (1 << FATTR4_ARCHIVE) |
-        (1 << FATTR4_CANSETTIME)      | (1 << FATTR4_CASE_INSENSITIVE) |
-        (1 << FATTR4_CASE_PRESERVING) | (1 << FATTR4_CHOWN_RESTRICTED) |
-        (1 << FATTR4_FILEHANDLE)      | (1 << FATTR4_FILEID) |
-        (1 << FATTR4_FILES_AVAIL)     | (1 << FATTR4_FILES_FREE) |
-        (1 << FATTR4_FILES_TOTAL)     | (1 << FATTR4_HOMOGENEOUS) |
-        (1 << FATTR4_MAXFILESIZE)     | (1 << FATTR4_MAXLINK) |
-        (1 << FATTR4_MAXNAME)         | (1 << FATTR4_MAXREAD) |
-        (1U << FATTR4_MAXWRITE);
-    static const uint32_t supported_word1 =
-        (1U << (FATTR4_MODE - 32))         | (1U << (FATTR4_NUMLINKS - 32)) |
-        (1U << (FATTR4_OWNER - 32))        | (1U << (FATTR4_OWNER_GROUP - 32)) |
-        (1U << (FATTR4_SPACE_AVAIL - 32))  | (1U << (FATTR4_SPACE_FREE - 32)) |
-        (1U << (FATTR4_SPACE_TOTAL - 32))  | (1U << (FATTR4_SPACE_USED - 32)) |
-        (1U << (FATTR4_TIME_ACCESS - 32))  | (1U << (FATTR4_TIME_METADATA - 32)) |
-        (1U << (FATTR4_TIME_MODIFY - 32))  |
-        (1U << (FATTR4_MOUNTED_ON_FILEID - 32));
     static const uint32_t writeonly_word1 =
         (1U << (FATTR4_TIME_ACCESS_SET - 32)) |
         (1U << (FATTR4_TIME_MODIFY_SET - 32));
@@ -188,16 +179,19 @@ verify_validate_mask(
      * attrs; requesting it via GETATTR/VERIFY is INVAL per RFC 7530 §5.6. */
     static const uint32_t writeonly_word0 = (1U << FATTR4_RDATTR_ERROR);
 
+    /* The write-only attributes cannot be read back to compare.  Anything
+     * else outside supported_attrs -- the shared list GETATTR marshals from,
+     * nfs4_attr.h -- is not supported. */
     if (num >= 1 && (mask[0] & writeonly_word0)) {
         return NFS4ERR_INVAL;
     }
-    if (num >= 1 && (mask[0] & ~supported_word0)) {
+    if (num >= 1 && (mask[0] & ~CHIMERA_NFS4_SUPPORTED_ATTRS_WORD0)) {
         return NFS4ERR_ATTRNOTSUPP;
     }
     if (num >= 2 && (mask[1] & writeonly_word1)) {
         return NFS4ERR_INVAL;
     }
-    if (num >= 2 && (mask[1] & ~(supported_word1 | writeonly_word1))) {
+    if (num >= 2 && (mask[1] & ~CHIMERA_NFS4_SUPPORTED_ATTRS_WORD1)) {
         return NFS4ERR_ATTRNOTSUPP;
     }
     if (num >= 3 && mask[2] != 0) {
