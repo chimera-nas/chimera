@@ -32,6 +32,7 @@ chimera_nfs4_setattr_complete(
         chimera_nfs_abort_if(res->attrsset == NULL, "Failed to allocate space");
 
         res->num_attrsset = chimera_nfs4_mask2attr(set_attr,
+                                                   post_attr,
                                                    args->obj_attributes.num_attrmask,
                                                    args->obj_attributes.attrmask,
                                                    res->attrsset);

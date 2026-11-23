@@ -257,7 +257,7 @@ v4_wide_attr_mask(uint32_t *m)
         (1U << FATTR4_NAMED_ATTR) | (1U << FATTR4_FSID) |
         (1U << FATTR4_UNIQUE_HANDLES) | (1U << FATTR4_LEASE_TIME) |
         (1U << FATTR4_ACL) | (1U << FATTR4_ACLSUPPORT) |
-        (1U << FATTR4_ARCHIVE) | (1U << FATTR4_CANSETTIME) |
+        (1U << FATTR4_CANSETTIME) |
         (1U << FATTR4_CASE_INSENSITIVE) | (1U << FATTR4_CASE_PRESERVING) |
         (1U << FATTR4_CHOWN_RESTRICTED) | (1U << FATTR4_FILEHANDLE) |
         (1U << FATTR4_FILEID) | (1U << FATTR4_FILES_AVAIL) |
@@ -1543,12 +1543,6 @@ encode_op(
          * without knowing a single attribute value. */
         a->argop = nv ? OP_NVERIFY : OP_VERIFY;
         v4_wide_attr_mask(s->bitmap);
-        /* VERIFY's own supported set omits FATTR4_RAWDEV, though GETATTR
-         * marshals it happily -- an asymmetry in chimera, recorded as an open
-         * finding in DEVIATIONS-NFS4.md.  Requesting it here would answer
-         * NFS4ERR_ATTRNOTSUPP before the marshaller ever runs, defeating the
-         * point of the op, so drop the bit until chimera is fixed. */
-        s->bitmap[1]     &= ~(1U << (FATTR4_RAWDEV - 32));
         f->attrmask       = s->bitmap;
         f->num_attrmask   = 2;
         f->attr_vals.data = s->blob;

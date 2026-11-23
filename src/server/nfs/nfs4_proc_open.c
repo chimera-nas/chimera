@@ -1062,6 +1062,7 @@ chimera_nfs4_open_at_complete(
         rc = xdr_dbuf_alloc_array(&res->resok4, attrset, 4, req->encoding->dbuf);
         chimera_nfs_abort_if(rc, "Failed to allocate array");
         res->resok4.num_attrset = chimera_nfs4_mask2attr(set_attr,
+                                                         attr,
                                                          args->openhow.how.createattrs.num_attrmask,
                                                          args->openhow.how.createattrs.attrmask,
                                                          res->resok4.attrset);

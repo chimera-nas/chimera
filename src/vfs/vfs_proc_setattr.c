@@ -84,6 +84,16 @@ chimera_vfs_setattr_required(
             CHIMERA_ACE_WRITE_DATA : CHIMERA_ACE_WRITE_ATTRIBUTES;
     }
 
+    /* A birth time (SMB CreationTime, NFSv4 time_create) has no "touch" form
+     * a data writer may use: setting it is an attribute write (RFC 7530
+     * 6.2.1.3.1), so only the owner, through the timestamp exemption in the
+     * gate, or a WRITE_ATTRIBUTES grant may do it.  TIME_OMIT leaves it
+     * alone. */
+    if ((m & CHIMERA_VFS_ATTR_BTIME) &&
+        set_attr->va_btime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
+        required |= CHIMERA_ACE_WRITE_ATTRIBUTES;
+    }
+
     return required;
 } /* chimera_vfs_setattr_required */
 
@@ -257,6 +267,11 @@ chimera_vfs_setattr_denied_error(
 
     if ((m & CHIMERA_VFS_ATTR_MTIME) &&
         set_attr->va_mtime.tv_nsec != CHIMERA_VFS_TIME_NOW) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    if ((m & CHIMERA_VFS_ATTR_BTIME) &&
+        set_attr->va_btime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
         return CHIMERA_VFS_EPERM;
     }
 

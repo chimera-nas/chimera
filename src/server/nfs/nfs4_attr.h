@@ -63,15 +63,99 @@ chimera_nfs4_change_from_attrs(const struct chimera_vfs_attrs *attr)
  * honour in an EXCLUSIVE4_1 cva_attrs.  time_access_set/time_modify_set are
  * deliberately absent because the create verifier is stored in atime/mtime
  * (the Linux nfsd strategy), so a client value for them could not survive the
- * create.  Defined here so the advertisement (chimera_nfs4_marshall_attrs) and
- * the cva_attrs check (chimera_nfs4_validate_exclcreat_attrs) cannot drift
- * apart -- RFC 8881 18.16.3 requires the second to be exactly the first.
+ * create.  time_create is absent too, though it is writable: the EXCLUSIVE4_1
+ * attrset (chimera_nfs4_open_excl_attrset) names the cva_attrs requested, not
+ * what the backend stored, and the passthrough backends cannot store a birth
+ * time, so listing it would have the reply claim a birth time never set.  A
+ * client sets it with a SETATTR after the create, where the attrset reports
+ * what the object reads back.  Defined here so the advertisement
+ * (chimera_nfs4_marshall_attrs) and the cva_attrs check
+ * (chimera_nfs4_validate_exclcreat_attrs) cannot drift apart -- RFC 8881
+ * 18.16.3 requires the second to be exactly the first.
  */
 #define CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD0        (1U << FATTR4_SIZE)
 #define CHIMERA_NFS4_SUPPATTR_EXCLCREAT_WORD1        ( \
             (1U << (FATTR4_MODE - 32)) | \
             (1U << (FATTR4_OWNER - 32)) | \
             (1U << (FATTR4_OWNER_GROUP - 32)))
+
+/*
+ * supported_attrs (RFC 7530 5.8.1.1), words 0 and 1: the attributes this
+ * server implements for every object.  Defined here so the advertisement
+ * (chimera_nfs4_marshall_attrs) and the check of the attributes a client sets
+ * in SETATTR, OPEN and CREATE (chimera_nfs4_validate_createattrs) are one
+ * list.  A client may set any writable attribute it finds advertised: the
+ * macOS client puts archive, mode and time_create in the createattrs of every
+ * OPEN and CREATE when they are listed here, so an attribute advertised here
+ * and refused there fails every create that client sends.
+ *
+ * archive, hidden, system, time_backup and mimetype are absent because the
+ * NFSv4 server does not map them to anything it stores.  fs_layout_types is
+ * added per object when pNFS serves it.
+ */
+#define CHIMERA_NFS4_SUPPORTED_ATTRS_WORD0           ( \
+            (1U << FATTR4_SUPPORTED_ATTRS) | \
+            (1U << FATTR4_TYPE) | \
+            (1U << FATTR4_FH_EXPIRE_TYPE) | \
+            (1U << FATTR4_CHANGE) | \
+            (1U << FATTR4_SIZE) | \
+            (1U << FATTR4_LINK_SUPPORT) | \
+            (1U << FATTR4_SYMLINK_SUPPORT) | \
+            (1U << FATTR4_NAMED_ATTR) | \
+            (1U << FATTR4_FSID) | \
+            (1U << FATTR4_UNIQUE_HANDLES) | \
+            (1U << FATTR4_LEASE_TIME) | \
+            (1U << FATTR4_RDATTR_ERROR) | \
+            (1U << FATTR4_ACL) | \
+            (1U << FATTR4_ACLSUPPORT) | \
+            (1U << FATTR4_CANSETTIME) | \
+            (1U << FATTR4_CASE_INSENSITIVE) | \
+            (1U << FATTR4_CASE_PRESERVING) | \
+            (1U << FATTR4_CHOWN_RESTRICTED) | \
+            (1U << FATTR4_FILEHANDLE) | \
+            (1U << FATTR4_FILEID) | \
+            (1U << FATTR4_FILES_AVAIL) | \
+            (1U << FATTR4_FILES_FREE) | \
+            (1U << FATTR4_FILES_TOTAL) | \
+            (1U << FATTR4_HOMOGENEOUS) | \
+            (1U << FATTR4_MAXFILESIZE) | \
+            (1U << FATTR4_MAXLINK) | \
+            (1U << FATTR4_MAXNAME) | \
+            (1U << FATTR4_MAXREAD) | \
+            (1U << FATTR4_MAXWRITE))
+#define CHIMERA_NFS4_SUPPORTED_ATTRS_WORD1           ( \
+            (1U << (FATTR4_MODE - 32)) | \
+            (1U << (FATTR4_NUMLINKS - 32)) | \
+            (1U << (FATTR4_OWNER - 32)) | \
+            (1U << (FATTR4_OWNER_GROUP - 32)) | \
+            (1U << (FATTR4_RAWDEV - 32)) | \
+            (1U << (FATTR4_SPACE_AVAIL - 32)) | \
+            (1U << (FATTR4_SPACE_FREE - 32)) | \
+            (1U << (FATTR4_SPACE_TOTAL - 32)) | \
+            (1U << (FATTR4_SPACE_USED - 32)) | \
+            (1U << (FATTR4_TIME_ACCESS - 32)) | \
+            (1U << (FATTR4_TIME_ACCESS_SET - 32)) | \
+            (1U << (FATTR4_TIME_CREATE - 32)) | \
+            (1U << (FATTR4_TIME_METADATA - 32)) | \
+            (1U << (FATTR4_TIME_MODIFY - 32)) | \
+            (1U << (FATTR4_TIME_MODIFY_SET - 32)) | \
+            (1U << (FATTR4_MOUNTED_ON_FILEID - 32)))
+
+/*
+ * The supported attributes a client may set: every attribute above that
+ * RFC 7530 section 5 defines as writable.  Setting any other supported
+ * attribute is NFS4ERR_INVAL.
+ */
+#define CHIMERA_NFS4_WRITABLE_ATTRS_WORD0            ( \
+            (1U << FATTR4_SIZE) | \
+            (1U << FATTR4_ACL))
+#define CHIMERA_NFS4_WRITABLE_ATTRS_WORD1            ( \
+            (1U << (FATTR4_MODE - 32)) | \
+            (1U << (FATTR4_OWNER - 32)) | \
+            (1U << (FATTR4_OWNER_GROUP - 32)) | \
+            (1U << (FATTR4_TIME_ACCESS_SET - 32)) | \
+            (1U << (FATTR4_TIME_CREATE - 32)) | \
+            (1U << (FATTR4_TIME_MODIFY_SET - 32)))
 
 /*
  * The single pNFS layouttype4 this file's backend supports, for FATTR4
@@ -260,12 +344,20 @@ chimera_nfs4_attrs_fill_filehandle(
     memcpy(attr->va_fh, fh, fhlen);
 } /* chimera_nfs4_attrs_fill_filehandle */
 
+/*
+ * The attrset of a SETATTR, OPEN or CREATE reply: the attributes of the
+ * request bitmap that were set.  `attr` is the set the backend was handed and
+ * has returned -- except for CREATE of a symbolic link, whose completion is
+ * not handed it and passes the new link's attributes instead.  `obj`, which
+ * may be NULL, is the object's attributes after the operation.
+ */
 static inline int
 chimera_nfs4_mask2attr(
-    struct chimera_vfs_attrs *attr,
-    uint32_t                  num_req_mask,
-    uint32_t                 *req_mask,
-    uint32_t                 *rsp_mask)
+    const struct chimera_vfs_attrs *attr,
+    const struct chimera_vfs_attrs *obj,
+    uint32_t                        num_req_mask,
+    uint32_t                       *req_mask,
+    uint32_t                       *rsp_mask)
 {
     /*
      * num_req_mask is the client-supplied request bitmap length and is
@@ -320,6 +412,29 @@ chimera_nfs4_mask2attr(
         (req_mask[1] & (1 << (FATTR4_TIME_MODIFY_SET - 32))) &&
         (attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
         rsp_mask[1] |= (1 << (FATTR4_TIME_MODIFY_SET - 32));
+    }
+
+    /*
+     * time_create is stored by some backends and ignored by others: no
+     * system call sets a file's birth time, so the passthrough backends
+     * cannot keep it.  The mask a backend hands back does not say which --
+     * memfs, diskfs and cairn rewrite it to what they applied, linux and
+     * io_uring return it untouched -- so the object decides.  The VFS asks
+     * for the object's birth time after every SETATTR, OPEN and CREATE
+     * (CHIMERA_VFS_ATTR_MASK_CACHEABLE), and time_create is named only if the
+     * object now reads back the value the client sent.  A backend that
+     * returns no birth time, or one stored at a coarser precision, is
+     * reported as not having set it.  `attr` still carrying the bit rules out
+     * an operation that dropped its attributes, as an UNCHECKED4 OPEN of an
+     * existing file does.
+     */
+    if (num_req_mask >= 2 &&
+        (req_mask[1] & (1 << (FATTR4_TIME_CREATE - 32))) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_BTIME) &&
+        obj && (obj->va_set_mask & CHIMERA_VFS_ATTR_BTIME) &&
+        obj->va_btime.tv_sec == attr->va_btime.tv_sec &&
+        obj->va_btime.tv_nsec == attr->va_btime.tv_nsec) {
+        rsp_mask[1] |= (1 << (FATTR4_TIME_CREATE - 32));
     }
 
     /*
@@ -500,57 +615,11 @@ chimera_nfs4_marshall_attrs(
              * v4.0 reply advertises just the two 4.0 words. */
             chimera_nfs4_attr_append_uint32(&attrs, minorversion >= 1 ? 3 : 2);
             chimera_nfs4_attr_append_uint32(&attrs,
-                                            (1 << FATTR4_SUPPORTED_ATTRS) |
-                                            (1 << FATTR4_TYPE) |
-                                            (1 << FATTR4_FH_EXPIRE_TYPE) |
-                                            (1 << FATTR4_CHANGE) |
-                                            (1 << FATTR4_SIZE) |
-                                            (1 << FATTR4_LINK_SUPPORT) |
-                                            (1 << FATTR4_SYMLINK_SUPPORT) |
-                                            (1 << FATTR4_NAMED_ATTR) |
-                                            (1 << FATTR4_FSID) |
-                                            (1 << FATTR4_UNIQUE_HANDLES) |
-                                            (1 << FATTR4_LEASE_TIME) |
-                                            (1 << FATTR4_RDATTR_ERROR) |
-                                            (1 << FATTR4_ACL) |
-                                            (1 << FATTR4_ACLSUPPORT) |
-                                            (1 << FATTR4_ARCHIVE) |
-                                            (1 << FATTR4_CANSETTIME) |
-                                            (1 << FATTR4_CASE_INSENSITIVE) |
-                                            (1 << FATTR4_CASE_PRESERVING) |
-                                            (1 << FATTR4_CHOWN_RESTRICTED) |
-                                            (1 << FATTR4_FILEHANDLE) |
-                                            (1 << FATTR4_FILEID) |
-                                            (1 << FATTR4_FILES_AVAIL) |
-                                            (1 << FATTR4_FILES_FREE) |
-                                            (1 << FATTR4_FILES_TOTAL) |
-                                            /* fs_locations */
-                                            /* hidden */
-                                            (1 << FATTR4_HOMOGENEOUS) |
-                                            (1 << FATTR4_MAXFILESIZE) |
-                                            (1 << FATTR4_MAXLINK) |
-                                            (1 << FATTR4_MAXNAME) |
-                                            (1 << FATTR4_MAXREAD) |
-                                            (1 << FATTR4_MAXWRITE));
+                                            CHIMERA_NFS4_SUPPORTED_ATTRS_WORD0);
 
             chimera_nfs4_attr_append_uint32(&attrs,
-                                            (1ULL << (FATTR4_MODE - 32)) |
-                                            (1ULL << (FATTR4_NUMLINKS - 32)) |
-                                            (1ULL << (FATTR4_OWNER - 32)) |
-                                            (1ULL << (FATTR4_OWNER_GROUP - 32)) |
-                                            (1ULL << (FATTR4_RAWDEV - 32)) |
-                                            (1ULL << (FATTR4_SPACE_USED - 32)) |
-                                            (1ULL << (FATTR4_TIME_ACCESS - 32)) |
-                                            (1ULL << (FATTR4_TIME_ACCESS_SET - 32)) |
-                                            (1ULL << (FATTR4_TIME_CREATE - 32)) |
-                                            (1ULL << (FATTR4_TIME_MODIFY - 32)) |
-                                            (1ULL << (FATTR4_TIME_MODIFY_SET - 32)) |
-                                            (1ULL << (FATTR4_TIME_METADATA - 32)) |
-                                            (1ULL << (FATTR4_MOUNTED_ON_FILEID - 32)) |
-                                            (1ULL << (FATTR4_SPACE_AVAIL - 32)) |
-                                            (1ULL << (FATTR4_SPACE_FREE - 32)) |
-                                            (1ULL << (FATTR4_SPACE_TOTAL - 32)) |
-                                            (pnfs_layout_type ? (1ULL << (FATTR4_FS_LAYOUT_TYPES - 32)) : 0));
+                                            CHIMERA_NFS4_SUPPORTED_ATTRS_WORD1 |
+                                            (pnfs_layout_type ? (1U << (FATTR4_FS_LAYOUT_TYPES - 32)) : 0));
 
             if (minorversion >= 1) {
                 uint32_t word2 = (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64));
@@ -734,13 +803,6 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs,
                                             ACL4_SUPPORT_ALLOW_ACL |
                                             ACL4_SUPPORT_DENY_ACL);
-        }
-
-        if (req_mask[0] & (1 << FATTR4_ARCHIVE)) {
-            rsp_mask[0]  |= (1 << FATTR4_ARCHIVE);
-            *num_rsp_mask = 1;
-
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
         }
 
         if (req_mask[0] & (1 << FATTR4_CANSETTIME)) {
@@ -1389,7 +1451,7 @@ chimera_nfs4_unmarshall_attrs(
                 attr->va_atime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
                 attrs                  = (char *) attrs + sizeof(uint32_t);
 
-                /* RFC 7530 §5.7: nseconds must be < 1,000,000,000. */
+                /* RFC 7530 section 2.2.1: nseconds must be < 1,000,000,000. */
                 if (unlikely(attr->va_atime.tv_nsec >= 1000000000)) {
                     return NFS4ERR_INVAL;
                 }
@@ -1399,6 +1461,36 @@ chimera_nfs4_unmarshall_attrs(
             }
 
             attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
+        }
+
+        /* time_create (bit 50) decodes between time_access_set (48) and
+         * time_modify_set (54).  It is a bare nfstime4: there is no "server
+         * time" form to choose, unlike the two *_set attributes.  The value
+         * goes to the backend as the object's birth time; setting it needs
+         * the WRITE_ATTRIBUTES right (chimera_vfs_setattr_required).  A
+         * backend that cannot store one completes the operation without it,
+         * and the reply's attrset (chimera_nfs4_mask2attr) then leaves
+         * time_create out -- what the Linux server does on every
+         * filesystem. */
+        if (req_mask[1] & (1 << (FATTR4_TIME_CREATE - 32))) {
+
+            if (unlikely((char *) attrs + sizeof(uint64_t) + sizeof(uint32_t) > attrsend)) {
+                return NFS4ERR_BADXDR;
+            }
+
+            attr->va_btime.tv_sec  = chimera_nfs_ntoh64(*(uint64_t *) attrs);
+            attrs                  = (char *) attrs + sizeof(uint64_t);
+            attr->va_btime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
+            attrs                  = (char *) attrs + sizeof(uint32_t);
+
+            /* RFC 7530 section 2.2.1: nseconds must be < 1,000,000,000.
+             * This also keeps a client from sending the VFS's own TIME_NOW
+             * and TIME_OMIT sentinels, which live above that bound. */
+            if (unlikely(attr->va_btime.tv_nsec >= 1000000000)) {
+                return NFS4ERR_INVAL;
+            }
+
+            attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
         }
 
         if (req_mask[1] & (1 << (FATTR4_TIME_MODIFY_SET - 32))) {
@@ -1421,7 +1513,7 @@ chimera_nfs4_unmarshall_attrs(
                 attr->va_mtime.tv_nsec = chimera_nfs_ntoh32(*(uint32_t *) attrs);
                 attrs                  = (char *) attrs + sizeof(uint32_t);
 
-                /* RFC 7530 §5.7: nseconds must be < 1,000,000,000. */
+                /* RFC 7530 section 2.2.1: nseconds must be < 1,000,000,000. */
                 if (unlikely(attr->va_mtime.tv_nsec >= 1000000000)) {
                     return NFS4ERR_INVAL;
                 }
@@ -1446,77 +1538,16 @@ chimera_nfs4_validate_createattrs(
     uint32_t        num_attrmask,
     const uint32_t *attrmask)
 {
-    static const uint32_t supported_word0 =
-        (1 << FATTR4_SUPPORTED_ATTRS) |
-        (1 << FATTR4_TYPE) |
-        (1 << FATTR4_FH_EXPIRE_TYPE) |
-        (1 << FATTR4_CHANGE) |
-        (1 << FATTR4_SIZE) |
-        (1 << FATTR4_LINK_SUPPORT) |
-        (1 << FATTR4_SYMLINK_SUPPORT) |
-        (1 << FATTR4_NAMED_ATTR) |
-        (1 << FATTR4_FSID) |
-        (1 << FATTR4_UNIQUE_HANDLES) |
-        (1 << FATTR4_LEASE_TIME) |
-        (1 << FATTR4_RDATTR_ERROR) |
-        (1 << FATTR4_ACL) |
-        (1 << FATTR4_ACLSUPPORT) |
-        (1 << FATTR4_ARCHIVE) |
-        (1 << FATTR4_CANSETTIME) |
-        (1 << FATTR4_CASE_INSENSITIVE) |
-        (1 << FATTR4_CASE_PRESERVING) |
-        (1 << FATTR4_CHOWN_RESTRICTED) |
-        (1 << FATTR4_FILEHANDLE) |
-        (1 << FATTR4_FILEID) |
-        (1 << FATTR4_FILES_AVAIL) |
-        (1 << FATTR4_FILES_FREE) |
-        (1 << FATTR4_FILES_TOTAL) |
-        /* no fs_locations=24, hidden=25 */
-        (1 << FATTR4_HOMOGENEOUS) |
-        (1 << FATTR4_MAXFILESIZE) |
-        (1 << FATTR4_MAXLINK) |
-        (1 << FATTR4_MAXNAME) |
-        (1 << FATTR4_MAXREAD) |
-        (1U << FATTR4_MAXWRITE);
-
-    static const uint32_t supported_word1 =
-        (1 << (FATTR4_MODE - 32)) |
-        (1 << (FATTR4_NUMLINKS - 32)) |
-        (1 << (FATTR4_OWNER - 32)) |
-        (1 << (FATTR4_OWNER_GROUP - 32)) |
-        (1 << (FATTR4_RAWDEV - 32)) |
-        (1 << (FATTR4_SPACE_AVAIL - 32)) |
-        (1 << (FATTR4_SPACE_FREE - 32)) |
-        (1 << (FATTR4_SPACE_TOTAL - 32)) |
-        (1 << (FATTR4_SPACE_USED - 32)) |
-        (1 << (FATTR4_TIME_ACCESS - 32)) |
-        (1 << (FATTR4_TIME_ACCESS_SET - 32)) |
-        (1 << (FATTR4_TIME_METADATA - 32)) |
-        (1 << (FATTR4_TIME_MODIFY - 32)) |
-        (1 << (FATTR4_TIME_MODIFY_SET - 32)) |
-        (1 << (FATTR4_MOUNTED_ON_FILEID - 32));
-
-    static const uint32_t writable_word0 =
-        (1 << FATTR4_SIZE) |
-        (1 << FATTR4_ACL);
-
-    static const uint32_t writable_word1 =
-        (1 << (FATTR4_MODE - 32)) |
-        (1 << (FATTR4_OWNER - 32)) |
-        (1 << (FATTR4_OWNER_GROUP - 32)) |
-        (1 << (FATTR4_TIME_ACCESS_SET - 32)) |
-        (1 << (FATTR4_TIME_MODIFY_SET - 32));
-
-    uint32_t              w;
+    uint32_t w;
 
     if (num_attrmask >= 1) {
         w = attrmask[0];
 
-        if (w & ~supported_word0) {
+        if (w & ~CHIMERA_NFS4_SUPPORTED_ATTRS_WORD0) {
             return NFS4ERR_ATTRNOTSUPP;
         }
 
-        if (w & supported_word0 & ~writable_word0) {
+        if (w & ~CHIMERA_NFS4_WRITABLE_ATTRS_WORD0) {
             return NFS4ERR_INVAL;
         }
     }
@@ -1524,11 +1555,11 @@ chimera_nfs4_validate_createattrs(
     if (num_attrmask >= 2) {
         w = attrmask[1];
 
-        if (w & ~supported_word1) {
+        if (w & ~CHIMERA_NFS4_SUPPORTED_ATTRS_WORD1) {
             return NFS4ERR_ATTRNOTSUPP;
         }
 
-        if (w & supported_word1 & ~writable_word1) {
+        if (w & ~CHIMERA_NFS4_WRITABLE_ATTRS_WORD1) {
             return NFS4ERR_INVAL;
         }
     }
