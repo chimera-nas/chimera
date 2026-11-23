@@ -2,13 +2,18 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/platform.h"
 #include "common/thread.h"
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include "common/misc.h"
 #include "common/uuid.h"
 #include <xxhash.h>
 #include "prometheus-c.h"
 #include "nfs4_session.h"
+#include "clientid_allocator.h"
+#include "clientid_format.h"
 #include "nfs4_state.h"
 #include "nfs4_callback.h"
 #include "nfs4_drc.h"
@@ -16,6 +21,37 @@
 #include "nfs_internal.h"
 #include "nfs_nlm_state.h"
 #include "nfs_common.h"
+
+/* An in-flight SETCLIENTID / EXCHANGE_ID waiting for the client ID allocator
+ * (see nfs4_client_reg_begin). */
+#define NFS4_REG_STR_MAX 128   /* r_netid / r_addr copies (RFC 5665 forms are short) */
+
+struct nfs4_pending_exchange {
+    UT_hash_handle         hh;
+    uint8_t                owner[NFS4_OPAQUE_LIMIT];
+    int                    owner_len;
+    uint64_t               token;
+    enum nfs4_reg_kind     kind;
+    uint64_t               verifier;
+    uint32_t               princ_flavor;
+    uint32_t               princ_uid;
+    uint32_t               princ_gid;
+    uint8_t                princ_mach[NFS4_OPAQUE_LIMIT];
+    int                    princ_mach_len;
+    uint8_t                minorversion;
+    bool                   update;
+    uint32_t               eia_flags;
+    uint32_t               spa_how;
+    uint32_t               cb_program;
+    uint32_t               cb_ident;
+    char                   cb_netid[NFS4_REG_STR_MAX];
+    int                    cb_netid_len;
+    char                   cb_addr[NFS4_REG_STR_MAX];
+    int                    cb_addr_len;
+    int                    collisions;
+    int                    nwaiters;
+    struct nfs4_reg_waiter waiters[1 + NFS4_REG_MAX_WAITERS];
+};
 #include "evpl/evpl_rpc2.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
@@ -79,23 +115,55 @@ replay_field_retry_uncached(struct nfs4_replay_metrics *rm)
     return rm->retry_uncached;
 } /* replay_field_retry_uncached */
 
-void
-nfs4_client_table_init(
+/* Stamp the per-boot part of setclientid_confirm verifiers.  The boot epoch is
+ * nanoseconds of wall clock (or strictly past the previous boot's, when the KV
+ * store is persistent), so fold all of it rather than keep the slowly-moving
+ * high bits.  Client IDs themselves come from the client ID allocator. */
+static void
+nfs4_client_table_stamp_boot(
     struct nfs4_client_table *table,
-    uint16_t                  node_id)
+    uint64_t                  boot_id)
 {
+    table->nfs4_ct_confirm_boot = (uint32_t) (boot_id ^ (boot_id >> 32));
+} /* nfs4_client_table_stamp_boot */
+
+void
+nfs4_client_table_init(struct nfs4_client_table *table)
+{
+    struct timespec ts;
+
     table->nfs4_ct_clients_by_owner = NULL;
     table->nfs4_ct_clients_by_id    = NULL;
     table->nfs4_ct_sessions         = NULL;
-    table->nfs4_ct_next_client_id   = 1;
-    table->nfs4_ct_node_id          = node_id;
-    table->nfs4_ct_next_confirm     = 1;
+    table->nfs4_ct_pending          = NULL;
+    table->nfs4_ct_pending_token    = 0;
     table->nfs4_ct_forget           = NULL;
     table->nfs4_ct_forget_count     = 0;
     table->nfs4_ct_forget_capacity  = 0;
 
+    /* RFC 7530 §16.33.5: setclientid_confirm verifiers must be "extremely
+     * unlikely to ever be regenerated" -- across restarts too.  A per-boot
+     * high half (provisional here, from the clock; final in
+     * nfs4_client_table_set_boot) and a random starting low half keep this
+     * boot's values apart from every earlier boot's. */
+    clock_gettime(CLOCK_REALTIME, &ts);
+    nfs4_client_table_stamp_boot(table,
+                                 (uint64_t) ts.tv_sec * 1000000000ULL +
+                                 (uint64_t) ts.tv_nsec);
+    table->nfs4_ct_next_confirm = chimera_rand64() & NFS4_CONFIRM_SEQ_MASK;
+
     evpl_mutex_init(&table->nfs4_ct_lock, NULL);
 } /* nfs4_client_table_init */
+
+void
+nfs4_client_table_set_boot(
+    struct nfs4_client_table *table,
+    uint64_t                  boot_id)
+{
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    nfs4_client_table_stamp_boot(table, boot_id);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_table_set_boot */
 
 void
 nfs4_client_table_free(struct nfs4_client_table *table)
@@ -143,6 +211,20 @@ nfs4_client_table_free(struct nfs4_client_table *table)
 
 #endif /* ifndef __clang_analyzer__ */
 
+#ifndef __clang_analyzer__
+    {
+        struct nfs4_pending_exchange *p, *ptmp;
+
+        /* Registrations still waiting for the allocator at teardown are
+         * abandoned: their requests die with their connections. */
+        HASH_ITER(hh, table->nfs4_ct_pending, p, ptmp)
+        {
+            HASH_DEL(table->nfs4_ct_pending, p);
+            free(p);
+        }
+    }
+#endif /* ifndef __clang_analyzer__ */
+
     free(table->nfs4_ct_forget);
     table->nfs4_ct_forget          = NULL;
     table->nfs4_ct_forget_count    = 0;
@@ -153,6 +235,7 @@ nfs4_client_table_free(struct nfs4_client_table *table)
 uint64_t
 nfs4_client_register(
     struct nfs4_client_table *table,
+    uint64_t                  clientid,
     const void               *owner,
     int                       owner_len,
     uint64_t                  verifier,
@@ -176,8 +259,7 @@ nfs4_client_register(
     } else {
         client = calloc(1, sizeof(*client));
 
-        client->nfs4_client_id = nfs4_make_clientid(table->nfs4_ct_node_id,
-                                                    table->nfs4_ct_next_client_id++);
+        client->nfs4_client_id = clientid;
 
         memcpy(client->nfs4_client_owner, owner, owner_len);
         client->nfs4_client_owner_len = owner_len;
@@ -315,12 +397,13 @@ nfs4_client_hash_owner_locked(
     c->nfs4_client_in_owner_table = 1;
 } /* nfs4_client_hash_owner_locked */
 
-/* Caller must hold table->nfs4_ct_lock.  Allocates a fresh (unconfirmed)
- * client record, brings up its unified state hierarchy, and inserts it into
- * both hash tables. */
+/* Caller must hold table->nfs4_ct_lock.  Creates a fresh (unconfirmed)
+* client record under `clientid` (from the client ID allocator), brings up
+* its unified state hierarchy, and inserts it into both hash tables. */
 static struct nfs4_client *
 nfs4_client_new_locked(
     struct nfs4_client_table           *table,
+    uint64_t                            clientid,
     const void                         *owner,
     int                                 owner_len,
     uint64_t                            verifier,
@@ -330,8 +413,7 @@ nfs4_client_new_locked(
 {
     struct nfs4_client *c = calloc(1, sizeof(*c));
 
-    c->nfs4_client_id = nfs4_make_clientid(table->nfs4_ct_node_id,
-                                           table->nfs4_ct_next_client_id++);
+    c->nfs4_client_id            = clientid;
     c->nfs4_client_owner_len     = owner_len;
     c->nfs4_client_verifier      = verifier;
     c->nfs4_client_refcnt        = 1;
@@ -525,8 +607,13 @@ nfs4_client_has_session_locked(
     return 0;
 } /* nfs4_client_has_session_locked */
 
-void
-nfs4_client_exchange_id(
+/* Caller holds table->nfs4_ct_lock.  RFC 8881 §18.35.4.  Every branch that
+ * needs a fresh client ID checks for `candidate` before changing anything, so
+ * a call without one leaves the table as it found it (apart from fencing a
+ * record whose lease is already cancelled, which is idempotent and always
+ * correct) and reports need_id. */
+static void
+nfs4_client_exchange_id_locked(
     struct nfs4_client_table           *table,
     const void                         *owner,
     int                                 owner_len,
@@ -534,6 +621,7 @@ nfs4_client_exchange_id(
     const struct nfs4_client_principal *principal,
     bool                                update,
     uint8_t                             minorversion,
+    uint64_t                            candidate,
     struct nfs4_exchange_id_result     *out)
 {
     struct nfs4_client *existing, *nc, *pending;
@@ -544,8 +632,7 @@ nfs4_client_exchange_id(
     out->sequenceid       = 1;
     out->destroy_unified  = NULL;
     out->destroy_unified2 = NULL;
-
-    evpl_mutex_lock(&table->nfs4_ct_lock);
+    out->need_id          = false;
 
     HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
               owner, owner_len, existing);
@@ -560,7 +647,7 @@ nfs4_client_exchange_id(
 
     if (update) {
         /* EXCHGID4_FLAG_UPD_CONFIRMED_REC_A: an update targets an existing
-         * *confirmed* record (RFC 8881 §18.35.4 cases 6/8/9). */
+         * *confirmed* record (RFC 8881 §18.35.4 cases 6/8/9).  Never mints. */
         if (!existing || !existing->nfs4_client_confirmed) {
             out->status = NFS4ERR_NOENT;
         } else if (!nfs4_principal_matches(existing, principal)) {
@@ -572,25 +659,31 @@ nfs4_client_exchange_id(
             out->confirmed  = 1;
             out->sequenceid = existing->nfs4_client_cs_seqid + 1;
         }
-        goto out_unlock;
+        return;
     }
 
     if (!existing) {
         /* Case 1: brand-new owner. */
-        nc = nfs4_client_new_locked(table, owner, owner_len,
+        if (!candidate) {
+            goto need_id;
+        }
+        nc = nfs4_client_new_locked(table, candidate, owner, owner_len,
                                     verifier, principal, minorversion, true);
         out->clientid = nc->nfs4_client_id;
-        goto out_unlock;
+        return;
     }
 
     if (!existing->nfs4_client_confirmed) {
         /* Case 4: an unconfirmed record is always replaced -- the client
          * never proved ownership of its clientid, so a fresh one is issued. */
+        if (!candidate) {
+            goto need_id;
+        }
         out->destroy_unified = nfs4_client_remove_locked(table, existing);
-        nc                   = nfs4_client_new_locked(table, owner, owner_len,
+        nc                   = nfs4_client_new_locked(table, candidate, owner, owner_len,
                                                       verifier, principal, minorversion, true);
         out->clientid = nc->nfs4_client_id;
-        goto out_unlock;
+        return;
     }
 
     /* Confirmed record below.  It keeps the by-owner slot (and stays fully
@@ -608,7 +701,7 @@ nfs4_client_exchange_id(
             out->clientid   = existing->nfs4_client_id;
             out->confirmed  = 1;
             out->sequenceid = existing->nfs4_client_cs_seqid + 1;
-            goto out_unlock;
+            return;
         }
 
         /* Case 5: same principal, new boot verifier -- the client rebooted.
@@ -616,17 +709,20 @@ nfs4_client_exchange_id(
          * unconfirmed record is by-id-only and the confirmed record (and
          * its sessions) stay live until CREATE_SESSION confirms the new
          * one. */
+        if (!candidate) {
+            goto need_id;
+        }
         pending = nfs4_client_take_pending_locked(table, existing);
         if (pending) {
             out->destroy_unified =
                 nfs4_client_remove_byid_locked(table, pending);
         }
-        nc = nfs4_client_new_locked(table, owner, owner_len, verifier,
+        nc = nfs4_client_new_locked(table, candidate, owner, owner_len, verifier,
                                     principal, minorversion, false);
         nc->nfs4_client_supersedes_id         = existing->nfs4_client_id;
         existing->nfs4_client_scid_pending_id = nc->nfs4_client_id;
         out->clientid                         = nc->nfs4_client_id;
-        goto out_unlock;
+        return;
     }
 
     /* Confirmed record owned by a different principal (RFC 8881 §18.35.4
@@ -635,20 +731,43 @@ nfs4_client_exchange_id(
      * in-flight superseding record it carries -- is replaced. */
     if (nfs4_client_has_session_locked(table, existing->nfs4_client_id)) {
         out->status = NFS4ERR_CLID_INUSE;
-        goto out_unlock;
+        return;
     }
 
+    if (!candidate) {
+        goto need_id;
+    }
     pending = nfs4_client_take_pending_locked(table, existing);
     if (pending) {
         out->destroy_unified2 =
             nfs4_client_remove_byid_locked(table, pending);
     }
     out->destroy_unified = nfs4_client_remove_locked(table, existing);
-    nc                   = nfs4_client_new_locked(table, owner, owner_len,
+    nc                   = nfs4_client_new_locked(table, candidate, owner, owner_len,
                                                   verifier, principal, minorversion, true);
     out->clientid = nc->nfs4_client_id;
+    return;
 
- out_unlock:
+ need_id:
+    out->status  = NFS4ERR_DELAY;
+    out->need_id = true;
+} /* nfs4_client_exchange_id_locked */
+
+void
+nfs4_client_exchange_id(
+    struct nfs4_client_table           *table,
+    const void                         *owner,
+    int                                 owner_len,
+    uint64_t                            verifier,
+    const struct nfs4_client_principal *principal,
+    bool                                update,
+    uint8_t                             minorversion,
+    uint64_t                            candidate,
+    struct nfs4_exchange_id_result     *out)
+{
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    nfs4_client_exchange_id_locked(table, owner, owner_len, verifier, principal,
+                                   update, minorversion, candidate, out);
     evpl_mutex_unlock(&table->nfs4_ct_lock);
 } /* nfs4_client_exchange_id */
 
@@ -669,13 +788,16 @@ nfs4_client_remove_byid_locked(
 } /* nfs4_client_remove_byid_locked */
 
 /* Caller holds the table lock.  Stamp a fresh, unique setclientid_confirm
- * verifier onto a record and mark a confirm pending. */
+ * verifier onto a record and mark a confirm pending.  The high half is this
+ * boot's, so a confirm retransmitted from before a restart never matches a
+ * record of the new boot (RFC 7530 §16.33.5). */
 static void
 nfs4_scid_set_confirm(
     struct nfs4_client_table *table,
     struct nfs4_client       *c)
 {
-    uint64_t v = table->nfs4_ct_next_confirm++;
+    uint64_t v = ((uint64_t) table->nfs4_ct_confirm_boot << 32) |
+        (table->nfs4_ct_next_confirm++ & NFS4_CONFIRM_SEQ_MASK);
 
     memcpy(c->nfs4_client_scid_confirm, &v, NFS4_VERIFIER_SIZE);
     c->nfs4_client_scid_confirm_valid = 1;
@@ -796,14 +918,18 @@ nfs4_client_retire_locked(
     return nfs4_client_remove_locked(table, c);
 } /* nfs4_client_retire_locked */
 
-void
-nfs4_client_setclientid(
+/* Caller holds table->nfs4_ct_lock.  RFC 7530 §16.33.5.  As for
+ * nfs4_client_exchange_id_locked, a branch that needs a fresh client ID checks
+ * for `candidate` before changing anything. */
+static void
+nfs4_client_setclientid_locked(
     struct nfs4_client_table           *table,
     const void                         *owner,
     int                                 owner_len,
     uint64_t                            verifier,
     const struct nfs4_client_principal *principal,
     uint8_t                             minorversion,
+    uint64_t                            candidate,
     struct nfs4_setclientid_result     *out)
 {
     struct nfs4_client *existing, *nc, *pending;
@@ -811,9 +937,8 @@ nfs4_client_setclientid(
     out->status          = NFS4_OK;
     out->clientid        = 0;
     out->destroy_unified = NULL;
+    out->need_id         = false;
     memset(out->confirm, 0, NFS4_VERIFIER_SIZE);
-
-    evpl_mutex_lock(&table->nfs4_ct_lock);
 
     HASH_FIND(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
               owner, owner_len, existing);
@@ -830,26 +955,32 @@ nfs4_client_setclientid(
 
     if (!existing) {
         /* No record for this owner: create an unconfirmed one. */
-        nc = nfs4_client_new_locked(table, owner, owner_len, verifier,
+        if (!candidate) {
+            goto need_id;
+        }
+        nc = nfs4_client_new_locked(table, candidate, owner, owner_len, verifier,
                                     principal, minorversion, true);
         nfs4_scid_set_confirm(table, nc);
         out->clientid = nc->nfs4_client_id;
         memcpy(out->confirm, nc->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE);
-        goto out_unlock;
+        return;
     }
 
     if (!existing->nfs4_client_confirmed) {
         /* The by-owner record is itself unconfirmed (no confirmed record for
          * this owner yet) -- RFC 7530 §16.33.5: any unconfirmed record is
          * replaced by a fresh one with a new clientid. */
+        if (!candidate) {
+            goto need_id;
+        }
         out->destroy_unified = nfs4_client_remove_locked(table, existing);
-        nc                   = nfs4_client_new_locked(table, owner, owner_len,
+        nc                   = nfs4_client_new_locked(table, candidate, owner, owner_len,
                                                       verifier, principal,
                                                       minorversion, true);
         nfs4_scid_set_confirm(table, nc);
         out->clientid = nc->nfs4_client_id;
         memcpy(out->confirm, nc->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE);
-        goto out_unlock;
+        return;
     }
 
     /* A confirmed record exists for this owner. */
@@ -859,7 +990,14 @@ nfs4_client_setclientid(
     if (!nfs4_principal_matches(existing, principal) &&
         nfs4_client_has_state(existing)) {
         out->status = NFS4ERR_CLID_INUSE;
-        goto out_unlock;
+        return;
+    }
+
+    /* Only a different verifier (client reboot) or a different principal with
+     * no state issues a new clientid; check before touching anything. */
+    if (!(nfs4_principal_matches(existing, principal) &&
+          existing->nfs4_client_verifier == verifier) && !candidate) {
+        goto need_id;
     }
 
     /* A new SETCLIENTID supersedes any earlier in-flight unconfirmed record
@@ -878,24 +1016,323 @@ nfs4_client_setclientid(
         out->clientid = existing->nfs4_client_id;
         memcpy(out->confirm, existing->nfs4_client_scid_confirm,
                NFS4_VERIFIER_SIZE);
-        goto out_unlock;
+        return;
     }
 
     /* Different verifier (client reboot) or different principal with no state:
      * issue a new clientid via a superseding unconfirmed record kept in the
      * by-id table only.  The confirmed record remains live and usable until
      * this one is confirmed. */
-    nc = nfs4_client_new_locked(table, owner, owner_len, verifier,
+    nc = nfs4_client_new_locked(table, candidate, owner, owner_len, verifier,
                                 principal, minorversion, false);
     nc->nfs4_client_supersedes_id = existing->nfs4_client_id;
     nfs4_scid_set_confirm(table, nc);
     existing->nfs4_client_scid_pending_id = nc->nfs4_client_id;
     out->clientid                         = nc->nfs4_client_id;
     memcpy(out->confirm, nc->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE);
+    return;
+
+ need_id:
+    out->status  = NFS4ERR_DELAY;
+    out->need_id = true;
+} /* nfs4_client_setclientid_locked */
+
+void
+nfs4_client_setclientid(
+    struct nfs4_client_table           *table,
+    const void                         *owner,
+    int                                 owner_len,
+    uint64_t                            verifier,
+    const struct nfs4_client_principal *principal,
+    uint8_t                             minorversion,
+    uint64_t                            candidate,
+    struct nfs4_setclientid_result     *out)
+{
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    nfs4_client_setclientid_locked(table, owner, owner_len, verifier, principal,
+                                   minorversion, candidate, out);
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+} /* nfs4_client_setclientid */
+
+/* ------------------------------------------------------------------ *
+*  asynchronous registration                                         *
+* ------------------------------------------------------------------ */
+
+
+SYMBOL_EXPORT nfsstat4
+nfs4_clientid_alloc_status_to_nfs(int status)
+{
+    return clientid_allocator_status_is_transient(status) ?
+           NFS4ERR_DELAY : NFS4ERR_SERVERFAULT;
+} /* nfs4_clientid_alloc_status_to_nfs */
+
+/* Does `a` describe exactly the request the reservation was made for?  Only
+ * then may it be coalesced; a request that differs in any argument that
+ * affects the outcome is a different attempt. */
+static bool
+nfs4_reg_identical(
+    const struct nfs4_pending_exchange *p,
+    const struct nfs4_reg_args         *a)
+{
+    int mach_len = a->principal.machinename_len > NFS4_OPAQUE_LIMIT ?
+        NFS4_OPAQUE_LIMIT : a->principal.machinename_len;
+
+    if (p->kind != a->kind || p->verifier != a->verifier ||
+        p->minorversion != a->minorversion ||
+        p->princ_flavor != a->principal.flavor ||
+        p->princ_uid != a->principal.uid || p->princ_gid != a->principal.gid ||
+        p->princ_mach_len != mach_len ||
+        (mach_len && memcmp(p->princ_mach, a->principal.machinename, mach_len))) {
+        return false;
+    }
+    if (a->kind == NFS4_REG_EXCHANGE_ID) {
+        return p->update == a->update && p->eia_flags == a->eia_flags &&
+               p->spa_how == a->spa_how;
+    }
+    return p->cb_program == a->cb_program && p->cb_ident == a->cb_ident &&
+           p->cb_netid_len == a->cb_netid_len && p->cb_addr_len == a->cb_addr_len &&
+           memcmp(p->cb_netid, a->cb_netid, a->cb_netid_len) == 0 &&
+           memcmp(p->cb_addr, a->cb_addr, a->cb_addr_len) == 0;
+} /* nfs4_reg_identical */
+
+static void
+nfs4_reg_principal(
+    const struct nfs4_pending_exchange *p,
+    struct nfs4_client_principal       *out)
+{
+    out->flavor          = p->princ_flavor;
+    out->uid             = p->princ_uid;
+    out->gid             = p->princ_gid;
+    out->machinename     = (const char *) p->princ_mach;
+    out->machinename_len = p->princ_mach_len;
+} /* nfs4_reg_principal */
+
+/* Caller holds the table lock.  Classify the reservation's request with
+ * `candidate` (0 = none available). */
+static void
+nfs4_reg_classify_locked(
+    struct nfs4_client_table           *table,
+    const struct nfs4_pending_exchange *p,
+    uint64_t                            candidate,
+    struct nfs4_reg_outcome            *out)
+{
+    struct nfs4_client_principal principal;
+
+    nfs4_reg_principal(p, &principal);
+    if (p->kind == NFS4_REG_SETCLIENTID) {
+        nfs4_client_setclientid_locked(table, p->owner, p->owner_len, p->verifier,
+                                       &principal, p->minorversion, candidate,
+                                       &out->scid);
+    } else {
+        nfs4_client_exchange_id_locked(table, p->owner, p->owner_len, p->verifier,
+                                       &principal, p->update, p->minorversion,
+                                       candidate, &out->eid);
+    }
+} /* nfs4_reg_classify_locked */
+
+static void
+nfs4_reg_set_status(
+    enum nfs4_reg_kind       kind,
+    struct nfs4_reg_outcome *out,
+    nfsstat4                 status)
+{
+    if (kind == NFS4_REG_SETCLIENTID) {
+        memset(&out->scid, 0, sizeof(out->scid));
+        out->scid.status = status;
+    } else {
+        memset(&out->eid, 0, sizeof(out->eid));
+        out->eid.status = status;
+    }
+} /* nfs4_reg_set_status */
+
+SYMBOL_EXPORT enum nfs4_reg_begin
+nfs4_client_reg_begin(
+    struct nfs4_client_table     *table,
+    const struct nfs4_reg_args   *a,
+    const struct nfs4_reg_waiter *self,
+    struct nfs4_reg_outcome      *out,
+    uint64_t                     *token)
+{
+    struct nfs4_pending_exchange *p;
+    enum nfs4_reg_begin           rc = NFS4_REG_DONE;
+    bool need_id;
+
+    memset(out, 0, sizeof(*out));
+
+    if (a->owner_len < 0 || a->owner_len > NFS4_OPAQUE_LIMIT ||
+        a->cb_netid_len < 0 || a->cb_netid_len > NFS4_REG_STR_MAX ||
+        a->cb_addr_len < 0 || a->cb_addr_len > NFS4_REG_STR_MAX) {
+        nfs4_reg_set_status(a->kind, out, NFS4ERR_INVAL);
+        return NFS4_REG_DONE;
+    }
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(hh, table->nfs4_ct_pending, a->owner, a->owner_len, p);
+    if (p) {
+        if (nfs4_reg_identical(p, a) && p->nwaiters < 1 + NFS4_REG_MAX_WAITERS) {
+            /* Same request again while the first is still being served
+             * (a retransmission, possibly over a new connection): answer it
+             * with the original's result. */
+            p->waiters[p->nwaiters++] = *self;
+            rc                        = NFS4_REG_WAITING;
+        } else {
+            nfs4_reg_set_status(a->kind, out, NFS4ERR_DELAY);
+        }
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
+        return rc;
+    }
+
+    if (a->kind == NFS4_REG_SETCLIENTID) {
+        nfs4_client_setclientid_locked(table, a->owner, a->owner_len, a->verifier,
+                                       &a->principal, a->minorversion, 0, &out->scid);
+        need_id = out->scid.need_id;
+    } else {
+        nfs4_client_exchange_id_locked(table, a->owner, a->owner_len, a->verifier,
+                                       &a->principal, a->update, a->minorversion, 0,
+                                       &out->eid);
+        need_id = out->eid.need_id;
+    }
+
+    if (need_id) {
+        p = calloc(1, sizeof(*p));
+        if (!p) {
+            nfs4_reg_set_status(a->kind, out, NFS4ERR_DELAY);
+            evpl_mutex_unlock(&table->nfs4_ct_lock);
+            return NFS4_REG_DONE;
+        }
+        memcpy(p->owner, a->owner, a->owner_len);
+        p->owner_len      = a->owner_len;
+        p->token          = ++table->nfs4_ct_pending_token;
+        p->kind           = a->kind;
+        p->verifier       = a->verifier;
+        p->princ_flavor   = a->principal.flavor;
+        p->princ_uid      = a->principal.uid;
+        p->princ_gid      = a->principal.gid;
+        p->princ_mach_len = a->principal.machinename_len > NFS4_OPAQUE_LIMIT ?
+            NFS4_OPAQUE_LIMIT : a->principal.machinename_len;
+        if (p->princ_mach_len) {
+            memcpy(p->princ_mach, a->principal.machinename, p->princ_mach_len);
+        }
+        p->minorversion = a->minorversion;
+        p->update       = a->update;
+        p->eia_flags    = a->eia_flags;
+        p->spa_how      = a->spa_how;
+        p->cb_program   = a->cb_program;
+        p->cb_ident     = a->cb_ident;
+        p->cb_netid_len = a->cb_netid_len;
+        p->cb_addr_len  = a->cb_addr_len;
+        if (a->cb_netid_len) {
+            memcpy(p->cb_netid, a->cb_netid, a->cb_netid_len);
+        }
+        if (a->cb_addr_len) {
+            memcpy(p->cb_addr, a->cb_addr, a->cb_addr_len);
+        }
+        p->waiters[0] = *self;
+        p->nwaiters   = 1;
+        HASH_ADD(hh, table->nfs4_ct_pending, owner, p->owner_len, p);
+        *token = p->token;
+        rc     = NFS4_REG_ALLOCATE;
+    }
+
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+    return rc;
+} /* nfs4_client_reg_begin */
+
+SYMBOL_EXPORT enum nfs4_reg_commit
+nfs4_client_reg_commit(
+    struct nfs4_client_table *table,
+    const void               *owner,
+    int                       owner_len,
+    uint64_t                  token,
+    int                       alloc_status,
+    uint64_t                  candidate,
+    struct nfs4_reg_outcome  *out)
+{
+    struct nfs4_pending_exchange *p;
+    struct nfs4_client           *dup;
+    enum nfs4_reg_commit          rc = NFS4_REG_COMMITTED;
+    bool need_id;
+    char idbuf[160];
+
+    memset(out, 0, sizeof(*out));
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(hh, table->nfs4_ct_pending, owner, owner_len, p);
+    if (!p || p->token != token) {
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
+        return NFS4_REG_STALE;
+    }
+
+    /* Classify again first, without a candidate (which changes nothing but
+     * the idempotent fence): the client may have been confirmed, fenced or
+     * superseded while the allocation was in flight.  If the request no
+     * longer needs a fresh ID it is answered from that classification and
+     * any candidate is simply abandoned, whatever the allocator said. */
+    nfs4_reg_classify_locked(table, p, 0, out);
+    need_id = p->kind == NFS4_REG_SETCLIENTID ? out->scid.need_id : out->eid.need_id;
+    if (!need_id) {
+        goto out_unlock;
+    }
+
+    if (alloc_status) {
+        nfs4_reg_set_status(p->kind, out, nfs4_clientid_alloc_status_to_nfs(alloc_status));
+        goto out_unlock;
+    }
+
+    /* Opacity-preserving collision check: compare the whole ID with every
+     * client this node knows, never decode it.  A hit means an allocator bug
+     * or an older-format ID that happens to be equal; discard it (never
+     * reuse) and try another. */
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &candidate, sizeof(candidate), dup);
+    if (dup) {
+        clientid_format(candidate, idbuf, sizeof(idbuf));
+        chimera_nfs_error("NFS4 client ID allocator returned %s, which is already in "
+                          "use; discarding it (attempt %d of %d)", idbuf,
+                          p->collisions + 1, NFS4_REG_MAX_COLLISIONS);
+        if (++p->collisions < NFS4_REG_MAX_COLLISIONS) {
+            rc = NFS4_REG_RETRY;
+            memset(out, 0, sizeof(*out));
+        } else {
+            nfs4_reg_set_status(p->kind, out, NFS4ERR_SERVERFAULT);
+        }
+        goto out_unlock;
+    }
+
+    /* Commit: the same classification, now with the checked candidate. */
+    memset(out, 0, sizeof(*out));
+    nfs4_reg_classify_locked(table, p, candidate, out);
 
  out_unlock:
     evpl_mutex_unlock(&table->nfs4_ct_lock);
-} /* nfs4_client_setclientid */
+    return rc;
+} /* nfs4_client_reg_commit */
+
+SYMBOL_EXPORT int
+nfs4_client_reg_finish(
+    struct nfs4_client_table *table,
+    const void               *owner,
+    int                       owner_len,
+    uint64_t                  token,
+    struct nfs4_reg_waiter   *waiters,
+    int                       max_waiters)
+{
+    struct nfs4_pending_exchange *p;
+    int                           n = 0;
+
+    evpl_mutex_lock(&table->nfs4_ct_lock);
+    HASH_FIND(hh, table->nfs4_ct_pending, owner, owner_len, p);
+    if (p && p->token == token) {
+        HASH_DEL(table->nfs4_ct_pending, p);
+        n = p->nwaiters < max_waiters ? p->nwaiters : max_waiters;
+        memcpy(waiters, p->waiters, n * sizeof(*waiters));
+        free(p);
+    }
+    evpl_mutex_unlock(&table->nfs4_ct_lock);
+    return n;
+} /* nfs4_client_reg_finish */
 
 nfsstat4
 nfs4_client_setclientid_confirm(

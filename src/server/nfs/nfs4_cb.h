@@ -52,3 +52,11 @@ nfs4_cb_recall_holder(
 void
 nfs4_cb_drain_resume_queue(
     struct chimera_server_nfs_thread *thread);
+
+/* Run fn(arg) on `target`'s event loop (via its cb_doorbell).  A request's
+ * reply must be sent from the thread that received it. */
+void
+nfs4_thread_run(
+    struct chimera_server_nfs_thread *target,
+    void (                           *fn )(void *arg),
+    void                             *arg);

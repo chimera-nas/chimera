@@ -68,6 +68,7 @@
 #include "common/tcp_flavor.h"
 #include "prometheus-c.h"
 #include "common/mbt_artifacts.h"
+#include "common/test_clientid_env.h"
 
 #define DRIVER_BLOCK_SIZE  4096
 #define MAX_PIDS           4
@@ -1506,6 +1507,7 @@ posix_env_setup(
             chimera_server_config_set_smb_posix_rename(server_config, 1);
         } else {
             chimera_server_config_set_nfs_enabled(server_config, 1);
+            chimera_test_clientid_env(); /* stand-in supervisor grant */
         }
         if (!posix_module_is_passthrough(module)) {
             /* linux/io_uring are already in the server's default module set

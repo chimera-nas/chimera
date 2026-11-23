@@ -33,6 +33,10 @@
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs4_session.h"
+#include "clientid_allocator.h"
+#include "clientid_format.h"
+#include <jansson.h>
+#include <stdlib.h>
 #include "nfs4_lease.h"
 #include "nfs4_v40_drc.h"
 #include "nfs4_drc.h"
@@ -165,6 +169,206 @@ nfs_fh_key_init(
                           "survive restart", path, strerror(errno));
     }
 } /* nfs_fh_key_init */
+
+/* Strict decimal parse of a supervisor-provided environment value. */
+static int
+nfs_clientid_env_uint(
+    const char *name,
+    uint64_t   *out)
+{
+    const char *v = getenv(name);
+    char       *end;
+
+    if (!v || !*v || *v < '0' || *v > '9') {
+        return -1;
+    }
+    errno = 0;
+    *out  = strtoull(v, &end, 10);
+    return (errno || *end) ? -1 : 0;
+} /* nfs_clientid_env_uint */
+
+/*
+ * Resolve the NFSv4 client ID allocator configuration (clientid_allocator.h).
+ * The allocator never reads the environment; startup does, here:
+ *
+ *   1. server.nfs4_clientid_allocator, if configured, is used as given;
+ *   2. otherwise CHIMERA_NODE_ID / CHIMERA_INSTANCE / CHIMERA_GENERATION
+ *      select local Type 1 (supervisor grant): all three must be present and
+ *      decimal.  A unique Node ID and a fresh Generation on every start are
+ *      the supervisor's responsibility;
+ *   3. otherwise there is no client ID namespace.
+ *
+ * Returns NULL, with the reason logged, when there is no namespace or the
+ * configuration is invalid; the caller then does not offer NFSv4 at all
+ * (fail closed), rather than minting IDs nobody granted.
+ */
+static json_t *
+nfs_clientid_resolve_config(struct chimera_server_nfs_shared *shared)
+{
+    const char                      *text = chimera_server_config_get_nfs4_clientid_allocator(shared->config);
+    int                              have_env;
+    json_t                          *cfg = NULL;
+    json_error_t                     err;
+    struct clientid_allocator_config acfg;
+    int                              rc;
+
+    have_env = getenv("CHIMERA_NODE_ID") || getenv("CHIMERA_INSTANCE") ||
+        getenv("CHIMERA_GENERATION");
+
+    if (text) {
+        cfg = json_loads(text, 0, &err);
+        if (!cfg) {
+            chimera_nfs_error("nfs4_clientid_allocator is not valid JSON: %s", err.text);
+            return NULL;
+        }
+        if (have_env) {
+            chimera_nfs_info("CHIMERA_NODE_ID/INSTANCE/GENERATION are ignored: "
+                             "nfs4_clientid_allocator is configured");
+        }
+    } else if (have_env) {
+        uint64_t node, instance, generation;
+
+        if (nfs_clientid_env_uint("CHIMERA_NODE_ID", &node) ||
+            nfs_clientid_env_uint("CHIMERA_INSTANCE", &instance) ||
+            nfs_clientid_env_uint("CHIMERA_GENERATION", &generation)) {
+            chimera_nfs_error("CHIMERA_NODE_ID, CHIMERA_INSTANCE and "
+                              "CHIMERA_GENERATION must all be set to decimal "
+                              "integers to use the supervisor-grant client ID "
+                              "allocator (Type 1)");
+            return NULL;
+        }
+        cfg = json_pack("{s:i, s:s, s:i, s:{s:i, s:I, s:I, s:I}}",
+                        "schema", 1, "backend", "local", "type", CLIENTID_TYPE_SUPERVISOR,
+                        "kwargs", "version", 0, "node_id", (json_int_t) node,
+                        "instance", (json_int_t) instance,
+                        "generation", (json_int_t) generation);
+    } else {
+        chimera_nfs_error("No NFSv4 client ID namespace: set CHIMERA_NODE_ID, "
+                          "CHIMERA_INSTANCE and CHIMERA_GENERATION (supervisor grant) "
+                          "or configure server.nfs4_clientid_allocator");
+        return NULL;
+    }
+    if (!cfg) {
+        return NULL;
+    }
+
+    acfg.json = cfg;
+    rc        = clientid_allocator_supported(&acfg);
+    if (rc) {
+        chimera_nfs_error("NFSv4 client ID allocator configuration rejected (%s)",
+                          rc == ENOTSUP ? "not supported by this build" : "invalid");
+        json_decref(cfg);
+        return NULL;
+    }
+    return cfg;
+} /* nfs_clientid_resolve_config */
+
+/* ------------------------------------------------------------------ *
+*  client ID allocator metrics                                       *
+* ------------------------------------------------------------------ */
+
+#define NFS4_CLIENTID_PLAIN_STATS 5
+_Static_assert(NFS4_CLIENTID_METRIC_COUNT ==
+               NFS4_CLIENTID_PLAIN_STATS + 2 * CLIENTID_STATUS_COUNT,
+               "NFS4_CLIENTID_METRIC_COUNT out of step with the status set");
+
+static const char *
+nfs_clientid_metric_label(
+    int    i,
+    char  *buf,
+    size_t len)
+{
+    static const char *const plain[NFS4_CLIENTID_PLAIN_STATS] = {
+        "issued", "remaining", "pending", "failed", "unknown_status"
+    };
+
+    if (i < NFS4_CLIENTID_PLAIN_STATS) {
+        return plain[i];
+    }
+    i -= NFS4_CLIENTID_PLAIN_STATS;
+    snprintf(buf, len, "%s_%s", i < CLIENTID_STATUS_COUNT ? "rejected" : "failed",
+             clientid_allocator_status_index_name(i % CLIENTID_STATUS_COUNT));
+    return buf;
+} /* nfs_clientid_metric_label */
+
+static void
+nfs_clientid_metrics_init(struct chimera_server_nfs_shared *shared)
+{
+    struct nfs4_clientid_metrics *cm = &shared->clientid_metrics;
+    char                          buf[64];
+
+    if (!shared->metrics) {
+        return;
+    }
+
+    /* 0 tells a supervisor its grant was rejected without parsing the log. */
+    cm->offered_gauge = prometheus_metrics_create_gauge(
+        shared->metrics, "chimera_nfs4_offered",
+        "1 if NFSv4 is offered, 0 if no usable client ID allocator was configured");
+    cm->offered_series = prometheus_gauge_create_series(cm->offered_gauge, NULL, NULL, 0);
+    cm->offered        = prometheus_gauge_series_create_instance(cm->offered_series);
+    prometheus_gauge_set(cm->offered, shared->nfs4_offered ? 1 : 0);
+
+    if (!shared->nfs4_offered) {
+        return;
+    }
+
+    cm->alloc_gauge = prometheus_metrics_create_gauge(
+        shared->metrics, "chimera_nfs4_clientid_allocator",
+        "NFSv4 client ID allocator: IDs issued and remaining, requests pending, and "
+        "cumulative failures and rejections by status");
+    for (int i = 0; i < NFS4_CLIENTID_METRIC_COUNT; i++) {
+        const char *label = nfs_clientid_metric_label(i, buf, sizeof(buf));
+
+        cm->alloc_series[i] = prometheus_gauge_create_series(
+            cm->alloc_gauge, (const char *[]) { "stat" }, (const char *[]) { label }, 1);
+        cm->alloc[i] = prometheus_gauge_series_create_instance(cm->alloc_series[i]);
+    }
+} /* nfs_clientid_metrics_init */
+
+static void
+nfs_clientid_metrics_update(struct chimera_server_nfs_shared *shared)
+{
+    struct nfs4_clientid_metrics   *cm = &shared->clientid_metrics;
+    struct clientid_allocator_stats st;
+    uint64_t                        v[NFS4_CLIENTID_METRIC_COUNT];
+
+    if (!cm->alloc_gauge || !shared->clientid_alloc) {
+        return;
+    }
+    clientid_allocator_get_stats(shared->clientid_alloc, &st);
+    v[0] = st.issued;
+    v[1] = st.remaining;
+    v[2] = st.pending;
+    v[3] = st.failed;
+    v[4] = st.unknown_status;
+    for (int i = 0; i < CLIENTID_STATUS_COUNT; i++) {
+        v[NFS4_CLIENTID_PLAIN_STATS + i]                         = st.rejected[i];
+        v[NFS4_CLIENTID_PLAIN_STATS + CLIENTID_STATUS_COUNT + i] = st.failed_by_status[i];
+    }
+    for (int i = 0; i < NFS4_CLIENTID_METRIC_COUNT; i++) {
+        prometheus_gauge_set(cm->alloc[i], (int64_t) v[i]);
+    }
+} /* nfs_clientid_metrics_update */
+
+static void
+nfs_clientid_metrics_destroy(struct chimera_server_nfs_shared *shared)
+{
+    struct nfs4_clientid_metrics *cm = &shared->clientid_metrics;
+
+    if (cm->alloc_gauge) {
+        for (int i = 0; i < NFS4_CLIENTID_METRIC_COUNT; i++) {
+            prometheus_gauge_series_destroy_instance(cm->alloc_series[i], cm->alloc[i]);
+            prometheus_gauge_destroy_series(cm->alloc_gauge, cm->alloc_series[i]);
+        }
+        prometheus_gauge_destroy(shared->metrics, cm->alloc_gauge);
+    }
+    if (cm->offered_gauge) {
+        prometheus_gauge_series_destroy_instance(cm->offered_series, cm->offered);
+        prometheus_gauge_destroy_series(cm->offered_gauge, cm->offered_series);
+        prometheus_gauge_destroy(shared->metrics, cm->offered_gauge);
+    }
+} /* nfs_clientid_metrics_destroy */
 
 static void *
 nfs_server_init(
@@ -444,7 +648,16 @@ nfs_server_init(
     shared->nsm_v1.recv_call_SM_SIMU_CRASH = chimera_nfs_sm_simu_crash;
     shared->nsm_v1.recv_call_SM_NOTIFY     = chimera_nfs_sm_notify;
 
-    nfs4_client_table_init(&shared->nfs4_shared_clients, shared->node_id);
+    nfs4_client_table_init(&shared->nfs4_shared_clients);
+
+    shared->clientid_config = nfs_clientid_resolve_config(shared);
+    shared->nfs4_offered    = shared->clientid_config != NULL;
+    if (!shared->nfs4_offered) {
+        chimera_nfs_error("NFSv4 is NOT offered: no usable client ID allocator "
+                          "(NFSv3 is unaffected)");
+    }
+    nfs_clientid_metrics_init(shared);
+    shared->clientid_metrics_update = nfs_clientid_metrics_update;
     nfs_state_table_init(&shared->nfs4_state_table, shared->node_id);
     nfs_layout_table_init(&shared->nfs4_layout_table);
     nfs3_drc_init(&shared->nfs3_drc, CHIMERA_KV_TYPE_NFS3_REPLY);
@@ -594,6 +807,7 @@ nfs_server_init(
             programs[1]              = &shared->portmap_v3.rpc2;
             programs[2]              = &shared->portmap_v4.rpc2;
             shared->portmap_server   = evpl_rpc2_server_init(programs, 3);
+            portmap_set_nfs4_offered(shared->nfs4_offered);
             portmap_set_nlm_port(nfs_lockmgr_port);
             portmap_set_nsm_port(nfs_nsm_port);
         }
@@ -608,8 +822,20 @@ nfs_server_init(
     if (!nfs3_disabled) {
         programs[nprogs++] = &shared->nfs_v3.rpc2;
     }
-    programs[nprogs++] = &shared->nfs_v4.rpc2;
-    programs[nprogs++] = &shared->nfs_v4_cb.rpc2;
+    /* Without a usable client ID allocator NFSv4 cannot register clients, so
+     * it is not offered at all: clients see a version mismatch and fall back
+     * to NFSv3, rather than mounting and failing every registration. */
+    if (shared->nfs4_offered) {
+        programs[nprogs++] = &shared->nfs_v4.rpc2;
+        programs[nprogs++] = &shared->nfs_v4_cb.rpc2;
+    }
+
+    /* nfs3_disabled asks for NFSv4 only; with NFSv4 unavailable too there is
+    * nothing to serve, so refuse to start rather than listen for nothing. */
+    chimera_nfs_fatal_if(nprogs == 0,
+                         "NFSv3 is disabled (nfs3_disabled) and NFSv4 is not offered "
+                         "(the client ID allocator configuration was rejected): "
+                         "nothing to serve");
 
     shared->nfs_server = evpl_rpc2_server_init(programs, nprogs);
 
@@ -651,6 +877,7 @@ nfs_server_init(
 } /* nfs_server_init */
 
 
+
 /* See nfs_common.h: cached because the callback paths have no config to
  * consult when they need to build an endpoint. */
 static enum chimera_tcp_flavor NfsCallbackTcpFlavor = CHIMERA_TCP_FLAVOR_PLAIN;
@@ -679,6 +906,21 @@ nfs_server_start(void *arg)
      * single connection can be accepted: the first EXCHANGE_ID after a restart
      * must find the load finished, not race it. */
     nfs_recovery_cold_start(&shared->nfs4_recovery);
+
+    /* The boot epoch is final now: fold it into every setclientid_confirm
+     * verifier (client IDs come from the allocator), still before any client
+     * can register. */
+    nfs4_client_table_set_boot(&shared->nfs4_shared_clients,
+                               shared->nfs4_recovery.current_boot_id);
+
+    /* The client ID allocator, likewise before any listener. */
+    if (shared->nfs4_offered) {
+        struct clientid_allocator_config acfg;
+
+        acfg.json = shared->clientid_config;
+        rc        = clientid_allocator_create(&acfg, &shared->clientid_alloc);
+        chimera_nfs_abort_if(rc, "failed to create the NFSv4 client ID allocator: %d", rc);
+    }
 
     /* Likewise no handle may be minted or verified before the fleet FH keyring
      * is loaded (or the fleet's first key minted). */
@@ -751,6 +993,11 @@ nfs_server_stop(void *arg)
      * ahead of the thread-pool teardown that closes every accepted connection,
      * and the DISCONNECTED path reads the flag to keep NSM monitor records. */
     atomic_store(&shared->stopping, 1);
+
+    /* Admit no new client ID allocations; those already accepted still
+     * complete, and each NFS thread drains its own before it goes
+     * (nfs_server_thread_destroy). */
+    clientid_allocator_shutdown(shared->clientid_alloc);
 
     if (shared->mount_server) {
         evpl_rpc2_server_stop(shared->mount_server);
@@ -852,6 +1099,8 @@ nfs_server_destroy(void *data)
     if (shared->op_histogram) {
         prometheus_histogram_destroy(shared->metrics, shared->op_histogram);
     }
+
+    nfs_clientid_metrics_destroy(shared);
 
     {
         struct nfs4_table_metrics *tm = &shared->table_metrics;
@@ -972,6 +1221,12 @@ nfs_server_destroy(void *data)
     nfs4_v40_drc_destroy(&shared->v40_drc);
     nfs3_drc_destroy(&shared->nfs3_drc);
     nfs4_drc_hydra_destroy(shared);
+
+    /* Every NFS thread detached its allocator home loop before it went. */
+    clientid_allocator_destroy(shared->clientid_alloc);
+    if (shared->clientid_config) {
+        json_decref(shared->clientid_config);
+    }
 
     free(shared);
 } /* nfs_server_destroy */
@@ -1146,7 +1401,6 @@ nfs_server_thread_destroy(void *data)
         thread->lease_sweeper = NULL;
     }
 
-    nfs4_cb_thread_destroy(thread);
     chimera_nfs_nlm4_thread_destroy(thread);
 
     if (thread->shared->mount_server) {
@@ -1169,6 +1423,17 @@ nfs_server_thread_destroy(void *data)
     while (thread->active_requests > 0) {
         evpl_continue(thread->evpl);
     }
+
+    /* Every client ID allocation accepted on this loop is called back before
+     * the loop goes; then its delivery state is retired on this thread. */
+    clientid_allocator_detach(thread->shared->clientid_alloc, thread->evpl);
+
+    /* Only now retire the cross-thread run queue (nfs4_thread_run): until this
+     * thread's requests have drained, another thread may still hand one of
+     * them its reply -- a coalesced SETCLIENTID / EXCHANGE_ID waiter is
+     * answered from the thread whose allocation completed, and a deferred op
+     * is resumed from the thread that processed the final LAYOUTRETURN. */
+    nfs4_cb_thread_destroy(thread);
 
     /* Held NFSv3 retransmits are rpc2 requests too, but not nfs_requests, so
      * the drain above does not wait for them: answer or release them before

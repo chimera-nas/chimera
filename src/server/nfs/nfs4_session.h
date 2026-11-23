@@ -281,6 +281,9 @@ struct nfs4_exchange_id_result {
     /* A second hierarchy to tear down: replacing a principal-mismatched
      * confirmed record also destroys its in-flight superseding record. */
     struct nfs_client *destroy_unified2;
+    /* Set (with status NFS4ERR_DELAY) when the RFC case needs a fresh client
+     * ID but the caller supplied none.  Nothing was changed in that case. */
+    bool               need_id;
 };
 
 struct nfs4_session {
@@ -351,38 +354,56 @@ struct nfs4_sessionid {
     uint8_t id[NFS4_SESSIONID_SIZE];
 };
 
+struct nfs4_pending_exchange;
+
 struct nfs4_client_table {
-    struct nfs4_client    *nfs4_ct_clients_by_owner;
-    struct nfs4_client    *nfs4_ct_clients_by_id;
-    struct nfs4_session   *nfs4_ct_sessions;
-    /* Low 48 bits of the next clientid; the high 16 are this instance's node_id
-     * (see nfs4_make_clientid) so peers sharing one store never collide. */
-    uint64_t               nfs4_ct_next_client_id;
-    uint16_t               nfs4_ct_node_id;
-    /* Monotonic source for SETCLIENTID setclientid_confirm verifiers; every
-     * value handed out is unique for the life of the table. */
-    uint64_t               nfs4_ct_next_confirm;
+    struct nfs4_client           *nfs4_ct_clients_by_owner;
+    struct nfs4_client           *nfs4_ct_clients_by_id;
+    struct nfs4_session          *nfs4_ct_sessions;
+    /* In-flight registrations waiting for the client ID allocator, keyed by
+     * the exact opaque owner bytes (never the XID or the verifier).  See
+     * nfs4_client_reg_begin. */
+    struct nfs4_pending_exchange *nfs4_ct_pending;
+    uint64_t                      nfs4_ct_pending_token;
+    /* High 32 bits of every setclientid_confirm verifier, derived from the
+     * boot epoch so a confirm retransmitted from before a restart never
+     * matches a record of the new boot. */
+    uint32_t                      nfs4_ct_confirm_boot;
+    /* Low 32 bits of the next setclientid_confirm verifier; starts at a
+     * random value every boot. */
+    uint64_t                      nfs4_ct_next_confirm;
     /* Persistent sessions taken out of the table along with their client
      * (fence, supersede) whose KV records are still to be deleted, so a later
      * hydrate cannot rebuild them.  The lease sweep drains this outside the
      * lock (nfs4_client_take_forgets_locked). */
-    struct nfs4_sessionid *nfs4_ct_forget;
-    uint32_t               nfs4_ct_forget_count;
-    uint32_t               nfs4_ct_forget_capacity;
-    evpl_mutex_t           nfs4_ct_lock;
+    struct nfs4_sessionid        *nfs4_ct_forget;
+    uint32_t                      nfs4_ct_forget_count;
+    uint32_t                      nfs4_ct_forget_capacity;
+    evpl_mutex_t                  nfs4_ct_lock;
 };
 
-/* A clientid carries the minting instance's node_id in its high 16 bits and a
- * per-instance counter in the low 48, so two instances over one backing store
- * never hand out the same value (and `clientid >> 48` is the owning node). */
-#define NFS4_CLIENTID_COUNTER_MASK 0xFFFFFFFFFFFFULL
-#define nfs4_make_clientid(node_id, counter) \
-        (((uint64_t) (node_id) << 48) | ((counter)&NFS4_CLIENTID_COUNTER_MASK))
+/* Client IDs are minted only by the client ID allocator
+ * (clientid_allocator.h) and are opaque everywhere else: registration,
+ * hydration, failover, recovery, reply caches and request handling treat the
+ * full 64-bit value as a key and never read its bits (clientid_format.h).
+ *
+ * setclientid_confirm verifiers stay in this layer: (client ID, confirm) is
+ * unique because client IDs are, and a confirm value never repeats for one
+ * client ID within a run. */
+#define NFS4_CONFIRM_SEQ_MASK 0xFFFFFFFFULL
 
 void
 nfs4_client_table_init(
+    struct nfs4_client_table *table);
+
+/* Fold this boot's epoch (nfs_recovery.current_boot_id) into every
+ * setclientid_confirm verifier minted from here on.  Called once the
+ * recovery load has settled the epoch and before any listener is bound;
+ * nfs4_client_table_init stamps a provisional one from the clock. */
+void
+nfs4_client_table_set_boot(
     struct nfs4_client_table *table,
-    uint16_t                  node_id);
+    uint64_t                  boot_id);
 
 void
 nfs4_client_table_free(
@@ -398,9 +419,13 @@ nfs4_client_table_destroy_unified(
     struct nfs_state_table    *state_table,
     struct chimera_vfs_thread *vfs_thread);
 
+/* Register (or find) a confirmed-style record for `owner` under the supplied
+ * client ID.  Test helper; protocol registration goes through
+ * nfs4_client_reg_begin. */
 uint64_t
 nfs4_client_register(
     struct nfs4_client_table *table,
+    uint64_t                  clientid,
     const void               *owner,
     int                       owner_len,
     uint64_t                  verifier,
@@ -418,12 +443,16 @@ struct nfs4_setclientid_result {
     /* A replaced unconfirmed record's state hierarchy, to be torn down with
      * nfs_client_destroy after the table lock is dropped (NULL if none). */
     struct nfs_client *destroy_unified;
+    /* See nfs4_exchange_id_result.need_id. */
+    bool               need_id;
 };
 
 /* RFC 7530 §16.33.5 SETCLIENTID record matching.  Records (or updates) an
  * unconfirmed record for the client owner and fills *out.  May return
  * NFS4ERR_CLID_INUSE when a confirmed record owned by a different principal
- * still holds open/lock state. */
+ * still holds open/lock state.  A new record takes `candidate` as its client
+ * ID; if one is needed and `candidate` is 0, nothing is changed and *out says
+ * need_id (status NFS4ERR_DELAY). */
 void
 nfs4_client_setclientid(
     struct nfs4_client_table           *table,
@@ -432,6 +461,7 @@ nfs4_client_setclientid(
     uint64_t                            verifier,
     const struct nfs4_client_principal *principal,
     uint8_t                             minorversion,
+    uint64_t                            candidate,
     struct nfs4_setclientid_result     *out);
 
 /* RFC 7530 §16.34 SETCLIENTID_CONFIRM.  Confirms the (unconfirmed) record
@@ -452,7 +482,8 @@ nfs4_client_setclientid_confirm(
 
 /* RFC 8881 §18.35.4 EXCHANGE_ID client-record matching state machine.  Runs
  * entirely under the table lock and fills *out (see nfs4_exchange_id_result).
- * `update` reflects EXCHGID4_FLAG_UPD_CONFIRMED_REC_A. */
+ * `update` reflects EXCHGID4_FLAG_UPD_CONFIRMED_REC_A.  `candidate` as for
+ * nfs4_client_setclientid. */
 void
 nfs4_client_exchange_id(
     struct nfs4_client_table           *table,
@@ -462,7 +493,116 @@ nfs4_client_exchange_id(
     const struct nfs4_client_principal *principal,
     bool                                update,
     uint8_t                             minorversion,
+    uint64_t                            candidate,
     struct nfs4_exchange_id_result     *out);
+
+/* ------------------------------------------------------------------ *
+ *  Asynchronous registration (SETCLIENTID / EXCHANGE_ID)             *
+ * ------------------------------------------------------------------ *
+ *
+ * A registration that needs a fresh client ID reserves its owner, asks the
+ * allocator, and is classified again (with the new ID as candidate) when the
+ * allocator answers, because the state may have changed meanwhile.  While the
+ * owner is reserved:
+ *   - an identical request (same kind, verifier, principal, minor version and
+ *     callback arguments for v4.0 or flags and state-protection mode for
+ *     v4.1) is coalesced: it waits and gets the same reply.  Without an XID
+ *     it cannot be told from a retransmission, and answering both alike is
+ *     what a reply cache would do;
+ *   - any other request for the owner gets NFS4ERR_DELAY.
+ * The reservation is removed once the registration is finalized, before any
+ * reply, so Linux's second EXCHANGE_ID (sent only after the first reply)
+ * finds none and gets RFC 8881 Case 4. */
+
+#define NFS4_REG_MAX_WAITERS    4   /* coalesced requests besides the original */
+#define NFS4_REG_MAX_COLLISIONS 3   /* allocated IDs already in use before giving up */
+
+enum nfs4_reg_kind {
+    NFS4_REG_SETCLIENTID,
+    NFS4_REG_EXCHANGE_ID,
+};
+
+struct nfs4_reg_args {
+    enum nfs4_reg_kind kind;
+    const void                  *owner;
+    int                          owner_len;
+    uint64_t                     verifier;
+    struct nfs4_client_principal principal;
+    uint8_t                      minorversion;
+    /* EXCHANGE_ID */
+    bool                         update;
+    uint32_t                     eia_flags;
+    uint32_t                     spa_how;
+    /* SETCLIENTID callback arguments */
+    uint32_t                     cb_program;
+    uint32_t                     cb_ident;
+    const char                  *cb_netid;
+    int                          cb_netid_len;
+    const char                  *cb_addr;
+    int                          cb_addr_len;
+};
+
+struct chimera_server_nfs_thread;
+struct nfs_request;
+
+struct nfs4_reg_waiter {
+    struct chimera_server_nfs_thread *thread;
+    struct nfs_request               *req;
+    void                             *argop;
+    void                             *resop;
+};
+
+struct nfs4_reg_outcome {
+    struct nfs4_setclientid_result scid;
+    struct nfs4_exchange_id_result eid;
+};
+
+enum nfs4_reg_begin {
+    NFS4_REG_DONE,      /* *out holds the result; reply now */
+    NFS4_REG_WAITING,   /* coalesced; the original's completion replies */
+    NFS4_REG_ALLOCATE,  /* owner reserved; ask the allocator, then commit */
+};
+
+SYMBOL_EXPORT enum nfs4_reg_begin
+nfs4_client_reg_begin(
+    struct nfs4_client_table     *table,
+    const struct nfs4_reg_args   *args,
+    const struct nfs4_reg_waiter *self,
+    struct nfs4_reg_outcome      *out,
+    uint64_t                     *token);
+
+enum nfs4_reg_commit {
+    NFS4_REG_COMMITTED, /* *out holds the result; finalize, then finish */
+    NFS4_REG_RETRY,     /* the ID was already in use; allocate again */
+    NFS4_REG_STALE,     /* no such reservation (must not happen) */
+};
+
+/* Apply the allocator's answer to the reservation `token` for `owner`. */
+SYMBOL_EXPORT enum nfs4_reg_commit
+nfs4_client_reg_commit(
+    struct nfs4_client_table *table,
+    const void               *owner,
+    int                       owner_len,
+    uint64_t                  token,
+    int                       alloc_status,
+    uint64_t                  candidate,
+    struct nfs4_reg_outcome  *out);
+
+/* Remove the reservation and return its waiters (the original first). */
+SYMBOL_EXPORT int
+nfs4_client_reg_finish(
+    struct nfs4_client_table *table,
+    const void               *owner,
+    int                       owner_len,
+    uint64_t                  token,
+    struct nfs4_reg_waiter   *waiters,
+    int                       max_waiters);
+
+/* Allocator status -> NFS status: transient -> NFS4ERR_DELAY, permanent ->
+ * NFS4ERR_SERVERFAULT (both are valid for SETCLIENTID and EXCHANGE_ID). */
+SYMBOL_EXPORT nfsstat4
+nfs4_clientid_alloc_status_to_nfs(
+    int status);
 
 /* CREATE_SESSION sequencing decision (RFC 8881 §18.36.4). */
 enum nfs4_cs_action {

@@ -19,6 +19,8 @@
 
 set -u
 
+source "$(dirname "${BASH_SOURCE[0]}")/chimera_clientid_test_env.sh"
+
 # Clear LD_PRELOAD up front so ASAN does not perturb system binaries (ip,
 # kadmin, ...).  Restored only for the chimera daemon.
 SAVED_LD_PRELOAD="${LD_PRELOAD:-}"
@@ -266,6 +268,7 @@ start_chimera() {
     local preload_env=()
     [ -n "${SAVED_LD_PRELOAD}" ] && preload_env=(LD_PRELOAD="${SAVED_LD_PRELOAD}")
 
+    chimera_clientid_test_env   # a fresh supervisor grant per start
     ip netns exec "${NETNS_NAME}" env \
         KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
         KRB5_KTNAME="${KEYTAB_FILE}" \

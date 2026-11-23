@@ -55,6 +55,7 @@
 #include "evpl/evpl_rpc2_gss.h"
 
 #include "krb5_local.h"
+#include "common/test_clientid_env.h"
 
 #define MBT_MAX_ENTRIES        512 /* readdir entries copied out per reply */
 #define MBT_NAME_MAX           256
@@ -872,6 +873,7 @@ mbt_pnfs_ds_start(
     chimera_server_config_set_state_dir(config, dir);
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_nfs_enabled(config, 1);
+    chimera_test_clientid_env(); /* stand-in supervisor grant */
     chimera_server_config_set_nfs_port(config, MBT_DS_PORT_BASE + idx);
     chimera_server_config_set_nfs_data_server(config, 1);
     chimera_server_config_set_nfs_server_scope(config, 43 + idx);
@@ -941,6 +943,7 @@ mbt_pnfs_proxy_start(struct mbt_env *env)
     chimera_server_config_set_state_dir(config, dir);
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_nfs_enabled(config, 1);
+    chimera_test_clientid_env(); /* stand-in supervisor grant */
     chimera_server_config_set_nfs_port(config, MBT_PROXY_PORT);
     chimera_server_config_set_nfs_mount_port(config, MBT_PROXY_MOUNT_PORT);
     chimera_server_config_set_nfs_portmap_port(config, MBT_PROXY_PORTMAP_PORT);
@@ -1077,6 +1080,7 @@ mbt_env_open_opts(
     chimera_server_config_set_state_dir(config, env->session_dir);
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_nfs_enabled(config, 1);
+    chimera_test_clientid_env(); /* stand-in supervisor grant */
 
     if (env->sec != MBT_SEC_SYS) {
         uint32_t uid;

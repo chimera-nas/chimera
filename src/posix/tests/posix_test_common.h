@@ -38,6 +38,7 @@
 #include "common/logging.h"
 #include "common/test_users.h"
 #include "prometheus-c.h"
+#include "common/test_clientid_env.h"
 
 /*
  * Self-dumping watchdog for the forked child of a cross-process test.
@@ -679,6 +680,7 @@ posix_test_start_nfs_server(struct posix_test_env *env)
     /* The posix suite only talks NFS; the other protocols stay at their
      * default of disabled. */
     chimera_server_config_set_nfs_enabled(server_config, 1);
+    chimera_test_clientid_env(); /* stand-in supervisor grant */
 
     if (posix_test_is_diskfs(nfs_backend_name)) {
         posix_test_configure_diskfs(env->session_dir,

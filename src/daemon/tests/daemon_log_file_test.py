@@ -1,3 +1,4 @@
+import os
 # SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
 # SPDX-License-Identifier: LGPL-2.1-only
 """Run the real daemon with -l and check where its log lines land.
@@ -11,6 +12,15 @@ import subprocess
 import sys
 import tempfile
 import time
+
+
+def _clientid_test_env():
+    """A stand-in supervisor grant for the daemon under test: NFSv4 is offered
+    only with a client ID namespace (scripts/chimera_clientid_test_env.sh is
+    the shell counterpart).  Generation comes from the millisecond clock."""
+    import time
+    return {"CHIMERA_NODE_ID": "1", "CHIMERA_INSTANCE": "0",
+            "CHIMERA_GENERATION": str(int(time.time() * 1000) % 1048575 + 1)}
 
 
 def free_port():
@@ -35,6 +45,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-log-file-") as scratch:
     root = Path(scratch)
 
     # An unopenable log path must fail startup before anything else runs.
+    os.environ.update(_clientid_test_env())
     bad = subprocess.run([chimera, "-l", str(root / "missing" / "chimera.log"),
                           "-c", str(root / "unused.json")],
                          capture_output=True, text=True, timeout=30)
@@ -58,6 +69,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-log-file-") as scratch:
     out_path = root / "stdout.txt"
 
     with out_path.open("w+b") as out:
+        os.environ.update(_clientid_test_env())
         proc = subprocess.Popen([chimera, "-l", str(log_path), "-c", str(config_path)],
                                 stdout=out, stderr=subprocess.STDOUT)
         try:

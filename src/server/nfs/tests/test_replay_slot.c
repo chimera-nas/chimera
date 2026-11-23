@@ -16,12 +16,22 @@
 #include "common/logging.h"
 #include "nfs_common.h"
 #include "nfs4_session.h"
+#include <errno.h>
+#include "clientid_format.h"
+
+/* Client IDs come from the allocator in the server; tests supply their own
+ * Type 1 / Version 0 values (node, generation, sequence; instance 0). */
+#define TEST_T1(node, gen, seq) \
+        ((1ULL << 60) | ((uint64_t) (node) << 48) | ((uint64_t) (gen) << 24) | \
+         (uint64_t) (seq))
+static uint32_t test_next_clientid_seq = 100000;
+#define TEST_CLIENTID() TEST_T1(1, 1, test_next_clientid_seq++)
 
 /* Active in both debug (NDEBUG unset) and release (NDEBUG set) -- CHECK(3)
  * compiles to a no-op under NDEBUG, which causes -Wunused-but-set-variable
  * for inputs only consumed by asserts.  CHECK() always evaluates and dies
  * on failure. */
-#define CHECK(cond) do { \
+#define CHECK(cond)     do { \
             if (!(cond)) { \
                 fprintf(stderr, "%s:%d: CHECK failed: %s\n", \
                         __FILE__, __LINE__, #cond); \
@@ -60,9 +70,9 @@ make_session(
     uint64_t             clientid;
     struct nfs4_session *session;
 
-    nfs4_client_table_init(table, 1);
+    nfs4_client_table_init(table);
 
-    clientid = nfs4_client_register(table, owner, (int) sizeof(owner) - 1,
+    clientid = nfs4_client_register(table, TEST_CLIENTID(), owner, (int) sizeof(owner) - 1,
                                     0xdeadbeefULL, 40, NULL, NULL);
     CHECK(clientid != 0);
 
@@ -478,8 +488,8 @@ test_implicit_session_no_slots(void)
     bool                     is_replay;
     nfsstat4                 status;
 
-    nfs4_client_table_init(&table, 1);
-    clientid = nfs4_client_register(&table, owner, (int) sizeof(owner) - 1,
+    nfs4_client_table_init(&table);
+    clientid = nfs4_client_register(&table, TEST_CLIENTID(), owner, (int) sizeof(owner) - 1,
                                     0xfeedfaceULL, 40, NULL, NULL);
 
     /* implicit=1 -> replay_slots stays NULL, replay_max_slots = 0. */
@@ -714,8 +724,8 @@ test_restored_session_starts_resync(void)
     uint32_t                 i;
 
     memset(sid, 0xab, sizeof(sid));
-    nfs4_client_table_init(&table, 1);
-    clientid = nfs4_client_register(&table, owner, (int) sizeof(owner) - 1,
+    nfs4_client_table_init(&table);
+    clientid = nfs4_client_register(&table, TEST_CLIENTID(), owner, (int) sizeof(owner) - 1,
                                     0xabcdULL, 40, NULL, NULL);
     session = nfs4_create_session(&table, clientid, 0, TEST_SLOTS, TEST_MAXRESP,
                                   NULL, NULL, sid, true);

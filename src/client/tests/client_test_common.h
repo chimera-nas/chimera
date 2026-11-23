@@ -28,6 +28,7 @@
 #include "common/test_users.h"
 #include "prometheus-c.h"
 #include "evpl/evpl.h"
+#include "common/test_clientid_env.h"
 
 struct test_env {
     struct chimera_server        *server;
@@ -157,6 +158,7 @@ client_test_init(
         /* Protocols are opt-in; serve only what this test will mount. */
         if (env->use_nfs) {
             chimera_server_config_set_nfs_enabled(server_config, 1);
+            chimera_test_clientid_env(); /* stand-in supervisor grant */
         }
         if (env->use_smb) {
             chimera_server_config_set_smb_enabled(server_config, 1);

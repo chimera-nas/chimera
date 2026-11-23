@@ -74,6 +74,7 @@
 #include "common/logging.h"
 #include "common/tcp_flavor.h"
 #include "prometheus-c.h"
+#include "common/test_clientid_env.h"
 
 #ifndef MAP_FILE
 # define MAP_FILE 0
@@ -3989,6 +3990,7 @@ main(
             chimera_server_config = chimera_server_config_init();
 
             chimera_server_config_set_nfs_enabled(chimera_server_config, 1);
+            chimera_test_clientid_env(); /* stand-in supervisor grant */
 
             /* fsx builds its own server and client rather than going through
              * posix_test_common.h, so it needs the same transport set here:

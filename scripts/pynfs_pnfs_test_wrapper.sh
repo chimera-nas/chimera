@@ -13,6 +13,8 @@
 
 set -u
 
+source "$(dirname "${BASH_SOURCE[0]}")/chimera_clientid_test_env.sh"
+
 SAVED_LD_PRELOAD="${LD_PRELOAD:-}"
 unset LD_PRELOAD
 
@@ -39,6 +41,7 @@ PYNFS_NFS4_GRACE_TIME="${PYNFS_NFS4_GRACE_TIME:-10}"
 
 run_chimera() {
     local cfg="$1" log="$2"
+    chimera_clientid_test_env   # a fresh supervisor grant per start
     if [ -n "${SAVED_LD_PRELOAD}" ]; then
         ip netns exec "${NETNS_NAME}" env LD_PRELOAD="${SAVED_LD_PRELOAD}" \
             "$CHIMERA_BINARY" -c "$cfg" >"$log" 2>&1 &

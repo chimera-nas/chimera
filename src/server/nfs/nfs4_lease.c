@@ -245,6 +245,11 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
 
     evpl_mutex_unlock(&table->nfs4_ct_lock);
 
+    /* Outside the table lock: the allocator takes its own. */
+    if (shared->clientid_metrics_update) {
+        shared->clientid_metrics_update(shared);
+    }
+
     for (size_t i = 0; i < victim_count; i++) {
         struct nfs_client *uc = victims[i].uc;
 

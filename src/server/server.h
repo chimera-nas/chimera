@@ -371,6 +371,18 @@ SYMBOL_EXPORT int
 chimera_server_config_get_nfs4_node_id(
     const struct chimera_server_config *config);
 
+/* The NFSv4 client ID allocator configuration (a JSON object as text; see
+ * src/server/nfs/clientid_allocator.h).  Returns -1 if it is too long. */
+SYMBOL_EXPORT int
+chimera_server_config_set_nfs4_clientid_allocator(
+    struct chimera_server_config *config,
+    const char                   *json_text);
+
+/* NULL when not configured. */
+SYMBOL_EXPORT const char *
+chimera_server_config_get_nfs4_clientid_allocator(
+    const struct chimera_server_config *config);
+
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_courtesy_time(
     struct chimera_server_config *config,

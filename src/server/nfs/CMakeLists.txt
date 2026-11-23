@@ -5,7 +5,7 @@
 include_directories(${NFS_COMMON_INCLUDE_DIR})
 
 # Create libraries for NFSv3 and NFSv4
-add_library(chimera_nfs ${CHIMERA_LIBRARY_TYPE} nfs.c nfs4_session.c nfs4_state.c nfs4_lease.c nfs4_recovery.c nfs4_drc.c nfs3_drc.c nfs4_v40_drc.c nfs_drc_reply.c nfs4_callback.c nfs_mount.c nfs_portmap.c nfs3_dump.c nfs4_dump.c nfs3_trace.c nfs4_trace.c
+add_library(chimera_nfs ${CHIMERA_LIBRARY_TYPE} nfs.c clientid_allocator.c clientid_local.c nfs4_registration.c nfs4_session.c nfs4_state.c nfs4_lease.c nfs4_recovery.c nfs4_drc.c nfs3_drc.c nfs4_v40_drc.c nfs_drc_reply.c nfs4_callback.c nfs_mount.c nfs_portmap.c nfs3_dump.c nfs4_dump.c nfs3_trace.c nfs4_trace.c
             nfs_fh_keyring.c
             nfs_external_portmap.c nfs_peer_probe.c nfs_nlm.c nfs_nlm_state.c nfs_nlm_granted.c nfs_nsm.c nfs_nsm_notify.c nfs_nsm_state.c
             nfs3_proc_null.c nfs3_proc_getattr.c nfs3_proc_setattr.c nfs3_proc_lookup.c 
@@ -44,6 +44,18 @@ target_compile_definitions(chimera_nfs PRIVATE XXH_INLINE_ALL)
 target_link_libraries(chimera_nfs chimera_server_config chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB} ${CHIMERA_RCU_LIBS} ${CHIMERA_GSS_LIB})
 
 install(TARGETS chimera_nfs DESTINATION lib)
+
+# The "test" client ID allocator backend (delayed, cross-thread completion)
+# exists only in builds that carry the tests.  It completes from a worker
+# thread built on pthreads, which the native Windows build does not have.
+if (NOT DISABLE_TESTS AND NOT WIN32)
+    target_sources(chimera_nfs PRIVATE clientid_test_backend.c)
+    target_compile_definitions(chimera_nfs PUBLIC CHIMERA_CLIENTID_TEST_BACKEND)
+endif()
+
+# Offline decoder for NFSv4 client IDs (no library dependencies).
+add_executable(chimera-clientid clientid_decode_main.c)
+install(TARGETS chimera-clientid DESTINATION bin)
 
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)

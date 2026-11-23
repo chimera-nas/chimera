@@ -892,6 +892,26 @@ chimera_server_config_get_nfs4_node_id(const struct chimera_server_config *confi
     return config->nfs4_node_id;
 } /* chimera_server_config_get_nfs4_node_id */
 
+SYMBOL_EXPORT int
+chimera_server_config_set_nfs4_clientid_allocator(
+    struct chimera_server_config *config,
+    const char                   *json_text)
+{
+    size_t len = json_text ? strlen(json_text) : 0;
+
+    if (len >= sizeof(config->nfs4_clientid_allocator)) {
+        return -1;
+    }
+    memcpy(config->nfs4_clientid_allocator, json_text ? json_text : "", len + 1);
+    return 0;
+} /* chimera_server_config_set_nfs4_clientid_allocator */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_nfs4_clientid_allocator(const struct chimera_server_config *config)
+{
+    return config->nfs4_clientid_allocator[0] ? config->nfs4_clientid_allocator : NULL;
+} /* chimera_server_config_get_nfs4_clientid_allocator */
+
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_courtesy_time(
     struct chimera_server_config *config,
