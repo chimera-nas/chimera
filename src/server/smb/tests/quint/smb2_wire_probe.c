@@ -62,6 +62,11 @@
  *   E9, E10   a compressed READ reply to an encrypted request, under available
  *             and under an encrypt_data share, is compressed and encrypted
  *
+ * L1-L3 are SESSION_SETUPs refused after authentication: L1 a reconnect
+ * whose PreviousSessionId names a session of another dialect (MS-SMB2
+ * 3.3.5.5.1), L2 "required" refusing a client that does not encrypt, L3 a
+ * mode outside the four refusing it the same way.
+ *
  * With --winbind (run under scripts/ad_test_wrapper.sh) W2-W4 and W7 (as
  * WB2-WB4 and WB7), W10, W11 and W12 run again as a domain user that the
  * server validates through winbind.  winbind returns only the session base
@@ -764,6 +769,96 @@ run_encryption_modes(void)
     run_encryption_available_cleartext();
 } /* run_encryption_modes */
 
+/* A SESSION_SETUP the server refuses after authenticating releases the
+ * request's security buffer like any other: under AddressSanitizer a refusal
+ * that skips it fails the run on the leak.  L2 is "required" refusing a
+ * session that cannot encrypt: a 3.0 client that signs and never offers
+ * encryption (MS-SMB2 3.3.5.5.3: STATUS_ACCESS_DENIED).  L3 is the same
+ * client against a mode outside the four, set through the library: it acts
+ * as required, so it refuses too, where "enabled" would let the session in. */
+static void
+run_required_refusal(void)
+{
+    /* *INDENT-OFF* */
+    static const struct smb2_wire_profile refusals[] = {
+        { .name = "L2 3.0 server encryption required, client does not encrypt",
+          .max_dialect = 0x0300, .ntlmv2 = 1, .sign = 1,
+          .server_encryption = SMB2W_SERVER_ENC_REQUIRED },
+        { .name = "L3 3.0 server encryption mode outside the four, client does not encrypt",
+          .max_dialect = 0x0300, .ntlmv2 = 1, .sign = 1,
+          .server_encryption = SMB2W_SERVER_ENC_INVALID },
+    };
+    /* *INDENT-ON* */
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn    *c;
+    uint32_t             st;
+    size_t               i;
+
+    for (i = 0; i < sizeof(refusals) / sizeof(refusals[0]); i++) {
+        const struct smb2_wire_profile *w = &refusals[i];
+
+        printf("# --- %s ---\n", w->name);
+        smb2_env_open_wire(&env, &opts, w);
+        smb2_env_fs_setup(&env, "fs0");
+        c  = smb2_conn_open(&env);
+        st = smb2_negotiate(c);
+        CHECK(st == ST_SUCCESS && c->dialect == 0x0300,
+              "%s: NEGOTIATE 3.0 -> 0x%08x (0x%04x)", w->name, st, c->dialect);
+        st = smb2_session_setup(c);
+        CHECK(st == ST_ACCESS_DENIED,
+              "%s: SESSION_SETUP -> 0x%08x (want ACCESS_DENIED)", w->name, st);
+        smb2_env_fs_teardown(&env, "fs0");
+        smb2_env_stop(&env);
+    }
+} /* run_required_refusal */
+
+/* L1 is the other refusal: a reconnect whose PreviousSessionId names a session
+ * of another dialect (MS-SMB2 3.3.5.5.1: STATUS_USER_SESSION_DELETED). */
+static void
+run_reconnect_other_dialect(void)
+{
+    /* *INDENT-OFF* */
+    static const struct smb2_wire_profile w30 = {
+        .name = "L1 3.0 session, then a 3.1.1 reconnect naming it",
+        .max_dialect = 0x0300, .ntlmv2 = 1, .sign = 1,
+    };
+    static const struct smb2_wire_profile w311 = {
+        .name = "L1 3.1.1 reconnect",
+        .max_dialect = 0x0311, .ntlmv2 = 1, .sign = 1,
+        .signing_alg = SMB2W_SIGN_AES_CMAC,
+    };
+    /* *INDENT-ON* */
+    struct smb2_env      env;
+    struct smb2_env_opts opts = { .leases = 1, .oplocks = 1 };
+    struct smb2_conn    *c1, *c2;
+    uint32_t             st;
+
+    printf("# --- %s ---\n", w30.name);
+    smb2_env_open_wire(&env, &opts, &w30);
+    smb2_env_fs_setup(&env, "fs0");
+    c1 = smb2_conn_open(&env);
+    st = smb2_negotiate(c1);
+    CHECK(st == ST_SUCCESS && c1->dialect == 0x0300,
+          "%s: first NEGOTIATE -> 0x%08x (0x%04x)", w30.name, st, c1->dialect);
+    st = smb2_session_setup(c1);
+    CHECK(st == ST_SUCCESS, "%s: first SESSION_SETUP -> 0x%08x", w30.name, st);
+
+    c2                  = smb2_conn_open(&env);
+    c2->wire            = &w311;
+    c2->prev_session_id = c1->session_id;
+    st                  = smb2_negotiate(c2);
+    CHECK(st == ST_SUCCESS && c2->dialect == 0x0311,
+          "%s: reconnect NEGOTIATE -> 0x%08x (0x%04x)", w30.name, st, c2->dialect);
+    st = smb2_session_setup(c2);
+    CHECK(st == 0xC0000203u,
+          "%s: reconnect SESSION_SETUP -> 0x%08x (want USER_SESSION_DELETED)",
+          w30.name, st);
+
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* run_reconnect_other_dialect */
+
 #ifdef SMB2W_WBSTUB
 /* The account the stub answers for. */
 #define WINBIND_USER        WBSTUB_USER
@@ -991,6 +1086,8 @@ main(
         run_bad_key_exchange(&past_end_key, SMB2W_USER, SMB2W_PASSWORD, 16, 1);
         run_bad_key_exchange(&long_key, SMB2W_USER, SMB2W_PASSWORD, 24, 0);
         run_encryption_modes();
+        run_reconnect_other_dialect();
+        run_required_refusal();
     }
 
     if (failures) {
