@@ -185,8 +185,9 @@ ip_wait(
     return !pending;
 } /* ip_wait */
 
-/* Pump for a fixed time, so a request just sent has reached the server (and
- * reserved, or been held on, its identity) before the next one goes out. */
+/* Pump for a fixed time, so a reply that must not come has had the chance to
+ * arrive before the probe checks that it did not.  Never used to order two
+ * requests: see ip_wait_state. */
 static void
 ip_settle(
     struct drc_ctx *c,
@@ -302,6 +303,44 @@ ip_check_state(
            "expected %lld", state, got, want);
 } /* ip_check_state */
 
+/*
+ * Pump until the cache reports `want` entries in `state`, or the bound runs
+ * out.  Returns 1 when it got there.
+ *
+ * This is how the probe orders its requests.  An original and the request
+ * meant to find it in progress go out on different connections, each opened
+ * as it is first used, so the order the probe sends them in is not the order
+ * the cache sees them in: until the cache has reserved the original, the
+ * second request can get there first and take its place.  A fixed delay
+ * between the two only makes that less likely, and a loaded machine can
+ * outlast any delay; the cache's own account says when it has happened.
+ * Checked once a tick, since each check scrapes the whole registry.
+ */
+static int
+ip_wait_state(
+    struct drc_ctx *c,
+    const char     *state,
+    long long       want)
+{
+    struct ip_ticker t;
+    int              checked = -1, reached = 0;
+
+    t.ticks = 0;
+    evpl_add_timer(c->env->evpl, &t.timer, ip_tick, IP_TICK_US);
+    while (t.ticks < IP_WAIT_TICKS) {
+        if (t.ticks != checked) {
+            checked = t.ticks;
+            if (ip_metric(c, "chimera_nfs3_drc_state", "state", state) == want) {
+                reached = 1;
+                break;
+            }
+        }
+        evpl_continue(c->env->evpl);
+    }
+    evpl_remove_timer(c->env->evpl, &t.timer);
+    return reached;
+} /* ip_wait_state */
+
 /* ---- an original abandoned (default mode) ------------------------------- */
 
 static void
@@ -319,10 +358,17 @@ run_abandon(
      * released unrun and ends with no reply: its entry is abandoned.  The
      * retransmit held on it was never going to get a cached reply. */
     ip_mkdir(c, 2, u1, 1400, "g", &orig);
-    ip_settle(c, 50);
+    report("abandon/original-reserved", ip_wait_state(c, "in_progress", 1),
+           "the original never reached the cache");
     ip_mkdir(c, 1, u1, 1400, "g", &re1);
-    ip_settle(c, 50);
+    report("abandon/retransmit-reached-cache", ip_wait_state(c, "held", 1),
+           "the retransmit was never held on the original");
     drc_reconnect(c, 2);
+    /* The next retransmit must find the entry gone, not still in progress. */
+    report("abandon/released-on-close",
+           ip_wait_state(c, "in_progress", 0) && ip_wait_state(c, "held", 0),
+           "the cache kept the original or its retransmit after the "
+           "connection closed");
     ip_settle(c, 100);
     report("abandon/original-lost-with-its-connection",
            orig.done && orig.rpc_err != 0, "original MKDIR: %s",
@@ -363,7 +409,8 @@ run_hold_expiry(
     struct ip_call       *all[2];
 
     ip_mkdir(c, 0, u1, 2000, "f", &orig);
-    ip_settle(c, 50);
+    report("expiry/original-reserved", ip_wait_state(c, "in_progress", 1),
+           "the original never reached the cache");
     ip_mkdir(c, 1, u1, 2000, "f", &re1);
 
     all[0] = &orig;
@@ -414,7 +461,8 @@ run_ceiling(
 
     /* The original takes the only entry the cache may have in progress. */
     ip_mkdir(c, 0, u1, 4000, "h", &orig);
-    ip_settle(c, 50);
+    report("ceiling/original-reserved", ip_wait_state(c, "in_progress", 1),
+           "the original never reached the cache");
 
     /* A different request now finds no room.  It is refused straight away,
      * while the original is still parked, and does not run. */
@@ -469,9 +517,11 @@ run_shutdown(
     static struct ip_call orig, re1;
 
     ip_mkdir(c, 0, u1, 3000, "s", &orig);
-    ip_settle(c, 50);
+    report("shutdown/original-reserved", ip_wait_state(c, "in_progress", 1),
+           "the original never reached the cache");
     ip_mkdir(c, 1, u1, 3000, "s", &re1);
-    ip_settle(c, 50);
+    report("shutdown/retransmit-reached-cache", ip_wait_state(c, "held", 1),
+           "the retransmit was never held on the original");
 
     report("shutdown/original-still-parked", !orig.done, "original: %s",
            ip_err(&orig));
