@@ -43,6 +43,13 @@
 
 static int failures = 0;
 
+/* Cases cut short because the host changed under them (oa_still_txtbsy), as
+ * opposed to a backend or host that cannot run them at all.  When nothing
+ * failed, main exits 77 for these: ctest then reports the run as skipped, and
+ * its JUnit record keeps the output, where a passing run's is cut to the first
+ * 1 KiB. */
+static int host_skips = 0;
+
 #define CHECK(cond, ...)                             \
         do {                                         \
             if (cond) {                              \
@@ -145,16 +152,20 @@ oa_set_attributes(
  *
  * The kernel refuses a write open of a running executable with ETXTBSY.  A
  * MAXIMUM_ALLOWED open of one is re-issued read-only and granted no data-write
- * right; an explicit data-write open is refused ACCESS_DENIED.  Passthrough
- * backends only: `dir` is the shared host directory. */
+ * right; an explicit data-write open is refused ACCESS_DENIED.  A server answer
+ * that lets the file be written is excused only when the host has let go of
+ * the running file by itself (oa_still_txtbsy).  Passthrough backends only:
+ * `dir` is the shared host directory. */
 
 #ifndef _WIN32
 
 /* Copy /bin/sleep to `path` (named "sleep") as an executable every class may
  * write, so the session's MaximalAccess holds FILE_WRITE_DATA whoever owns the
- * copy. */
+ * copy.  *st receives the copy's identity. */
 static int
-oa_copy_sleep(const char *path)
+oa_copy_sleep(
+    const char  *path,
+    struct stat *st)
 {
     char    buf[65536];
     ssize_t n;
@@ -175,7 +186,7 @@ oa_copy_sleep(const char *path)
             break;
         }
     }
-    if (n < 0 || fchmod(out, 0777) < 0) {
+    if (n < 0 || fchmod(out, 0777) < 0 || fstat(out, st) < 0) {
         ok = 0;
     }
     close(in);
@@ -205,12 +216,116 @@ oa_wait_txtbsy(const char *path)
     return 0;
 } /* oa_wait_txtbsy */
 
+/* If the child has ended, reap it, set *pid to -1, report how it ended as
+ * found after `after`, and return 1; return 0 while it runs.  An exit status
+ * of 127 is its exec failing: oa_wait_txtbsy then saw the host refuse only
+ * while that exec was under way, and the case fails, as it does when the
+ * exec fails before the opens.  Any other end (a signal, or sleep returning)
+ * skips. */
+static int
+oa_child_ended(
+    const char *path,
+    pid_t      *pid,
+    const char *after)
+{
+    int status = 0;
+
+    if (waitpid(*pid, &status, WNOHANG) != *pid) {
+        return 0;
+    }
+    *pid = -1;
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+        CHECK(0, "after %s the child had failed to exec %s (exit status 127)",
+              after, path);
+    } else if (WIFSIGNALED(status)) {
+        printf("# skip running_file: after %s the child had been killed by "
+               "signal %d\n", after, WTERMSIG(status));
+        host_skips++;
+    } else {
+        printf("# skip running_file: after %s the child had exited (wait "
+               "status 0x%x)\n", after, status);
+        host_skips++;
+    }
+    return 1;
+} /* oa_child_ended */
+
+/* Whether the host still refuses a write open of `path` ETXTBSY, checked
+ * after a server answer that let the file be written.  The checks below
+ * expect a refusal only because the host refuses, so while it still does, the
+ * answer is the server's fault: this returns 1 and the caller's check fails.
+ *
+ * Otherwise this returns 0 and the caller ends the case, which skips only when
+ * the host has let go of the running file by itself: the child has ended
+ * (other than by failing its exec), or a host write open of the very file the
+ * child was started on (`copy`) now succeeds.  The server may then have been
+ * right, and the case can no longer tell.  The file gone, replaced, or refused
+ * for another reason is not that, and fails.
+ *
+ * A child found ended is reaped and *pid set to -1, so the caller does not
+ * signal a pid that may have been reused. */
+static int
+oa_still_txtbsy(
+    const char        *path,
+    const struct stat *copy,
+    pid_t             *pid,
+    const char        *after)
+{
+    struct stat st;
+    char        proc[64], exe[600];
+    int         fd, err, same = 0;
+    ssize_t     len;
+
+    if (oa_child_ended(path, pid, after)) {
+        return 0;
+    }
+
+    fd  = open(path, O_WRONLY);
+    err = errno;
+    if (fd < 0 && err == ETXTBSY) {
+        return 1;
+    }
+    if (fd >= 0) {
+        same = fstat(fd, &st) == 0 && st.st_dev == copy->st_dev &&
+            st.st_ino == copy->st_ino;
+        close(fd);
+    }
+
+    /* The child ending since the check above is what lets the open through. */
+    if (oa_child_ended(path, pid, after)) {
+        return 0;
+    }
+
+    if (fd < 0) {
+        CHECK(0, "after %s a host write open of %s fails %s, not ETXTBSY",
+              after, path, strerror(err));
+        return 0;
+    }
+    if (!same) {
+        CHECK(0, "after %s %s is no longer the file the child was started on",
+              after, path);
+        return 0;
+    }
+
+    snprintf(proc, sizeof(proc), "/proc/%d/exe", (int) *pid);
+    len                    = readlink(proc, exe, sizeof(exe) - 1);
+    err                    = errno;
+    exe[len > 0 ? len : 0] = '\0';
+    printf("# skip running_file: after %s a host write open of the file "
+           "succeeds while the child runs %s%s\n", after,
+           len > 0 ? exe : "a program /proc cannot name: ",
+           len > 0 ? "" : strerror(err));
+    host_skips++;
+    return 0;
+} /* oa_still_txtbsy */
+
 static void
 probe_running_file(
     struct smb2_conn *c,
     const char       *dir)
 {
     struct smb2_create_out o;
+    struct stat            copy;
     char                   path[600];
     uint8_t                out[4];
     uint32_t               st, ga, mx = 0, n = 0;
@@ -222,7 +337,7 @@ probe_running_file(
         return;
     }
     snprintf(path, sizeof(path), "%s/sleep", dir);
-    if (!oa_copy_sleep(path)) {
+    if (!oa_copy_sleep(path, &copy)) {
         printf("# skip running_file: cannot copy /bin/sleep (%s)\n",
                strerror(errno));
         return;
@@ -275,6 +390,11 @@ probe_running_file(
               (OA_FILE_WRITE_DATA | OA_FILE_APPEND_DATA),
               "  MxAc includes WRITE_DATA and APPEND_DATA (0x%08x)", mx);
         ga = oa_access_info(c, o.file_id);
+        if ((ga & (OA_FILE_WRITE_DATA | OA_FILE_APPEND_DATA)) &&
+            !oa_still_txtbsy(path, &copy, &pid, "the MAXIMUM_ALLOWED open")) {
+            smb2_close(c, o.file_id);
+            goto out;
+        }
         CHECK(ga == (mx & ~(OA_FILE_WRITE_DATA | OA_FILE_APPEND_DATA)),
               "  granted access 0x%08x == MxAc without WRITE_DATA, APPEND_DATA "
               "(0x%08x)", ga, mx & ~(OA_FILE_WRITE_DATA | OA_FILE_APPEND_DATA));
@@ -287,15 +407,20 @@ probe_running_file(
 
     st = oa_open(c, "sleep", MBT_FILE_OPEN, OA_FILE_WRITE_DATA,
                  MBT_FILE_NON_DIRECTORY_FILE, 0, NULL, &o);
-    CHECK(st == ST_ACCESS_DENIED, "OPEN running sleep FILE_WRITE_DATA -> "
-          "ACCESS_DENIED (0x%08x)", st);
     if (st == ST_SUCCESS) {
         smb2_close(c, o.file_id);
+        if (!oa_still_txtbsy(path, &copy, &pid, "the FILE_WRITE_DATA open")) {
+            goto out;
+        }
     }
+    CHECK(st == ST_ACCESS_DENIED, "OPEN running sleep FILE_WRITE_DATA -> "
+          "ACCESS_DENIED (0x%08x)", st);
 
  out:
-    kill(pid, SIGKILL);
-    waitpid(pid, NULL, 0);
+    if (pid > 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+    }
 } /* probe_running_file */
 
 #else /* ifndef _WIN32 */
@@ -1839,6 +1964,11 @@ main(
     if (failures) {
         printf("# %d check(s) FAILED\n", failures);
         return 1;
+    }
+    if (host_skips) {
+        printf("# all checks passed; %d case(s) skipped because the host "
+               "changed under them\n", host_skips);
+        return 77;
     }
     printf("# all checks passed\n");
     return 0;
