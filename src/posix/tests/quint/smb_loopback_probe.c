@@ -222,6 +222,61 @@ op_two_path(
     return probe_call(r);
 } /* op_two_path */
 
+/* A row that must fail, reported by id ("ROW <id> PASS|FAIL") so a run's
+ * output shows that it was reached.  The errno is printed but not pinned: the
+ * driver reads errno for the path ops in the same call that makes the op, so
+ * the value it reports there is not reliable. */
+static void
+probe_refused_row(
+    const char *id,
+    json_t     *res)
+{
+    long long ret  = probe_ret(res);
+    long long err  = probe_field(res, "err");
+    int       pass = ret < 0;
+
+    fprintf(stderr, "smb_loopback_probe: ROW %s %s ret=%lld errno=%lld\n",
+            id, pass ? "PASS" : "FAIL", ret, err);
+    if (!pass) {
+        probe_fail(id, "unexpected result");
+    }
+    json_decref(res);
+} /* probe_refused_row */
+
+/* A creating open of `path` that must fail with `want` and leave nothing at
+ * `collapsed`, the name a lexical collapse of the path would have created. */
+static void
+probe_create_row(
+    const char *id,
+    const char *path,
+    long long   want,
+    const char *collapsed)
+{
+    json_t   *res = op_open(path, O_CREAT | O_WRONLY, 0644);
+    long long ret = probe_ret(res);
+    long long err = probe_field(res, "err");
+    json_t   *st;
+    int       absent, pass;
+
+    json_decref(res);
+    if (ret >= 0) {
+        json_decref(op_fd("close", (int) ret));
+    }
+
+    st     = op_stat(collapsed, 0);
+    absent = probe_ret(st) < 0;
+    json_decref(st);
+
+    pass = ret < 0 && err == want && absent;
+    fprintf(stderr, "smb_loopback_probe: ROW %s %s ret=%lld errno=%lld want=%lld "
+            "state=%s\n", id, pass ? "PASS" : "FAIL", ret, err, want,
+            absent ? "ok" : "bad");
+    if (!pass) {
+        probe_fail(id, absent ? "unexpected errno" :
+                   "the lexically collapsed name was created");
+    }
+} /* probe_create_row */
+
 /* Create an empty file, asserting both legs. */
 static void
 probe_touch(const char *path)
@@ -317,6 +372,62 @@ probe_working_surface(void)
     probe_eq("size reflects the truncate", probe_field(res, "size"), 2);
     json_decref(res);
 
+    /* Symlink and mknod at DEPTH: a multi-component create resolves its
+     * parent in the core and creates the leaf against it.  From the namespace
+     * root, where every client op starts, that is the route on every version
+     * of the procs, so these are regression rows for the multi-component
+     * path; the symlink/mknod whole-path guards are reached only from a handle
+     * inside the path-only mount (chimera/vfs/smb/pathop_guard).  Cleaned up
+     * before the rmdir of /w/sub.
+     *
+     * The symlink-at-depth sub-block is skipped under --leases: deleting a
+     * symlink (reparse) leaf at depth while a directory lease is held returns
+     * an unmapped protocol status, independently of these rows.  mknod at
+     * depth (a non-reparse delete) runs in every config. */
+    if (!g_smb_leases) {
+        res = probe_req("symlink");
+        probe_set_str(res, "path", "/w/sub/s");
+        probe_set_str(res, "target", "f");
+        probe_ok("symlink at depth", probe_call(res));
+        res = op_stat("/w/sub/s", 0);            /* lstat: the link itself */
+        {
+            const char *lt = json_string_value(json_object_get(res, "ftype"));
+
+            if (probe_ret(res) < 0 || !lt || strcmp(lt, "lnk") != 0) {
+                probe_fail("symlink at depth lstat", "expected an lnk at depth");
+            }
+        }
+        json_decref(res);
+        res = probe_req("readlink");
+        probe_set_str(res, "path", "/w/sub/s");
+        res = probe_call(res);
+        {
+            const char *lt = json_string_value(json_object_get(res, "target"));
+
+            if (probe_ret(res) < 0 || !lt || strcmp(lt, "f") != 0) {
+                probe_fail("readlink at depth", "did not return the target 'f'");
+            }
+        }
+        json_decref(res);
+        probe_ok("unlink symlink at depth", op_path("unlink", "/w/sub/s"));
+    }
+
+    res = probe_req("mknod");
+    probe_set_str(res, "path", "/w/sub/p");
+    probe_set_int(res, "mode", 0644);
+    probe_set_str(res, "ftype", "fifo");
+    probe_ok("mknod at depth", probe_call(res));
+    res = op_stat("/w/sub/p", 1);                /* it exists as a fifo */
+    {
+        const char *pt = json_string_value(json_object_get(res, "ftype"));
+
+        if (probe_ret(res) < 0 || !pt || strcmp(pt, "fifo") != 0) {
+            probe_fail("mknod at depth stat", "expected a fifo at depth");
+        }
+    }
+    json_decref(res);
+    probe_ok("unlink mknod at depth", op_path("unlink", "/w/sub/p"));
+
     /* Rename and remove, both at depth. */
     probe_ok("rename", op_two_path("rename", "/w/sub/f", "/w/sub/g"));
     probe_ok("stat the renamed file", op_stat("/w/sub/g", 1));
@@ -328,6 +439,79 @@ probe_working_surface(void)
     probe_ok("rmdir", op_path("rmdir", "/w/sub"));
     probe_err("rmdir of a missing name", op_path("rmdir", "/w/sub"));
     probe_err("stat of a missing name", op_stat("/w/missing", 1));
+
+    /* Cross-directory rename: source parent != destination parent.
+     * This is the one shape the same-parent row above cannot test -- a dest join
+     * keyed on the SOURCE fh would create /a/g and leave /b/g absent.  A fresh
+     * /a,/b sibling tree so it does not depend on /w/sub (rmdir'd above). */
+    probe_ok("mkdir /a", op_mkdir("/a", 0755));
+    probe_ok("mkdir /b", op_mkdir("/b", 0755));
+
+    res = op_open("/a/f", O_CREAT | O_RDWR, 0644);
+    probe_ok("open /a/f O_CREAT", json_incref(res));
+    fd = probe_ret(res);
+    json_decref(res);
+    if (fd >= 0) {
+        json_t *w = probe_req("write");
+
+        probe_set_int(w, "fd", (int) fd);
+        probe_set_str(w, "data", "aGVsbG8=");     /* "hello", 5 bytes */
+        res = probe_call(w);
+        probe_eq("cross-dir write returns the byte count", probe_ret(res), 5);
+        json_decref(res);
+        probe_ok("close /a/f", op_fd("close", (int) fd));
+    }
+
+    probe_ok("rename /a/f -> /b/g", op_two_path("rename", "/a/f", "/b/g"));
+
+    /* The object moved to /b/g and carries the payload (same object, new name). */
+    res = op_stat("/b/g", 1);
+    probe_ok("stat /b/g", json_incref(res));
+    probe_eq("/b/g size reflects the write", probe_field(res, "size"), 5);
+    json_decref(res);
+
+    /* The old name is gone. */
+    probe_err("stat /a/f (old name gone)", op_stat("/a/f", 1));
+
+    /* DECISIVE: /a/g must NOT exist.  A source-keyed dest join would have joined
+     * the dest leaf "g" onto the SOURCE parent "a" and created /a/g. */
+    probe_err("stat /a/g (dest not keyed on source fh)", op_stat("/a/g", 1));
+
+    probe_ok("unlink /b/g", op_path("unlink", "/b/g"));
+    probe_ok("rmdir /b", op_path("rmdir", "/b"));
+    probe_ok("rmdir /a", op_path("rmdir", "/a"));
+
+    /* Not under a directory lease: there, resolving a path through the
+     * regular file /q/f (as these rows do, and as a plain stat of
+     * "/q/f/../x" does) leaves the later unlink of /q/f failing.  That is
+     * not specific to these rows. */
+    if (!g_smb_leases) {
+        /* A creating open resolves its parent in the core, as unlink does, so the
+         * two address the same object.  The backend collapses "f/.." lexically
+         * without looking at f; the core requires the parent to be a real
+         * directory.  So a create through a regular-file or missing prefix is
+         * refused, and nothing appears under the lexically collapsed name -- the
+         * same answer unlink gives for the same path.  From the namespace root these
+         * take the rebase route into the smb mount at "/". */
+        probe_ok("mkdir /q", op_mkdir("/q", 0755));
+        res = op_open("/q/f", O_CREAT | O_RDWR, 0644);
+        probe_ok("open /q/f O_CREAT", json_incref(res));
+        fd = probe_ret(res);
+        json_decref(res);
+        if (fd >= 0) {
+            probe_ok("close /q/f", op_fd("close", (int) fd));
+        }
+
+        probe_create_row("O-a", "/q/f/../x", ENOTDIR, "/q/x");
+        probe_refused_row("O-b", op_path("unlink", "/q/f/../x"));
+        probe_create_row("O-c", "/q/nx/../y", ENOENT, "/q/y");
+
+        /* Tolerant cleanup: a failing row may have created the collapsed name. */
+        json_decref(op_path("unlink", "/q/x"));
+        json_decref(op_path("unlink", "/q/y"));
+        probe_ok("unlink /q/f", op_path("unlink", "/q/f"));
+        probe_ok("rmdir /q", op_path("rmdir", "/q"));
+    }
 
     probe_ok("statvfs", op_path("statvfs", "/"));
 } /* probe_working_surface */

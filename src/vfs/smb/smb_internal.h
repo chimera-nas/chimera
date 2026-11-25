@@ -308,7 +308,32 @@ struct chimera_smb_op_state {
      * Length 0 means no link was followed and the requested path stands. */
     int                               followed_pathlen;
     char                              followed_path[CHIMERA_SMB_PATH_MAX + 1];
+
+    /* The parent-joined full mount-relative paths an op must evict on
+     * success.  remove/rename join their leaf against the core-resolved parent
+     * handle, so the interned id is the JOINED path, not the raw leaf.  remove
+     * must not reuse `followed_path` (the follow shim owns that slot, and it is
+     * live during the remove CREATE).  A remove and a rename are never the same
+     * request, so their buffers share storage; the `*_len` fields stay outside
+     * the union and are zeroed at op start so a failure path cannot evict a
+     * recycled plugin_data leftover. */
+    int                               remove_path_len;
+    int                               rename_src_len;
+    int                               rename_dst_len;
+    union {
+        char remove_path[CHIMERA_SMB_PATH_MAX + 1];
+        struct {
+            char rename_src[CHIMERA_SMB_PATH_MAX + 1];
+            char rename_dst[CHIMERA_SMB_PATH_MAX + 1];
+        };
+    };
 };
+
+/* The op state lives in request->plugin_data, so it must fit that buffer
+ * (CHIMERA_VFS_PLUGIN_DATA_SIZE, the size of plugin_data -- not the engine's
+ * gate scratch, which is a different buffer). */
+_Static_assert(sizeof(struct chimera_smb_op_state) <= CHIMERA_VFS_PLUGIN_DATA_SIZE,
+               "struct chimera_smb_op_state must fit request->plugin_data");
 
 /* The continuation invoked when the reply for a specific message_id arrives.
 * `body` is positioned at the SMB2 body (consumed == sizeof(smb2_header)). */
@@ -848,8 +873,28 @@ void smb_apply_attrs(
     const struct smb_open_info       *info,
     uint64_t                          ino);
 
+/* Resolve a leaf `name` against an EXPLICIT parent fh into a full mount-relative
+ * path in `out` ("" parent -> the normalized name).  This is the general joiner: the
+ * rename destination joins against `rename_at.new_fh`, which is NOT request->fh
+ * (that is the source parent).  Returns the normalized length, or a negated
+ * vfs error the caller passes through as its status: -CHIMERA_VFS_ESTALE when
+ * the fh's path id is not interned, -CHIMERA_VFS_ENAMETOOLONG when the result
+ * does not fit `out_max`.
+ * Does NOT reject "."/".." -- that is the whole-path passthrough too; the leaf
+ * guard (smb_leaf_is_dot_or_dotdot) is applied by the caller before this. */
+int smb_fh_full_path(
+    struct chimera_smb_client_conn *conn,
+    const uint8_t                  *fh,
+    int                             fh_len,
+    const char                     *name,
+    int                             namelen,
+    char                           *out,
+    int                             out_max);
+
 /* Resolve a dirfd-relative leaf `name` against the parent handle `request->fh`
- * into a full mount-relative path in `out` ("" parent -> just the name). */
+ * into a full mount-relative path in `out` ("" parent -> the normalized name).
+ * One-line wrapper over smb_fh_full_path forwarding request->fh/fh_len, so the
+ * existing callers stay byte-identical. */
 int smb_at_full_path(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request,
@@ -857,6 +902,19 @@ int smb_at_full_path(
     int                             namelen,
     char                           *out,
     int                             out_max);
+
+/* A leaf of exactly "." or "..".  A joined leaf of ".." re-collapses under
+ * smb_path_normalize (it pops the parent), so the op would act outside the
+ * core-resolved parent; remove/rename reject such a leaf (EINVAL) BEFORE
+ * joining. */
+static inline int
+smb_leaf_is_dot_or_dotdot(
+    const char *name,
+    int         namelen)
+{
+    return (namelen == 1 && name[0] == '.') ||
+           (namelen == 2 && name[0] == '.' && name[1] == '.');
+} /* smb_leaf_is_dot_or_dotdot */
 
 /* Send an SMB2 CREATE on `path` (full mount-relative path; "" for the root). */
 void smb_send_create(

@@ -142,15 +142,17 @@ chimera_smb_path_table_clear(struct chimera_smb_client_server *server)
  * handle in request->fh.
  *
  * Most ops arrive rebased against the mount root (request->fh is the root fh),
- * where `name` already IS the full path.  But an *at op issued against a real
+ * where `name` already IS the full path (it is normalized, like every joined
+ * result, so "." / ".." / "//" are collapsed).  But an *at op issued against a real
  * directory descriptor (openat/unlinkat/utimensat with a dirfd) hands the
  * backend that directory's open-token handle as the parent and only the leaf as
  * `name`; a path-only backend must prefix the directory's path itself, since
  * SMB2 addresses every CREATE from the share root, not from an open FileId.
  * The parent's path is the one interned when it was opened (SD5's path table).
  *
- * Returns the length written (NUL-terminated), or -1 if it does not fit or the
- * parent handle's path is unknown.
+ * Returns the length written (NUL-terminated); -CHIMERA_VFS_ENAMETOOLONG if the
+ * joined path does not fit `out_max`; -CHIMERA_VFS_ESTALE if the parent handle's
+ * path is not interned.  Callers pass the negated value through as the status.
  */
 
 /* Collapse "." , ".." and empty ("//") components of a mount-relative path in
@@ -200,9 +202,10 @@ smb_path_normalize(
 } /* smb_path_normalize */
 
 int
-smb_at_full_path(
+smb_fh_full_path(
     struct chimera_smb_client_conn *conn,
-    struct chimera_vfs_request     *request,
+    const uint8_t                  *fh,
+    int                             fh_len,
     const char                     *name,
     int                             namelen,
     char                           *out,
@@ -211,9 +214,9 @@ smb_at_full_path(
     const char *ppath;
     int         plen = 0, n;
 
-    if (chimera_smb_fh_is_root(request->fh_len)) {
+    if (chimera_smb_fh_is_root(fh_len)) {
         if (namelen >= out_max) {
-            return -1;
+            return -CHIMERA_VFS_ENAMETOOLONG;
         }
         memcpy(out, name, namelen);
         out[namelen] = '\0';
@@ -221,16 +224,16 @@ smb_at_full_path(
     }
 
     ppath = chimera_smb_path_resolve(conn->server,
-                                     chimera_smb_fh_path_id(request->fh), &plen);
+                                     chimera_smb_fh_path_id(fh), &plen);
     if (!ppath) {
-        return -1;
+        return -CHIMERA_VFS_ESTALE;
     }
 
     /* parent + '/' + name, except an empty parent (the share root itself, whose
-     * open-token path is "") joins to just the name. */
+     * open-token path is "") joins to just the (normalized) name. */
     n = plen + (plen ? 1 : 0) + namelen;
     if (n >= out_max) {
-        return -1;
+        return -CHIMERA_VFS_ENAMETOOLONG;
     }
     n = 0;
     memcpy(out, ppath, plen);
@@ -242,6 +245,19 @@ smb_at_full_path(
     n     += namelen;
     out[n] = '\0';
     return smb_path_normalize(out, n);
+} /* smb_fh_full_path */
+
+int
+smb_at_full_path(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *name,
+    int                             namelen,
+    char                           *out,
+    int                             out_max)
+{
+    return smb_fh_full_path(conn, request->fh, request->fh_len, name, namelen,
+                            out, out_max);
 } /* smb_at_full_path */
 
 /*
@@ -1281,7 +1297,9 @@ smb_send_create_follow(
 /* The mount-relative path a CREATE actually resolved to: the follow shim's
  * rewrite when it followed one or more symbolic links, otherwise `name`
  * resolved against the request's parent handle.  This is the path an fh must
- * intern -- see chimera_smb_op_state::followed_path. */
+ * intern -- see chimera_smb_op_state::followed_path.  Negative on failure; the
+ * callers only test the sign (they mint no fh rather than fail the op), so the
+ * followed-path overflow stays a plain -1. */
 static int
 smb_resolved_full_path(
     struct chimera_smb_client_conn *conn,
@@ -1657,7 +1675,7 @@ chimera_smb_client_lookup_at(
                                 request->lookup_at.component_len,
                                 path, sizeof(path));
     if (path_len < 0) {
-        request->status = CHIMERA_VFS_ESTALE;
+        request->status = (enum chimera_vfs_error) -path_len;
         request->complete(request);
         return;
     }
@@ -1824,11 +1842,11 @@ chimera_smb_client_open_at(
     int            path_len;
 
     /* Resolve the leaf against the parent handle (a dirfd-relative open); for a
-     * root-relative open this is just the name. */
+     * root-relative open this is the normalized name. */
     path_len = smb_at_full_path(conn, request, request->open_at.name,
                                 request->open_at.namelen, path, sizeof(path));
     if (path_len < 0) {
-        request->status = CHIMERA_VFS_ESTALE;
+        request->status = (enum chimera_vfs_error) -path_len;
         request->complete(request);
         return;
     }
@@ -2160,12 +2178,12 @@ chimera_smb_client_mkdir_at(
                              &request->mkdir_at.r_attr);
 
     /* Resolve the leaf against the parent handle (a dirfd-relative create);
-     * for a root-relative create this is just the name. */
+     * for a root-relative create this is the normalized name. */
     fullpath_len = smb_at_full_path(conn, request, request->mkdir_at.name,
                                     request->mkdir_at.name_len, fullpath,
                                     sizeof(fullpath));
     if (fullpath_len < 0) {
-        request->status = CHIMERA_VFS_ESTALE;
+        request->status = (enum chimera_vfs_error) -fullpath_len;
         request->complete(request);
         return;
     }
@@ -2183,7 +2201,7 @@ chimera_smb_client_mkdir_at(
                     chimera_smb_mkdir_create_reply);
 } /* chimera_smb_client_mkdir_at */
 
-/* ---- remove_at (full path, delete-on-close) ---------------------------- */
+/* ---- remove_at (parent-joined path, delete-on-close) ------------------- */
 
 static void
 chimera_smb_remove_close_reply(
@@ -2194,14 +2212,22 @@ chimera_smb_remove_close_reply(
     int                             body_len,
     void                           *arg)
 {
-    struct chimera_vfs_request *request = arg;
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
 
-    (void) conn;
     (void) hdr;
     (void) body;
     (void) body_len;
 
     request->status = chimera_smb_status_to_errno(status);
+
+    /* The object was removed under its JOINED path id; evict that cache entry so
+     * a later open of the same path does not serve the dead FileId.  Evict only
+     * on success (DELETE_ON_CLOSE actually took effect). */
+    if (request->status == CHIMERA_VFS_OK && state->remove_path_len > 0) {
+        smb_evict_pathid(conn, request, state->remove_path, state->remove_path_len);
+    }
+
     request->complete(request);
 } /* chimera_smb_remove_close_reply */
 
@@ -2239,6 +2265,13 @@ chimera_smb_client_remove_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
+    struct chimera_smb_op_state *state = request->plugin_data;
+    int                          fullpath_len;
+
+    /* plugin_data is recycled; zero the eviction-stash length before any bail so
+     * a failure path cannot evict a stale leftover. */
+    state->remove_path_len = 0;
+
     /* A dirfd-relative unlink/rmdir whose parent is a non-directory is ENOTDIR
     * (even when the parent's name was unlinked while its fd stayed open -- its
     * interned path is then stale and would resolve to a misleading ENOENT). */
@@ -2247,6 +2280,30 @@ chimera_smb_client_remove_at(
         request->complete(request);
         return;
     }
+
+    /* A "." / ".." leaf would re-collapse the parent under smb_path_normalize,
+     * so the delete would hit the grandparent rather than a child of the
+     * core-resolved parent.  Reject before join. */
+    if (smb_leaf_is_dot_or_dotdot(request->remove_at.name,
+                                  request->remove_at.namelen)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    /* Join the leaf against the core-resolved parent handle (request->fh).  A
+     * missing intern is ESTALE, never a silent share-root CREATE of the leaf; a
+     * joined path past the backend's bound is ENAMETOOLONG. */
+    fullpath_len = smb_fh_full_path(conn, request->fh, request->fh_len,
+                                    request->remove_at.name,
+                                    request->remove_at.namelen,
+                                    state->remove_path, sizeof(state->remove_path));
+    if (fullpath_len < 0) {
+        request->status = (enum chimera_vfs_error) -fullpath_len;
+        request->complete(request);
+        return;
+    }
+    state->remove_path_len = fullpath_len;
 
     /* POSIX unlink/rmdir removes the named entry itself; a final-component
      * symlink must be deleted as the link, never followed (which would ELOOP or
@@ -2269,7 +2326,7 @@ chimera_smb_client_remove_at(
     }
 
     smb_send_create_follow(conn, request,
-                           request->remove_at.name, request->remove_at.namelen,
+                           state->remove_path, state->remove_path_len,
                            SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES,
                            SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                            SMB2_FILE_OPEN,
