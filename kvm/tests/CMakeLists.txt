@@ -67,7 +67,7 @@ endif()
 # I/O directly to /dev/sda.
 set(PNFS_BLOCK_SETUP "mkdir -p /run/rpc_pipefs && mount -t rpc_pipefs rpc_pipefs /run/rpc_pipefs && modprobe blocklayoutdriver && /usr/sbin/blkmapd && sleep 1 && mount -t nfs -o vers=4.1,tcp 10.0.0.1:/share /mnt")
 
-set(PNFS_BLOCK_PROGRAMS rw remove recall_truncate)
+set(PNFS_BLOCK_PROGRAMS rw remove recall_truncate remove_xclient)
 
 # rw: write 8 MiB through the layout, assert LAYOUTGET, drop caches, read back.
 set(PNFS_BLOCK_WL_rw "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && cmp /tmp/orig /mnt/test/f0")
@@ -78,6 +78,15 @@ set(PNFS_BLOCK_WL_remove "mkdir -p /mnt/test && dd if=/dev/urandom of=/mnt/test/
 # (MDS recalls + defers), then verify the surviving 4 MiB is intact -- exercises
 # the truncate path freeing remote extents past EOF + the recall machinery.
 set(PNFS_BLOCK_WL_recall_truncate "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && truncate -s 4194304 /mnt/test/f0 && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && head -c 4194304 /tmp/orig > /tmp/orig4 && cmp /tmp/orig4 /mnt/test/f0")
+# remove_xclient: client A (the 10.0.0.1 mount) writes through its block
+# layout; client B (the 10.0.0.5 mount) removes the file and then allocates
+# fresh blocks.  The file is not held open: both mounts share one Linux client
+# here, and a removed file that client still has open is renamed instead and
+# its layout returned at close, so no recall would reach the MDS.  The MDS must recall A's layout and free A's
+# extents only after A has returned it; the wrapper checks that ordering in
+# the MDS log (DEFERRED_RECALL_EXPECTED: a block layout has no data server
+# file, so the check stops at the layout being returned).
+set(PNFS_BLOCK_WL_remove_xclient ": DEFERRED_RECALL_EXPECTED && mkdir -p /mnt2 /mnt/test && echo second-client > /sys/module/nfs/parameters/nfs4_unique_id && mount -t nfs -o vers=4.1,tcp 10.0.0.5:/share /mnt2 && dd if=/dev/urandom of=/tmp/orig bs=1M count=4 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && timeout 10 rm /mnt2/test/f0 && ! test -e /mnt2/test/f0 && dd if=/dev/urandom of=/mnt2/test/f1 bs=1M count=8 2>/dev/null && sync && sleep 1")
 
 # pNFS SCSI layout (RFC 8154): diskfs-only.  Same remote-data path as block, but
 # the client matches the LU strictly by its SCSI VPD-0x83 hardware designator (a
@@ -100,10 +109,11 @@ set(PNFS_SCSI_SETUP "modprobe blocklayoutdriver && mount -t nfs -o vers=4.1,tcp 
 
 # Reuse the block workloads verbatim (the layout type differs, the data path
 # does not).
-set(PNFS_SCSI_PROGRAMS rw remove recall_truncate)
+set(PNFS_SCSI_PROGRAMS rw remove recall_truncate remove_xclient)
 set(PNFS_SCSI_WL_rw "${PNFS_BLOCK_WL_rw}")
 set(PNFS_SCSI_WL_remove "${PNFS_BLOCK_WL_remove}")
 set(PNFS_SCSI_WL_recall_truncate "${PNFS_BLOCK_WL_recall_truncate}")
+set(PNFS_SCSI_WL_remove_xclient "${PNFS_BLOCK_WL_remove_xclient}")
 
 set(NFS_VERSIONS 3 4.0 4.1 4.2)
 
@@ -134,7 +144,7 @@ set(SMB_DIALECTS 2.0.2 2.1 3.0 3.0.2 3.1.1)
 # wrote can only succeed if the client actually used pNFS to reach the data
 # server -- there is no MDS fallback to mask a broken layout.  The explicit
 # LAYOUTGET check in mountstats is a belt-and-suspenders positive assertion.
-set(PNFS_PROGRAMS rw recall_truncate recall_truncate_xclient remove)
+set(PNFS_PROGRAMS rw recall_truncate recall_truncate_xclient remove remove_xclient rename_xclient remove_linked)
 set(PNFS_CMD_rw "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && cmp /tmp/orig /mnt/test/f0")
 
 # Truncate a file that has an outstanding layout: the MDS recalls it, defers the
@@ -153,6 +163,19 @@ set(PNFS_CMD_recall_truncate_xclient "mkdir -p /mnt2 /mnt/test && mount -t nfs -
 # Remove a pNFS-backed file: the MDS deletes the backing file on the data server
 # and the name is gone from the namespace.
 set(PNFS_CMD_remove "mkdir -p /mnt/test && dd if=/dev/urandom of=/mnt/test/f0 bs=1M count=4 2>/dev/null && sync && grep -qi LAYOUTGET /proc/self/mountstats && rm /mnt/test/f0 && ! test -e /mnt/test/f0")
+# remove_xclient: client A writes the file through its layout; client B
+# removes it (the file is not held open: see the block remove_xclient above).  B's rm must not wait on A; the MDS recalls A's
+# layout and deletes the backing file only after A has returned it
+# (DEFERRED_DELETE_EXPECTED: MDS log ordering and the layout recall and revoke counters).
+set(PNFS_CMD_remove_xclient ": DEFERRED_DELETE_EXPECTED; mkdir -p /mnt2 /mnt/test && echo second-client > /sys/module/nfs/parameters/nfs4_unique_id && mount -t nfs -o vers=4.1 10.0.0.5:/share /mnt2 && dd if=/dev/urandom of=/tmp/orig bs=1M count=4 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && timeout 10 rm /mnt2/test/f0 && ! test -e /mnt2/test/f0 && sleep 1")
+# rename_xclient: the same, with B renaming its own file over A's.
+# Both mounts reach the same server, which the Linux client would merge into one
+# client (one session) and that client returns its own layout when the file goes
+# away; the second mount therefore gets its own client identity first.
+set(PNFS_CMD_rename_xclient ": DEFERRED_DELETE_EXPECTED; mkdir -p /mnt2 /mnt/test && echo second-client > /sys/module/nfs/parameters/nfs4_unique_id && mount -t nfs -o vers=4.1 10.0.0.5:/share /mnt2 && dd if=/dev/urandom of=/tmp/orig bs=1M count=4 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && echo replacement > /mnt2/test/src && timeout 10 mv -f /mnt2/test/src /mnt2/test/f0 && grep -q replacement /mnt2/test/f0 && sleep 1")
+# remove_linked: removing one of two links recalls nothing and keeps the data;
+# the surviving link still reads back through the layout after a cache drop.
+set(PNFS_CMD_remove_linked ": NO_DEFERRED_DELETE_EXPECTED; mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=4 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && grep -qi LAYOUTGET /proc/self/mountstats && ln /mnt/test/f0 /mnt/test/f0link && rm /mnt/test/f0 && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && cmp /tmp/orig /mnt/test/f0link")
 
 # pNFS PROXY workloads: exercise chimera's own pNFS *client* (the nfs VFS proxy
 # module) against chimera's pNFS server.  The guest mounts a chimera proxy over
@@ -160,7 +183,7 @@ set(PNFS_CMD_remove "mkdir -p /mnt/test && dd if=/dev/urandom of=/mnt/test/f0 bs
 # DS I/O + back-channel CB_LAYOUTRECALL).  So, unlike the direct pNFS tests, the
 # guest mount has no LAYOUTGET in its own mountstats -- the wrapper asserts pNFS
 # engagement (proxy->DS connection) and recall delivery from the proxy's logs.
-set(PNFS_PROXY_PROGRAMS rw recall_truncate)
+set(PNFS_PROXY_PROGRAMS rw recall_truncate remove)
 set(PNFS_PROXY_CMD_rw "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && cmp /tmp/orig /mnt/test/f0")
 
 # Truncating a file the proxy holds a layout for makes the proxy issue a SETATTR
@@ -183,6 +206,11 @@ set(PNFS_PROXY_CMD_rw "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=
 #     enough for the sweep to reap an unpinned handle before a later pin
 #     lands.  (`9<>` creates f0 empty; cp then overwrites it.)
 set(PNFS_PROXY_CMD_recall_truncate ": RECALL_EXPECTED; mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && exec 9<>/mnt/test/f0 && cp /tmp/orig /mnt/test/f0 && sync && truncate -s 4194304 /mnt/test/f0 && exec 9<&- && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && head -c 4194304 /tmp/orig > /tmp/orig4 && cmp /tmp/orig4 /mnt/test/f0")
+# Removing a file the proxy holds a layout for while it still has the file open
+# (fd 9, as in recall_truncate above): the MDS deletes the data server's file
+# once the last reference goes.  The proxy may return the layout itself at
+# close, so a recall is not required (UNLINK_DELETE_EXPECTED).
+set(PNFS_PROXY_CMD_remove ": UNLINK_DELETE_EXPECTED; mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && exec 9<>/mnt/test/f0 && cp /tmp/orig /mnt/test/f0 && sync && rm /mnt/test/f0 && ! test -e /mnt/test/f0 && sleep 1 && exec 9<&-")
 
 # xfstests programs
 set(XFSTESTS_PROGRAMS fsstress fsx dirstress nametest fstest rewinddir)
