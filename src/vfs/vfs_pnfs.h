@@ -239,6 +239,33 @@ chimera_vfs_pnfs_backing_name(
              fileid);
 } /* chimera_vfs_pnfs_backing_name */
 
+/* True when `name` has the shape chimera_vfs_pnfs_backing_name produces. */
+static inline int
+chimera_vfs_pnfs_is_backing_name(
+    const char *name,
+    int         namelen)
+{
+    int i;
+
+    if (namelen != CHIMERA_VFS_PNFS_BACKING_NAME_MAX - 1 ||
+        name[CHIMERA_VFS_MOUNTID_SIZE * 2] != '_') {
+        return 0;
+    }
+
+    for (i = 0; i < namelen; i++) {
+        char c = name[i];
+
+        if (i == CHIMERA_VFS_MOUNTID_SIZE * 2) {
+            continue;
+        }
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return 0;
+        }
+    }
+
+    return 1;
+} /* chimera_vfs_pnfs_is_backing_name */
+
 /*
  * True when fh names an object inside a data-server backing mount, i.e. one of
  * the mounts named by chimera_vfs_ds.backing_path.  Such a mount is the storage
@@ -246,6 +273,16 @@ chimera_vfs_pnfs_backing_name(
  * the data redirect uses this to avoid re-entering itself.
  */
 SYMBOL_EXPORT int chimera_vfs_pnfs_fh_is_ds_backing(
+    const struct chimera_vfs *vfs,
+    const void               *fh,
+    int                       fhlen);
+
+/*
+ * True when fh names an object inside the backing mount of a data server this
+ * server itself serves (chimera_vfs_ds.backing_local).  In the combined
+ * topology that mount is also the one the metadata files live in.
+ */
+SYMBOL_EXPORT int chimera_vfs_pnfs_fh_is_local_ds_backing(
     const struct chimera_vfs *vfs,
     const void               *fh,
     int                       fhlen);

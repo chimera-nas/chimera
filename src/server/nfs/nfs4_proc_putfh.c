@@ -6,6 +6,7 @@
 #include "nfs4_status.h"
 #include "nfs4_state.h"
 #include "nfs4_session.h"
+#include "vfs/vfs_ref.h"
 #include "server/server.h"
 #include "nfs4_named_attr.h"
 #include "vfs/vfs_procs.h"
@@ -67,14 +68,20 @@ chimera_nfs4_putfh_getattr_complete(
 
     /* req->fh already holds the decoded (inner VFS) handle, which is also the
      * key under which open state is tracked.  A zero-link inode is only still
-     * valid if some open pins it; that open may belong to any client (the
-     * REMOVE and this PUTFH can arrive on a different connection than the
-     * OPEN), so the check is server-wide, not per-connection. */
+     * valid if something holds it.  NFSv4.0 counts NFSv4 open state alone.
+     * From NFSv4.1 on the VFS's account also counts, which covers a layout (a
+     * layout is a reference, and LAYOUTRETURN needs this PUTFH), and an open
+     * from another protocol.  Either may belong to any client (the REMOVE and
+     * this PUTFH can arrive on a different connection than the OPEN), so the
+     * check is server-wide, not per-connection. */
     (void) args;
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_NLINK) &&
         attr->va_nlink == 0 &&
         !nfs4_clients_have_open_state(&req->thread->shared->nfs4_shared_clients,
-                                      req->fh, req->fhlen)) {
+                                      req->fh, req->fhlen) &&
+        !(req->minorversion >= 1 &&
+          chimera_vfs_ref_unlinked_referenced(req->thread->shared->vfs,
+                                              req->fh, (uint16_t) req->fhlen))) {
         res->status = NFS4ERR_STALE;
         chimera_nfs4_compound_complete(req, res->status);
         return;

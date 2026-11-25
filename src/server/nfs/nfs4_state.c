@@ -11,6 +11,7 @@
 #include "nfs4_callback.h"
 #include "nfs4_session.h"
 #include "nfs4_layout_table.h"
+#include "nfs4_cb.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_release.h"
 
@@ -1404,15 +1405,18 @@ nfs_layout_state_find(
 
 struct nfs_layout_state *
 nfs_layout_state_create(
-    struct nfs_client       *client,
-    const uint8_t           *fh,
-    uint16_t                 fh_len,
-    uint16_t                 export_id,
-    uint32_t                 iomode,
-    uint32_t                 client_short_id,
-    struct nfs_state_table  *table,
-    struct nfs_layout_table *layout_table,
-    struct stateid4         *out_stateid)
+    struct nfs_client               *client,
+    const uint8_t                   *fh,
+    uint16_t                         fh_len,
+    uint16_t                         export_id,
+    uint32_t                         iomode,
+    uint32_t                         client_short_id,
+    struct nfs_state_table          *table,
+    struct nfs_layout_table         *layout_table,
+    struct stateid4                 *out_stateid,
+    struct chimera_vfs_thread       *vfs_thread,
+    struct chimera_vfs_open_handle **handle,
+    nfsstat4                        *status)
 {
     struct nfs_layout_state *st;
     uint8_t                  shard;
@@ -1424,6 +1428,25 @@ nfs_layout_state_create(
 
     st = calloc(1, sizeof(*st));
     chimera_nfs_abort_if(st == NULL, "layout_state alloc OOM");
+
+    /* The reference comes first, before anything is published: a file whose
+     * last real reference is this very open, or whose purge has begun, gets no
+     * layout, and the refusal leaves nothing to undo. */
+    if (handle && *handle) {
+        enum chimera_vfs_error verr;
+
+        st->recall.fn  = nfs4_layout_vfs_recall;
+        st->recall.arg = layout_table;
+
+        verr = chimera_vfs_ref_make_recallable(vfs_thread, *handle, &st->recall);
+        if (verr != CHIMERA_VFS_OK) {
+            *status = (verr == CHIMERA_VFS_ESTALE) ? NFS4ERR_STALE : NFS4ERR_LAYOUTUNAVAILABLE;
+            free(st);
+            return NULL;
+        }
+        st->handle = *handle;
+        *handle = NULL;
+    }
 
     rc = nfs_state_table_alloc(table, NFS4_SLOT_TYPE_LAYOUT, &shard, &slot_idx, &gen);
     chimera_nfs_abort_if(rc != 0, "state table exhausted");
@@ -1448,26 +1471,43 @@ nfs_layout_state_create(
     evpl_mutex_unlock(&client->lock);
 
     /* Publish into the server-wide fh->holder index so a conflicting op from
-     * any client can find and recall this layout. */
-    nfs_layout_table_register(layout_table, st);
+     * any client can find and recall this layout.  A recall already in
+     * progress on the file refuses it: undo the state taken above, which
+     * releases the reference too. */
+    if (nfs_layout_table_register(layout_table, st) != NFS4_OK) {
+        st->global_table = NULL;
+        nfs_layout_state_destroy(st, table, vfs_thread);
+        *status = NFS4ERR_RECALLCONFLICT;
+        return NULL;
+    }
 
     nfs4_stateid_encode(out_stateid, st->seqid, NFS4_STATEID_TYPE_LAYOUT,
                         shard, slot_idx, gen, client_short_id);
     return st;
 } /* nfs_layout_state_create */
 
-void
+nfsstat4
 nfs_layout_state_bump(
     struct nfs_layout_state *st,
     uint32_t                 client_short_id,
     struct stateid4         *out_stateid)
 {
     /* RFC 8881 §12.5.3: the server owns the layout stateid seqid and advances
-     * it on each successful LAYOUTGET / LAYOUTRETURN. */
-    st->seqid = nfs4_stateid_seqid_next(st->seqid);
+     * it on each successful LAYOUTGET / LAYOUTRETURN.  While a recall is
+     * outstanding on the file the layout is not advanced (§12.5.5.2). */
+    if (st->global_table) {
+        nfsstat4 status = nfs_layout_table_advance(st->global_table, st);
+
+        if (status != NFS4_OK) {
+            return status;
+        }
+    } else {
+        st->seqid = nfs4_stateid_seqid_next(st->seqid);
+    }
     nfs4_stateid_encode(out_stateid, st->seqid, NFS4_STATEID_TYPE_LAYOUT,
                         st->shard, st->slot_idx, st->generation,
                         client_short_id);
+    return NFS4_OK;
 } /* nfs_layout_state_bump */
 
 static void
@@ -1479,8 +1519,6 @@ layout_state_destroy_locked(
 {
     uint8_t  prev_destroyed;
     uint32_t prev;
-
-    (void) vfs_thread;
 
     prev_destroyed = atomic_exchange_explicit(&st->destroyed, 1,
                                               memory_order_acq_rel);
@@ -1495,6 +1533,15 @@ layout_state_destroy_locked(
     }
 
     HASH_DEL(client->layouts_by_fh, st);
+
+    /* The layout's reference on the file goes with it.  The last reference on
+     * an unlinked file lets the VFS purge its data.  The VFS takes only its
+     * own shard lock here and never calls back under it, so holding the
+     * client's lock across this is safe. */
+    if (st->handle) {
+        chimera_vfs_ref_release_recallable(vfs_thread, &st->recall);
+        st->handle = NULL;
+    }
 
     nfs_state_table_free_slot(table, st->shard, st->slot_idx);
 

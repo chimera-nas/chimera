@@ -1795,7 +1795,18 @@ nfs4_session_bind_conn(
             /* Already bound to this session. */
             return;
         }
-        /* Bound to a different session -- unbind the old one. */
+        /* Bound to a different session -- unbind the old one.  If the
+         * connection was the old one's backchannel, the old session can no
+         * longer be found from the connection, so mark the new binding for the
+         * sweep in nfs4_session_unbind_conn. */
+        {
+            struct nfs4_session *old = existing;
+
+            if (old->nfs4_session_backchannel_conn == conn ||
+                old->nfs4_session_conn_rebound) {
+                session->nfs4_session_conn_rebound = true;
+            }
+        }
         nfs4_session_put((struct nfs4_session *) existing);
     } else if (magic == NLM_CLIENT_MAGIC) {
         /* NLM and NFS4 should never share a conn (different ports). */
@@ -1809,7 +1820,9 @@ nfs4_session_bind_conn(
 } /* nfs4_session_bind_conn */
 
 void
-nfs4_session_unbind_conn(struct evpl_rpc2_conn *conn)
+nfs4_session_unbind_conn(
+    struct nfs4_client_table *table,
+    struct evpl_rpc2_conn    *conn)
 {
     void                *existing;
     uint32_t             magic = 0;
@@ -1830,17 +1843,32 @@ nfs4_session_unbind_conn(struct evpl_rpc2_conn *conn)
     session = (struct nfs4_session *) existing;
     /* Drop the backchannel pointer if this was the conn carrying it, so a
      * later recall does not send on a dead connection, and mark the client's
-     * callback path down if it rode this session (nfs4_cb_backchannel_lost).
-     * Only the session the connection was last bound to is seen here.  A
-     * session whose backchannel is this connection but which has since been
-     * replaced on it (CREATE_SESSION or SEQUENCE for another session over the
-     * same connection) keeps nfs4_session_backchannel_conn pointing at it, and
-     * libevpl frees the connection once this notify returns: that pointer
-     * dangles, the path stays UP, and the next recall over it is a
-     * use-after-free.  See the field comment in nfs4_session.h. */
+     * callback path down if it rode this session (nfs4_cb_backchannel_lost). */
     if (session->nfs4_session_backchannel_conn == conn) {
         session->nfs4_session_backchannel_conn = NULL;
         nfs4_cb_backchannel_lost(session);
+    }
+
+    /* A connection records only the session it was last bound to.  One that
+     * was moved off a session carrying its backchannel (CREATE_SESSION or
+     * SEQUENCE for another session over the same connection) is freed by
+     * libevpl once this notify returns while that earlier session still names
+     * it, and the next recall over that session, a layout recall retry for one,
+     * would send on freed memory.  Clear every such session.  This runs on the
+     * thread that owns the connection, which is also the one a recall over it
+     * is sent from. */
+    if (session->nfs4_session_conn_rebound) {
+        struct nfs4_session *cur, *tmp;
+
+        evpl_mutex_lock(&table->nfs4_ct_lock);
+        HASH_ITER(nfs4_session_hh, table->nfs4_ct_sessions, cur, tmp)
+        {
+            if (cur->nfs4_session_backchannel_conn == conn) {
+                cur->nfs4_session_backchannel_conn = NULL;
+                nfs4_cb_backchannel_lost(cur);
+            }
+        }
+        evpl_mutex_unlock(&table->nfs4_ct_lock);
     }
     evpl_rpc2_conn_set_private_data(conn, NULL);
     nfs4_session_put(session);

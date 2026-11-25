@@ -164,6 +164,16 @@ add_test(chimera/vfs/mount_tree_test vfs_mount_tree_test)
 set_tests_properties(chimera/vfs/mount_tree_test PROPERTIES TIMEOUT 60)
 set(CHIMERA_TEST_TIER "${_mount_tree_saved_tier}")
 
+# The open cache's bookkeeping for files unlinked while referenced is driven
+# from many threads at once and is outside the protocol models.
+add_executable(vfs_unlinked_ref_test vfs_unlinked_ref_test.c)
+target_link_libraries(vfs_unlinked_ref_test chimera_vfs evpl)
+set(_unlinked_saved_tier "${CHIMERA_TEST_TIER}")
+set(CHIMERA_TEST_TIER quick)
+add_test(chimera/vfs/unlinked_ref_test vfs_unlinked_ref_test)
+set_tests_properties(chimera/vfs/unlinked_ref_test PROPERTIES TIMEOUT 120)
+set(CHIMERA_TEST_TIER "${_unlinked_saved_tier}")
+
 add_executable(vfs_umount_wait_test vfs_umount_wait_test.c)
 target_link_libraries(vfs_umount_wait_test chimera_vfs evpl)
 add_test(chimera/vfs/umount_wait_test vfs_umount_wait_test)

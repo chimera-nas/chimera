@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "nfs4_cb.h"
 #include "nfs4_drc.h"
 #include "nfs4_lease.h"
 #include "nfs4_recovery.h"
@@ -278,6 +279,11 @@ nfs_lease_sweep_once(struct chimera_server_nfs_thread *thread)
     }
     free(forget_ids);
 #endif /* ifndef __clang_analyzer__ */
+
+    /* A layout recall unanswered for two lease periods loses that layout
+     * alone; the client keeps its lease.  Bounds SETATTR's truncate and a
+     * pNFS file's data. */
+    nfs4_cb_revoke_overdue_layouts(thread);
 
     /* Record that this instance was alive (see nfs_recovery_heartbeat). */
     nfs_recovery_heartbeat(&thread->shared->nfs4_recovery, thread->vfs_thread);

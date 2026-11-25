@@ -328,6 +328,11 @@ chimera_vfs_umount_progress(struct chimera_vfs_request *request)
     uint64_t                        referenced;
     int                             fence_wait = 0;
 
+    /* A reference the holder agreed to give back must not keep the mount: ask
+     * for it before waiting on anything.  Each is asked at most once, so this
+     * is cheap to repeat on every pass. */
+    chimera_vfs_unlinked_recall_mount(vfs, request->umount.mount->root_fh);
+
     /* Held across the sweeps so a close completing inline cannot finish the
      * umount while handles are still being issued. */
     request->umount.pending_closes++;

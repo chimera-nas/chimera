@@ -10,6 +10,7 @@
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
 #include "vfs_notify.h"
+#include "vfs_unlink_track.h"
 #include "sdk/vfs_access.h"
 #include "sdk/vfs_acl.h"
 #include "common/macros.h"
@@ -705,8 +706,8 @@ chimera_vfs_rename_at_toolong(
     callback(status, NULL, NULL, NULL, NULL, arg);
 } /* chimera_vfs_rename_at_toolong */
 
-SYMBOL_EXPORT void
-chimera_vfs_rename_at(
+static void
+chimera_vfs_rename_at_checked(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
     const void                      *fh,
@@ -729,55 +730,6 @@ chimera_vfs_rename_at(
 {
     struct chimera_vfs_module         *module;
     struct chimera_vfs_rename_at_gate *gate;
-
-    /* POSIX: renaming to/from "." or ".." is invalid (EINVAL); a final
-     * component longer than {NAME_MAX} is ENAMETOOLONG. */
-    if ((namelen == 1 && name[0] == '.') ||
-        (namelen == 2 && name[0] == '.' && name[1] == '.') ||
-        (new_namelen == 1 && new_name[0] == '.') ||
-        (new_namelen == 2 && new_name[0] == '.' && new_name[1] == '.')) {
-        callback(CHIMERA_VFS_EINVAL, NULL, NULL, NULL, NULL, private_data);
-        return;
-    }
-
-    /* As on Linux, a mount point can be neither renamed nor replaced while
-     * something is mounted on it. */
-    if (chimera_vfs_mount_table_cover_root(thread->vfs->mount_table, fh, fhlen,
-                                           name, namelen, NULL, NULL, NULL) == 0 ||
-        chimera_vfs_mount_table_cover_root(thread->vfs->mount_table, new_fh, new_fhlen,
-                                           new_name, new_namelen, NULL, NULL, NULL) == 0) {
-        callback(CHIMERA_VFS_EBUSY, NULL, NULL, NULL, NULL, private_data);
-        return;
-    }
-
-    /* Both names are bounded before dispatch, but the VERDICT is not
-     * unconditionally ENAMETOOLONG: search permission on the directory holding
-     * the over-long name is owed first (chimera_vfs_name_too_long_fh).  When
-     * both are over-long POSIX orders neither, so the source directory decides.
-     */
-    if (namelen >= CHIMERA_VFS_NAME_MAX) {
-        chimera_vfs_name_too_long_fh(thread, cred, fh, fhlen,
-                                     chimera_vfs_rename_at_toolong,
-                                     callback, private_data);
-        return;
-    }
-
-    if (new_namelen >= CHIMERA_VFS_NAME_MAX) {
-        chimera_vfs_name_too_long_fh(thread, cred, new_fh, new_fhlen,
-                                     chimera_vfs_rename_at_toolong,
-                                     callback, private_data);
-        return;
-    }
-
-    /* POSIX rename(2): the source and destination must be on the same file
-     * system.  A file handle's first CHIMERA_VFS_MOUNT_ID_SIZE bytes are its
-     * mount id; differing source- and destination-directory mount ids mean the
-     * rename would span mounts -> EXDEV (pjd rename/15). */
-    if (fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE && new_fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE &&
-        memcmp(fh, new_fh, CHIMERA_VFS_MOUNT_ID_SIZE) != 0) {
-        callback(CHIMERA_VFS_EXDEV, NULL, NULL, NULL, NULL, private_data);
-        return;
-    }
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
@@ -830,4 +782,274 @@ chimera_vfs_rename_at(
                                    target_fh, target_fh_len, flags, pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,
                                    op_handle, callback, private_data);
+} /* chimera_vfs_rename_at_checked */
+
+
+/*
+ * A regular file that a rename replaces is tracked like one that an unlink
+ * removes (see vfs_unlink_track.h): the replaced target is pinned before the
+ * rename and its link count read through the pin afterwards.  A rename onto the
+ * same file, or onto another link of it, replaces nothing and is left alone.
+ */
+struct chimera_vfs_rename_at_tracked {
+    struct chimera_vfs_thread       *thread;
+    const struct chimera_vfs_cred   *cred;
+    const void                      *fh;
+    int                              fhlen;
+    const char                      *name;
+    int                              namelen;
+    const void                      *new_fh;
+    int                              new_fhlen;
+    const char                      *new_name;
+    int                              new_namelen;
+    const uint8_t                   *target_fh;
+    int                              target_fh_len;
+    unsigned int                     flags;
+    uint64_t                         pre_attr_mask;
+    uint64_t                         post_attr_mask;
+    const uint8_t                   *parent_lease_skip;
+    struct chimera_vfs_open_handle  *op_handle;
+    chimera_vfs_rename_at_callback_t callback;
+    void                            *private_data;
+    struct chimera_vfs_unlink_victim victim;
+    struct chimera_vfs_unlink_pin   *pin;
+    enum chimera_vfs_error           status;
+    /* Copies of the reply's attributes, minus the pointers they may carry. */
+    struct chimera_vfs_attrs         attr[4];
+    int                              have[4];
+};
+
+static void
+chimera_vfs_rename_at_tracked_go(
+    struct chimera_vfs_rename_at_tracked *t,
+    chimera_vfs_rename_at_callback_t      callback,
+    void                                 *private_data)
+{
+    chimera_vfs_rename_at_checked(t->thread, t->cred, t->fh, t->fhlen, t->name, t->namelen,
+                                  t->new_fh, t->new_fhlen, t->new_name, t->new_namelen,
+                                  t->target_fh, t->target_fh_len, t->flags, t->pre_attr_mask,
+                                  t->post_attr_mask, t->parent_lease_skip, t->op_handle,
+                                  callback, private_data);
+} /* chimera_vfs_rename_at_tracked_go */
+
+static void
+chimera_vfs_rename_at_tracked_replied(void *private_data)
+{
+    struct chimera_vfs_rename_at_tracked *t        = private_data;
+    chimera_vfs_rename_at_callback_t      callback = t->callback;
+    void                                 *arg      = t->private_data;
+    enum chimera_vfs_error                status   = t->status;
+    struct chimera_vfs_attrs              attr[4];
+    int                                   have[4];
+
+    memcpy(attr, t->attr, sizeof(attr));
+    memcpy(have, t->have, sizeof(have));
+    free(t);
+
+    callback(status, have[0] ? &attr[0] : NULL, have[1] ? &attr[1] : NULL,
+             have[2] ? &attr[2] : NULL, have[3] ? &attr[3] : NULL, arg);
+} /* chimera_vfs_rename_at_tracked_replied */
+
+static void
+chimera_vfs_rename_at_tracked_renamed(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *fromdir_pre_attr,
+    struct chimera_vfs_attrs *fromdir_post_attr,
+    struct chimera_vfs_attrs *todir_pre_attr,
+    struct chimera_vfs_attrs *todir_post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_rename_at_tracked *t     = private_data;
+    struct chimera_vfs_attrs             *in[4] = { fromdir_pre_attr, fromdir_post_attr, todir_pre_attr, todir_post_attr
+    };
+
+    t->status = error_code;
+
+    for (int i = 0; i < 4; i++) {
+        t->have[i] = in[i] != NULL;
+        if (in[i]) {
+            t->attr[i]              = *in[i];
+            t->attr[i].va_acl       = NULL;
+            t->attr[i].va_owner_sid = NULL;
+            t->attr[i].va_group_sid = NULL;
+            t->attr[i].va_set_mask &= ~(uint64_t) (CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_OWNER_SID |
+                                                   CHIMERA_VFS_ATTR_GROUP_SID);
+        }
+    }
+
+    chimera_vfs_unlink_pin_finish(t->pin, error_code, chimera_vfs_rename_at_tracked_replied, t);
+} /* chimera_vfs_rename_at_tracked_renamed */
+
+static void
+chimera_vfs_rename_at_tracked_pinned(
+    struct chimera_vfs_unlink_pin *pin,
+    void                          *private_data)
+{
+    struct chimera_vfs_rename_at_tracked *t = private_data;
+
+    if (!pin) {
+        chimera_vfs_rename_at_tracked_go(t, t->callback, t->private_data);
+        free(t);
+        return;
+    }
+
+    t->pin = pin;
+    chimera_vfs_rename_at_tracked_go(t, chimera_vfs_rename_at_tracked_renamed, t);
+} /* chimera_vfs_rename_at_tracked_pinned */
+
+static void
+chimera_vfs_rename_at_tracked_source(
+    int                                     found,
+    const struct chimera_vfs_unlink_victim *source,
+    void                                   *private_data)
+{
+    struct chimera_vfs_rename_at_tracked *t = private_data;
+
+    /* The source resolving to the victim's own handle means the two names are
+     * links of one file: the rename replaces nothing. */
+    if (found && source->fh_len == t->victim.fh_len &&
+        memcmp(source->fh, t->victim.fh, source->fh_len) == 0) {
+        chimera_vfs_rename_at_tracked_pinned(NULL, t);
+        return;
+    }
+
+    chimera_vfs_unlink_pin_take(t->thread, t->cred, &t->victim, chimera_vfs_rename_at_tracked_pinned, t);
+} /* chimera_vfs_rename_at_tracked_source */
+
+static void
+chimera_vfs_rename_at_tracked_victim(
+    int                                     found,
+    const struct chimera_vfs_unlink_victim *victim,
+    void                                   *private_data)
+{
+    struct chimera_vfs_rename_at_tracked *t = private_data;
+
+    if (!found || (victim->type_known && !victim->regular)) {
+        /* Nothing is replaced, or what is replaced is not a regular file. */
+        chimera_vfs_rename_at_tracked_pinned(NULL, t);
+        return;
+    }
+
+    t->victim = *victim;
+
+    chimera_vfs_unlink_victim_lookup(t->thread, t->cred, t->fh, t->fhlen, t->name, t->namelen,
+                                     chimera_vfs_rename_at_tracked_source, t);
+} /* chimera_vfs_rename_at_tracked_victim */
+
+SYMBOL_EXPORT void
+chimera_vfs_rename_at(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const void                      *fh,
+    int                              fhlen,
+    const char                      *name,
+    int                              namelen,
+    const void                      *new_fh,
+    int                              new_fhlen,
+    const char                      *new_name,
+    int                              new_namelen,
+    const uint8_t                   *target_fh,
+    int                              target_fh_len,
+    unsigned int                     flags,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    struct chimera_vfs_open_handle  *op_handle,
+    chimera_vfs_rename_at_callback_t callback,
+    void                            *private_data)
+{
+    struct chimera_vfs_rename_at_tracked *t;
+
+    /* POSIX: renaming to/from "." or ".." is invalid (EINVAL); a final
+     * component longer than {NAME_MAX} is ENAMETOOLONG. */
+    if ((namelen == 1 && name[0] == '.') ||
+        (namelen == 2 && name[0] == '.' && name[1] == '.') ||
+        (new_namelen == 1 && new_name[0] == '.') ||
+        (new_namelen == 2 && new_name[0] == '.' && new_name[1] == '.')) {
+        callback(CHIMERA_VFS_EINVAL, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
+    /* As on Linux, a mount point can be neither renamed nor replaced while
+     * something is mounted on it. */
+    if (chimera_vfs_mount_table_cover_root(thread->vfs->mount_table, fh, fhlen,
+                                           name, namelen, NULL, NULL, NULL) == 0 ||
+        chimera_vfs_mount_table_cover_root(thread->vfs->mount_table, new_fh, new_fhlen,
+                                           new_name, new_namelen, NULL, NULL, NULL) == 0) {
+        callback(CHIMERA_VFS_EBUSY, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
+    /* Both names are bounded before dispatch, but the VERDICT is not
+     * unconditionally ENAMETOOLONG: search permission on the directory holding
+     * the over-long name is owed first (chimera_vfs_name_too_long_fh).  When
+     * both are over-long POSIX orders neither, so the source directory decides.
+     */
+    if (namelen >= CHIMERA_VFS_NAME_MAX) {
+        chimera_vfs_name_too_long_fh(thread, cred, fh, fhlen,
+                                     chimera_vfs_rename_at_toolong,
+                                     callback, private_data);
+        return;
+    }
+
+    if (new_namelen >= CHIMERA_VFS_NAME_MAX) {
+        chimera_vfs_name_too_long_fh(thread, cred, new_fh, new_fhlen,
+                                     chimera_vfs_rename_at_toolong,
+                                     callback, private_data);
+        return;
+    }
+
+    /* POSIX rename(2): the source and destination must be on the same file
+     * system.  A file handle's first CHIMERA_VFS_MOUNT_ID_SIZE bytes are its
+     * mount id; differing source- and destination-directory mount ids mean the
+     * rename would span mounts -> EXDEV (pjd rename/15). */
+    if (fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE && new_fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE &&
+        memcmp(fh, new_fh, CHIMERA_VFS_MOUNT_ID_SIZE) != 0) {
+        callback(CHIMERA_VFS_EXDEV, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
+    if (!chimera_vfs_unlink_track_wanted(thread, new_fh, new_fhlen, new_name, new_namelen) ||
+        target_fh_len > CHIMERA_VFS_FH_SIZE) {
+        chimera_vfs_rename_at_checked(thread, cred, fh, fhlen, name, namelen, new_fh, new_fhlen,
+                                      new_name, new_namelen, target_fh, target_fh_len, flags,
+                                      pre_attr_mask, post_attr_mask, parent_lease_skip,
+                                      op_handle, callback, private_data);
+        return;
+    }
+
+    t = calloc(1, sizeof(*t));
+
+    t->thread            = thread;
+    t->cred              = cred;
+    t->fh                = fh;
+    t->fhlen             = fhlen;
+    t->name              = name;
+    t->namelen           = namelen;
+    t->new_fh            = new_fh;
+    t->new_fhlen         = new_fhlen;
+    t->new_name          = new_name;
+    t->new_namelen       = new_namelen;
+    t->target_fh         = target_fh;
+    t->target_fh_len     = target_fh_len;
+    t->flags             = flags;
+    t->pre_attr_mask     = pre_attr_mask;
+    t->post_attr_mask    = post_attr_mask;
+    t->parent_lease_skip = parent_lease_skip;
+    t->op_handle         = op_handle;
+    t->callback          = callback;
+    t->private_data      = private_data;
+
+    if (target_fh && target_fh_len > 0) {
+        struct chimera_vfs_unlink_victim victim;
+
+        memset(&victim, 0, sizeof(victim));
+        memcpy(victim.fh, target_fh, target_fh_len);
+        victim.fh_len = (uint16_t) target_fh_len;
+        chimera_vfs_rename_at_tracked_victim(1, &victim, t);
+        return;
+    }
+
+    chimera_vfs_unlink_victim_lookup(thread, cred, new_fh, new_fhlen, new_name, new_namelen,
+                                     chimera_vfs_rename_at_tracked_victim, t);
 } /* chimera_vfs_rename_at */

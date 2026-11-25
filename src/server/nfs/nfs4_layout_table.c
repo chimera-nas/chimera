@@ -7,7 +7,9 @@
 #include <string.h>
 
 #include "nfs4_layout_table.h"
+#include "nfs4_lease.h"
 #include "nfs4_state.h"
+#include "nfs4_stateid.h"
 #include "nfs_internal.h"
 
 /* FNV-1a over the file handle; the low bits pick the shard. */
@@ -63,7 +65,7 @@ nfs_layout_table_destroy(struct nfs_layout_table *table)
     }
 } /* nfs_layout_table_destroy */
 
-void
+nfsstat4
 nfs_layout_table_register(
     struct nfs_layout_table *table,
     struct nfs_layout_state *ls)
@@ -74,6 +76,16 @@ nfs_layout_table_register(
     evpl_mutex_lock(&shard->lock);
 
     HASH_FIND(hh, shard->by_fh, ls->fh, ls->fh_len, e);
+
+    /* A recall is outstanding on this file: it has already snapshotted the
+     * holders it will call back, so a holder added now would be neither
+     * recalled nor revoked.  Decided here, under the lock the snapshot takes,
+     * so the check and the insert cannot be separated by a recall starting. */
+    if (e && e->waiters) {
+        evpl_mutex_unlock(&shard->lock);
+        return NFS4ERR_RECALLCONFLICT;
+    }
+
     if (!e) {
         e = calloc(1, sizeof(*e));
         memcpy(e->fh, ls->fh, ls->fh_len);
@@ -85,7 +97,30 @@ nfs_layout_table_register(
     e->holders      = ls;
 
     evpl_mutex_unlock(&shard->lock);
+    return NFS4_OK;
 } /* nfs_layout_table_register */
+
+nfsstat4
+nfs_layout_table_advance(
+    struct nfs_layout_table *table,
+    struct nfs_layout_state *ls)
+{
+    struct nfs_layout_shard *shard = &table->shards[layout_shard_index(ls->fh, ls->fh_len)];
+    struct nfs_layout_entry *e;
+    nfsstat4                 status = NFS4_OK;
+
+    evpl_mutex_lock(&shard->lock);
+
+    HASH_FIND(hh, shard->by_fh, ls->fh, ls->fh_len, e);
+    if (e && e->waiters) {
+        status = NFS4ERR_RECALLCONFLICT;
+    } else {
+        ls->seqid = nfs4_stateid_seqid_next(ls->seqid);
+    }
+
+    evpl_mutex_unlock(&shard->lock);
+    return status;
+} /* nfs_layout_table_advance */
 
 void
 nfs_layout_table_deregister(
@@ -145,22 +180,37 @@ nfs_layout_table_recall_prepare(
     struct nfs_layout_shard *shard = &table->shards[layout_shard_index(fh, fh_len)];
     struct nfs_layout_entry *e;
     struct nfs_layout_state *ls;
-    int                      n = 0;
+    int                      n      = 0;
+    uint64_t                 now_ns = nfs_lease_now_ns();
 
     evpl_mutex_lock(&shard->lock);
 
     HASH_FIND(hh, shard->by_fh, fh, fh_len, e);
     if (!e || !e->holders) {
         evpl_mutex_unlock(&shard->lock);
+        return -1;
+    }
+
+    /* Defer the caller behind this file's recall (or join the one already
+     * active), and snapshot holders no batch has taken yet, pinned, so the
+     * caller can recall each outside the lock. */
+    if (waiter) {
+        waiter->next = e->waiters;
+        e->waiters   = waiter;
+    } else if (!e->waiters) {
+        /* A further batch of a recall that has since completed (every holder
+         * left and the barrier fired); a holder now present was granted after
+         * it and must not be recalled by a stale loop. */
+        evpl_mutex_unlock(&shard->lock);
         return 0;
     }
 
-    /* Defer the caller behind this file's recall, and snapshot the current
-     * holders (pinned) so the caller can recall each outside the lock. */
-    waiter->next = e->waiters;
-    e->waiters   = waiter;
-
     for (ls = e->holders; ls && n < max_holders; ls = ls->global_next) {
+        if (ls->recall_snapped) {
+            continue;
+        }
+        ls->recall_snapped    = 1;
+        ls->recall_snapped_ns = now_ns;
         nfs_layout_state_get(ls);
         out_holders[n++] = ls;
     }
@@ -190,3 +240,95 @@ nfs_layout_table_recall_active(
     evpl_mutex_unlock(&shard->lock);
     return active;
 } /* nfs_layout_table_recall_active */
+
+bool
+nfs_layout_table_has_holders(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len)
+{
+    struct nfs_layout_shard *shard = &table->shards[layout_shard_index(fh, fh_len)];
+    struct nfs_layout_entry *e;
+    bool                     held;
+
+    evpl_mutex_lock(&shard->lock);
+    HASH_FIND(hh, shard->by_fh, fh, fh_len, e);
+    held = (e && e->holders);
+    evpl_mutex_unlock(&shard->lock);
+    return held;
+} /* nfs_layout_table_has_holders */
+
+struct nfs_layout_recall_waiter *
+nfs_layout_table_take_waiter(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len,
+    bool (                  *match )(
+        const struct nfs_layout_recall_waiter *w,
+        const void                            *key),
+    const void              *key)
+{
+    struct nfs_layout_shard          *shard = &table->shards[layout_shard_index(fh, fh_len)];
+    struct nfs_layout_entry          *e;
+    struct nfs_layout_recall_waiter **pp, *w = NULL;
+
+    evpl_mutex_lock(&shard->lock);
+    HASH_FIND(hh, shard->by_fh, fh, fh_len, e);
+    if (e) {
+        for (pp = &e->waiters; *pp; pp = &(*pp)->next) {
+            if (match(*pp, key)) {
+                w = *pp;
+                *pp = w->next;
+                w->next = NULL;
+                break;
+            }
+        }
+    }
+    evpl_mutex_unlock(&shard->lock);
+    return w;
+} /* nfs_layout_table_take_waiter */
+
+int
+nfs_layout_table_collect_overdue(
+    struct nfs_layout_table  *table,
+    uint64_t                  now_ns,
+    uint64_t                  max_age_ns,
+    struct nfs_layout_state **out,
+    int                       max)
+{
+    struct nfs_layout_entry *e, *tmp;
+    struct nfs_layout_state *ls;
+    int                      i, n = 0;
+
+    for (i = 0; i < NFS_LAYOUT_TABLE_SHARDS && n < max; i++) {
+        struct nfs_layout_shard *shard = &table->shards[i];
+
+        evpl_mutex_lock(&shard->lock);
+#ifndef __clang_analyzer__
+        HASH_ITER(hh, shard->by_fh, e, tmp)
+        {
+            if (!e->waiters) {
+                continue;
+            }
+            for (ls = e->holders; ls && n < max; ls = ls->global_next) {
+                if (ls->recall_snapped &&
+                    now_ns >= ls->recall_snapped_ns &&
+                    now_ns - ls->recall_snapped_ns >= max_age_ns) {
+                    /* The layout ref keeps only the state alive; destroy
+                     * locks the client, so pin that too.  The holder is
+                     * still linked here, so its client's teardown has not
+                     * yet run (it deregisters every holder first). */
+                    nfs_layout_state_get(ls);
+                    nfs_client_get(ls->client);
+                    out[n++] = ls;
+                }
+            }
+            if (n >= max) {
+                break;
+            }
+        }
+#endif /* ifndef __clang_analyzer__ */
+        evpl_mutex_unlock(&shard->lock);
+    }
+    return n;
+} /* nfs_layout_table_collect_overdue */

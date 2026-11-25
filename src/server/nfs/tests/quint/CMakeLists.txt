@@ -80,6 +80,42 @@ foreach(backend memfs diskfs cairn)
         LABELS "functional;fault_injection;pnfs;${backend}" TIMEOUT 90)
 endforeach()
 
+# pNFS REMOVE / RENAME over a last link (#945): every layout holder is
+# recalled and the file's data is let go only once they have all returned or
+# been revoked (see nfs4_pnfs_remove_probe.c).  One ctest per subtest.
+add_executable(nfs4_pnfs_remove_probe nfs4_pnfs_remove_probe.c)
+target_include_directories(nfs4_pnfs_remove_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_pnfs_remove_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_pnfs_remove_probe)
+foreach(sub name fanout_setattr deferred revoke_decline fanout_remove shutdown_pending last_close putfh_after_close other_link link_back rename rename_self backing_gone register_race bump_race recall_delay layoutget_orphan several_layouts nfs3_remove open_during_recall last_close_foreign layoutget_last_strong stale_after_purge umount_layout combined recallable_no_ds)
+    add_test(NAME chimera/server/nfs/pnfs/remove_${sub}
+        COMMAND $<TARGET_FILE:nfs4_pnfs_remove_probe> ${sub})
+    set_tests_properties(chimera/server/nfs/pnfs/remove_${sub} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_pnfs_remove_${sub}"
+        LABELS "functional;probe;pnfs;memfs" TIMEOUT 90)
+endforeach()
+
+# The two-lease recall deadline: a holder that accepts CB_LAYOUTRECALL and
+# never returns, or has no callback channel to be recalled over, while
+# renewing a 3 s lease, loses that layout alone.
+foreach(sub deadline_setattr deadline_remove revoke_nocb delay_deadline delay_conn_drop)
+    add_test(NAME chimera/server/nfs/pnfs/remove_${sub}
+        COMMAND $<TARGET_FILE:nfs4_pnfs_remove_probe> ${sub})
+    set_tests_properties(chimera/server/nfs/pnfs/remove_${sub} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_pnfs_remove_${sub};MBT_NFS4_LEASE_S=3"
+        LABELS "functional;probe;pnfs;memfs" TIMEOUT 120)
+endforeach()
+
+# The lease as the bound on a deferred delete: a holder that accepts the
+# recall and goes silent is reaped after a short lease and courtesy period.
+add_test(NAME chimera/server/nfs/pnfs/remove_lease
+    COMMAND $<TARGET_FILE:nfs4_pnfs_remove_probe> lease)
+set_tests_properties(chimera/server/nfs/pnfs/remove_lease PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_pnfs_remove_lease;MBT_NFS4_LEASE_S=3;MBT_NFS4_COURTESY_S=1"
+    LABELS "functional;probe;pnfs;memfs" TIMEOUT 120)
+
 # READDIR/READDIRPLUS must check read permission on the directory (#1762).
 # Every backend: the engine gate covers the engine backends, and the
 # passthroughs (linux, io_uring) enumerate through a descriptor opened

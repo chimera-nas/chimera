@@ -114,6 +114,11 @@ void nfs4_cb_thread_init(
 void nfs4_cb_thread_destroy(
     struct chimera_server_nfs_thread *thread);
 
+/* Drop the layout recall re-sends (nfs4_cb.c) still waiting on `thread`.
+ * Called as the thread is torn down, while its evpl still works. */
+void nfs4_cb_layout_retries_destroy(
+    struct chimera_server_nfs_thread *thread);
+
 /*
  * Ensure the calling client's callback path is usable, kicking a CB_NULL
  * probe if it has not been validated yet.  Must be called on the thread that
