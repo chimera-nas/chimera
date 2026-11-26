@@ -344,10 +344,13 @@ chimera_vfs_identity_worker(void *arg)
 
         /* Blocking resolution happens here, off the event loop. */
         req->status = chimera_vfs_identity_run_handlers(identity, req);
-        if (req->status == CHIMERA_VFS_IDENTITY_OK && req->cacheable) {
+        if (req->status == CHIMERA_VFS_IDENTITY_OK && req->cacheable &&
+            !chimera_vfs_identity_key_is_account(req->key)) {
             /* Populate the cache so future lookups for this identity are
              * synchronous (TTL-expiring, non-pinned).  A group goes to the
-             * group chains, never the user ones. */
+             * group chains, never the user ones.  An account answer carries
+             * no user or group record: let in, it would be cached as uid 0
+             * with an empty name. */
             if (req->result.is_group) {
                 chimera_vfs_group_cache_add(
                     identity->vfs->vfs_user_cache,

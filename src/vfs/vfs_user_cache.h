@@ -83,6 +83,8 @@ enum chimera_vfs_identity_key {
     CHIMERA_VFS_IDENTITY_BY_GID,
     CHIMERA_VFS_IDENTITY_BY_NAME,
     CHIMERA_VFS_IDENTITY_BY_SID,
+    CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT,  /* name = SID string                */
+    CHIMERA_VFS_IDENTITY_NAME_TO_ACCOUNT, /* name = "name" or "DOMAIN\\name"  */
 };
 
 /*
