@@ -31,6 +31,7 @@
  */
 
 #include "common/atomic.h"
+#include "common/pthread_util.h"
 #include "common/compiler.h"
 #include "common/test_host.h"
 #include "common/getopt.h"
@@ -4757,13 +4758,13 @@ v4_teardown_pumped(
     struct mbt_env *env,
     const char     *fsname)
 {
-    struct v4_teardown t = { .env = env, .fsname = fsname, .done = 0 };
-    struct evpl_timer  tick;
-    pthread_t          th;
-    double             deadline  = now_seconds() + 90.0;
-    int                timed_out = 0;
+    struct v4_teardown   t = { .env = env, .fsname = fsname, .done = 0 };
+    struct evpl_timer    tick;
+    evpl_native_thread_t th;
+    double               deadline  = now_seconds() + 90.0;
+    int                  timed_out = 0;
 
-    if (pthread_create(&th, NULL, v4_teardown_thread, &t) != 0) {
+    if (chimera_pthread_create(&th, NULL, v4_teardown_thread, &t) != 0) {
         mbt_env_fs_teardown(env, fsname);
         return;
     }
@@ -4783,7 +4784,7 @@ v4_teardown_pumped(
     }
 
     evpl_remove_timer(env->evpl, &tick);
-    pthread_join(th, NULL);
+    evpl_native_thread_join(th, NULL);
 } /* v4_teardown_pumped */
 
 static int
