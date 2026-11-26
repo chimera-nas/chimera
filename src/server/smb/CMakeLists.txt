@@ -13,7 +13,7 @@ add_library(chimera_smb ${CHIMERA_LIBRARY_TYPE}
     smb_proc_sparse.c smb_proc_copychunk.c smb_proc_copyoffload.c
     smb_proc_lock.c smb_proc_oplock_break.c
     smb_notify.c smb_async_interim.c smb_sharemode.c smb_ntlm.c smb_durable.c
-    smb_wbclient.c smb_account_cache.c smb_auth.c ${CHIMERA_SMB_GSS_SOURCE} smb_kerberos_identity.c
+    smb_wbclient.c smb_account_cache.c smb_lsarpc_names.c smb_auth.c ${CHIMERA_SMB_GSS_SOURCE} smb_kerberos_identity.c
 )
 
 # Generate NDR marshalling for the named-pipe RPC interfaces from their .idl
@@ -72,6 +72,13 @@ if (NOT DISABLE_TESTS)
     target_link_libraries(smb_account_cache_test chimera_vfs evpl)
     add_test(NAME chimera/server/smb/account_cache COMMAND smb_account_cache_test)
     set_tests_properties(chimera/server/smb/account_cache PROPERTIES LABELS "smb")
+
+    # Unit test for the LSARPC naming rules; compiles the module directly.
+    add_executable(smb_lsarpc_names_test tests/smb_lsarpc_names_test.c smb_lsarpc_names.c smb_account_cache.c)
+    target_include_directories(smb_lsarpc_names_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(smb_lsarpc_names_test chimera_vfs evpl)
+    add_test(NAME chimera/server/smb/lsarpc_names COMMAND smb_lsarpc_names_test)
+    set_tests_properties(chimera/server/smb/lsarpc_names PROPERTIES LABELS "smb")
 
     add_subdirectory(tests)
 endif()
