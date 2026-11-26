@@ -769,7 +769,10 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
     chimera_vfs_acl_windows_gate_install(request);
 
     if (!module || !thread->module_private[module->fh_magic]) {
-        request->status = CHIMERA_VFS_ESTALE;
+        /* A registered module whose init failed is unavailable (ENXIO), not
+         * a stale handle; see chimera_vfs_mount. */
+        request->status = (module && !vfs->module_private[module->fh_magic]) ?
+            CHIMERA_VFS_ENXIO : CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }

@@ -766,6 +766,23 @@ s3_mbt_env_fs_setup(
                     "CHIMERA_MBT_SCRATCH)\n", env->module, dir);
             _exit(77);
         }
+        if (mrc == CHIMERA_VFS_EPERM) {
+            /* name_to_handle_at worked but open_by_handle_at needs
+             * CAP_DAC_READ_SEARCH. */
+            fprintf(stderr, "SKIP: %s backend needs CAP_DAC_READ_SEARCH "
+                    "(open_by_handle_at); this process is unprivileged\n",
+                    env->module);
+            _exit(77);
+        }
+        if (mrc == CHIMERA_VFS_ENXIO) {
+            /* The module is registered but its init failed: e.g.
+             * io_uring_setup is ENOSYS under a container's default
+             * seccomp profile.  The backend does not exist here. */
+            fprintf(stderr, "SKIP: %s backend unavailable in this process "
+                    "(module init failed, e.g. io_uring_setup ENOSYS)\n",
+                    env->module);
+            _exit(77);
+        }
         if (mrc != 0) {
             fprintf(stderr, "mount %s at %s failed: status=%d\n",
                     env->module, dir, mrc);

@@ -461,6 +461,13 @@ struct diskfs_device {
     char                        name[256];
     evpl_mutex_t                lock;
 
+    /* Set by diskfs_device_open_complete to a non-zero errno when the backend
+     * open failed here -- the backend is unavailable (e.g. io_uring is
+     * seccomp-blocked, a pre-5.1 kernel, or disabled).  diskfs_init treats any
+     * device with this set as an unavailable module and returns NULL rather
+     * than aborting the daemon. */
+    int                         open_status;
+
     /* Block-mode (pNFS) device identity.  role == SM_DEV_REMOTE means this
      * device's storage lives outside this system: diskfs allocates space on it
      * and hands the layout to the block client but never opens or touches it. */
