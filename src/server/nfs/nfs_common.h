@@ -576,9 +576,21 @@ struct chimera_server_nfs_thread {
     struct nfs3_drc_waiter           *drc_mbox;   /* via waiter->qnext */
     struct nfs3_drc_waiter           *drc_held;   /* via waiter->tprev/tnext */
     struct nfs3_drc_delay_ctx        *drc_parked; /* test delay only */
+    struct nfs4_compound_gate_ctx    *compound_parked; /* test gate only */
     uint8_t                           drc_armed;
     uint8_t                           drc_timer_armed;
 };
+
+struct nfs_request;
+
+/* The request owns one reference on each session it points at.  The setter
+ * moves req->session to a new session; the release drops both references
+ * and is called from nfs_request_free. */
+void nfs4_request_set_session(
+    struct nfs_request  *req,
+    struct nfs4_session *session);
+void nfs4_request_release_sessions(
+    struct nfs_request *req);
 
 static inline struct nfs_request *
 nfs_request_alloc(
@@ -600,6 +612,7 @@ nfs_request_alloc(
     req->conn     = conn;
     req->encoding = encoding;
 
+    req->session        = NULL;
     req->replay_slot    = NULL;
     req->replay_session = NULL;
     req->replay_slot_id = 0;
@@ -625,6 +638,8 @@ nfs_request_free(
      * attach to this (now recycled) request's span. */
     otel_span_end(&req->otel);
     thread->vfs_thread->otel_parent = NULL;
+
+    nfs4_request_release_sessions(req);
 
     thread->active_requests--;
     LL_PREPEND(thread->free_requests, req);

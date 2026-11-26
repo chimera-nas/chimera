@@ -1712,8 +1712,8 @@ nfs4_destroy_session(
 
     if (session) {
         /* Drop the hash table's ref.  The session is freed only when the
-         * last conn that still caches it in private_data also drops its
-         * ref (in the disconnect notify). */
+         * last conn that still caches it in private_data and the last
+         * request that holds it have also dropped their refs. */
         nfs4_session_put(session);
     }
 
@@ -1777,12 +1777,72 @@ nfs4_session_put(struct nfs4_session *session)
 } /* nfs4_session_put */
 
 void
+nfs4_request_set_session(
+    struct nfs_request  *req,
+    struct nfs4_session *session)
+{
+    struct nfs4_session *old = req->session;
+
+    if (session == old) {
+        return;
+    }
+
+    /* Get before put so a session is never briefly unreferenced. */
+    if (session) {
+        nfs4_session_get(session);
+    }
+
+    req->session = session;
+
+    if (old) {
+        nfs4_session_put(old);
+    }
+
+    chimera_nfs_abort_if(session && atomic_load_explicit(&session->refcount,
+                                                         memory_order_relaxed) < 1,
+                         "nfs4_request_set_session: session %p has no refs",
+                         session);
+} /* nfs4_request_set_session */
+
+void
+nfs4_request_release_sessions(struct nfs_request *req)
+{
+    struct nfs4_session *session        = req->session;
+    struct nfs4_session *replay_session = req->replay_session;
+
+    req->session        = NULL;
+    req->replay_session = NULL;
+
+    if (session) {
+        nfs4_session_put(session);
+    }
+
+    if (replay_session) {
+        nfs4_session_put(replay_session);
+    }
+} /* nfs4_request_release_sessions */
+
+void
+nfs4_session_assert_conn_thread(
+    const struct chimera_server_nfs_thread *thread,
+    const struct evpl_rpc2_conn            *conn,
+    const char                             *where)
+{
+    chimera_nfs_abort_if(conn->thread != thread->rpc2_thread,
+                         "%s: conn %p belongs to rpc2 thread %p, called on %p",
+                         where, conn, conn->thread, thread->rpc2_thread);
+} /* nfs4_session_assert_conn_thread */
+
+void
 nfs4_session_bind_conn(
-    struct evpl_rpc2_conn *conn,
-    struct nfs4_session   *session)
+    struct chimera_server_nfs_thread *thread,
+    struct evpl_rpc2_conn            *conn,
+    struct nfs4_session              *session)
 {
     void    *existing;
     uint32_t magic = 0;
+
+    nfs4_session_assert_conn_thread(thread, conn, "nfs4_session_bind_conn");
 
     existing = evpl_rpc2_conn_get_private_data(conn);
 
@@ -1809,11 +1869,15 @@ nfs4_session_bind_conn(
 } /* nfs4_session_bind_conn */
 
 void
-nfs4_session_unbind_conn(struct evpl_rpc2_conn *conn)
+nfs4_session_unbind_conn(
+    struct chimera_server_nfs_thread *thread,
+    struct evpl_rpc2_conn            *conn)
 {
     void                *existing;
     uint32_t             magic = 0;
     struct nfs4_session *session;
+
+    nfs4_session_assert_conn_thread(thread, conn, "nfs4_session_unbind_conn");
 
     existing = evpl_rpc2_conn_get_private_data(conn);
 
@@ -2021,6 +2085,25 @@ nfs4_replay_principal_digest(const struct nfs_request *req)
     return h;
 } /* nfs4_replay_principal_digest */
 
+/* The request owns its own reference on the session whose slot it holds, so
+ * the slot's session outlives the request even if req->session moves on
+ * (CREATE_SESSION mid-compound) or the session is destroyed.  Dropped in
+ * nfs4_request_release_sessions. */
+static void
+nfs4_replay_take_session(
+    struct nfs_request  *req,
+    struct nfs4_session *session)
+{
+    struct nfs4_session *old = req->replay_session;
+
+    nfs4_session_get(session);
+    req->replay_session = session;
+
+    if (old) {
+        nfs4_session_put(old);
+    }
+} /* nfs4_replay_take_session */
+
 nfsstat4
 nfs4_replay_slot_acquire(
     struct nfs4_session *session,
@@ -2067,8 +2150,8 @@ nfs4_replay_slot_acquire(
                     memory_order_acq_rel, memory_order_acquire)) {
                 continue;  /* lost the race; re-read and re-evaluate */
             }
-            req->replay_slot        = slot;
-            req->replay_session     = session;
+            req->replay_slot = slot;
+            nfs4_replay_take_session(req, session);
             req->replay_slot_id     = slotid;
             req->replay_action      = NFS4_REPLAY_ACTION_NEW;
             slot->in_progress_since = nfs4_slot_now();
@@ -2110,8 +2193,8 @@ nfs4_replay_slot_acquire(
                                               slotid, cseq);
                     }
                 }
-                req->replay_slot        = slot;
-                req->replay_session     = session;
+                req->replay_slot = slot;
+                nfs4_replay_take_session(req, session);
                 req->replay_slot_id     = slotid;
                 req->replay_action      = NFS4_REPLAY_ACTION_NEW;
                 slot->in_progress_since = nfs4_slot_now();
@@ -2168,8 +2251,8 @@ nfs4_replay_slot_acquire(
                             memory_order_acq_rel, memory_order_acquire)) {
                         continue;  /* lost the race; re-read and re-evaluate */
                     }
-                    req->replay_slot        = slot;
-                    req->replay_session     = session;
+                    req->replay_slot = slot;
+                    nfs4_replay_take_session(req, session);
                     req->replay_slot_id     = slotid;
                     req->replay_action      = NFS4_REPLAY_ACTION_FROM_CACHE;
                     *out_is_replay          = true;

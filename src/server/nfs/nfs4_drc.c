@@ -320,6 +320,7 @@ nfs4_drc_rc_finish(
     bool                    ok)
 {
     ctx->done(ok, ctx->arg);
+    nfs4_session_put(ctx->session);
     free(ctx->value);
     free(ctx);
 } /* nfs4_drc_rc_finish */
@@ -429,9 +430,10 @@ nfs4_drc_persist_reclaim_complete(
     }
     ctx->vfs_thread = vfs_thread;
     ctx->session    = session;
-    ctx->key_len    = nfs_kv_session_key(ctx->key, session->nfs4_session_id);
-    ctx->done       = done;
-    ctx->arg        = arg;
+    nfs4_session_get(session);
+    ctx->key_len = nfs_kv_session_key(ctx->key, session->nfs4_session_id);
+    ctx->done    = done;
+    ctx->arg     = arg;
     chimera_vfs_get_key(vfs_thread, ctx->key, ctx->key_len,
                         nfs4_drc_rc_get_cb, ctx);
 } /* nfs4_drc_persist_reclaim_complete */

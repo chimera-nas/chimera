@@ -842,10 +842,20 @@ void nfs4_session_get(
 void nfs4_session_put(
     struct nfs4_session *session);
 void nfs4_session_bind_conn(
-    struct evpl_rpc2_conn *conn,
-    struct nfs4_session   *session);
+    struct chimera_server_nfs_thread *thread,
+    struct evpl_rpc2_conn            *conn,
+    struct nfs4_session              *session);
 void nfs4_session_unbind_conn(
-    struct evpl_rpc2_conn *conn);
+    struct chimera_server_nfs_thread *thread,
+    struct evpl_rpc2_conn            *conn);
+
+/* A connection's private_data (its bound session) is read and written without
+ * a lock because only the thread that owns the connection touches it.  Abort
+ * if thread is not that thread. */
+void nfs4_session_assert_conn_thread(
+    const struct chimera_server_nfs_thread *thread,
+    const struct evpl_rpc2_conn            *conn,
+    const char                             *where);
 bool nfs4_session_conn_associated(
     struct evpl_rpc2_conn *conn,
     struct nfs4_session   *session);

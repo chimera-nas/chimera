@@ -1065,7 +1065,7 @@ chimera_nfs_server_notify(
                     }
                 }
             } else if (magic == NFS4_SESSION_MAGIC) {
-                nfs4_session_unbind_conn(conn);
+                nfs4_session_unbind_conn(thread, conn);
             } else if (magic == NFS4_CB_CLIENT_MAGIC) {
                 /* A 4.0 outbound delegation callback connection dropped;
                  * invalidate the channel so recalls stop using a freed conn. */
@@ -1163,6 +1163,10 @@ nfs_server_thread_destroy(void *data)
     if (thread->shared->portmap_server) {
         evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->portmap_server);
     }
+
+    /* Test only: a COMPOUND parked by the test gate is an active request the
+     * drain below would wait on forever; release it unrun. */
+    nfs4_compound_gate_thread_destroy(thread);
 
     /* Drain all in-flight NFS requests before destroying RPC2 thread.
      * This prevents use-after-free when request callbacks try to free

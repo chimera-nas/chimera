@@ -229,8 +229,8 @@ chimera_nfs4_create_session(
         }
     }
 
-    nfs4_session_bind_conn(conn, session);
-    req->session = session;
+    nfs4_session_bind_conn(thread, conn, session);
+    nfs4_request_set_session(req, session);
 
     /* Persist this session's metadata so a restart can reconstruct it with the
      * same sessionid (and its owning client), letting a persistent client's

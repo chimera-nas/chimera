@@ -84,8 +84,8 @@ chimera_nfs4_setclientid_confirm(
     if (session) {
         struct nfs_client *uc = session->client_unified;
 
-        nfs4_session_bind_conn(req->conn, session);
-        req->session = session;
+        nfs4_session_bind_conn(thread, req->conn, session);
+        nfs4_request_set_session(req, session);
         nfs4_session_put(session);
 
         if (uc) {

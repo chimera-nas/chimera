@@ -124,7 +124,7 @@ chimera_nfs4_bind_conn_to_session(
      * unless it is already bound to this session).  This holds a ref before we
      * drop the lookup ref below, mirroring SEQUENCE. */
     if (bind_fore || bind_back) {
-        nfs4_session_bind_conn(req->conn, session);
+        nfs4_session_bind_conn(thread, req->conn, session);
     }
 
     if (bind_back) {
@@ -143,12 +143,12 @@ chimera_nfs4_bind_conn_to_session(
          * dispatcher took from the connection's binding when this COMPOUND
          * arrived: none on a fresh connection, or another session.  Point it
          * at the session just bound, as SEQUENCE does. */
-        req->session = session;
+        nfs4_request_set_session(req, session);
         nfs4_cb_resend_recalls_on_rebind(thread, session->client_unified, req);
     }
 
-    /* Drop the +1 from nfs4_session_lookup; the conn's ref keeps the session
-     * alive for the rest of this compound. */
+    /* Drop the +1 from nfs4_session_lookup; the request's own ref keeps the
+     * session alive for the rest of this compound. */
     nfs4_session_put(session);
 
     res->bctsr_status = NFS4_OK;
