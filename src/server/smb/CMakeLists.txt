@@ -12,7 +12,7 @@ add_library(chimera_smb ${CHIMERA_LIBRARY_TYPE}
     smb_proc_reparse.c smb_proc_object_id.c smb_proc_change_notify.c smb_proc_cancel.c
     smb_proc_sparse.c smb_proc_copychunk.c smb_proc_copyoffload.c
     smb_proc_lock.c smb_proc_oplock_break.c
-    smb_notify.c smb_async_interim.c smb_sharemode.c smb_ntlm.c smb_durable.c
+    smb_notify.c smb_async_interim.c smb_pipe.c smb_sharemode.c smb_ntlm.c smb_durable.c
     smb_wbclient.c smb_account_cache.c smb_lsarpc_names.c smb_auth.c ${CHIMERA_SMB_GSS_SOURCE} smb_kerberos_identity.c
 )
 

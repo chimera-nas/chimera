@@ -4,6 +4,7 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
+#include "smb_pipe.h"
 #include "smb_session.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_notify.h"
@@ -234,32 +235,29 @@ chimera_smb_rdma_read_callback(
 
 
 
-/*
- * DCE/RPC over a named pipe (ncacn_np), SMB2 WRITE leg: feed the written request
- * PDU through the pipe's transceive handler and stash the response for the
- * client's following SMB2 READ(s) to drain.  This is the WRITE/READ transport
- * Windows and smbtorture use, distinct from the single-shot
- * FSCTL_PIPE_TRANSCEIVE IOCTL transport.  A request PDU is assumed to arrive in
- * one WRITE (true for the small LSARPC/SRVSVC calls in scope).
- */
+/* The WRITE leg's pipe call is over (inline or after it parked): stash the
+ * reply PDU for the following READ(s), then complete the WRITE -- so a READ the
+ * client sends once the WRITE completes always finds it.
+ *
+ * Known limitation: a READ the client pipelines before this WRITE completes
+ * (while an LSARPC lookup keeps the WRITE parked) finds nothing stashed, parks
+ * as a blocking pipe READ, and nothing here wakes it -- it waits until it is
+ * cancelled or the connection ends.  Windows and Samba use WRITE and READ for
+ * the bind and FSCTL_PIPE_TRANSCEIVE for a single-PDU request, and only a
+ * lookup request can park, so they are not expected to hit this.  Serving a
+ * READ parked on the same FileId from here, once the reply is stashed, would
+ * lift the limitation. */
 static void
-chimera_smb_pipe_write(struct chimera_smb_request *request)
+chimera_smb_pipe_write_done(
+    struct chimera_smb_request *request,
+    int                         status)
 {
-    struct chimera_server_smb_thread *thread    = request->compound->thread;
-    struct evpl                      *evpl      = thread->evpl;
-    struct chimera_smb_open_file     *open_file = request->write.open_file;
-    struct evpl_iovec                 output_iov;
-    int                               status;
-
-    evpl_iovec_alloc(evpl, 65535, 8, 1, 0, &output_iov);
-
-    status = open_file->pipe_transceive(request, request->write.iov,
-                                        request->write.niov, &output_iov);
-
-    evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+    struct evpl                  *evpl       = request->compound->thread->evpl;
+    struct chimera_smb_open_file *open_file  = request->pipe.open_file;
+    struct evpl_iovec            *output_iov = &request->pipe.write_output;
 
     if (unlikely(status != 0)) {
-        evpl_iovec_release(evpl, &output_iov);
+        evpl_iovec_release(evpl, output_iov);
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
         return;
@@ -270,16 +268,35 @@ chimera_smb_pipe_write(struct chimera_smb_request *request)
     if (open_file->rpc_resp) {
         free(open_file->rpc_resp);
     }
-    open_file->rpc_resp_len = output_iov.length;
+    open_file->rpc_resp_len = output_iov->length;
     open_file->rpc_resp_off = 0;
-    open_file->rpc_resp     = malloc(output_iov.length ? output_iov.length : 1);
-    memcpy(open_file->rpc_resp, output_iov.data, output_iov.length);
+    open_file->rpc_resp     = malloc(output_iov->length ? output_iov->length : 1);
+    memcpy(open_file->rpc_resp, output_iov->data, output_iov->length);
 
-    evpl_iovec_release(evpl, &output_iov);
+    evpl_iovec_release(evpl, output_iov);
     chimera_smb_open_file_release(request, open_file);
 
     /* chimera_smb_write_reply reports request->write.length bytes accepted. */
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_pipe_write_done */
+
+/*
+ * DCE/RPC over a named pipe (ncacn_np), SMB2 WRITE leg: feed the written request
+ * PDU through the pipe's transceive handler and stash the response for the
+ * client's following SMB2 READ(s) to drain.  This is the WRITE/READ transport
+ * Windows and smbtorture use for the bind, distinct from the single-shot
+ * FSCTL_PIPE_TRANSCEIVE IOCTL transport.  A request PDU is assumed to arrive in
+ * one WRITE (true for the small LSARPC/SRVSVC calls in scope).
+ */
+static void
+chimera_smb_pipe_write(struct chimera_smb_request *request)
+{
+    evpl_iovec_alloc(request->compound->thread->evpl, 65535, 8, 1, 0,
+                     &request->pipe.write_output);
+
+    chimera_smb_pipe_call(request, request->write.open_file, request->write.iov,
+                          request->write.niov, &request->pipe.write_output,
+                          chimera_smb_pipe_write_done);
 } /* chimera_smb_pipe_write */
 
 void

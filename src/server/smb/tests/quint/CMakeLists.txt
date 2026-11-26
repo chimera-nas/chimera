@@ -228,6 +228,51 @@ if(CHIMERA_NETNS_TESTING AND WBCLIENT_FOUND)
     endif()
 endif()
 
+# LSARPC probe: MS-LSAT spoken over the "lsarpc" named pipe through both pipe
+# transports (FSCTL_PIPE_TRANSCEIVE, and SMB2 WRITE + READ) by the hand-built
+# client in smb2_lsarpc_wire.h.  The server's NDR code is generated for its own
+# end of the pipe only, so the probe compiles the generated lsarpc_ndr.c too
+# and its self-test checks the client against it; the server library's copy
+# of those symbols is hidden, so it stays bound to itself.  The generated file
+# is a custom-command output of chimera_smb, in the parent directory: mark it
+# GENERATED here and order each probe after chimera_smb, so it exists before
+# it is compiled.
+set_source_files_properties(${NDR_GEN_DIR}/lsarpc_ndr.c PROPERTIES
+    GENERATED TRUE
+    COMPILE_OPTIONS "${CHIMERA_GENERATED_C_OPTIONS}")
+
+add_executable(smb2_lsarpc_probe smb2_lsarpc_probe.c ${NDR_GEN_DIR}/lsarpc_ndr.c)
+target_include_directories(smb2_lsarpc_probe PRIVATE ${CMAKE_SOURCE_DIR}/src ${NDR_GEN_DIR})
+target_link_libraries(smb2_lsarpc_probe chimera_server chimera_metrics chimera_crypto)
+add_dependencies(smb2_lsarpc_probe chimera_smb)
+
+add_test(NAME chimera/server/smb/mbt/lsarpc_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_lsarpc_probe>)
+set_tests_properties(chimera/server/smb/mbt/lsarpc_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_lsarpc_probe_memfs"
+    LABELS "functional;probe;smb_mbt;memfs"
+    TIMEOUT 180)
+
+# The same probe against wbclient_stub.c, as a domain user the server
+# validates through winbind (see smb2_wire_probe_wbstub above).
+if(WBCLIENT_FOUND AND NOT APPLE)
+    add_executable(smb2_lsarpc_probe_wbstub smb2_lsarpc_probe.c
+        ${NDR_GEN_DIR}/lsarpc_ndr.c wbclient_stub.c)
+    target_compile_definitions(smb2_lsarpc_probe_wbstub PRIVATE SMB2W_WBSTUB=1)
+    target_include_directories(smb2_lsarpc_probe_wbstub PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${NDR_GEN_DIR} ${WBCLIENT_INCLUDE_DIRS})
+    target_link_libraries(smb2_lsarpc_probe_wbstub chimera_server chimera_metrics chimera_crypto)
+    set_target_properties(smb2_lsarpc_probe_wbstub PROPERTIES ENABLE_EXPORTS ON)
+    add_dependencies(smb2_lsarpc_probe_wbstub chimera_smb)
+
+    add_test(NAME chimera/server/smb/mbt/lsarpc_probe_wbstub
+        COMMAND $<TARGET_FILE:smb2_lsarpc_probe_wbstub> --winbind)
+    set_tests_properties(chimera/server/smb/mbt/lsarpc_probe_wbstub PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_lsarpc_probe_wbstub"
+        LABELS "functional;probe;smb_mbt;memfs"
+        TIMEOUT 180)
+endif()
+
 # FSCTL ground-truth probe: server-side copy, copy-offload tokens, block
 # cloning, reparse points and the sparse-file trio.  No trace in the corpus
 # emits an IOCTL, so this is the only test that reaches src/server/smb's

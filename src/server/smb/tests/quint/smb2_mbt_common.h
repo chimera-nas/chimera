@@ -573,6 +573,10 @@ struct smb2_notify_msg {
     struct smb2_notify_rec rec[SMB2C_MAX_NOTIFY_RECS];
 };
 
+/* A probe's hook on each final reply of a connection (smb2_conn.on_reply). */
+typedef void (*smb2_reply_hook_t)(
+    struct smb2_conn *c);
+
 struct smb2_conn {
     struct smb2_env                *env;
     int                             conn_index; /* stable per-env index (ClientGuid seed) */
@@ -627,6 +631,12 @@ struct smb2_conn {
      * "did anything of mine complete?" without having to subtract the
      * barrier's own traffic. */
     int                             nreply_app;
+    /* Optional: called with each final reply right after it is promoted into
+     * rbuf.  rbuf holds only the latest reply, and replies to requests a probe
+     * keeps in flight together can land in the same pump, so a probe that needs
+     * every one of them reads each here.  NULL (the default) for none. */
+    smb2_reply_hook_t               on_reply;
+    void                           *on_reply_arg;
 
     /* Async interim (STATUS_PENDING) accounting.  An interim tells the caller
      * the request PARKED server-side (smb_async_interim.c: the interim is sent
@@ -1221,6 +1231,9 @@ smb2c_deliver(
         if (g16(c->xbuf + 4, 12) != SMB2_ECHO) {
             c->nreply_app++;
         }
+    }
+    if (c->on_reply) {
+        c->on_reply(c);
     }
 } /* smb2c_deliver */
 

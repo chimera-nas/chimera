@@ -34,6 +34,7 @@
 #include "smb_internal.h"
 #include "smb_async_interim.h"
 #include "smb_wbclient.h"
+#include "smb_account_cache.h"
 #include "smb_procs.h"
 #include "smb_notify.h"
 #include "smb_dump.h"
@@ -249,6 +250,12 @@ chimera_smb_server_init(
          * the default NSS handler. */
         chimera_vfs_identity_register_handler(vfs, smb_wbclient_identity_handler,
                                               NULL);
+
+        /* Winbind's answers to the LSARPC account lookups, kept by SID and by
+         * name so repeated lookups do not go back to winbind. */
+        shared->account_cache = chimera_smb_account_cache_create(
+            CHIMERA_SMB_ACCOUNT_CACHE_ENTRIES, CHIMERA_SMB_ACCOUNT_CACHE_TTL);
+        chimera_smb_abort_if(!shared->account_cache, "failed to create the LSARPC account cache");
     }
     if (shared->config.auth.kerberos_enabled) {
 #ifndef CHIMERA_HAVE_GSSAPI
@@ -421,6 +428,8 @@ chimera_smb_server_destroy(void *data)
     chimera_smb_abort_if(shared->sessions, "active sessions exist at server shutdown")
 
     chimera_smb_durable_table_destroy(&shared->durable);
+
+    chimera_smb_account_cache_destroy(shared->account_cache);  /* NULL-safe */
 
     while (shared->free_sessions) {
         session = shared->free_sessions;
@@ -2950,6 +2959,7 @@ chimera_smb_server_accept(
     conn->flags              = 0;
     conn->requests_completed = 0;
     conn->async_outstanding  = 0;
+    conn->lsarpc_parked      = 0;
     conn->credits_balance    = 0;
     /* Connection.CommandSequenceWindow starts holding exactly MessageId 0 -- the
      * one implicit credit a client may use for its first request (NEGOTIATE)
