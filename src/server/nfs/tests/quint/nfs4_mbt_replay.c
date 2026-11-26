@@ -30,6 +30,7 @@
  * nfs4_replay.py, in git history -- compared raw bytes.)
  */
 
+#include "common/atomic.h"
 #include "common/compiler.h"
 #include "common/test_host.h"
 #include "common/getopt.h"
@@ -4747,7 +4748,7 @@ v4_teardown_thread(void *arg)
     struct v4_teardown *t = arg;
 
     mbt_env_fs_teardown(t->env, t->fsname);
-    __atomic_store_n(&t->done, 1, __ATOMIC_RELEASE);
+    chimera_atomic_store_n(&t->done, 1, CHIMERA_MEMORY_RELEASE);
     return NULL;
 } /* v4_teardown_thread */
 
@@ -4771,7 +4772,7 @@ v4_teardown_pumped(
      * await_recalls). */
     evpl_add_timer(env->evpl, &tick, await_tick, 50000);
 
-    while (!__atomic_load_n(&t.done, __ATOMIC_ACQUIRE)) {
+    while (!chimera_atomic_load_n(&t.done, CHIMERA_MEMORY_ACQUIRE)) {
         if (!timed_out && now_seconds() >= deadline) {
             timed_out = 1;
             fprintf(stderr,

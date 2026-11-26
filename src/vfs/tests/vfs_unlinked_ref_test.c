@@ -39,6 +39,7 @@
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/sdk/vfs_error.h"
 #include "common/logging.h"
+#include "common/atomic.h"
 #include "common/mbt_watchdog.h"
 #include "prometheus-c.h"
 
@@ -85,17 +86,17 @@ purge_hook(
     int            carrierless,
     void          *arg)
 {
-    __atomic_store_n(&hook.carrierless, carrierless, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&hook.off_main_thread, !is_main_thread, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&hook.carrierless, carrierless, CHIMERA_MEMORY_SEQ_CST);
+    chimera_atomic_store_n(&hook.off_main_thread, !is_main_thread, CHIMERA_MEMORY_SEQ_CST);
 
-    if (__atomic_load_n(&hook.stall, __ATOMIC_SEQ_CST)) {
-        __atomic_store_n(&hook.entered, 1, __ATOMIC_SEQ_CST);
-        while (!__atomic_load_n(&hook.go, __ATOMIC_SEQ_CST)) {
+    if (chimera_atomic_load_n(&hook.stall, CHIMERA_MEMORY_SEQ_CST)) {
+        chimera_atomic_store_n(&hook.entered, 1, CHIMERA_MEMORY_SEQ_CST);
+        while (!chimera_atomic_load_n(&hook.go, CHIMERA_MEMORY_SEQ_CST)) {
             usleep(1000);
         }
     }
 
-    __atomic_add_fetch(&hook.fired, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_add_fetch(&hook.fired, 1, CHIMERA_MEMORY_SEQ_CST);
 } /* purge_hook */
 
 #define WAIT_FOR(cond) \
@@ -581,17 +582,17 @@ test_estale_while_purging(struct test_ctx *ctx)
     memcpy(fh, ctx->fh, fh_len);
     CHECK(chimera_vfs_unlinked_track(ctx->vfs, fh, fh_len) == CHIMERA_VFS_OK);
 
-    __atomic_store_n(&hook.stall, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&hook.stall, 1, CHIMERA_MEMORY_SEQ_CST);
     chimera_vfs_release(ctx->vfs_thread, h);
     mark_for_close(ctx, fh);
-    WAIT_FOR(__atomic_load_n(&hook.entered, __ATOMIC_SEQ_CST));
+    WAIT_FOR(chimera_atomic_load_n(&hook.entered, CHIMERA_MEMORY_SEQ_CST));
 
     CHECK(info_of(ctx, fh, fh_len).state == CHIMERA_VFS_UNLINKED_PURGING);
     CHECK(open_fh(ctx, &ctx->root, fh, fh_len, &h2) == CHIMERA_VFS_ESTALE);
     CHECK(open_fh(ctx, &ctx->other, fh, fh_len, &h2) == CHIMERA_VFS_ESTALE);
     TEST_PASS("an open by handle is refused with ESTALE while the purge runs");
 
-    __atomic_store_n(&hook.go, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&hook.go, 1, CHIMERA_MEMORY_SEQ_CST);
     WAIT_FOR(!info_of(ctx, fh, fh_len).exists);
     CHECK(open_fh(ctx, &ctx->root, fh, fh_len, &h2) == CHIMERA_VFS_OK);
     chimera_vfs_release(ctx->vfs_thread, h2);
@@ -752,15 +753,15 @@ step_hook(
     uint16_t                       fh_len,
     void                          *arg)
 {
-    int n = __atomic_fetch_add(&stephook.nlog, 1, __ATOMIC_SEQ_CST);
+    int n = chimera_atomic_fetch_add(&stephook.nlog, 1, CHIMERA_MEMORY_SEQ_CST);
 
     if (n < 16) {
         stephook.log[n] = (int) step;
     }
 
-    if (__atomic_load_n(&stephook.stall_step, __ATOMIC_SEQ_CST) == (int) step) {
-        __atomic_store_n(&stephook.entered, 1, __ATOMIC_SEQ_CST);
-        while (!__atomic_load_n(&stephook.go, __ATOMIC_SEQ_CST)) {
+    if (chimera_atomic_load_n(&stephook.stall_step, CHIMERA_MEMORY_SEQ_CST) == (int) step) {
+        chimera_atomic_store_n(&stephook.entered, 1, CHIMERA_MEMORY_SEQ_CST);
+        while (!chimera_atomic_load_n(&stephook.go, CHIMERA_MEMORY_SEQ_CST)) {
             usleep(1000);
         }
     }
@@ -769,10 +770,10 @@ step_hook(
 static void
 step_reset(void)
 {
-    __atomic_store_n(&stephook.nlog, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&stephook.stall_step, -1, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&stephook.entered, 0, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&stephook.go, 0, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&stephook.nlog, 0, CHIMERA_MEMORY_SEQ_CST);
+    chimera_atomic_store_n(&stephook.stall_step, -1, CHIMERA_MEMORY_SEQ_CST);
+    chimera_atomic_store_n(&stephook.entered, 0, CHIMERA_MEMORY_SEQ_CST);
+    chimera_atomic_store_n(&stephook.go, 0, CHIMERA_MEMORY_SEQ_CST);
 } /* step_reset */
 
 struct snap {
@@ -1310,15 +1311,15 @@ test_purge_order_observed(struct test_ctx *ctx)
 
     /* Stalled before the recheck: nothing has been deleted yet. */
     step_reset();
-    __atomic_store_n(&stephook.stall_step, CHIMERA_VFS_UNLINKED_STEP_RECHECK, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&stephook.stall_step, CHIMERA_VFS_UNLINKED_STEP_RECHECK, CHIMERA_MEMORY_SEQ_CST);
     make_pfile(ctx, "order1", &f);
     idle_pfile(ctx, &f);
     CHECK(unlink_name(ctx, "order1") == CHIMERA_VFS_OK);
-    WAIT_FOR(__atomic_load_n(&stephook.entered, __ATOMIC_SEQ_CST));
+    WAIT_FOR(chimera_atomic_load_n(&stephook.entered, CHIMERA_MEMORY_SEQ_CST));
     i = info_of(ctx, f.fh, f.fh_len);
     CHECK(i.exists && i.state == CHIMERA_VFS_UNLINKED_PURGING);
     CHECK(backing_exists(ctx, f.backing));
-    __atomic_store_n(&stephook.go, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&stephook.go, 1, CHIMERA_MEMORY_SEQ_CST);
     WAIT_BACKING_GONE(ctx, f.backing);
     WAIT_FOR(!info_of(ctx, f.fh, f.fh_len).exists);
     TEST_PASS("the backing file is still there when the recheck starts");
@@ -1326,15 +1327,15 @@ test_purge_order_observed(struct test_ctx *ctx)
     /* Stalled before the backend close: the backing file is already gone and
      * the record still stands. */
     step_reset();
-    __atomic_store_n(&stephook.stall_step, CHIMERA_VFS_UNLINKED_STEP_BACKEND_CLOSE, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&stephook.stall_step, CHIMERA_VFS_UNLINKED_STEP_BACKEND_CLOSE, CHIMERA_MEMORY_SEQ_CST);
     make_pfile(ctx, "order2", &f);
     idle_pfile(ctx, &f);
     CHECK(unlink_name(ctx, "order2") == CHIMERA_VFS_OK);
-    WAIT_FOR(__atomic_load_n(&stephook.entered, __ATOMIC_SEQ_CST));
+    WAIT_FOR(chimera_atomic_load_n(&stephook.entered, CHIMERA_MEMORY_SEQ_CST));
     CHECK(!backing_exists(ctx, f.backing));
     i = info_of(ctx, f.fh, f.fh_len);
     CHECK(i.exists && i.state == CHIMERA_VFS_UNLINKED_PURGING);
-    __atomic_store_n(&stephook.go, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&stephook.go, 1, CHIMERA_MEMORY_SEQ_CST);
     WAIT_FOR(!info_of(ctx, f.fh, f.fh_len).exists);
     CHECK(stephook.log[0] == CHIMERA_VFS_UNLINKED_STEP_RECHECK);
     CHECK(stephook.log[1] == CHIMERA_VFS_UNLINKED_STEP_BACKING_DELETE);
@@ -1374,13 +1375,13 @@ test_open_racing_unlink(struct test_ctx *ctx)
     /* An open that arrives while the purge is stalled is refused, and what it
      * cannot do afterwards is bring the file back. */
     step_reset();
-    __atomic_store_n(&stephook.stall_step, CHIMERA_VFS_UNLINKED_STEP_BACKING_DELETE, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&stephook.stall_step, CHIMERA_VFS_UNLINKED_STEP_BACKING_DELETE, CHIMERA_MEMORY_SEQ_CST);
     make_pfile(ctx, "race2", &f);
     idle_pfile(ctx, &f);
     CHECK(unlink_name(ctx, "race2") == CHIMERA_VFS_OK);
-    WAIT_FOR(__atomic_load_n(&stephook.entered, __ATOMIC_SEQ_CST));
+    WAIT_FOR(chimera_atomic_load_n(&stephook.entered, CHIMERA_MEMORY_SEQ_CST));
     CHECK(open_fh(ctx, &ctx->other, f.fh, f.fh_len, &h2) == CHIMERA_VFS_ESTALE);
-    __atomic_store_n(&stephook.go, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&stephook.go, 1, CHIMERA_MEMORY_SEQ_CST);
     WAIT_BACKING_GONE(ctx, f.backing);
     WAIT_FOR(!info_of(ctx, f.fh, f.fh_len).exists);
     CHECK(open_fh(ctx, &ctx->other, f.fh, f.fh_len, &h2) != CHIMERA_VFS_OK);
@@ -1467,7 +1468,7 @@ holder_open_done(
 
     hd->open_status = error_code;
     hd->open_handle = oh;
-    __atomic_store_n(&hd->open_done, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_store_n(&hd->open_done, 1, CHIMERA_MEMORY_SEQ_CST);
 } /* holder_open_done */
 
 static void
@@ -1503,10 +1504,10 @@ recall_cb(
         hd->probed = 1;
     }
 
-    __atomic_add_fetch(&hd->calls, 1, __ATOMIC_SEQ_CST);
+    chimera_atomic_add_fetch(&hd->calls, 1, CHIMERA_MEMORY_SEQ_CST);
 } /* recall_cb */
 
-#define HCALLS(hd) __atomic_load_n(&(hd)->calls, __ATOMIC_SEQ_CST)
+#define HCALLS(hd) chimera_atomic_load_n(&(hd)->calls, CHIMERA_MEMORY_SEQ_CST)
 
 static void
 holder_init(
@@ -1692,7 +1693,7 @@ test_recall_reentry(struct test_ctx *ctx)
     drop_pfile(ctx, &f);
 
     WAIT_FOR(HCALLS(&hd) == 1);
-    WAIT_FOR(__atomic_load_n(&hd.open_done, __ATOMIC_SEQ_CST));
+    WAIT_FOR(chimera_atomic_load_n(&hd.open_done, CHIMERA_MEMORY_SEQ_CST));
     CHECK(hd.open_status == CHIMERA_VFS_OK);
     chimera_vfs_release(ctx->vfs_thread, hd.open_handle);
     mark_for_close(ctx, f.fh);

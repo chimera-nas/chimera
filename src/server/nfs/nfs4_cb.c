@@ -199,14 +199,18 @@ nfs4_cb_layout_retry_arm(
 void
 nfs4_cb_layout_retries_destroy(struct chimera_server_nfs_thread *thread)
 {
-    struct nfs4_cb_layout_retry *r;
+    struct nfs4_cb_layout_retry *r = thread->cb_layout_retries;
+    struct nfs4_cb_layout_retry *next;
 
-    while ((r = thread->cb_layout_retries) != NULL) {
-        nfs4_cb_layout_retry_unlink(r);
+    thread->cb_layout_retries = NULL;
+
+    while (r != NULL) {
+        next = r->next;
         evpl_remove_timer(thread->evpl, &r->timer);
         nfs_client_put(r->holder->client);
         nfs_layout_state_put(r->holder);
         free(r);
+        r = next;
     }
 } /* nfs4_cb_layout_retries_destroy */
 
