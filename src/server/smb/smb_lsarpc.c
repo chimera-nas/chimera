@@ -253,16 +253,27 @@ struct chimera_smb_lsarpc_miss_rec {
 };
 
 /*
- * A request's resolve round.  Pass 1 allocates it at the first miss; it is
- * freed just before the call is finished -- after pass 2, or once the
- * connection turns out to be gone.  Only the request's own thread touches it:
- * the resolver calls back there.
+ * A request's resolve round.  Pass 1 allocates it at the first miss.  It is
+ * freed when the call is finished -- after pass 2, or once the connection
+ * turns out to be gone -- except when the session closed first: the call is
+ * then finished early, and the last answer frees the round (see `request`).
+ * Only the request's own thread touches it: the resolver calls back there.
  */
 struct chimera_smb_lsarpc_pending {
+    /* NULL once the call was finished ahead of its answers because its
+     * session was closing (chimera_smb_lsarpc_session_closing): the answers
+     * still come, and the last one only frees this. */
     struct chimera_smb_request        *request;
+    struct chimera_server_smb_shared  *shared;
     int                                outstanding; /* guard-counted join      */
-    /* Returned ASYNC: holds an async credit and a parked slot. */
+    /* Set once the transceive returned ASYNC: the last answer then finishes
+     * the call, or only frees this.  The async credit and the parked slot
+     * taken at that point are given back by chimera_smb_lsarpc_unpark, which
+     * leaves this set. */
     int                                parked;
+    /* On conn->lsarpc_pending while parked on a live connection. */
+    struct chimera_smb_lsarpc_pending *prev;
+    struct chimera_smb_lsarpc_pending *next;
     int                                nmiss;
     int                                over_cap;    /* misses the cap left out */
     struct chimera_smb_lsarpc_miss_rec miss[CHIMERA_SMB_LSARPC_MAX_MISSES];
@@ -401,6 +412,7 @@ chimera_smb_lsarpc_record_miss(
             return;
         }
         pending->request = call->request;
+        pending->shared  = call->request->compound->thread->shared;
         call->pending    = pending;
     }
 
@@ -1130,6 +1142,63 @@ chimera_smb_lsarpc_final_pass(
     return status;
 } /* chimera_smb_lsarpc_final_pass */
 
+/* Take a parked call off its live connection: give back its async credit and
+ * its parked slot, and unlink it. */
+static void
+chimera_smb_lsarpc_unpark(
+    struct chimera_smb_conn           *conn,
+    struct chimera_smb_lsarpc_pending *pending)
+{
+    if (conn->async_outstanding) {
+        conn->async_outstanding--;
+    }
+    if (conn->lsarpc_parked) {
+        conn->lsarpc_parked--;
+    }
+    DL_DELETE(conn->lsarpc_pending, pending);
+} /* chimera_smb_lsarpc_unpark */
+
+/*
+ * A session has been taken off a live connection (LOGOFF, a SESSION_SETUP
+ * that tears the session down) by chimera_smb_conn_remove_session_handle.
+ * Every call of it still parked here is failed now, while the session can
+ * still sign or encrypt the reply: once the session handle is gone, the
+ * request has nothing left to complete under.  The resolver round cannot be
+ * called off, so its record stays behind, detached from the request, until
+ * the last answer comes and frees it.
+ *
+ * Finishing a call runs on the rest of its compound.  A request of this
+ * session there is refused, its handle being off the connection, so none can
+ * park behind this sweep; one of another session can park a lookup of its
+ * own, so the list is searched again from its head after each one.
+ */
+void
+chimera_smb_lsarpc_session_closing(
+    struct chimera_smb_conn           *conn,
+    struct chimera_smb_session_handle *session_handle)
+{
+    struct chimera_smb_lsarpc_pending *pending;
+    struct chimera_smb_request        *request;
+
+    for (;;) {
+        DL_FOREACH(conn->lsarpc_pending, pending)
+        {
+            if (pending->request &&
+                pending->request->session_handle == session_handle) {
+                break;
+            }
+        }
+        if (!pending) {
+            return;
+        }
+
+        request = pending->request;
+        chimera_smb_lsarpc_unpark(conn, pending);
+        pending->request = NULL;
+        chimera_smb_pipe_call_finish(request, -1);
+    }
+} /* chimera_smb_lsarpc_session_closing */
+
 /*
  * The last answer of a parked round is in.  Unless the connection went away
  * while the request waited, give back its async credit and its parked slot,
@@ -1138,16 +1207,26 @@ chimera_smb_lsarpc_final_pass(
  * serve another client: this code touches neither the connection nor its
  * counts, and fails the call -- the compound drops the reply.  (The
  * completion that follows still reads request->session_handle, as every async
- * completion that outlives its connection does.)  Either way the pipe call is
- * finished from here, exactly once.
+ * completion that outlives its connection does.)  A call whose session was
+ * closing was already finished by chimera_smb_lsarpc_session_closing, and
+ * only its record is left to free.  Either way the pipe call is finished
+ * exactly once.
  */
 static void
 chimera_smb_lsarpc_parked_finish(struct chimera_smb_lsarpc_pending *pending)
 {
-    struct chimera_smb_request  *request  = pending->request;
-    struct chimera_smb_compound *compound = request->compound;
-    struct chimera_smb_conn     *conn     = compound->conn;
+    struct chimera_smb_request  *request = pending->request;
+    struct chimera_smb_compound *compound;
+    struct chimera_smb_conn     *conn;
     int                          status;
+
+    if (!request) {
+        free(pending);
+        return;
+    }
+
+    compound = request->compound;
+    conn     = compound->conn;
 
     if (conn->generation != compound->conn_generation) {
         free(pending);
@@ -1155,12 +1234,7 @@ chimera_smb_lsarpc_parked_finish(struct chimera_smb_lsarpc_pending *pending)
         return;
     }
 
-    if (conn->async_outstanding) {
-        conn->async_outstanding--;
-    }
-    if (conn->lsarpc_parked) {
-        conn->lsarpc_parked--;
-    }
+    chimera_smb_lsarpc_unpark(conn, pending);
 
     status = chimera_smb_lsarpc_final_pass(pending, request->pipe.input_iov,
                                            request->pipe.input_niov,
@@ -1182,8 +1256,7 @@ chimera_smb_lsarpc_resolve_cb(
 {
     struct chimera_smb_lsarpc_miss_rec *rec     = private_data;
     struct chimera_smb_lsarpc_pending  *pending = rec->pending;
-    struct chimera_server_smb_shared   *shared  =
-        pending->request->compound->thread->shared;
+    struct chimera_server_smb_shared   *shared  = pending->shared;
 
     rec->resolved.status = status;
 
@@ -1210,9 +1283,10 @@ chimera_smb_lsarpc_resolve_cb(
  * inline, else park the call (CHIMERA_SMB_PIPE_ASYNC) behind an interim until
  * the last one comes, with no deadline of its own -- the resolver calls back
  * once its handlers return, so the wait is as long as theirs.  A
- * call that could not park -- no async credit free (the ceiling a blocking
- * pipe READ uses), or CHIMERA_SMB_LSARPC_MAX_PARKED lookups already parked on
- * the connection -- asks the resolver nothing: pass 2 runs at once with no
+ * call that could not park -- its connection already gone (a compound runs on
+ * after it), no async credit free (the ceiling a blocking pipe READ uses), or
+ * CHIMERA_SMB_LSARPC_MAX_PARKED lookups already parked on the connection --
+ * asks the resolver nothing: pass 2 runs at once with no
  * record, so every miss gets what the caches say, as on a null session.  An
  * SMB2 CANCEL of a parked call is absorbed (smb_proc_cancel.c): the round
  * cannot be called off, so the lookup completes when it ends.
@@ -1232,13 +1306,16 @@ chimera_smb_lsarpc_resolve(
 
     /* Decided before any question is asked: an answer that does not come
      * back inline can only be waited for in a parked call. */
-    if (conn->async_outstanding >=
+    if (conn->generation != request->compound->conn_generation ||
+        conn->async_outstanding >=
         (uint32_t) thread->shared->config.smb2_max_async_credits - 1 ||
         conn->lsarpc_parked >= CHIMERA_SMB_LSARPC_MAX_PARKED) {
         static struct chimera_ratelimit rl;
         uint64_t                        held_back;
 
-        if (chimera_ratelimit_allow(&rl, CHIMERA_SMB_LSARPC_REPORT_NS,
+        /* A connection that is gone has no one left to tell. */
+        if (conn->generation == request->compound->conn_generation &&
+            chimera_ratelimit_allow(&rl, CHIMERA_SMB_LSARPC_REPORT_NS,
                                     &held_back)) {
             chimera_smb_info("LSA lookup: not waiting on the identity service "
                              "(%u lookup(s) waiting and %u async request(s) "
@@ -1277,6 +1354,7 @@ chimera_smb_lsarpc_resolve(
 
     conn->async_outstanding++;
     conn->lsarpc_parked++;
+    DL_APPEND(conn->lsarpc_pending, pending);
     chimera_smb_async_interim_begin(request);
 
     pending->parked = 1;

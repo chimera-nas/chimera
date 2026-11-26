@@ -1411,6 +1411,13 @@ struct chimera_smb_session_handle {
      * such a handle is answered STATUS_USER_SESSION_DELETED (MS-SMB2
      * 3.3.5.2.9, Samba bug 14512). */
     uint8_t                            is_channel;
+    /* Set once the handle is taken off its connection for good
+     * (chimera_smb_conn_remove_session_handle).  A request of a compound
+     * resolved its session handle when the compound was parsed, so one whose
+     * turn comes after that point still holds this handle: it is answered
+     * STATUS_USER_SESSION_DELETED instead of being run
+     * (chimera_smb_compound_advance). */
+    uint8_t                            closing;
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
 #ifdef CHIMERA_HAVE_GSSAPI
@@ -1442,6 +1449,7 @@ struct chimera_smb_session_handle {
 #define CHIMERA_SMB_NEGOTIATE_CTX_SIGNING           (1u << 6)
 
 struct chimera_smb_notify_request;
+struct chimera_smb_lsarpc_pending;
 
 #define CHIMERA_SMB_RPC_MAX_HANDLES                 16
 
@@ -1599,7 +1607,8 @@ struct chimera_smb_conn {
      *   - a CHANGE_NOTIFY (smb_proc_change_notify.c), given back by
      *     chimera_smb_notify_unlink however it ends;
      *   - an LSARPC lookup waiting on the identity resolver (smb_lsarpc.c),
-     *     given back when its last answer comes in.
+     *     given back when its last answer comes in, or earlier when its
+     *     session leaves the connection.
      * chimera_smb_async_interim_drain zeroes it at teardown; a lookup that
      * finishes after that leaves it alone. */
     uint32_t                           async_outstanding;
@@ -1610,6 +1619,10 @@ struct chimera_smb_conn {
      * smb_lsarpc.c; a lookup that finishes after teardown leaves it alone, and
      * connection setup zeroes it. */
     uint32_t                           lsarpc_parked;
+    /* Those parked lookups (smb_lsarpc.c), so that a session leaving the
+     * connection can fail its own.  Teardown empties it: the lookups left
+     * finish without touching the connection, and none parks on it again. */
+    struct chimera_smb_lsarpc_pending *lsarpc_pending;
     /* Server-side estimate of the client's current SMB2 credit balance (granted
      * minus charged), used to cap how many credits a response grants so a client
      * that keeps requesting more (e.g. the smb2.credits async flood) cannot
@@ -2759,6 +2772,7 @@ chimera_smb_session_handle_alloc(struct chimera_server_smb_thread *thread)
 
     session_handle->bound_channel = 0;
     session_handle->is_channel    = 0;
+    session_handle->closing       = 0;
 
     return session_handle;
 } /* chimera_smb_session_handle_alloc */
@@ -2770,6 +2784,23 @@ chimera_smb_session_handle_free(
 {
     LL_PREPEND(thread->free_session_handles, session_handle);
 } /* chimera_smb_session_handle_free */
+
+/* Take a session handle off its connection, as the first step of ending the
+ * session there (LOGOFF, a SESSION_SETUP that tears the session down).  From
+ * here on no request finds the session on this connection: a later message
+ * does not resolve it, and a request that already holds the handle -- a later
+ * element of a compound parsed before this point -- is refused when its turn
+ * comes.  So nothing the rest of the teardown runs can start work on the
+ * session, or begin tearing it down a second time. */
+static inline void
+chimera_smb_conn_remove_session_handle(
+    struct chimera_smb_conn           *conn,
+    struct chimera_smb_session_handle *session_handle)
+{
+    HASH_DELETE(hh, conn->session_handles, session_handle);
+    conn->last_session_handle = NULL;
+    session_handle->closing   = 1;
+} /* chimera_smb_conn_remove_session_handle */
 
 static inline struct chimera_smb_conn *
 chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
@@ -3095,6 +3126,10 @@ chimera_smb_conn_free(
      * chimera_smb_compound_reply and drops its reply rather than sending into
      * a freed (or recycled) bind. */
     conn->generation++;
+
+    /* The lookups still parked on this connection finish without it: they
+     * are no longer its to list. */
+    conn->lsarpc_pending = NULL;
 
     /* Drop from the owning thread's active-connection list before returning the
      * conn to the pool (the resume doorbell walks active_conns). */

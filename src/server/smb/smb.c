@@ -1260,6 +1260,32 @@ chimera_smb_complete_request(
     chimera_smb_compound_advance(compound);
 } /* chimera_smb_complete_request */
 
+/* Give back the buffers parsing a request took and its handler would have
+ * released, for a request that is answered without being run. */
+static void
+chimera_smb_request_release_input(struct chimera_smb_request *request)
+{
+    struct evpl *evpl = request->compound->thread->evpl;
+
+    switch (request->smb2_hdr.command) {
+        case SMB2_WRITE:
+            evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+            break;
+        case SMB2_IOCTL:
+            if (request->ioctl.ctl_code == SMB2_FSCTL_TRANSCEIVE_PIPE) {
+                evpl_iovecs_release(evpl, request->ioctl.input_iov,
+                                    request->ioctl.input_niov);
+            }
+            break;
+        case SMB2_SESSION_SETUP:
+            evpl_iovecs_release(evpl, request->session_setup.input_iov,
+                                request->session_setup.input_niov);
+            break;
+        default:
+            break;
+    } /* switch */
+} /* chimera_smb_request_release_input */
+
 static inline void
 chimera_smb_compound_advance(struct chimera_smb_compound *compound)
 {
@@ -1346,6 +1372,25 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
      * deferred status; complete it here, in order, rather than dispatching. */
     if (unlikely(request->flags & CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED)) {
         chimera_smb_complete_request(request, request->status);
+        return;
+    }
+
+    /* The request resolved its session when the compound was parsed, and the
+     * session has left the connection since: an earlier element of this
+     * compound was its LOGOFF, or this compound waited behind a parked request
+     * while a LOGOFF or a failed re-authentication ended it.  Running the
+     * request would start work on a session that is going away -- work that
+     * can outlive it, or that tears it down a second time.  It is answered as
+     * a request naming a session the connection no longer has (MS-SMB2
+     * 3.3.5.2.9), and like that one without the session: the handle is not
+     * kept, since the reply may be built after the session is released, so
+     * the reply is not signed and does not claim to be. */
+    if (unlikely(request->session_handle && request->session_handle->closing)) {
+        chimera_smb_request_release_input(request);
+        request->session_handle  = NULL;
+        request->flags          &= ~CHIMERA_SMB_REQUEST_FLAG_SIGN;
+        request->smb2_hdr.flags &= ~SMB2_FLAGS_SIGNED;
+        chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
         return;
     }
 
@@ -2960,6 +3005,7 @@ chimera_smb_server_accept(
     conn->requests_completed = 0;
     conn->async_outstanding  = 0;
     conn->lsarpc_parked      = 0;
+    conn->lsarpc_pending     = NULL;
     conn->credits_balance    = 0;
     /* Connection.CommandSequenceWindow starts holding exactly MessageId 0 -- the
      * one implicit credit a client may use for its first request (NEGOTIATE)

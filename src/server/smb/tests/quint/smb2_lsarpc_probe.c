@@ -33,7 +33,11 @@
  *       its connection; never for a null session; at most 64 per request;
  *       at most 16 lookups parked on one connection; a name lookup leaves
  *       the user cache alone; and an account winbind just said it does not
- *       know is answered again at once (W4b)
+ *       know is answered again at once (W4b); and a lookup still waiting
+ *       when its session ends, by a LOGOFF or a failed re-authentication,
+ *       is failed before the session goes (W12b, W12c, W12d); and a request
+ *       of a compound whose turn comes after its session ended is not run
+ *       (W12e, W12f)
  */
 
 #include <stdarg.h>
@@ -1205,6 +1209,9 @@ static const struct smb2_wire_profile lsa_winbind_profile = {
 #define W_CAPPED           70     /* SIDs in W14's request           */
 #define W_RESOLVED         64     /* the misses one request resolves */
 #define W_PARKED           16     /* the lookups one connection parks */
+#define W_INTERNAL_ERROR   0xc00000e5u /* STATUS_INTERNAL_ERROR */
+#define W_LOGON_FAILURE    0xc000006du /* STATUS_LOGON_FAILURE  */
+#define W_SESSION_DELETED  0xc0000203u /* STATUS_USER_SESSION_DELETED */
 
 /* wbcLookupSid + wbcLookupName calls so far. */
 static unsigned int
@@ -1314,6 +1321,7 @@ w_wait_interim(struct smb2_conn *c)
 struct w_reply {
     uint32_t         call_id;     /* 0 when the reply is not an LSA response */
     uint32_t         smb_status;
+    int              is_signed;   /* its header says it is signed            */
     uint32_t         lsa_status;
     int              parsed;      /* the stub parsed into exactly one name   */
     struct lsaw_name name;
@@ -1338,6 +1346,7 @@ w_log_reply(struct smb2_conn *c)
     }
     r = &log->r[log->n - 1];
     memset(r, 0, sizeof(*r));
+    r->is_signed  = (g32(c->rbuf + 4, 16) & SMB2_FLAGS_SIGNED) != 0;
     r->smb_status = lsa_fsctl_output(c, &pdu, &len);
     if (!pdu) {
         return;
@@ -1390,6 +1399,73 @@ w_pump_until(
         }
     }
 } /* w_pump_until */
+
+/* W12e's and W12f's replies, message by message: each element of a
+ * compound's reply, read off its SMB2 header. */
+struct w_msg {
+    int      n;                   /* elements seen, kept or not */
+    uint16_t command[2];
+    uint32_t status[2];
+    uint32_t flags[2];
+};
+
+struct w_msg_log {
+    int          n;               /* messages seen, kept or not */
+    struct w_msg m[4];
+};
+
+static void
+w_log_msg(struct smb2_conn *c)
+{
+    struct w_msg_log *log  = c->on_reply_arg;
+    const uint8_t    *h    = c->rbuf + 4;
+    int               left = c->rlen - 4;
+    struct w_msg     *m;
+    uint32_t          next;
+
+    if (log->n++ >= M_COUNT(log->m)) {
+        return;
+    }
+    m = &log->m[log->n - 1];
+    memset(m, 0, sizeof(*m));
+    while (left >= SMB2_HDR_SIZE) {
+        if (m->n < M_COUNT(m->status)) {
+            m->command[m->n] = g16(h, 12);
+            m->status[m->n]  = g32(h, 8);
+            m->flags[m->n]   = g32(h, 16);
+        }
+        m->n++;
+        next = g32(h, 20);
+        if (next < SMB2_HDR_SIZE || next > (uint32_t) left) {
+            break;
+        }
+        h    += next;
+        left -= (int) next;
+    }
+} /* w_log_msg */
+
+/* Pump until `log` holds `nmsg` messages, or the hang ceiling passes (a named
+ * FAIL rather than a wedge). */
+static void
+w_pump_msgs(
+    struct smb2_conn       *c,
+    const struct w_msg_log *log,
+    int                     nmsg)
+{
+    uint64_t deadline = smb2c_now_ms() + SMB2C_HANG_MS;
+
+    while (log->n < nmsg) {
+        smb2_pump(c->env);
+        if (c->disconnected) {
+            smb2c_dead(c);
+        }
+        if (smb2c_now_ms() >= deadline) {
+            printf("#   gave up after %d ms: %d message(s)\n", SMB2C_HANG_MS,
+                   log->n);
+            return;
+        }
+    }
+} /* w_pump_msgs */
 
 /* The owner SID of an open file, or "" when it cannot be read. */
 static void
@@ -1454,6 +1530,12 @@ static const char *const    w10_sids[] = { W_P(1005) };
 static const struct m_entry w10_want[] = { W_U(1005) };
 static const char *const    w11_sids[] = { W_P(1006) };
 static const char *const    w12_sids[] = { W_P(1007) };
+static const char *const    w12b_sids[] = { WBSTUB_DOMAIN_SID "-1300" };
+static const char *const    w12c_sids[] = { WBSTUB_DOMAIN_SID "-1301" };
+static const char *const    w12d_sids[] = { WBSTUB_DOMAIN_SID "-1302" };
+static const char *const    w12e_sids[] = { W_P(1009) };
+static const struct m_entry w12e_want[] = { W_U(1009) };
+static const char *const    w12f_sids[] = { WBSTUB_DOMAIN_SID "-1303" };
 static const struct m_entry w12_want[] = { W_U(1007) };
 
 static const char *const    w13_sids[] = { NULL, W_P(1012), W_P(1012), "S-1-22-1-0" };
@@ -1485,7 +1567,8 @@ run_resolve(
     static struct lsaw_name   names[W_CAPPED];
     static char               w14_buf[W_CAPPED][32];
     static const char        *w14_sids[W_CAPPED];
-    static struct w_reply_log w16_log;
+    static struct w_reply_log w12b_log, w16_log;
+    static struct w_msg_log   w12_msgs;
     struct lsaw_sid           sids[8];
     struct smb2_create_out    co;
     struct smb2_conn         *other, *anon, *a, *b;
@@ -1683,6 +1766,188 @@ run_resolve(
           "lookup(s) in flight, dropped, then a new connection's %s -> "
           "0x%08x (%u winbind lookup(s))", parked, asked, w12_sids[0], st,
           w_calls() - calls);
+
+    /* W12b "a lookup waiting when its session logs off is answered first".
+     * The stub holds the lookup in flight across the LOGOFF.  The server has
+     * to fail the call while the session can still sign the reply, so the
+     * lookup's reply comes ahead of the LOGOFF's, and winbind's late answer
+     * finds nothing left to complete. */
+    other                   = w_session(env, &os);
+    other->on_reply         = w_log_reply;
+    other->on_reply_arg     = &w12b_log;
+    other->check_reply_sigs = 1;
+    w_hold(1);
+    w_post_sids(&os, w12b_sids, M_COUNT(w12b_sids));
+    parked = w_wait_interim(other) && !other->reply_ready;
+    smb2_logoff(other);    /* returns on the first of the two replies */
+    w_pump_until(other, &w12b_log, 0, 2);
+    other->session_id = 0;
+    other->signing_on = 0;
+    w_hold(0);
+    t0 = smb2c_now_ms();
+    while (smb2c_now_ms() - t0 < 200) {
+        smb2_pump(env);
+    }
+    w_session(env, &os);
+    st = lsa_lookup_sids(&os, w12b_sids, M_COUNT(w12b_sids), names, &nd);
+    CHECK(parked && w12b_log.n == 2 &&
+          w12b_log.r[0].smb_status == W_INTERNAL_ERROR &&
+          w12b_log.r[0].is_signed &&
+          w12b_log.r[1].smb_status == ST_SUCCESS && !other->disconnected &&
+          st == LSA_ST_NONE_MAPPED,
+          "W12b a lookup waiting when its session logs off is answered first: "
+          "parked %d, %d repl%s, the lookup -> 0x%08x (%s) then LOGOFF -> "
+          "0x%08x, the connection %s, a new logon's %s -> 0x%08x", parked,
+          w12b_log.n, w12b_log.n == 1 ? "y" : "ies", w12b_log.r[0].smb_status,
+          w12b_log.r[0].is_signed ? "signed" : "not signed",
+          w12b_log.r[1].smb_status, other->disconnected ? "dropped" : "stays",
+          w12b_sids[0], st);
+
+    /* W12c "a lookup waiting when a re-authentication fails is answered
+     * too".  A failed re-authentication ends the session as a LOGOFF does. */
+    memset(&w12b_log, 0, sizeof(w12b_log));
+    other                   = w_session(env, &os);
+    other->on_reply         = w_log_reply;
+    other->on_reply_arg     = &w12b_log;
+    other->check_reply_sigs = 1;
+    w_hold(1);
+    w_post_sids(&os, w12c_sids, M_COUNT(w12c_sids));
+    parked = w_wait_interim(other) && !other->reply_ready;
+    smb2_session_setup_as(other, WBSTUB_USER, "not-the-password");
+    w_pump_until(other, &w12b_log, 0, 3);
+    other->session_id = 0;
+    other->signing_on = 0;
+    w_hold(0);
+    t0 = smb2c_now_ms();
+    while (smb2c_now_ms() - t0 < 200) {
+        smb2_pump(env);
+    }
+    w_session(env, &os);
+    st = lsa_lookup_sids(&os, w12c_sids, M_COUNT(w12c_sids), names, &nd);
+    CHECK(parked && w12b_log.n == 3 &&
+          w12b_log.r[1].smb_status == W_LOGON_FAILURE &&
+          w12b_log.r[2].smb_status == W_INTERNAL_ERROR &&
+          w12b_log.r[2].is_signed &&
+          !other->disconnected && st == LSA_ST_NONE_MAPPED,
+          "W12c a lookup waiting when a re-authentication fails is answered "
+          "too: parked %d, %d replies, the logon -> 0x%08x, the lookup -> "
+          "0x%08x (%s), the connection %s, a new logon's %s -> 0x%08x", parked,
+          w12b_log.n, w12b_log.r[1].smb_status, w12b_log.r[2].smb_status,
+          w12b_log.r[2].is_signed ? "signed" : "not signed",
+          other->disconnected ? "dropped" : "stays", w12c_sids[0], st);
+
+    /* W12d "a LOGOFF compounded behind a waiting lookup is not run once
+     * another LOGOFF ends the session".  The first LOGOFF waits in the
+     * compound behind the lookup.  The second fails the lookup, which gives
+     * the first its turn in the middle of it.  Run all the same, it would
+     * log the session off a second time. */
+    memset(&w12_msgs, 0, sizeof(w12_msgs));
+    other                   = w_session(env, &os);
+    other->on_reply         = w_log_msg;
+    other->on_reply_arg     = &w12_msgs;
+    other->check_reply_sigs = 1;
+    w_hold(1);
+    smb2c_set_next_logoff(other);
+    w_post_sids(&os, w12d_sids, M_COUNT(w12d_sids));
+    parked = w_wait_interim(other) && !other->reply_ready;
+    smb2_logoff(other);    /* returns on the first of the two messages */
+    w_pump_msgs(other, &w12_msgs, 2);
+    other->session_id = 0;
+    other->signing_on = 0;
+    w_hold(0);
+    t0 = smb2c_now_ms();
+    while (smb2c_now_ms() - t0 < 200) {
+        smb2_pump(env);
+    }
+    w_session(env, &os);
+    st = lsa_lookup_sids(&os, w12d_sids, M_COUNT(w12d_sids), names, &nd);
+    CHECK(parked && w12_msgs.n == 2 && w12_msgs.m[0].n == 2 &&
+          w12_msgs.m[0].status[0] == W_INTERNAL_ERROR &&
+          w12_msgs.m[0].status[1] == W_SESSION_DELETED &&
+          w12_msgs.m[1].n == 1 && w12_msgs.m[1].status[0] == ST_SUCCESS &&
+          !other->disconnected && st == LSA_ST_NONE_MAPPED,
+          "W12d a LOGOFF compounded behind a waiting lookup is not run once "
+          "another LOGOFF ends the session: parked %d, %d message(s), the "
+          "lookup -> 0x%08x, the LOGOFF behind it -> 0x%08x, the other LOGOFF "
+          "-> 0x%08x, the connection %s, a new logon's %s -> 0x%08x", parked,
+          w12_msgs.n, w12_msgs.m[0].status[0], w12_msgs.m[0].status[1],
+          w12_msgs.m[1].status[0], other->disconnected ? "dropped" : "stays",
+          w12d_sids[0], st);
+
+    /* W12e "a lookup compounded behind its session's LOGOFF is not run".
+     * The LOGOFF ends the session before the lookup's turn comes.  Run all
+     * the same, the lookup would wait on winbind and be answered after its
+     * session is gone. */
+    memset(&w12_msgs, 0, sizeof(w12_msgs));
+    other                   = w_session(env, &os);
+    other->on_reply         = w_log_msg;
+    other->on_reply_arg     = &w12_msgs;
+    other->check_reply_sigs = 1;
+    calls                   = w_calls();
+    smb2c_set_next_logoff_ahead(other);
+    w_post_sids(&os, w12e_sids, M_COUNT(w12e_sids));
+    smb2c_wait(other);
+    other->session_id = 0;
+    other->signing_on = 0;
+    t0                = smb2c_now_ms();
+    while (smb2c_now_ms() - t0 < 200) {
+        smb2_pump(env);
+    }
+    calls = w_calls() - calls;
+    w_session(env, &os);
+    st = lsa_lookup_sids(&os, w12e_sids, M_COUNT(w12e_sids), names, &nd);
+    ok = m_names_are(names, w12e_want, M_COUNT(w12e_want));
+    CHECK(w12_msgs.n == 1 && w12_msgs.m[0].n == 2 &&
+          w12_msgs.m[0].status[0] == ST_SUCCESS &&
+          w12_msgs.m[0].status[1] == W_SESSION_DELETED &&
+          other->ninterim == 0 && calls == 0 && !other->disconnected &&
+          st == 0 && ok,
+          "W12e a lookup compounded behind its session's LOGOFF is not run: "
+          "%d message(s) of %d element(s), LOGOFF -> 0x%08x then the lookup -> "
+          "0x%08x, %d interim(s), %u winbind lookup(s), the connection %s, a "
+          "new logon's %s -> 0x%08x", w12_msgs.n, w12_msgs.m[0].n,
+          w12_msgs.m[0].status[0], w12_msgs.m[0].status[1], other->ninterim,
+          calls, other->disconnected ? "dropped" : "stays", w12e_sids[0], st);
+
+    /* W12f "a re-authentication compounded behind a waiting lookup is not
+     * run once a LOGOFF ends the session".  The LOGOFF fails the lookup,
+     * which lets the SESSION_SETUP behind it take its turn in the middle of
+     * the LOGOFF.  Run all the same, it would fail and take the session down
+     * a second time. */
+    memset(&w12_msgs, 0, sizeof(w12_msgs));
+    other                   = w_session(env, &os);
+    other->on_reply         = w_log_msg;
+    other->on_reply_arg     = &w12_msgs;
+    other->check_reply_sigs = 1;
+    w_hold(1);
+    smb2c_set_next_bad_setup(other);
+    w_post_sids(&os, w12f_sids, M_COUNT(w12f_sids));
+    parked = w_wait_interim(other) && !other->reply_ready;
+    smb2_logoff(other);    /* returns on the first of the two messages */
+    w_pump_msgs(other, &w12_msgs, 2);
+    other->session_id = 0;
+    other->signing_on = 0;
+    w_hold(0);
+    t0 = smb2c_now_ms();
+    while (smb2c_now_ms() - t0 < 200) {
+        smb2_pump(env);
+    }
+    w_session(env, &os);
+    st = lsa_lookup_sids(&os, w12f_sids, M_COUNT(w12f_sids), names, &nd);
+    CHECK(parked && w12_msgs.n == 2 && w12_msgs.m[0].n == 2 &&
+          w12_msgs.m[0].status[0] == W_INTERNAL_ERROR &&
+          (w12_msgs.m[0].flags[0] & SMB2_FLAGS_SIGNED) &&
+          w12_msgs.m[0].status[1] == W_SESSION_DELETED &&
+          w12_msgs.m[1].n == 1 && w12_msgs.m[1].status[0] == ST_SUCCESS &&
+          !other->disconnected && st == LSA_ST_NONE_MAPPED,
+          "W12f a re-authentication compounded behind a waiting lookup is not "
+          "run once a LOGOFF ends the session: parked %d, %d message(s), the "
+          "lookup -> 0x%08x (%s), the SESSION_SETUP -> 0x%08x, LOGOFF -> "
+          "0x%08x, the connection %s, a new logon's %s -> 0x%08x", parked,
+          w12_msgs.n, w12_msgs.m[0].status[0],
+          (w12_msgs.m[0].flags[0] & SMB2_FLAGS_SIGNED) ? "signed" : "not signed",
+          w12_msgs.m[0].status[1], w12_msgs.m[1].status[0],
+          other->disconnected ? "dropped" : "stays", w12f_sids[0], st);
 
     /* W13 "duplicates and a null sid in one request" */
     calls = w_calls();
