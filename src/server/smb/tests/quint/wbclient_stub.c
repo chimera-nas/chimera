@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 #include <sys/types.h>
 #include <pwd.h>
 #include <grp.h>
@@ -368,6 +369,50 @@ wbcLookupUserSids(
     return WBC_ERR_SUCCESS;
 } /* wbcLookupUserSids */
 
+unsigned int  wbstub_lookup_calls;
+unsigned int  wbstub_bare_name_calls;
+int           wbstub_hold;
+__thread char wbstub_last_lookup_domain[256];
+__thread char wbstub_last_lookup_name[256];
+
+/* Count the call, honour WBSTUB_LOOKUP_DELAY_MS, then wait for as long as
+ * wbstub_hold is set.  The environment is read on every call so a test can
+ * change it between lookups. */
+static void
+stub_lookup_begin(void)
+{
+    const char *delay = getenv("WBSTUB_LOOKUP_DELAY_MS");
+    long        ms    = delay ? strtol(delay, NULL, 10) : 0;
+
+    __atomic_add_fetch(&wbstub_lookup_calls, 1, __ATOMIC_RELAXED);
+    if (ms > 0) {
+        usleep((useconds_t) ms * 1000);
+    }
+    while (__atomic_load_n(&wbstub_hold, __ATOMIC_ACQUIRE)) {
+        usleep(1000);
+    }
+} /* stub_lookup_begin */
+
+/* Non-zero, and the rid, if `name` is "user<rid>" for a pool rid. */
+static int
+stub_pool_name(
+    const char *name,
+    unsigned   *rid)
+{
+    char         *end;
+    unsigned long v;
+
+    if (strncasecmp(name, "user", 4) != 0 || !isdigit((unsigned char) name[4])) {
+        return 0;
+    }
+    v = strtoul(name + 4, &end, 10);
+    if (*end != '\0' || v < WBSTUB_POOL_FIRST_RID || v > WBSTUB_POOL_LAST_RID) {
+        return 0;
+    }
+    *rid = (unsigned) v;
+    return 1;
+} /* stub_pool_name */
+
 SYMBOL_EXPORT wbcErr
 wbcLookupName(
     const char          *dom_name,
@@ -375,10 +420,40 @@ wbcLookupName(
     struct wbcDomainSid *sid,
     enum wbcSidType     *name_type)
 {
-    (void) dom_name;
-    (void) name;
-    (void) sid;
-    (void) name_type;
+    char     sidstr[64];
+    unsigned rid;
+
+    stub_lookup_begin();
+    snprintf(wbstub_last_lookup_domain, sizeof(wbstub_last_lookup_domain),
+             "%s", dom_name ? dom_name : "");
+    snprintf(wbstub_last_lookup_name, sizeof(wbstub_last_lookup_name),
+             "%s", name ? name : "");
+
+    if (!dom_name || !dom_name[0]) {
+        __atomic_add_fetch(&wbstub_bare_name_calls, 1, __ATOMIC_RELAXED);
+    }
+
+    if (!name || (dom_name && dom_name[0] &&
+                  strcasecmp(dom_name, WBSTUB_DOMAIN) != 0)) {
+        return WBC_ERR_DOMAIN_NOT_FOUND;
+    }
+    if (strcasecmp(name, WBSTUB_HALF_NAME) == 0) {
+        *name_type = WBC_SID_NAME_USER;
+        return wbcStringToSid(WBSTUB_HALF_SID, sid);
+    }
+    if (strcasecmp(name, WBSTUB_USER) == 0) {
+        *name_type = WBC_SID_NAME_USER;
+        return wbcStringToSid(WBSTUB_USER_SID, sid);
+    }
+    if (strcasecmp(name, WBSTUB_GROUP_NAME) == 0) {
+        *name_type = WBC_SID_NAME_DOM_GRP;
+        return wbcStringToSid(WBSTUB_GROUP_SID, sid);
+    }
+    if (stub_pool_name(name, &rid)) {
+        snprintf(sidstr, sizeof(sidstr), WBSTUB_DOMAIN_SID "-%u", rid);
+        *name_type = WBC_SID_NAME_USER;
+        return wbcStringToSid(sidstr, sid);
+    }
     return WBC_ERR_DOMAIN_NOT_FOUND;
 } /* wbcLookupName */
 
@@ -389,11 +464,47 @@ wbcLookupSid(
     char                     **name,
     enum wbcSidType           *name_type)
 {
-    (void) sid;
-    (void) name_type;
+    char     buf[64];
+    unsigned rid;
+    char    *dup_name = NULL;
+
+    stub_lookup_begin();
     *domain = NULL;
     *name   = NULL;
-    return WBC_ERR_DOMAIN_NOT_FOUND;
+
+    if (stub_sid_is(sid, WBSTUB_DOWN_SID)) {
+        return WBC_ERR_WINBIND_NOT_AVAILABLE;
+    }
+    if (stub_sid_is(sid, WBSTUB_USER_SID)) {
+        dup_name   = strdup(WBSTUB_USER);
+        *name_type = WBC_SID_NAME_USER;
+    } else if (stub_sid_is(sid, WBSTUB_GROUP_SID)) {
+        dup_name   = strdup(WBSTUB_GROUP_NAME);
+        *name_type = WBC_SID_NAME_DOM_GRP;
+    } else {
+        for (rid = WBSTUB_POOL_FIRST_RID; rid <= WBSTUB_POOL_LAST_RID; rid++) {
+            snprintf(buf, sizeof(buf), WBSTUB_DOMAIN_SID "-%u", rid);
+            if (stub_sid_is(sid, buf)) {
+                snprintf(buf, sizeof(buf), "user%u", rid);
+                dup_name   = strdup(buf);
+                *name_type = WBC_SID_NAME_USER;
+                break;
+            }
+        }
+        if (rid > WBSTUB_POOL_LAST_RID) {
+            return WBC_ERR_DOMAIN_NOT_FOUND;
+        }
+    }
+    if (!dup_name) {
+        return WBC_ERR_NO_MEMORY;
+    }
+    *domain = strdup(WBSTUB_DOMAIN);
+    if (!*domain) {
+        free(dup_name);
+        return WBC_ERR_NO_MEMORY;
+    }
+    *name = dup_name;
+    return WBC_ERR_SUCCESS;
 } /* wbcLookupSid */
 
 SYMBOL_EXPORT wbcErr

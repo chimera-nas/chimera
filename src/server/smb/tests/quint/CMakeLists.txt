@@ -187,6 +187,20 @@ if(WBCLIENT_FOUND AND NOT APPLE)
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_wire_probe_wbstub"
         LABELS "functional;probe;smb_mbt;memfs"
         TIMEOUT 180)
+
+    # The identity handler's account keys against the same stub, without the
+    # SMB server: the handler is called directly.
+    add_executable(wbstub_account_test wbstub_account_test.c wbclient_stub.c)
+    target_include_directories(wbstub_account_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${WBCLIENT_INCLUDE_DIRS})
+    target_link_libraries(wbstub_account_test chimera_server chimera_smb chimera_metrics chimera_crypto)
+    set_target_properties(wbstub_account_test PROPERTIES ENABLE_EXPORTS ON)
+
+    add_test(NAME chimera/server/smb/wbstub_account
+        COMMAND $<TARGET_FILE:wbstub_account_test>)
+    set_tests_properties(chimera/server/smb/wbstub_account PROPERTIES
+        LABELS "smb"
+        TIMEOUT 60)
 endif()
 
 # The signed profiles again as a domain user validated through winbind, against
