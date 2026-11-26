@@ -40,6 +40,7 @@
 #include "vfs/sdk/vfs_error.h"
 #include "common/logging.h"
 #include "common/atomic.h"
+#include "common/test_host.h"
 #include "common/mbt_watchdog.h"
 #include "prometheus-c.h"
 
