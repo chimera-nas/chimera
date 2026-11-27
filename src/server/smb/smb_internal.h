@@ -291,10 +291,16 @@ struct chimera_smb_config {
      * see chimera_server_config_set_smb_replay_pending_windows.  Default 0. */
     int                            replay_pending_windows;
     /* Per-connection ceiling on simultaneously outstanding async (STATUS_PENDING)
-     * operations.  A blocking named-pipe READ that cannot be served now is made
-     * async until the connection holds (smb2_max_async_credits - 1) of them;
-     * beyond that it is rejected with STATUS_INSUFFICIENT_RESOURCES (the contract
-     * smb2.credits.*_ipc_max_async_credits asserts).  Default 512. */
+     * operations, counted in conn->async_outstanding.  A blocking named-pipe READ
+     * that cannot be served now, a CHANGE_NOTIFY and an LSARPC lookup waiting on
+     * the identity resolver are made async until the connection holds
+     * (smb2_max_async_credits - 1) of them.  Beyond that the READ and the
+     * CHANGE_NOTIFY are rejected with STATUS_INSUFFICIENT_RESOURCES (the
+     * contracts smb2.credits.*_ipc_max_async_credits and
+     * *_notify_max_async_credits assert), and the lookup is answered from the
+     * caches without waiting.  A lookup is further limited to
+     * CHIMERA_SMB_LSARPC_MAX_PARKED waiting at once on a connection.  Default
+     * 512. */
     int                            smb2_max_async_credits;
     /* FileFsSectorSizeInformation values returned from SMB_QUERY_INFO. */
     uint32_t                       fs_physical_bytes_per_sector;
@@ -489,6 +495,19 @@ struct chimera_smb_request {
          * decrement that counter when the request leaves the parked list. */
         uint8_t                        pipe_read;
     } async;
+
+    /* A named-pipe call (smb_pipe.h) from the IOCTL or WRITE transport, kept
+     * outside the union: a transceive that parks finishes the call from here,
+     * after the handler that started it has returned.  Set by
+     * chimera_smb_pipe_call. */
+    struct {
+        struct chimera_smb_open_file *open_file;    /* reference held for the call      */
+        struct evpl_iovec            *input_iov;    /* request-owned; released by finish */
+        int                           input_niov;
+        struct evpl_iovec            *output_iov;   /* where the reply PDU is written   */
+        struct evpl_iovec             write_output; /* WRITE's reply buffer             */
+        chimera_smb_pipe_done_t       done;
+    } pipe;
 
     union {
 
@@ -1392,6 +1411,13 @@ struct chimera_smb_session_handle {
      * such a handle is answered STATUS_USER_SESSION_DELETED (MS-SMB2
      * 3.3.5.2.9, Samba bug 14512). */
     uint8_t                            is_channel;
+    /* Set once the handle is taken off its connection for good
+     * (chimera_smb_conn_remove_session_handle).  A request of a compound
+     * resolved its session handle when the compound was parsed, so one whose
+     * turn comes after that point still holds this handle: it is answered
+     * STATUS_USER_SESSION_DELETED instead of being run
+     * (chimera_smb_compound_advance). */
+    uint8_t                            closing;
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
 #ifdef CHIMERA_HAVE_GSSAPI
@@ -1423,6 +1449,7 @@ struct chimera_smb_session_handle {
 #define CHIMERA_SMB_NEGOTIATE_CTX_SIGNING           (1u << 6)
 
 struct chimera_smb_notify_request;
+struct chimera_smb_lsarpc_pending;
 
 #define CHIMERA_SMB_RPC_MAX_HANDLES                 16
 
@@ -1572,12 +1599,30 @@ struct chimera_smb_conn {
      * SMB2_CANCEL walks this list by AsyncId; conn_free drains it before tearing
      * down the bind. */
     struct chimera_smb_request        *parked_requests;
-    /* Count of currently-parked async named-pipe READs on this connection.
-     * Capped at (config.smb2_max_async_credits - 1); reaching the cap makes
-     * further blocking pipe reads fail with STATUS_INSUFFICIENT_RESOURCES.
-     * Incremented when a pipe read parks, decremented when it is cancelled or
-     * drained at teardown. */
+    /* Count of currently-parked async operations on this connection, capped
+     * at (config.smb2_max_async_credits - 1); see that field for what happens
+     * at the cap.  Taken when one of them parks:
+     *   - a blocking named-pipe READ (smb_proc_read.c), given back when it is
+     *     cancelled;
+     *   - a CHANGE_NOTIFY (smb_proc_change_notify.c), given back by
+     *     chimera_smb_notify_unlink however it ends;
+     *   - an LSARPC lookup waiting on the identity resolver (smb_lsarpc.c),
+     *     given back when its last answer comes in, or earlier when its
+     *     session leaves the connection.
+     * chimera_smb_async_interim_drain zeroes it at teardown; a lookup that
+     * finishes after that leaves it alone. */
     uint32_t                           async_outstanding;
+    /* LSARPC lookups parked on this connection waiting on the identity
+     * resolver (each also holds an async_outstanding credit), capped at
+     * CHIMERA_SMB_LSARPC_MAX_PARKED: past the cap a lookup is answered from
+     * the caches without waiting.  Taken and given back with that credit by
+     * smb_lsarpc.c; a lookup that finishes after teardown leaves it alone, and
+     * connection setup zeroes it. */
+    uint32_t                           lsarpc_parked;
+    /* Those parked lookups (smb_lsarpc.c), so that a session leaving the
+     * connection can fail its own.  Teardown empties it: the lookups left
+     * finish without touching the connection, and none parks on it again. */
+    struct chimera_smb_lsarpc_pending *lsarpc_pending;
     /* Server-side estimate of the client's current SMB2 credit balance (granted
      * minus charged), used to cap how many credits a response grants so a client
      * that keeps requesting more (e.g. the smb2.credits async flood) cannot
@@ -1870,6 +1915,8 @@ struct chimera_smb_durable_record {
     char     name[SMB_FILENAME_MAX];
 };
 
+struct chimera_smb_account_cache;
+
 struct chimera_server_smb_shared {
     struct chimera_smb_config         config;
     int                               rdma;
@@ -1889,6 +1936,9 @@ struct chimera_server_smb_shared {
      * at startup from a stable per-host id (see chimera_smb_server_init).  The
      * LSARPC/SAMR services issue domain-relative SIDs under this. */
     uint32_t                          machine_domain_sub[3];
+    /* The winbind account answers the LSARPC lookups name SIDs and names
+     * from; NULL unless winbind is enabled. */
+    struct chimera_smb_account_cache *account_cache;
 #ifdef CHIMERA_HAVE_GSSAPI
     gss_name_t                        svc;
     gss_cred_id_t                     srv_cred;
@@ -2722,6 +2772,7 @@ chimera_smb_session_handle_alloc(struct chimera_server_smb_thread *thread)
 
     session_handle->bound_channel = 0;
     session_handle->is_channel    = 0;
+    session_handle->closing       = 0;
 
     return session_handle;
 } /* chimera_smb_session_handle_alloc */
@@ -2733,6 +2784,23 @@ chimera_smb_session_handle_free(
 {
     LL_PREPEND(thread->free_session_handles, session_handle);
 } /* chimera_smb_session_handle_free */
+
+/* Take a session handle off its connection, as the first step of ending the
+ * session there (LOGOFF, a SESSION_SETUP that tears the session down).  From
+ * here on no request finds the session on this connection: a later message
+ * does not resolve it, and a request that already holds the handle -- a later
+ * element of a compound parsed before this point -- is refused when its turn
+ * comes.  So nothing the rest of the teardown runs can start work on the
+ * session, or begin tearing it down a second time. */
+static inline void
+chimera_smb_conn_remove_session_handle(
+    struct chimera_smb_conn           *conn,
+    struct chimera_smb_session_handle *session_handle)
+{
+    HASH_DELETE(hh, conn->session_handles, session_handle);
+    conn->last_session_handle = NULL;
+    session_handle->closing   = 1;
+} /* chimera_smb_conn_remove_session_handle */
 
 static inline struct chimera_smb_conn *
 chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
@@ -3058,6 +3126,10 @@ chimera_smb_conn_free(
      * chimera_smb_compound_reply and drops its reply rather than sending into
      * a freed (or recycled) bind. */
     conn->generation++;
+
+    /* The lookups still parked on this connection finish without it: they
+     * are no longer its to list. */
+    conn->lsarpc_pending = NULL;
 
     /* Drop from the owning thread's active-connection list before returning the
      * conn to the pool (the resume doorbell walks active_conns). */

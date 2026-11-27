@@ -12,6 +12,7 @@
 #include "smb_wbclient.h"
 #include "smb_kerberos_identity.h"
 #include "vfs/vfs.h"
+#include "smb_lsarpc.h"
 
 // Process NTLM authentication
 /*
@@ -863,7 +864,10 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                                                     session, conn->dialect)) {
             chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
 
-            HASH_DEL(conn->session_handles, request->session_handle);
+            chimera_smb_conn_remove_session_handle(conn, request->session_handle);
+            /* A re-authentication reaches here on a session already in use:
+             * fail its lookups still waiting on the identity resolver. */
+            chimera_smb_lsarpc_session_closing(conn, request->session_handle);
             chimera_smb_session_release(thread, shared, session, false);
             chimera_smb_session_handle_free(thread, request->session_handle);
             request->session_handle   = NULL;
@@ -910,6 +914,14 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
              *     preservable durable opens, so nothing to preserve. */
             struct chimera_smb_session *failed_session = request->session_handle->session;
 
+            /* Off the connection first: the step below can run other
+             * requests of this session, parsed in a compound before this
+             * point, and none of them may start work on it or take it down a
+             * second time.  Then its lookups still waiting on the identity
+             * resolver are failed, while the session can sign the replies. */
+            chimera_smb_conn_remove_session_handle(conn, request->session_handle);
+            chimera_smb_lsarpc_session_closing(conn, request->session_handle);
+
             /* A failed REAUTH invalidates the whole session, not just this
              * connection's handle: remove it from the global table and mark it
              * DELETED so requests arriving on OTHER channels (and later
@@ -927,11 +939,9 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             }
             evpl_mutex_unlock(&shared->sessions_lock);
 
-            HASH_DEL(conn->session_handles, request->session_handle);
             chimera_smb_session_release(thread, shared, failed_session, false);
             chimera_smb_session_handle_free(thread, request->session_handle);
-            request->session_handle   = NULL;
-            conn->last_session_handle = NULL;
+            request->session_handle = NULL;
         }
     }
 

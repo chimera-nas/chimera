@@ -28,7 +28,20 @@ struct chimera_vfs_identity;
 /* enum chimera_vfs_identity_key lives in vfs_user_cache.h. */
 
 /* How long an authoritative miss is cached. */
-#define CHIMERA_VFS_IDENTITY_NEGATIVE_TTL 60 /* seconds */
+#define CHIMERA_VFS_IDENTITY_NEGATIVE_TTL     60 /* seconds */
+
+#define CHIMERA_VFS_IDENTITY_ACCOUNT_NAME_MAX 256
+
+/*
+ * What an account key resolves to: the account's SID, its domain's name, its
+ * own name and its MS-LSAT SID_NAME_USE (the values of enum wbcSidType).
+ */
+struct chimera_vfs_identity_account {
+    char     sid[CHIMERA_VFS_SID_MAX_LEN];
+    char     domain[CHIMERA_VFS_IDENTITY_ACCOUNT_NAME_MAX];
+    char     name[CHIMERA_VFS_IDENTITY_ACCOUNT_NAME_MAX];
+    uint32_t sid_type;
+};
 
 /*
  * A resolved identity.  An identity is either a user or a group, and the two
@@ -37,10 +50,25 @@ struct chimera_vfs_identity;
  * a user-shaped record.
  */
 struct chimera_vfs_identity_result {
-    int                      is_group;
-    struct chimera_vfs_user  user;  /* valid when !is_group */
-    struct chimera_vfs_group group; /* valid when  is_group */
+    int                                 is_group;
+    struct chimera_vfs_user             user; /* valid when !is_group */
+    struct chimera_vfs_group            group; /* valid when  is_group */
+
+    /* Valid for the account keys (CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT and
+     * CHIMERA_VFS_IDENTITY_NAME_TO_ACCOUNT), which carry the account's
+     * domain, name, SID and SID type rather than a user or group.  An account
+     * answer is never inserted into the user or group cache; an authoritative
+     * miss is still cached negatively, per key kind. */
+    struct chimera_vfs_identity_account account;
 };
+
+/* True for the two account keys. */
+static inline int
+chimera_vfs_identity_key_is_account(enum chimera_vfs_identity_key key)
+{
+    return key == CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT ||
+           key == CHIMERA_VFS_IDENTITY_NAME_TO_ACCOUNT;
+} /* chimera_vfs_identity_key_is_account */
 
 /*
  * Outcome of a resolution.  NOT_FOUND is an authoritative negative (the
@@ -70,11 +98,12 @@ typedef void (*chimera_vfs_identity_callback)(
 /*
  * A miss handler performs a (possibly blocking) lookup on a resolver worker
  * thread and fills `*out`: either out->user (uid/gid/ngids/gids/username/sid)
- * or out->group (gid/groupname/sid) with out->is_group set.  Returns OK on
- * success, NOT_FOUND if it authoritatively knows no such identity, UNAVAILABLE
- * if it failed to ask its provider, or PASS if it cannot answer this kind of
- * key at all.  Handlers are tried in registration order; the overall status is
- * aggregated from their answers (see chimera_vfs_identity_run_handlers).
+ * or out->group (gid/groupname/sid) with out->is_group set -- or, for the two
+ * account keys, out->account alone.  Returns OK on success, NOT_FOUND if it
+ * authoritatively knows no such identity, UNAVAILABLE if it failed to ask its
+ * provider, or PASS if it cannot answer this kind of key at all.  Handlers are
+ * tried in registration order; the overall status is aggregated from their
+ * answers (see chimera_vfs_identity_run_handlers).
  */
 typedef enum chimera_vfs_identity_status (*chimera_vfs_identity_handler)(
     enum chimera_vfs_identity_key key,
@@ -103,7 +132,9 @@ chimera_vfs_identity_register_handler(
  * Resolve an identity.  On a cache hit the callback fires inline before this
  * returns; on a miss it fires later on `thread`'s evpl loop.  `id` is used for
  * BY_UID/BY_GID; `name` (a NUL-terminated username or SID string) for
- * BY_NAME/BY_SID.
+ * BY_NAME/BY_SID and for the two account keys (a SID string, a "DOMAIN\name").
+ * An account key is never a positive cache hit: only a cached "not found"
+ * answers it inline.
  */
 SYMBOL_EXPORT void
 chimera_vfs_identity_resolve(

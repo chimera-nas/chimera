@@ -4,6 +4,7 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
+#include "smb_pipe.h"
 #include "smb_string.h"
 #include "smb_common/smb2.h"
 #include "common/misc.h"
@@ -59,6 +60,25 @@ chimera_smb_validate_negotiate_info_ok(
     return true;
 } /* chimera_smb_validate_negotiate_info_ok */
 
+/* FSCTL_PIPE_TRANSCEIVE: the pipe call is over (inline or after it parked);
+ * the reply PDU, if any, is in request->ioctl.output_iov. */
+static void
+chimera_smb_ioctl_pipe_done(
+    struct chimera_smb_request *request,
+    int                         status)
+{
+    chimera_smb_open_file_release(request, request->pipe.open_file);
+
+    if (status != 0) {
+        evpl_iovec_release(request->compound->thread->evpl,
+                           &request->ioctl.output_iov);
+        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_ioctl_pipe_done */
+
 void
 chimera_smb_ioctl(struct chimera_smb_request *request)
 {
@@ -66,7 +86,6 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread = request->compound->thread;
     struct chimera_server_smb_shared *shared = thread->shared;
     struct chimera_smb_open_file     *open_file;
-    int                               status;
 
     /* MS-SMB2 §3.3.5.2.10: the state-modifying FSCTLs belong to the same
      * channel-sequence-checked set as WRITE/SET_INFO.  A stale, post-failover
@@ -167,22 +186,10 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 1,
                 0, &request->ioctl.output_iov);
 
-            status = open_file->pipe_transceive(request,
-                                                request->ioctl.input_iov,
-                                                request->ioctl.input_niov,
-                                                &request->ioctl.output_iov);
-
-            chimera_smb_open_file_release(request, open_file);
-
-            evpl_iovecs_release(thread->evpl, request->ioctl.input_iov, request->ioctl.input_niov);
-
-            if (status != 0) {
-                evpl_iovec_release(thread->evpl, &request->ioctl.output_iov);
-                chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
-                return;
-            }
-
-            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            chimera_smb_pipe_call(request, open_file, request->ioctl.input_iov,
+                                  request->ioctl.input_niov,
+                                  &request->ioctl.output_iov,
+                                  chimera_smb_ioctl_pipe_done);
             break;
 
         case SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO:

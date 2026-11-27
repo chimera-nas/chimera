@@ -155,6 +155,12 @@ typedef int (*chimera_smb_pipe_transceive_t)(
     int                         input_niov,
     struct evpl_iovec          *output_iov);
 
+/* How a transport finishes a pipe call (smb_pipe.h): status is the
+ * transceive's, 0 on success. */
+typedef void (*chimera_smb_pipe_done_t)(
+    struct chimera_smb_request *request,
+    int                         status);
+
 struct chimera_smb_notify_state;
 struct chimera_smb_lock_entry;
 

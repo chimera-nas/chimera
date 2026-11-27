@@ -228,6 +228,142 @@ fixture_identity_handler(
 } /* fixture_identity_handler */
 #endif /* ifdef _WIN32 */
 
+/*
+ * Stands in for an account-resolving handler.  Answers the two account keys for
+ * one account and scripts a NOT_FOUND, an UNAVAILABLE and a PASS for three
+ * other SIDs; every other key is passed.  `account_calls` counts how often it
+ * was consulted for an account key.
+ */
+static int account_calls;
+
+static void
+account_fill(struct chimera_vfs_identity_result *out)
+{
+    memset(&out->account, 0, sizeof(out->account));
+    snprintf(out->account.sid, sizeof(out->account.sid), "S-1-5-21-9-9-9-1001");
+    snprintf(out->account.domain, sizeof(out->account.domain), "WG9");
+    snprintf(out->account.name, sizeof(out->account.name), "acct9");
+    out->account.sid_type = 1;
+} /* account_fill */
+
+static enum chimera_vfs_identity_status
+account_handler(
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out,
+    void                               *private_data)
+{
+    (void) id;
+    (void) private_data;
+
+    if (key == CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT) {
+        account_calls++;
+        if (strcmp(name, "S-1-5-21-9-9-9-1001") == 0) {
+            account_fill(out);
+            return CHIMERA_VFS_IDENTITY_OK;
+        }
+        if (strcmp(name, "S-1-5-21-9-9-9-1999") == 0) {
+            return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+        }
+        if (strcmp(name, "S-1-5-21-9-9-9-1998") == 0) {
+            return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+        }
+        return CHIMERA_VFS_IDENTITY_PASS;
+    }
+
+    if (key == CHIMERA_VFS_IDENTITY_NAME_TO_ACCOUNT) {
+        account_calls++;
+        if (strcmp(name, "WG9\\acct9") == 0) {
+            account_fill(out);
+            return CHIMERA_VFS_IDENTITY_OK;
+        }
+        return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+    }
+
+    return CHIMERA_VFS_IDENTITY_PASS;
+} /* account_handler */
+
+struct account_probe {
+    int                                 done;
+    int                                 inline_fired;
+    enum chimera_vfs_identity_status status;
+    struct chimera_vfs_identity_account account;
+};
+
+static void
+account_cb(
+    enum chimera_vfs_identity_status          status,
+    const struct chimera_vfs_identity_result *result,
+    void                                     *private_data)
+{
+    struct account_probe *ap = private_data;
+
+    ap->status = status;
+    assert((result != NULL) == (status == CHIMERA_VFS_IDENTITY_OK));
+    if (result) {
+        ap->account = result->account;
+    }
+    ap->done = 1;
+} /* account_cb */
+
+static void
+account_resolve(
+    struct chimera_vfs_thread    *thread,
+    struct evpl                  *evpl,
+    enum chimera_vfs_identity_key key,
+    const char                   *name,
+    struct account_probe         *ap)
+{
+    memset(ap, 0, sizeof(*ap));
+    chimera_vfs_identity_resolve(thread, key, 0, name, account_cb, ap);
+    ap->inline_fired = ap->done;
+    while (!ap->done) {
+        evpl_continue(evpl);
+    }
+} /* account_resolve */
+
+/*
+ * What an account answer would change in the user cache if the worker let it
+ * in: it would add it as a user record whose user part is all zero (uid 0, an
+ * empty name), first on uid 0's chain.  So count every user and group record,
+ * and note which record uid 0 finds (the pointer is compared, never read).
+ */
+struct cache_shape {
+    int                            users;
+    int                            groups;
+    const struct chimera_vfs_user *uid0;
+    char                           uid0_name[256];
+};
+
+static void
+cache_shape_get(
+    struct chimera_vfs_user_cache *cache,
+    struct cache_shape            *s)
+{
+    const struct chimera_vfs_user  *user;
+    const struct chimera_vfs_group *group;
+    int                             i;
+
+    memset(s, 0, sizeof(*s));
+    chimera_rcu_read_lock(&cache->rcu);
+    for (i = 0; i < cache->num_buckets; i++) {
+        for (user = chimera_rcu_deref(cache->name_buckets[i].head); user;
+             user = chimera_rcu_deref(user->next_by_name)) {
+            s->users++;
+        }
+        for (group = chimera_rcu_deref(cache->group_gid_buckets[i].head); group;
+             group = chimera_rcu_deref(group->next_by_gid)) {
+            s->groups++;
+        }
+    }
+    s->uid0 = chimera_vfs_user_cache_lookup_by_uid(cache, 0);
+    if (s->uid0) {
+        snprintf(s->uid0_name, sizeof(s->uid0_name), "%s", s->uid0->username);
+    }
+    chimera_rcu_read_unlock(&cache->rcu);
+} /* cache_shape_get */
+
 int
 main(
     int    argc,
@@ -630,6 +766,84 @@ main(
     assert(chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_UID,
                                        gate.uid, NULL));
     TEST_PASS("warm_outlives_thread");
+
+    /* --- account keys --- */
+    {
+        struct account_probe ap;
+        struct cache_shape   shape0, shape1;
+        int                  before;
+
+        chimera_vfs_identity_register_handler(vfs, account_handler, NULL);
+
+        cache_shape_get(vfs->vfs_user_cache, &shape0);
+
+        account_resolve(thread, evpl, CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT,
+                        "S-1-5-21-9-9-9-1001", &ap);
+        assert(ap.status == CHIMERA_VFS_IDENTITY_OK);
+        assert(strcmp(ap.account.domain, "WG9") == 0);
+        assert(strcmp(ap.account.name, "acct9") == 0);
+        assert(ap.account.sid_type == 1);
+        assert(strcmp(ap.account.sid, "S-1-5-21-9-9-9-1001") == 0);
+
+        account_resolve(thread, evpl, CHIMERA_VFS_IDENTITY_NAME_TO_ACCOUNT,
+                        "WG9\\acct9", &ap);
+        assert(ap.status == CHIMERA_VFS_IDENTITY_OK);
+        assert(strcmp(ap.account.domain, "WG9") == 0);
+        assert(strcmp(ap.account.name, "acct9") == 0);
+        assert(ap.account.sid_type == 1);
+        assert(strcmp(ap.account.sid, "S-1-5-21-9-9-9-1001") == 0);
+        TEST_PASS("account key resolves to the handler's account");
+
+        assert(!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_SID,
+                                            0, "S-1-5-21-9-9-9-1001"));
+        assert(!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_NAME,
+                                            0, "acct9"));
+        assert(!chimera_vfs_identity_cached(vfs, CHIMERA_VFS_IDENTITY_BY_NAME,
+                                            0, "WG9\\acct9"));
+        /* The worker caches before it calls back, so both answers are in by
+         * now if they got in at all. */
+        cache_shape_get(vfs->vfs_user_cache, &shape1);
+        if (shape1.users != shape0.users || shape1.groups != shape0.groups ||
+            shape1.uid0 != shape0.uid0) {
+            fprintf(stderr, "  user cache changed: %d -> %d users, %d -> %d "
+                    "groups, uid 0 finds \"%s\" -> \"%s\"%s\n", shape0.users,
+                    shape1.users, shape0.groups, shape1.groups,
+                    shape0.uid0_name, shape1.uid0_name,
+                    shape1.uid0 != shape0.uid0 ? " (another record)" : "");
+        }
+        assert(shape1.users == shape0.users);
+        assert(shape1.groups == shape0.groups);
+        assert(shape1.uid0 == shape0.uid0);
+        assert(strcmp(shape1.uid0_name, shape0.uid0_name) == 0);
+        TEST_PASS("account answer never enters the user or group cache");
+
+        account_resolve(thread, evpl, CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT,
+                        "S-1-5-21-9-9-9-1997", &ap);
+        assert(ap.status == CHIMERA_VFS_IDENTITY_UNAVAILABLE);
+        TEST_PASS("nss and a passing handler leave an account key unavailable");
+
+        before = account_calls;
+        account_resolve(thread, evpl, CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT,
+                        "S-1-5-21-9-9-9-1999", &ap);
+        assert(ap.status == CHIMERA_VFS_IDENTITY_NOT_FOUND);
+        assert(account_calls == before + 1);
+        account_resolve(thread, evpl, CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT,
+                        "S-1-5-21-9-9-9-1999", &ap);
+        assert(ap.status == CHIMERA_VFS_IDENTITY_NOT_FOUND);
+        assert(ap.inline_fired == 1);
+        assert(account_calls == before + 1);
+        TEST_PASS("account not-found is cached negatively");
+
+        before = account_calls;
+        account_resolve(thread, evpl, CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT,
+                        "S-1-5-21-9-9-9-1998", &ap);
+        assert(ap.status == CHIMERA_VFS_IDENTITY_UNAVAILABLE);
+        account_resolve(thread, evpl, CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT,
+                        "S-1-5-21-9-9-9-1998", &ap);
+        assert(ap.status == CHIMERA_VFS_IDENTITY_UNAVAILABLE);
+        assert(account_calls == before + 2);
+        TEST_PASS("account unavailable is not cached");
+    }
 
     chimera_vfs_thread_destroy(thread);
     chimera_vfs_destroy(vfs);

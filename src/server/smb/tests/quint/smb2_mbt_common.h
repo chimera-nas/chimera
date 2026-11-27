@@ -573,6 +573,15 @@ struct smb2_notify_msg {
     struct smb2_notify_rec rec[SMB2C_MAX_NOTIFY_RECS];
 };
 
+/* smb2_conn.compound_armed: how the next request is sent compounded. */
+#define SMB2C_COMPOUND_LOGOFF_BEHIND    1
+#define SMB2C_COMPOUND_LOGOFF_AHEAD     2
+#define SMB2C_COMPOUND_BAD_SETUP_BEHIND 3
+
+/* A probe's hook on each final reply of a connection (smb2_conn.on_reply). */
+typedef void (*smb2_reply_hook_t)(
+    struct smb2_conn *c);
+
 struct smb2_conn {
     struct smb2_env                *env;
     int                             conn_index; /* stable per-env index (ClientGuid seed) */
@@ -627,6 +636,12 @@ struct smb2_conn {
      * "did anything of mine complete?" without having to subtract the
      * barrier's own traffic. */
     int                             nreply_app;
+    /* Optional: called with each final reply right after it is promoted into
+     * rbuf.  rbuf holds only the latest reply, and replies to requests a probe
+     * keeps in flight together can land in the same pump, so a probe that needs
+     * every one of them reads each here.  NULL (the default) for none. */
+    smb2_reply_hook_t               on_reply;
+    void                           *on_reply_arg;
 
     /* Async interim (STATUS_PENDING) accounting.  An interim tells the caller
      * the request PARKED server-side (smb_async_interim.c: the interim is sent
@@ -646,6 +661,7 @@ struct smb2_conn {
     int                             next_flags_armed;
     uint16_t                        next_cs;     /* header offset 8: ChannelSequence */
     int                             next_cs_armed;
+    int                             compound_armed; /* SMB2C_COMPOUND_*: send it compounded */
     uint64_t                        pin_msg_id;  /* send with THIS MessageId ... */
     int                             pin_armed;   /* ... and do not advance msg_id */
     uint64_t                        last_msg_id; /* MessageId actually stamped */
@@ -1221,6 +1237,9 @@ smb2c_deliver(
         if (g16(c->xbuf + 4, 12) != SMB2_ECHO) {
             c->nreply_app++;
         }
+    }
+    if (c->on_reply) {
+        c->on_reply(c);
     }
 } /* smb2c_deliver */
 
@@ -2023,6 +2042,7 @@ smb2c_send(
     int               body_len)
 {
     uint32_t payload = SMB2_HDR_SIZE + body_len;
+    uint32_t first   = 0;    /* length of a compound's first element */
     uint8_t *h       = c->sbuf + 4;
 
     /* Apply the one-shot header modifiers.  They patch the header AFTER the
@@ -2045,6 +2065,52 @@ smb2c_send(
     }
     c->last_msg_id = g64(h, 24);
 
+    /* smb2c_set_next_logoff / _logoff_ahead / _bad_setup: the request becomes
+     * one element of a compound of two unrelated requests on its session, with
+     * consecutive MessageIds.  The other element is a LOGOFF, behind the
+     * request or ahead of it, or a SESSION_SETUP behind it whose security
+     * buffer holds no token of any mechanism. */
+    if (c->compound_armed == SMB2C_COMPOUND_LOGOFF_AHEAD) {
+        uint8_t *h2;
+
+        first = SMB2_HDR_SIZE + 8;        /* a LOGOFF, padded to 8 bytes */
+        h2    = h + first;
+        memmove(h2, h, payload);
+        memcpy(h, h2, SMB2_HDR_SIZE);
+        memset(h + SMB2_HDR_SIZE, 0, 8);
+        p16(h, 12, SMB2_LOGOFF);
+        p32(h, 20, first);                /* NextCommand */
+        p16(h, SMB2_HDR_SIZE, 4);         /* StructureSize */
+        p64(h2, 24, g64(h, 24) + 1);      /* MessageId */
+        payload += first;
+    } else if (c->compound_armed) {
+        uint8_t *h2, *body2;
+
+        first = (payload + 7) & ~7u;
+        memset(h + payload, 0, first - payload);
+        p32(h, 20, first);                /* NextCommand */
+        h2    = h + first;
+        body2 = h2 + SMB2_HDR_SIZE;
+        memcpy(h2, h, SMB2_HDR_SIZE);
+        p32(h2, 20, 0);                   /* NextCommand */
+        p64(h2, 24, g64(h, 24) + 1);      /* MessageId */
+        if (c->compound_armed == SMB2C_COMPOUND_LOGOFF_BEHIND) {
+            p16(h2, 12, SMB2_LOGOFF);
+            p16(body2, 0, 4);             /* StructureSize */
+            p16(body2, 2, 0);             /* Reserved */
+            payload = first + SMB2_HDR_SIZE + 4;
+        } else {
+            memset(body2, 0, 24);
+            p16(h2, 12, SMB2_SESSION_SETUP);
+            p16(body2, 0, 25);            /* StructureSize */
+            body2[3] = 1;                 /* SecurityMode = SIGNING_ENABLED */
+            p16(body2, 12, SMB2_HDR_SIZE + 24); /* SecurityBufferOffset */
+            p16(body2, 14, 8);            /* SecurityBufferLength */
+            memcpy(body2 + 24, "no token", 8);
+            payload = first + SMB2_HDR_SIZE + 24 + 8;
+        }
+    }
+
     c->sbuf[0] = 0;
     c->sbuf[1] = (uint8_t) (payload >> 16);
     c->sbuf[2] = (uint8_t) (payload >> 8);
@@ -2062,11 +2128,22 @@ smb2c_send(
     if (c->signing_on) {
         uint8_t sig[16];
 
+        /* Each element of a compound is signed on its own, the first up to
+         * its NextCommand (MS-SMB2 3.2.4.1.1). */
         p32(h, 16, g32(h, 16) | SMB2_FLAGS_SIGNED);
         memset(h + 48, 0, 16);
         smb2w_sign(c->dialect, c->signing_alg, c->signing_key,
-                   h, (int) payload, sig);
+                   h, (int) (first ? first : payload), sig);
         memcpy(h + 48, sig, 16);
+        if (first) {
+            uint8_t *h2 = h + first;
+
+            p32(h2, 16, g32(h2, 16) | SMB2_FLAGS_SIGNED);
+            memset(h2 + 48, 0, 16);
+            smb2w_sign(c->dialect, c->signing_alg, c->signing_key,
+                       h2, (int) (payload - first), sig);
+            memcpy(h2 + 48, sig, 16);
+        }
     }
 
     /* SMB 3.1.1 preauth-integrity: fold NEGOTIATE and SESSION_SETUP into the
@@ -2127,8 +2204,9 @@ smb2c_send(
     }
 
     if (!c->pin_armed) {
-        c->msg_id++;
+        c->msg_id += first ? 2 : 1;
     }
+    c->compound_armed   = 0;
     c->next_flags       = 0;
     c->next_flags_armed = 0;
     c->next_cs          = 0;
@@ -2172,6 +2250,31 @@ smb2c_set_next_flags(
     c->next_flags       = flags;
     c->next_flags_armed = 1;
 } /* smb2c_set_next_flags */
+
+/* Send the next request with a LOGOFF of its session compounded behind it,
+ * as a second, unrelated element of the same message. */
+static inline void
+smb2c_set_next_logoff(struct smb2_conn *c)
+{
+    c->compound_armed = SMB2C_COMPOUND_LOGOFF_BEHIND;
+} /* smb2c_set_next_logoff */
+
+/* Send the next request compounded behind a LOGOFF of its session: the LOGOFF
+ * is the first element of the message, the request its unrelated second. */
+static inline void
+smb2c_set_next_logoff_ahead(struct smb2_conn *c)
+{
+    c->compound_armed = SMB2C_COMPOUND_LOGOFF_AHEAD;
+} /* smb2c_set_next_logoff_ahead */
+
+/* Send the next request with a SESSION_SETUP for its session compounded
+* behind it, as a second, unrelated element: a re-authentication that cannot
+* succeed, since its security buffer holds no token of any mechanism. */
+static inline void
+smb2c_set_next_bad_setup(struct smb2_conn *c)
+{
+    c->compound_armed = SMB2C_COMPOUND_BAD_SETUP_BEHIND;
+} /* smb2c_set_next_bad_setup */
 
 /* Stamp the next request's ChannelSequence (MS-SMB2 3.3.5.2.10). */
 static inline void

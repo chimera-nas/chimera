@@ -237,7 +237,7 @@ chimera_smb_read_send(struct chimera_smb_request *request)
 
 /*
  * DCE/RPC over a named pipe (ncacn_np), SMB2 READ leg: drain the response PDU a
- * prior SMB2 WRITE stashed via chimera_smb_pipe_write.  Serves up to the
+ * prior SMB2 WRITE stashed (chimera_smb_pipe_write_done).  Serves up to the
  * requested length, advancing an offset so a client may read the response in
  * several chunks; the stash is freed once fully drained.
  *
@@ -273,6 +273,11 @@ chimera_smb_pipe_read(struct chimera_smb_request *request)
             return;
         }
 
+        /* Only a CANCEL or teardown ends this park: nothing wakes it when a
+         * reply is stashed later.  So a READ that arrives while the WRITE
+         * whose reply it would fetch is still parked on an LSARPC lookup
+         * waits here until cancelled -- see chimera_smb_pipe_write_done for
+         * why clients are not expected to hit that. */
         conn->async_outstanding++;
         request->async.pipe_read = 1;
         chimera_smb_async_interim_begin(request);

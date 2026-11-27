@@ -5,6 +5,7 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "common/misc.h"
+#include "smb_lsarpc.h"
 
 void
 chimera_smb_logoff(struct chimera_smb_request *request)
@@ -23,6 +24,18 @@ chimera_smb_logoff(struct chimera_smb_request *request)
         chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
         return;
     }
+
+    /* Take the session off the connection first.  Both steps below can run
+     * other requests of this connection before they return -- completing a
+     * request advances its compound -- and one of them may belong to this
+     * session: another LOGOFF, a re-authentication, a pipe call that would
+     * park.  None of them is run (chimera_smb_compound_advance). */
+    chimera_smb_conn_remove_session_handle(conn, session_handle);
+
+    /* A lookup of this session still waiting on the identity resolver is
+     * failed (STATUS_INTERNAL_ERROR) before the session goes, so its reply
+     * comes ahead of this LOGOFF's. */
+    chimera_smb_lsarpc_session_closing(conn, session_handle);
 
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
@@ -44,10 +57,6 @@ chimera_smb_logoff(struct chimera_smb_request *request)
      * (preserves) any durable/persistent handle so a later session on the same
      * transport can durably reconnect it. */
     chimera_smb_session_release(thread, thread->shared, session_handle->session, true);
-
-    HASH_DELETE(hh, conn->session_handles, session_handle);
-
-    conn->last_session_handle = NULL;
 
     session_handle->session = NULL;
 

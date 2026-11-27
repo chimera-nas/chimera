@@ -109,9 +109,11 @@ int smb_wbclient_netbios_identity(
 // Identity-resolver miss handler backed by winbind.  Resolves BY_UID / BY_NAME
 // to a full user record (uid/gid/groups/name/real SID), BY_GID to a group
 // record (gid/name/real SID), and BY_SID to whichever of the two the SID names.
+// SID_TO_ACCOUNT and NAME_TO_ACCOUNT answer with the account winbind names
+// (domain, name, SID_NAME_USE) without touching the user or group record.
 // Registered with the VFS identity authority at SMB server init when winbind is
 // enabled.  Matches the chimera_vfs_identity_handler signature.
-enum chimera_vfs_identity_status smb_wbclient_identity_handler(
+SYMBOL_EXPORT enum chimera_vfs_identity_status smb_wbclient_identity_handler(
     enum chimera_vfs_identity_key       key,
     uint32_t                            id,
     const char                         *name,

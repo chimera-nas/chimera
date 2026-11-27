@@ -10,6 +10,7 @@
 
 #include <wbclient.h>
 #include "smb_wbclient_status.h"
+#include "smb_lsarpc_names.h"
 #include "common/ratelimit.h"
 #include <inttypes.h>
 #include <string.h>
@@ -476,6 +477,56 @@ wbc_sid_type_is_group(enum wbcSidType type)
            type == WBC_SID_NAME_WKN_GRP;
 } // wbc_sid_type_is_group
 
+/* Non-zero if `type` says winbind knows no such account. */
+static int
+wbc_sid_type_is_absent(enum wbcSidType type)
+{
+    return type == WBC_SID_NAME_USE_NONE ||
+           type == WBC_SID_NAME_DELETED ||
+           type == WBC_SID_NAME_INVALID ||
+           type == WBC_SID_NAME_UNKNOWN;
+} // wbc_sid_type_is_absent
+
+/* Fill `acct` with the account `sid` names: the SID string the caller already
+ * holds, plus the domain, name and type winbind reports for it. */
+static enum chimera_vfs_identity_status
+wbc_fill_account(
+    const struct wbcDomainSid           *sid,
+    const char                          *sidstr,
+    struct chimera_vfs_identity_account *acct)
+{
+    wbcErr wbc_err;
+    enum wbcSidType sid_type;
+    char *domain = NULL, *name = NULL;
+
+    wbc_err = wbcLookupSid(sid, &domain, &name, &sid_type);
+    if (wbc_err != WBC_ERR_SUCCESS) {
+        return wbc_status(wbc_err, "wbcLookupSid");
+    }
+    if (wbc_sid_type_is_absent(sid_type)) {
+        if (domain) {
+            wbcFreeMemory(domain);
+        }
+        if (name) {
+            wbcFreeMemory(name);
+        }
+        return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+    }
+
+    wbc_copy_string(acct->sid, sizeof(acct->sid), sidstr);
+    wbc_copy_string(acct->domain, sizeof(acct->domain), domain);
+    wbc_copy_string(acct->name, sizeof(acct->name), name);
+    acct->sid_type = (uint32_t) sid_type;
+
+    if (domain) {
+        wbcFreeMemory(domain);
+    }
+    if (name) {
+        wbcFreeMemory(name);
+    }
+    return CHIMERA_VFS_IDENTITY_OK;
+} // wbc_fill_account
+
 enum chimera_vfs_identity_status
 smb_wbclient_identity_handler(
     enum chimera_vfs_identity_key       key,
@@ -489,6 +540,8 @@ smb_wbclient_identity_handler(
     enum wbcSidType                  sid_type;
     char sidbuf[SMB_WBCLIENT_SID_MAX_LEN];
     char *lookup_domain = NULL, *lookup_name = NULL;
+    char acct_domain[CHIMERA_VFS_IDENTITY_ACCOUNT_NAME_MAX];
+    char acct_name[CHIMERA_VFS_IDENTITY_ACCOUNT_NAME_MAX];
     enum chimera_vfs_identity_status rc;
 
     (void) private_data;
@@ -579,6 +632,46 @@ smb_wbclient_identity_handler(
                 out->user.username_len = (int) strlen(out->user.username);
             }
             return rc;
+
+        case CHIMERA_VFS_IDENTITY_SID_TO_ACCOUNT:
+            if (!name) {
+                return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+            }
+            wbc_err = wbcStringToSid(name, &sid);
+            if (wbc_err != WBC_ERR_SUCCESS) {
+                return wbc_status(wbc_err, "wbcStringToSid");
+            }
+            return wbc_fill_account(&sid, name, &out->account);
+
+        case CHIMERA_VFS_IDENTITY_NAME_TO_ACCOUNT:
+            if (!name) {
+                return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+            }
+            /* A part that does not fit names no account winbind could hold. */
+            if (chimera_smb_lsa_split_name(name, acct_domain,
+                                           sizeof(acct_domain), acct_name,
+                                           sizeof(acct_name)) < 0) {
+                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+            }
+            wbc_err = wbcLookupName(acct_domain, acct_name, &sid, &sid_type);
+            if (wbc_err != WBC_ERR_SUCCESS) {
+                return wbc_status(wbc_err, "wbcLookupName");
+            }
+            if (wbc_sid_type_is_absent(sid_type)) {
+                return CHIMERA_VFS_IDENTITY_NOT_FOUND;
+            }
+            if (wbc_sid_to_string(&sid, sidbuf, sizeof(sidbuf)) < 0) {
+                return CHIMERA_VFS_IDENTITY_UNAVAILABLE;
+            }
+            /* The canonical domain and name come from the SID, not the input.
+             * Winbind has just named this SID for the name, so an answer that
+             * it knows no such SID does not say the name is unknown: the
+             * lookup did not finish (a domain controller that stopped
+             * answering in between reads this way), and must not be cached
+             * as an answer. */
+            rc = wbc_fill_account(&sid, sidbuf, &out->account);
+            return rc == CHIMERA_VFS_IDENTITY_NOT_FOUND ?
+                   CHIMERA_VFS_IDENTITY_UNAVAILABLE : rc;
 
         default:
             return CHIMERA_VFS_IDENTITY_PASS;
