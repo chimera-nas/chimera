@@ -990,6 +990,7 @@ test_reclaim_complete_persisted(void)
     session = calloc(1, sizeof(*session));
     CHECK(session);
     atomic_init(&session->destroyed, false);
+    atomic_init(&session->refcount, 1);
     memset(session->nfs4_session_id, 0x3C, NFS4_SESSIONID_SIZE);
     memset(&srec, 0, sizeof(srec));
     srec.clientid  = 42;
@@ -1025,6 +1026,8 @@ test_reclaim_complete_persisted(void)
     kv_wait_loop(&env, &w);
     CHECK(w.error == CHIMERA_VFS_ENOENT || w.value_len == 0);
 
+    /* Every write took and returned its own reference. */
+    CHECK(atomic_load(&session->refcount) == 1);
     free(session);
     kv_env_destroy(&env);
     printf("ok: reclaim_complete_persisted\n");

@@ -142,6 +142,13 @@ target_link_libraries(nfs4_session_binding_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 mbt_add_krb5(nfs4_session_binding_probe)
 
+add_executable(nfs4_session_lifetime_probe nfs4_session_lifetime_probe.c)
+target_include_directories(nfs4_session_lifetime_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs4_session_lifetime_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+mbt_add_krb5(nfs4_session_lifetime_probe)
+
 add_executable(nfs4_cb_path_probe nfs4_cb_path_probe.c)
 target_include_directories(nfs4_cb_path_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
@@ -382,6 +389,19 @@ foreach(_ipmode hold_expiry ceiling shutdown rdma)
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_inprog_probe_memfs_${_ipmode}"
         LABELS "functional;probe;nfsdrc_mbt;memfs"
         TIMEOUT 120)
+endforeach()
+
+# What a COMPOUND parked after its SEQUENCE does when its connection is closed or
+# its session is destroyed or replaced under it, and the replay of a COMPOUND that
+# carries CREATE_SESSION (see nfs4_session_lifetime_probe.c).  Needs no corpus.
+foreach(slcheck close rebind destroy replay)
+    add_test(NAME chimera/server/nfs/mbt4/session_lifetime_probe_${slcheck}_memfs
+        COMMAND $<TARGET_FILE:nfs4_session_lifetime_probe> --check ${slcheck})
+    set_tests_properties(chimera/server/nfs/mbt4/session_lifetime_probe_${slcheck}_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_session_lifetime_probe_${slcheck}_memfs"
+        LABELS "functional;probe;nfs4_mbt;memfs"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 90)
 endforeach()
 
 # Delegation policy probe: pins the deterministic grant/recall behavior the

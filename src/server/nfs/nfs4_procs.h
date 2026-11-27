@@ -888,6 +888,12 @@ nfs4_fail_undispatched_op(
     struct nfs_resop4                *resop,
     nfsstat4                          status);
 
+/* Test only: release COMPOUNDs parked by the test gate, unrun (see
+ * nfs4_compound_test_gate.h). */
+void
+nfs4_compound_gate_thread_destroy(
+    struct chimera_server_nfs_thread *thread);
+
 static inline void
 chimera_nfs4_compound_complete(
     struct nfs_request *req,

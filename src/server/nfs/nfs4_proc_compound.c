@@ -15,6 +15,7 @@
 #include "nfs4_rofs.h"
 #include "nfs_drc_reply.h"
 #include "nfs4_v40_drc.h"
+#include "nfs4_compound_test_gate.h"
 
 static int
 nfs4_send_cached_reply(
@@ -146,6 +147,93 @@ nfs4_fail_undispatched_op(
     }
 } /* nfs4_fail_undispatched_op */
 
+/* Test-only seam (nfs4_compound_test_gate.h); never armed unless a test arms
+ * it. */
+SYMBOL_EXPORT struct chimera_nfs4_compound_test_gate chimera_nfs4_compound_test_gate;
+
+/* How often a COMPOUND parked by the test gate looks for its release. */
+#define NFS4_COMPOUND_GATE_POLL_US 1000
+
+/* A COMPOUND parked by the test gate, kept on its thread's compound_parked
+ * list.  Its connection closing does not cancel it. */
+struct nfs4_compound_gate_ctx {
+    struct evpl_timer                 timer;
+    struct chimera_server_nfs_thread *thread;
+    struct nfs_request               *req;
+    unsigned int                      seq;  /* `released` when parked */
+    struct nfs4_compound_gate_ctx    *prev, *next;
+};
+
+static void
+nfs4_compound_gate_fire(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct nfs4_compound_gate_ctx    *gc = container_of(timer,
+                                                        struct nfs4_compound_gate_ctx,
+                                                        timer);
+    struct chimera_server_nfs_thread *thread = gc->thread;
+    struct nfs_request               *req    = gc->req;
+
+    if (atomic_load(&chimera_nfs4_compound_test_gate.released) == gc->seq) {
+        evpl_add_oneshot_timer(evpl, &gc->timer, nfs4_compound_gate_fire,
+                               NFS4_COMPOUND_GATE_POLL_US);
+        return;
+    }
+
+    atomic_fetch_sub(&chimera_nfs4_compound_test_gate.parked, 1);
+    DL_DELETE2(thread->compound_parked, gc, prev, next);
+    free(gc);
+
+    chimera_nfs4_compound_process(req, NFS4_OK);
+} /* nfs4_compound_gate_fire */
+
+/* Park req after its SEQUENCE if the test gate is armed.  Returns 1 if parked. */
+static int
+nfs4_compound_gate_take(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req)
+{
+    struct nfs4_compound_gate_ctx *gc;
+
+    if (!atomic_load(&chimera_nfs4_compound_test_gate.armed) ||
+        !atomic_exchange(&chimera_nfs4_compound_test_gate.armed, 0)) {
+        return 0;
+    }
+
+    gc = calloc(1, sizeof(*gc));
+    if (!gc) {
+        return 0;
+    }
+
+    gc->thread = thread;
+    gc->req    = req;
+    gc->seq    = atomic_load(&chimera_nfs4_compound_test_gate.released);
+    DL_APPEND2(thread->compound_parked, gc, prev, next);
+    atomic_fetch_add(&chimera_nfs4_compound_test_gate.parked, 1);
+    evpl_add_oneshot_timer(thread->evpl, &gc->timer, nfs4_compound_gate_fire,
+                           NFS4_COMPOUND_GATE_POLL_US);
+    return 1;
+} /* nfs4_compound_gate_take */
+
+/* Server shutdown: release every parked COMPOUND unrun. */
+void
+nfs4_compound_gate_thread_destroy(struct chimera_server_nfs_thread *thread)
+{
+    struct nfs4_compound_gate_ctx *gc, *tmp;
+
+    DL_FOREACH_SAFE2(thread->compound_parked, gc, tmp, next)
+    {
+        evpl_remove_timer(thread->evpl, &gc->timer);
+        atomic_fetch_sub(&chimera_nfs4_compound_test_gate.parked, 1);
+        DL_DELETE2(thread->compound_parked, gc, prev, next);
+        evpl_rpc2_discard_request(thread->evpl, gc->req->encoding);
+        nfs4_release_write_args(thread, gc->req, gc->req->args_compound);
+        nfs_request_free(thread, gc->req);
+        free(gc);
+    }
+} /* nfs4_compound_gate_thread_destroy */
+
 void
 chimera_nfs4_compound_process(
     struct nfs_request *req,
@@ -196,6 +284,12 @@ chimera_nfs4_compound_process(
                           req->replay_slot_id, req->replay_slot->cached_len);
         req->res_compound.status = nfs4_replay_slot_replay_failed(req);
         req->index               = req->res_compound.num_resarray;
+    }
+
+    /* Test only: the gate parks a COMPOUND whose SEQUENCE has just completed. */
+    if (status == NFS4_OK && req->index == 1 && req->seen_sequence &&
+        nfs4_compound_gate_take(thread, req)) {
+        return;
     }
 
     if (status != NFS4_OK) {
@@ -574,16 +668,20 @@ chimera_nfs4_compound(
     nfs4_trace_compound(req, args);
 
     /* The conn caches its bound nfs4_session in private_data.  The conn
-     * holds a refcount on it (set up by nfs4_session_bind_conn) so the
-     * memory is valid for the duration of this request.  However the
+     * holds a refcount on it (set up by nfs4_session_bind_conn), which keeps
+     * it valid while we take the request's own reference below.  However the
      * session may already have been destroyed by a prior DESTROY_SESSION
      * compound -- in that case treat the cache as empty so that the
      * lookup-by-id paths produce the appropriate BADSESSION/BAD_STATEID
      * errors. */
     {
-        struct nfs4_session *cached = evpl_rpc2_conn_get_private_data(conn);
+        struct nfs4_session *cached;
 
-        req->session = nfs4_session_is_live(cached) ? cached : NULL;
+        nfs4_session_assert_conn_thread(thread, conn, "compound start");
+        cached = evpl_rpc2_conn_get_private_data(conn);
+
+        nfs4_request_set_session(req,
+                                 nfs4_session_is_live(cached) ? cached : NULL);
     }
     req->args_compound       = args;
     req->res_compound.status = NFS4_OK;

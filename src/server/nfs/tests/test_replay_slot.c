@@ -108,7 +108,7 @@ test_unused_slot_first_seq_ok(void)
     nfsstat4                 status;
 
     reset_request(&req);
-    req.session = session;
+    nfs4_request_set_session(&req, session);
 
     status = nfs4_replay_slot_acquire(session, 0, 1, false, &req, &is_replay);
 
@@ -126,6 +126,7 @@ test_unused_slot_first_seq_ok(void)
     CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 1);
     CHECK(session->replay_slots[0].cached_buf == NULL);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_unused_slot_first_seq_ok */
 
@@ -140,7 +141,7 @@ test_unused_slot_wrong_seq_misordered(void)
     nfsstat4                 status;
 
     reset_request(&req);
-    req.session = session;
+    nfs4_request_set_session(&req, session);
 
     status = nfs4_replay_slot_acquire(session, 0, 2, false, &req, &is_replay);
 
@@ -148,6 +149,7 @@ test_unused_slot_wrong_seq_misordered(void)
     CHECK(!is_replay);
     CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_UNUSED);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_unused_slot_wrong_seq_misordered */
 
@@ -162,13 +164,14 @@ test_out_of_range_slot(void)
     nfsstat4                 status;
 
     reset_request(&req);
-    req.session = session;
+    nfs4_request_set_session(&req, session);
 
     status = nfs4_replay_slot_acquire(session, TEST_SLOTS, 1, false, &req,
                                       &is_replay);
     CHECK(status == NFS4ERR_BADSLOT);
     CHECK(!is_replay);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_out_of_range_slot */
 
@@ -192,8 +195,8 @@ test_in_progress_retry(void)
 
     reset_request(&req1);
     reset_request(&req2);
-    req1.session = session;
-    req2.session = session;
+    nfs4_request_set_session(&req1, session);
+    nfs4_request_set_session(&req2, session);
 
     status = nfs4_replay_slot_acquire(session, 0, 1, true, &req1, &is_replay);
     CHECK(status == NFS4_OK);
@@ -211,6 +214,8 @@ test_in_progress_retry(void)
 
     /* Clean up the first request. */
     nfs4_replay_slot_finalize(&req1);
+    nfs4_request_release_sessions(&req1);
+    nfs4_request_release_sessions(&req2);
     destroy_session_table(&table, session);
 } /* test_in_progress_retry */
 
@@ -232,7 +237,7 @@ test_completed_retry_uncached(void)
     nfsstat4                 status;
 
     reset_request(&req);
-    req.session = session;
+    nfs4_request_set_session(&req, session);
 
     /* Run a request with cachethis=false. */
     status = nfs4_replay_slot_acquire(session, 0, 1, false, &req, &is_replay);
@@ -241,12 +246,14 @@ test_completed_retry_uncached(void)
     CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_COMPLETED);
 
     /* Retry (same seqid) -> no cached bytes -> RETRY_UNCACHED_REP. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 0, 1, false, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 0, 1, false, &req, &is_replay);
     CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
     CHECK(!is_replay);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_completed_retry_uncached */
 
@@ -263,7 +270,7 @@ test_cached_retry_replay(void)
     char                    *fake_reply;
 
     reset_request(&req);
-    req.session = session;
+    nfs4_request_set_session(&req, session);
 
     /* Run with cachethis=true.  Encoding is NULL so arm_capture is a
      * no-op; we simulate the capture callback effect manually. */
@@ -282,14 +289,16 @@ test_cached_retry_replay(void)
     CHECK(session->replay_slots[0].cached_buf == fake_reply);
 
     /* Retry same seqid -> REPLAY. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
     CHECK(status == NFS4_OK);
     CHECK(is_replay);
     CHECK(req.replay_action == NFS4_REPLAY_ACTION_FROM_CACHE);
     CHECK(req.replay_slot == &session->replay_slots[0]);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
     /* fake_reply was freed by session_put -> slot teardown. */
 } /* test_cached_retry_replay */
@@ -306,7 +315,7 @@ test_advance_frees_cache(void)
     char                    *fake_reply;
 
     reset_request(&req);
-    req.session = session;
+    nfs4_request_set_session(&req, session);
 
     /* Get into CACHED with simulated bytes. */
     status = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
@@ -320,9 +329,10 @@ test_advance_frees_cache(void)
     CHECK(session->replay_bytes_in_use == 128);
 
     /* Advance: seqid + 1.  Old buf must be freed and bytes accounted. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 0, 2, false, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 0, 2, false, &req, &is_replay);
     CHECK(status == NFS4_OK);
     CHECK(!is_replay);
     CHECK(req.replay_action == NFS4_REPLAY_ACTION_NEW);
@@ -333,6 +343,7 @@ test_advance_frees_cache(void)
     nfs4_replay_slot_finalize(&req);
     CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_COMPLETED);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_advance_frees_cache */
 
@@ -354,8 +365,8 @@ test_retransmit_pins_cache_against_advance(void)
 
     /* Get slot 0 into CACHED with simulated captured bytes. */
     reset_request(&req_replay);
-    req_replay.session = session;
-    status             = nfs4_replay_slot_acquire(session, 0, 1, true, &req_replay, &is_replay);
+    nfs4_request_set_session(&req_replay, session);
+    status = nfs4_replay_slot_acquire(session, 0, 1, true, &req_replay, &is_replay);
     CHECK(status == NFS4_OK);
     fake_reply = malloc(96);
     memset(fake_reply, 'z', 96);
@@ -367,9 +378,10 @@ test_retransmit_pins_cache_against_advance(void)
 
     /* Retransmit (same seqid) claims the slot for replay: IN_PROGRESS, with the
      * buffer still present and pinned. */
+    nfs4_request_release_sessions(&req_replay);
     reset_request(&req_replay);
-    req_replay.session = session;
-    status             = nfs4_replay_slot_acquire(session, 0, 1, true, &req_replay, &is_replay);
+    nfs4_request_set_session(&req_replay, session);
+    status = nfs4_replay_slot_acquire(session, 0, 1, true, &req_replay, &is_replay);
     CHECK(status == NFS4_OK);
     CHECK(is_replay);
     CHECK(req_replay.replay_action == NFS4_REPLAY_ACTION_FROM_CACHE);
@@ -378,8 +390,8 @@ test_retransmit_pins_cache_against_advance(void)
 
     /* An advance arriving during the replay window must NOT free the buffer. */
     reset_request(&req_adv);
-    req_adv.session = session;
-    status          = nfs4_replay_slot_acquire(session, 0, 2, false, &req_adv, &is_replay);
+    nfs4_request_set_session(&req_adv, session);
+    status = nfs4_replay_slot_acquire(session, 0, 2, false, &req_adv, &is_replay);
     CHECK(status == NFS4ERR_SEQ_MISORDERED);
     CHECK(session->replay_slots[0].cached_buf == fake_reply);   /* still alive */
     CHECK(session->replay_bytes_in_use == 96);
@@ -391,9 +403,10 @@ test_retransmit_pins_cache_against_advance(void)
     CHECK(session->replay_slots[0].cached_buf == fake_reply);
 
     /* Now the advance succeeds and frees the buffer as usual. */
+    nfs4_request_release_sessions(&req_adv);
     reset_request(&req_adv);
-    req_adv.session = session;
-    status          = nfs4_replay_slot_acquire(session, 0, 2, false, &req_adv, &is_replay);
+    nfs4_request_set_session(&req_adv, session);
+    status = nfs4_replay_slot_acquire(session, 0, 2, false, &req_adv, &is_replay);
     CHECK(status == NFS4_OK);
     CHECK(!is_replay);
     CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_IN_PROGRESS);
@@ -401,6 +414,8 @@ test_retransmit_pins_cache_against_advance(void)
     CHECK(session->replay_bytes_in_use == 0);
     nfs4_replay_slot_finalize(&req_adv);
 
+    nfs4_request_release_sessions(&req_replay);
+    nfs4_request_release_sessions(&req_adv);
     destroy_session_table(&table, session);
 } /* test_retransmit_pins_cache_against_advance */
 
@@ -415,18 +430,20 @@ test_misordered_after_completed(void)
     nfsstat4                 status;
 
     reset_request(&req);
-    req.session = session;
+    nfs4_request_set_session(&req, session);
 
     status = nfs4_replay_slot_acquire(session, 0, 1, false, &req, &is_replay);
     CHECK(status == NFS4_OK);
     nfs4_replay_slot_finalize(&req);
 
     /* seqid = last+2 -> MISORDERED. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 0, 3, false, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 0, 3, false, &req, &is_replay);
     CHECK(status == NFS4ERR_SEQ_MISORDERED);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_misordered_after_completed */
 
@@ -441,7 +458,7 @@ test_slots_independent(void)
     nfsstat4                 status;
 
     reset_request(&req);
-    req.session = session;
+    nfs4_request_set_session(&req, session);
 
     status = nfs4_replay_slot_acquire(session, 0, 1, false, &req, &is_replay);
     CHECK(status == NFS4_OK);
@@ -449,19 +466,22 @@ test_slots_independent(void)
 
     /* Slot 1 is still UNUSED.  Its first seqid must be 1, not slot 0's
      * last+1 value. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 1, 2, false, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 1, 2, false, &req, &is_replay);
     CHECK(status == NFS4ERR_SEQ_MISORDERED);
 
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 1, 1, false, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 1, 1, false, &req, &is_replay);
     CHECK(status == NFS4_OK);
     nfs4_replay_slot_finalize(&req);
     CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_COMPLETED);
     CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_COMPLETED);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_slots_independent */
 
@@ -490,10 +510,11 @@ test_implicit_session_no_slots(void)
     CHECK(session->replay_max_slots == 0);
 
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 0, 1, false, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 0, 1, false, &req, &is_replay);
     CHECK(status == NFS4ERR_BADSLOT);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_implicit_session_no_slots */
 
@@ -521,7 +542,7 @@ test_false_retry_other_principal(void)
     char                     buf[8] = "cached";
 
     reset_request(&req);
-    req.session                   = session;
+    nfs4_request_set_session(&req, session);
     req.principal_flavor          = 1;    /* AUTH_SYS */
     req.principal_uid             = 1000;
     req.principal_gid             = 1000;
@@ -541,8 +562,9 @@ test_false_retry_other_principal(void)
                  nfs4_slot_word(1, NFS4_SLOT_CACHED));
 
     /* The same user retries: replayed. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session                   = session;
+    nfs4_request_set_session(&req, session);
     req.principal_flavor          = 1;
     req.principal_uid             = 1000;
     req.principal_gid             = 1000;
@@ -554,8 +576,9 @@ test_false_retry_other_principal(void)
     nfs4_replay_slot_replay_done(&req);
 
     /* A different uid on the same host: a false retry. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session                   = session;
+    nfs4_request_set_session(&req, session);
     req.principal_flavor          = 1;
     req.principal_uid             = 1001;
     req.principal_gid             = 1001;
@@ -566,8 +589,9 @@ test_false_retry_other_principal(void)
     CHECK(!is_replay);
 
     /* The same uid from a different machine is also a different user. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session                   = session;
+    nfs4_request_set_session(&req, session);
     req.principal_flavor          = 1;
     req.principal_uid             = 1000;
     req.principal_gid             = 1000;
@@ -579,8 +603,9 @@ test_false_retry_other_principal(void)
 
     /* An error from SEQUENCE must leave the slot alone (RFC 8881
      * Section 2.10.6.1.2), so the rightful owner can still replay. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session                   = session;
+    nfs4_request_set_session(&req, session);
     req.principal_flavor          = 1;
     req.principal_uid             = 1000;
     req.principal_gid             = 1000;
@@ -591,6 +616,7 @@ test_false_retry_other_principal(void)
     CHECK(is_replay);
     nfs4_replay_slot_replay_done(&req);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_false_retry_other_principal */
 
@@ -610,7 +636,7 @@ test_resync_slot_accepts_client_seqid(void)
                  nfs4_slot_word(0, NFS4_SLOT_RESYNC));
 
     reset_request(&req);
-    req.session       = session;
+    nfs4_request_set_session(&req, session);
     req.principal_uid = 1000;
     status            = nfs4_replay_slot_acquire(session, 0, 31, false, &req, &is_replay);
     CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
@@ -621,22 +647,25 @@ test_resync_slot_accepts_client_seqid(void)
     CHECK(session->replay_slots[0].principal == nfs4_replay_principal_digest(&req));
 
     /* The same user retransmits the request that resynced the slot. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session       = session;
+    nfs4_request_set_session(&req, session);
     req.principal_uid = 1000;
     status            = nfs4_replay_slot_acquire(session, 0, 31, false, &req, &is_replay);
     CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
 
     /* Another user at that seqid is a false retry, as on a live slot. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session       = session;
+    nfs4_request_set_session(&req, session);
     req.principal_uid = 1001;
     status            = nfs4_replay_slot_acquire(session, 0, 31, false, &req, &is_replay);
     CHECK(status == NFS4ERR_SEQ_FALSE_RETRY);
 
     /* The client moves on: an ordinary advance. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session       = session;
+    nfs4_request_set_session(&req, session);
     req.principal_uid = 1000;
     status            = nfs4_replay_slot_acquire(session, 0, 32, false, &req, &is_replay);
     CHECK(status == NFS4_OK);
@@ -648,12 +677,14 @@ test_resync_slot_accepts_client_seqid(void)
     CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 32);
 
     /* Jumping ahead after the resync is misordered as usual. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session       = session;
+    nfs4_request_set_session(&req, session);
     req.principal_uid = 1000;
     status            = nfs4_replay_slot_acquire(session, 0, 34, false, &req, &is_replay);
     CHECK(status == NFS4ERR_SEQ_MISORDERED);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_resync_slot_accepts_client_seqid */
 
@@ -675,28 +706,31 @@ test_resync_slot_no_special_seqids(void)
                  nfs4_slot_word(0, NFS4_SLOT_RESYNC));
 
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 1, 1, false, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 1, 1, false, &req, &is_replay);
     CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
     CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_COMPLETED);
     CHECK(nfs4_slot_seqid(&session->replay_slots[1]) == 1);
 
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 1, 2, false, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 1, 2, false, &req, &is_replay);
     CHECK(status == NFS4_OK);
     nfs4_replay_slot_finalize(&req);
     CHECK(nfs4_slot_state(&session->replay_slots[1]) == NFS4_SLOT_COMPLETED);
     CHECK(nfs4_slot_seqid(&session->replay_slots[1]) == 2);
 
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 2, 0xFFFFFFFFu, false, &req,
-                                           &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 2, 0xFFFFFFFFu, false, &req,
+                                      &is_replay);
     CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
     CHECK(nfs4_slot_state(&session->replay_slots[2]) == NFS4_SLOT_COMPLETED);
     CHECK(nfs4_slot_seqid(&session->replay_slots[2]) == 0xFFFFFFFFu);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_resync_slot_no_special_seqids */
 
@@ -749,8 +783,8 @@ test_resyncing_slot_is_in_progress(void)
                  nfs4_slot_word(17, NFS4_SLOT_RESYNCING));
 
     reset_request(&req);
-    req.session = session;
-    status      = nfs4_replay_slot_acquire(session, 0, 17, false, &req, &is_replay);
+    nfs4_request_set_session(&req, session);
+    status = nfs4_replay_slot_acquire(session, 0, 17, false, &req, &is_replay);
     CHECK(status == NFS4ERR_DELAY);
     CHECK(!is_replay);
     CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_RESYNCING);
@@ -761,6 +795,7 @@ test_resyncing_slot_is_in_progress(void)
     CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_RESYNCING);
     CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 17);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_resyncing_slot_is_in_progress */
 
@@ -783,7 +818,7 @@ test_resync_slot_cachethis_not_captured(void)
 
     memset(&encoding, 0, sizeof(encoding));
     reset_request(&req);
-    req.session  = session;
+    nfs4_request_set_session(&req, session);
     req.encoding = &encoding;
     status       = nfs4_replay_slot_acquire(session, 3, 9, true, &req, &is_replay);
     CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
@@ -796,14 +831,16 @@ test_resync_slot_cachethis_not_captured(void)
 
     /* The same encoding on an ordinary first request does arm the capture,
      * so the check above is not vacuous. */
+    nfs4_request_release_sessions(&req);
     reset_request(&req);
-    req.session  = session;
+    nfs4_request_set_session(&req, session);
     req.encoding = &encoding;
     status       = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
     CHECK(status == NFS4_OK);
     CHECK(encoding.reply_capture_cb != NULL);
     nfs4_replay_slot_finalize(&req);
 
+    nfs4_request_release_sessions(&req);
     destroy_session_table(&table, session);
 } /* test_resync_slot_cachethis_not_captured */
 
