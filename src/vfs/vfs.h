@@ -222,6 +222,11 @@ struct chimera_vfs {
      * name another protocol caches recalls that holder first.  When clear
      * (single-protocol deployments) the extra lookup is skipped. */
     int                                   caching_enabled;
+    /* True when the VFS keeps a record of each file that lost its last link
+     * while referenced (see vfs_unlinked.h).  Set once at startup, by the pNFS
+     * feature or when a data server is registered; with it clear none of that
+     * machinery runs and reaping an unlinked file is as it always was. */
+    int                                   ref_tracking;
     /* How long umount waits for a mount's handles to be dropped before
      * reporting EBUSY (microseconds).  0 waits only as long as the closes it
      * issues itself take. */

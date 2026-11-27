@@ -12,6 +12,7 @@
 #include "vfs.h"
 #include "vfs_procs.h"
 #include "vfs_internal.h"
+#include "vfs_unlinked.h"
 #include "prometheus-c.h"
 
 struct vfs_open_cache_shard {
@@ -19,6 +20,13 @@ struct vfs_open_cache_shard {
     struct chimera_vfs_open_handle     *handles;
     struct chimera_vfs_open_handle     *pending_close;
     struct chimera_vfs_open_handle     *free_handles;
+    /* Handles taken out of `handles` while still in use (see
+     * chimera_vfs_open_cache_detach).  They are on no other list, so without
+     * this one the handles of an unlinked file could not all be found. */
+    struct chimera_vfs_open_handle     *detached;
+    /* Records of the files unlinked while referenced; NULL for nearly every
+     * shard nearly all of the time. */
+    struct chimera_vfs_unlinked        *unlinked;
     uint8_t                             cache_id;
     uint32_t                            max_open_files;
     uint32_t                            open_handles;
@@ -35,6 +43,7 @@ struct vfs_open_cache {
     struct prometheus_counter        *open_cache;
     struct prometheus_counter_series *open_cache_acquire;
     struct prometheus_counter_series *open_cache_insert;
+    struct chimera_vfs_unlinked_ctl   unlinked;
 };
 
 #define CHIMERA_VFS_OPEN_CACHE_NO_BACKEND_OPEN (UINT64_MAX - 1)
@@ -90,6 +99,244 @@ chimera_vfs_close_ref_dispatch(
                       ref->vfs_private, ref->fh_hash, callback, private_data);
 } /* chimera_vfs_close_ref_dispatch */
 
+/* --- Unlinked files (see vfs_unlinked.h) --- */
+
+/*
+ * One unit of work for the close thread.  A handle of an unlinked file that
+ * leaves the cache is not closed where it leaves; everything the close needs
+ * is copied here (the handle struct is recycled at once) and the close thread
+ * takes it from here.  The struct is malloc'd: handles of unlinked files are
+ * rare and the close thread, not the hot path, frees it.
+ */
+enum chimera_vfs_unlinked_work_kind {
+    /* A handle of the file left the cache: take it out of the count, close it,
+     * and purge the file if it was the last. */
+    CHIMERA_VFS_UNLINKED_WORK_HANDLE,
+    /* The file has no strong reference left: collect the holders that have not
+     * been called and call them. */
+    CHIMERA_VFS_UNLINKED_WORK_RECALL,
+    /* Holders already collected (umount): just call them. */
+    CHIMERA_VFS_UNLINKED_WORK_CALLS,
+};
+
+struct chimera_vfs_unlinked_work {
+    struct chimera_vfs_unlinked_work *next;
+    struct chimera_vfs_unlinked      *rec;
+    uint8_t                           kind;
+    uint8_t                           reason;
+    struct chimera_vfs_recall_call   *calls;
+    uint32_t                          ncalls;
+    struct chimera_vfs_close_ref      close_ref;
+    /* Counted in the close fence umount waits on (the handle left the cache
+     * through the idle sweep or a umount). */
+    uint8_t                           fenced;
+    /* The last handle was a pending open that failed, so there is no backend
+     * open to close and the handle count was already settled. */
+    uint8_t                           carrierless;
+    /* Set by the close thread: this handle was the file's last, so its close
+     * is the purge.  And the thread that owns the item. */
+    uint8_t                           last;
+    struct chimera_vfs_close_thread  *close_thread;
+    /* Counted in the close thread's in-flight total until finished. */
+    uint8_t                           pending;
+    /* How the purge ended, for the record's final count. */
+    uint8_t                           failed;
+    uint8_t                           relinked;
+    uint8_t                           leaked;
+    /* The purge's own state: root for the link recheck, a stand-in for the
+     * carrier handle (whose struct is gone) to ask it through, and the data
+     * server's root directory while the backing file is being deleted. */
+    struct chimera_vfs_cred           root;
+    struct chimera_vfs_open_handle    probe;
+    struct chimera_vfs_open_handle   *ds_root;
+};
+
+static inline struct chimera_vfs_unlinked *
+chimera_vfs_unlinked_find(
+    const struct vfs_open_cache_shard *shard,
+    const uint8_t                     *fh,
+    uint32_t                           fh_len)
+{
+    struct chimera_vfs_unlinked *rec;
+
+    for (rec = shard->unlinked; rec; rec = rec->next) {
+        if (rec->fh_len == fh_len && memcmp(rec->fh, fh, fh_len) == 0) {
+            return rec;
+        }
+    }
+
+    return NULL;
+} /* chimera_vfs_unlinked_find */
+
+/* Caller holds the shard lock. */
+static inline void
+chimera_vfs_unlinked_queue(
+    struct vfs_open_cache            *cache,
+    struct chimera_vfs_unlinked_work *work)
+{
+    struct chimera_vfs_unlinked_ctl *ctl = &cache->unlinked;
+
+    work->next = NULL;
+
+    evpl_mutex_lock(&ctl->lock);
+    if (ctl->work_tail) {
+        ctl->work_tail->next = work;
+    } else {
+        ctl->work_head = work;
+    }
+    ctl->work_tail = work;
+    /* Ring under the lock, as the other cross-thread wakeups do. */
+    if (ctl->doorbell) {
+        evpl_ring_doorbell(ctl->doorbell);
+    }
+    evpl_mutex_unlock(&ctl->lock);
+} /* chimera_vfs_unlinked_queue */
+
+/*
+ * A handle of an unlinked file is leaving the cache.  Hand its close to the
+ * close thread.  The caller still removes the handle from the lists it is on
+ * and frees the struct.  Caller holds the shard lock.
+ */
+static inline void
+chimera_vfs_unlinked_route(
+    struct vfs_open_cache          *cache,
+    struct vfs_open_cache_shard    *shard,
+    struct chimera_vfs_open_handle *handle,
+    int                             fenced)
+{
+    struct chimera_vfs_unlinked_work *work;
+    struct chimera_vfs_unlinked      *rec;
+
+    rec = chimera_vfs_unlinked_find(shard, handle->fh, handle->fh_len);
+
+    chimera_vfs_abort_if(!rec, "handle flagged unlinked has no record");
+
+    work = calloc(1, sizeof(*work));
+    chimera_vfs_close_ref_capture(&work->close_ref, handle);
+    work->rec    = rec;
+    work->fenced = fenced;
+
+    if (fenced && cache->unlinked.fence_issued) {
+        chimera_atomic_add_fetch(cache->unlinked.fence_issued, 1, CHIMERA_MEMORY_RELEASE);
+    }
+
+    chimera_vfs_unlinked_queue(cache, work);
+} /* chimera_vfs_unlinked_route */
+
+/* A new handle for a file that has a record joins its counts.  A file whose
+ * purge is already running is left alone: the handle is then an ordinary one
+ * and the open cache never hands out an open for it (see acquire). */
+static inline void
+chimera_vfs_unlinked_adopt(
+    struct vfs_open_cache_shard    *shard,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct chimera_vfs_unlinked *rec;
+
+    rec = chimera_vfs_unlinked_find(shard, handle->fh, handle->fh_len);
+
+    if (rec && rec->state == CHIMERA_VFS_UNLINKED_TRACKED) {
+        handle->flags |= CHIMERA_VFS_OPEN_HANDLE_UNLINKED;
+        rec->handles++;
+        rec->strong++;
+    }
+} /* chimera_vfs_unlinked_adopt */
+
+static inline void
+chimera_vfs_unlinked_ref_inc(
+    struct vfs_open_cache_shard    *shard,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct chimera_vfs_unlinked *rec;
+
+    rec = chimera_vfs_unlinked_find(shard, handle->fh, handle->fh_len);
+
+    chimera_vfs_abort_if(!rec, "handle flagged unlinked has no record");
+
+    rec->strong++;
+} /* chimera_vfs_unlinked_ref_inc */
+
+/*
+ * The file has no real open left and some holder has not yet been asked to give
+ * its reference back: have the close thread ask.  The release path only queues;
+ * the callbacks run on the close thread, outside every lock.  Caller holds the
+ * shard lock.
+ */
+static inline void
+chimera_vfs_unlinked_queue_recall(
+    struct vfs_open_cache       *cache,
+    struct chimera_vfs_unlinked *rec)
+{
+    struct chimera_vfs_unlinked_work *work;
+
+    if (rec->state != CHIMERA_VFS_UNLINKED_TRACKED || rec->strong != 0 ||
+        rec->unfired == 0 || rec->fire_queued) {
+        return;
+    }
+
+    rec->fire_queued = 1;
+
+    work         = calloc(1, sizeof(*work));
+    work->kind   = CHIMERA_VFS_UNLINKED_WORK_RECALL;
+    work->reason = CHIMERA_VFS_RECALL_UNLINKED;
+    work->rec    = rec;
+    chimera_vfs_unlinked_queue(cache, work);
+} /* chimera_vfs_unlinked_queue_recall */
+
+static inline void
+chimera_vfs_unlinked_ref_dec(
+    struct vfs_open_cache          *cache,
+    struct vfs_open_cache_shard    *shard,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct chimera_vfs_unlinked *rec;
+
+    rec = chimera_vfs_unlinked_find(shard, handle->fh, handle->fh_len);
+
+    chimera_vfs_abort_if(!rec, "handle flagged unlinked has no record");
+    chimera_vfs_abort_if(rec->strong == 0, "unlinked file strong count underflow");
+
+    rec->strong--;
+
+    chimera_vfs_unlinked_queue_recall(cache, rec);
+} /* chimera_vfs_unlinked_ref_dec */
+
+/*
+ * A pending open of an unlinked file failed.  The handle is freed without a
+ * backend open, and every reference it carried (the opener's and any request
+ * parked behind it) goes with it.  If it was the file's last handle there is
+ * no carrier left for the purge, so queue the purge without one.
+ */
+static inline void
+chimera_vfs_unlinked_failed_open(
+    struct vfs_open_cache          *cache,
+    struct vfs_open_cache_shard    *shard,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct chimera_vfs_unlinked      *rec;
+    struct chimera_vfs_unlinked_work *work;
+
+    rec = chimera_vfs_unlinked_find(shard, handle->fh, handle->fh_len);
+
+    chimera_vfs_abort_if(!rec, "handle flagged unlinked has no record");
+    chimera_vfs_abort_if(rec->strong < handle->opencnt, "unlinked file strong count underflow");
+    chimera_vfs_abort_if(rec->handles == 0, "unlinked file handle count underflow");
+
+    rec->strong -= handle->opencnt;
+    rec->handles--;
+
+    if (rec->handles == 0) {
+        rec->state = CHIMERA_VFS_UNLINKED_PURGING;
+
+        work              = calloc(1, sizeof(*work));
+        work->rec         = rec;
+        work->carrierless = 1;
+        chimera_vfs_unlinked_queue(cache, work);
+    } else {
+        chimera_vfs_unlinked_queue_recall(cache, rec);
+    }
+} /* chimera_vfs_unlinked_failed_open */
+
 /* --- Shard linked-list helpers --- */
 
 static inline void
@@ -121,6 +368,19 @@ chimera_vfs_open_cache_shard_remove(
     handle->bucket_next = NULL;
     handle->bucket_prev = NULL;
 } // chimera_vfs_open_cache_shard_remove
+
+/* Take a handle that is still in use out of the cache's lookup list.  Its
+ * holders keep working; it closes when the last one releases it.  Caller holds
+ * the shard lock. */
+static inline void
+chimera_vfs_open_cache_detach(
+    struct vfs_open_cache_shard    *shard,
+    struct chimera_vfs_open_handle *handle)
+{
+    chimera_vfs_open_cache_shard_remove(shard, handle);
+    handle->flags |= CHIMERA_VFS_OPEN_HANDLE_DETACHED;
+    DL_APPEND(shard->detached, handle);
+} /* chimera_vfs_open_cache_detach */
 
 /*
  * Find a handle in the shard matching fh, access_mode, and credential identity.
@@ -195,6 +455,11 @@ chimera_vfs_open_cache_init(
 
     cache->shards = calloc(cache->num_shards, sizeof(*cache->shards));
 
+    /* Both caches carry the inbox for symmetry, but only the file cache ever
+     * holds records, so only it registers the metrics. */
+    chimera_vfs_unlinked_ctl_init(&cache->unlinked,
+                                  cache_id == CHIMERA_VFS_OPEN_ID_FILE ? metrics : NULL);
+
     if (metrics) {
         cache->metrics    = metrics;
         cache->open_cache = prometheus_metrics_create_counter(metrics, "chimera_vfs_open_cache",
@@ -230,6 +495,8 @@ chimera_vfs_open_cache_destroy(struct vfs_open_cache *cache)
     struct vfs_open_cache_shard    *shard;
     struct chimera_vfs_open_handle *handle, *tmp;
 
+    chimera_vfs_unlinked_cache_destroy(cache);
+
     for (unsigned int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
 
@@ -243,6 +510,8 @@ chimera_vfs_open_cache_destroy(struct vfs_open_cache *cache)
 
         evpl_mutex_destroy(&shard->lock);
     }
+
+    chimera_vfs_unlinked_ctl_destroy(&cache->unlinked);
 
     if (cache->metrics) {
         prometheus_counter_destroy_series(cache->open_cache, cache->open_cache_acquire);
@@ -360,10 +629,15 @@ chimera_vfs_open_cache_release(
          * and we'll give everyone else NULL callbacks so they'll never
          * release themselves.  Therefore we can free the handle now
          */
+        if (unlikely(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
+            chimera_vfs_unlinked_failed_open(cache, shard, handle);
+        }
         handle->opencnt = 0;
         if (!(handle->flags & CHIMERA_VFS_OPEN_HANDLE_DETACHED)) {
             chimera_vfs_open_cache_shard_remove(shard, handle);
             shard->open_handles--;
+        } else {
+            DL_DELETE(shard->detached, handle);
         }
         chimera_vfs_open_cache_free(shard, handle);
 
@@ -371,18 +645,39 @@ chimera_vfs_open_cache_release(
 
         handle->opencnt--;
 
+        chimera_vfs_abort_if(handle->opencnt < handle->recallcnt,
+                             "plain release of a handle whose remaining references are all recallable");
+
+        if (unlikely(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
+            chimera_vfs_unlinked_ref_dec(cache, shard, handle);
+        }
+
         if (handle->opencnt == 0) {
             if (handle->flags & CHIMERA_VFS_OPEN_HANDLE_DETACHED) {
                 /* Detached handle: close immediately, do not add to pending_close.
                  * Do not decrement open_handles - the handle was already removed
                  * from the cache when it was detached by insert(). */
                 struct chimera_vfs_close_ref close_ref;
+                int                          routed;
 
-                chimera_vfs_close_ref_capture(&close_ref, handle);
+                DL_DELETE(shard->detached, handle);
+
+                /* The close thread closes it, and counts it out of its file's
+                * record on the way: the purge of an unlinked file is decided
+                * by whoever takes the last handle, and that is never here. */
+                routed = !!(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED);
+
+                if (routed) {
+                    chimera_vfs_unlinked_route(cache, shard, handle, 0);
+                } else {
+                    chimera_vfs_close_ref_capture(&close_ref, handle);
+                }
                 chimera_vfs_open_cache_free(shard, handle);
                 evpl_mutex_unlock(&shard->lock);
                 chimera_vfs_open_cache_release_blocked(thread, requests, error_code);
-                chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+                if (!routed) {
+                    chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+                }
                 return;
             }
             handle->timestamp = chimera_vfs_now_ticks();
@@ -413,6 +708,10 @@ chimera_vfs_open_cache_dup(
     chimera_vfs_abort_if(handle->opencnt == 0, "dup on handle with zero opencnt");
 
     handle->opencnt++;
+
+    if (unlikely(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
+        chimera_vfs_unlinked_ref_inc(shard, handle);
+    }
 
     evpl_mutex_unlock(&shard->lock);
 
@@ -465,8 +764,15 @@ chimera_vfs_open_cache_evict(
         if (handle->opencnt == 0) {
             /* Idle: remove from both lists and close (outside the lock). */
             struct chimera_vfs_close_ref close_ref;
+            int                          routed;
 
-            chimera_vfs_close_ref_capture(&close_ref, handle);
+            routed = !!(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED);
+
+            if (routed) {
+                chimera_vfs_unlinked_route(cache, shard, handle, 0);
+            } else {
+                chimera_vfs_close_ref_capture(&close_ref, handle);
+            }
 
             DL_DELETE(shard->pending_close, handle);
             chimera_vfs_open_cache_shard_remove(shard, handle);
@@ -474,12 +780,13 @@ chimera_vfs_open_cache_evict(
             chimera_vfs_open_cache_free(shard, handle);
 
             evpl_mutex_unlock(&shard->lock);
-            chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+            if (!routed) {
+                chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+            }
         } else {
             /* In use: detach now, close on the final release. */
-            chimera_vfs_open_cache_shard_remove(shard, handle);
             shard->open_handles--;
-            handle->flags |= CHIMERA_VFS_OPEN_HANDLE_DETACHED;
+            chimera_vfs_open_cache_detach(shard, handle);
             evpl_mutex_unlock(&shard->lock);
         }
 
@@ -567,6 +874,19 @@ chimera_vfs_open_cache_acquire(
 
     evpl_mutex_lock(&shard->lock);
 
+    if (unlikely(shard->unlinked != NULL)) {
+        struct chimera_vfs_unlinked *rec = chimera_vfs_unlinked_find(shard, fh, fhlen);
+
+        if (rec && rec->state == CHIMERA_VFS_UNLINKED_PURGING) {
+            /* The last handle is gone and the data is about to be: nothing may
+             * bring the file back by its handle any more. */
+            evpl_mutex_unlock(&shard->lock);
+            request->status = CHIMERA_VFS_ESTALE;
+            callback(request, NULL);
+            return;
+        }
+    }
+
     handle = chimera_vfs_open_cache_shard_find(shard, fh, fhlen, access_mode, cred_hash);
 
     if (handle) {
@@ -580,6 +900,10 @@ chimera_vfs_open_cache_acquire(
         }
 
         handle->opencnt++;
+
+        if (unlikely(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
+            chimera_vfs_unlinked_ref_inc(shard, handle);
+        }
 
         if (handle->flags & (CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE | CHIMERA_VFS_OPEN_HANDLE_PENDING)) {
             request->unblock_callback = callback;
@@ -601,6 +925,8 @@ chimera_vfs_open_cache_acquire(
         handle->granted_valid       = 0;
         handle->granted_bound       = 0;
         handle->opencnt             = 1;
+        handle->recallcnt           = 0;
+        handle->recallables         = NULL;
         handle->access_mode         = access_mode;
         handle->flags               = exclusive ? CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE : 0;
         handle->callback            = callback;
@@ -620,6 +946,10 @@ chimera_vfs_open_cache_acquire(
 
         memcpy(handle->fh, fh, fhlen);
 
+        if (unlikely(shard->unlinked != NULL)) {
+            chimera_vfs_unlinked_adopt(shard, handle);
+        }
+
         chimera_vfs_open_cache_shard_insert(shard, handle);
 
         if (shard->open_handles < shard->max_open_files) {
@@ -632,6 +962,17 @@ chimera_vfs_open_cache_acquire(
             chimera_vfs_open_cache_shard_remove(shard, existing);
 
             struct chimera_vfs_close_ref close_ref;
+
+            if (unlikely(existing->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
+                /* The close thread closes it.  The open this victim made room
+                 * for need not wait for that, so go on at once. */
+                chimera_vfs_unlinked_route(cache, shard, existing, 0);
+                prometheus_counter_increment(shard->acquire);
+                chimera_vfs_open_cache_free(shard, existing);
+                evpl_mutex_unlock(&shard->lock);
+                chimera_vfs_open_cache_close_callback(CHIMERA_VFS_OK, handle);
+                return;
+            }
 
             chimera_vfs_close_ref_capture(&close_ref, existing);
 
@@ -705,6 +1046,8 @@ chimera_vfs_open_cache_insert(
     handle->granted_valid       = 0;
     handle->granted_bound       = 0;
     handle->opencnt             = 1;
+    handle->recallcnt           = 0;
+    handle->recallables         = NULL;
     handle->access_mode         = access_mode;
     handle->flags               = 0;
     handle->callback            = callback;
@@ -720,6 +1063,10 @@ chimera_vfs_open_cache_insert(
 
     memcpy(handle->fh, fh, fhlen);
 
+    if (unlikely(shard->unlinked != NULL)) {
+        chimera_vfs_unlinked_adopt(shard, handle);
+    }
+
     /* Check for existing entry with same (fh, access_mode, cred) */
     existing = chimera_vfs_open_cache_shard_find(shard, fh, fhlen, access_mode, cred_hash);
 
@@ -733,18 +1080,26 @@ chimera_vfs_open_cache_insert(
             chimera_vfs_open_cache_shard_insert(shard, handle);
 
             struct chimera_vfs_close_ref close_ref;
+            int                          routed;
 
-            chimera_vfs_close_ref_capture(&close_ref, existing);
+            routed = !!(existing->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED);
+
+            if (routed) {
+                chimera_vfs_unlinked_route(cache, shard, existing, 0);
+            } else {
+                chimera_vfs_close_ref_capture(&close_ref, existing);
+            }
 
             chimera_vfs_open_cache_free(shard, existing);
             evpl_mutex_unlock(&shard->lock);
-            chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+            if (!routed) {
+                chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+            }
             callback(request, handle);
             return;
         } else {
             /* In use: detach. Current holders keep working; on release it closes immediately */
-            chimera_vfs_open_cache_shard_remove(shard, existing);
-            existing->flags |= CHIMERA_VFS_OPEN_HANDLE_DETACHED;
+            chimera_vfs_open_cache_detach(shard, existing);
         }
     } else {
         /* No existing entry — we're adding a net new handle to the shard */
@@ -761,12 +1116,21 @@ chimera_vfs_open_cache_insert(
                 chimera_vfs_open_cache_shard_insert(shard, handle);
 
                 struct chimera_vfs_close_ref    close_ref;
+                int                             routed;
 
-                chimera_vfs_close_ref_capture(&close_ref, victim);
+                routed = !!(victim->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED);
+
+                if (routed) {
+                    chimera_vfs_unlinked_route(cache, shard, victim, 0);
+                } else {
+                    chimera_vfs_close_ref_capture(&close_ref, victim);
+                }
 
                 chimera_vfs_open_cache_free(shard, victim);
                 evpl_mutex_unlock(&shard->lock);
-                chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+                if (!routed) {
+                    chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+                }
                 callback(request, handle);
                 return;
             } else {
@@ -816,8 +1180,17 @@ chimera_vfs_open_cache_defer_close(
 
             DL_DELETE(shard->pending_close, handle);
             chimera_vfs_open_cache_shard_remove(shard, handle);
-            LL_PREPEND(closed, handle);
             shard->open_handles--;
+
+            if (unlikely(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
+                /* Not closed by the sweep: the close thread's unlinked-file
+                 * inbox takes it, and counts it in the close fence itself. */
+                chimera_vfs_unlinked_route(cache, shard, handle, 1);
+                chimera_vfs_open_cache_free(shard, handle);
+                continue;
+            }
+
+            LL_PREPEND(closed, handle);
 
             /* Count the handle as taken here, under the same shard lock that
              * removes it, so that no observer can find it absent from both the
@@ -896,6 +1269,15 @@ chimera_vfs_open_cache_purge_by_mount(
                 DL_DELETE(shard->pending_close, handle);
                 chimera_vfs_open_cache_shard_remove(shard, handle);
                 shard->open_handles--;
+
+                if (unlikely(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
+                    /* The close thread closes it; the fence makes umount wait. */
+                    chimera_vfs_unlinked_route(cache, shard, handle, 1);
+                    chimera_vfs_open_cache_free(shard, handle);
+                    handle = next;
+                    continue;
+                }
+
                 LL_PREPEND(*r_purged, handle);
             }
 
@@ -943,6 +1325,44 @@ chimera_vfs_open_cache_mark_for_close_by_mount(
 } /* chimera_vfs_open_cache_mark_for_close_by_mount */
 
 /*
+ * Have the close sweep take the idle handles of one file on its next pass,
+ * ahead of everything that is merely old.  The unlink path uses this for the
+ * pin it has just dropped, so a file nothing else references is purged at
+ * once instead of after the idle age.  The sweep stops at the first handle that
+ * is not old enough, so a handle stamped as ancient has to move to the front of
+ * the list to be reached.
+ */
+static inline void
+chimera_vfs_open_cache_expedite_close(
+    struct vfs_open_cache *cache,
+    const uint8_t         *fh,
+    uint32_t               fh_len,
+    uint64_t               fh_hash)
+{
+    struct vfs_open_cache_shard    *shard = &cache->shards[fh_hash & cache->shard_mask];
+    struct chimera_vfs_open_handle *handle, *tmp;
+    int                             found = 0;
+
+    evpl_mutex_lock(&shard->lock);
+
+    DL_FOREACH_SAFE(shard->pending_close, handle, tmp)
+    {
+        if (handle->fh_len == fh_len && memcmp(handle->fh, fh, fh_len) == 0) {
+            DL_DELETE(shard->pending_close, handle);
+            handle->timestamp = 0;
+            DL_PREPEND(shard->pending_close, handle);
+            found = 1;
+        }
+    }
+
+    if (found && cache->unlinked.doorbell) {
+        evpl_ring_doorbell(cache->unlinked.doorbell);
+    }
+
+    evpl_mutex_unlock(&shard->lock);
+} /* chimera_vfs_open_cache_expedite_close */
+
+/*
  * Lookup a file handle in the open cache and increment its refcount if found.
  *
  * This is used for checking if a file is open (e.g., for silly rename on remove).
@@ -972,6 +1392,9 @@ chimera_vfs_open_cache_lookup_ref(
             handle->opencnt > 0 &&
             !(handle->flags & CHIMERA_VFS_OPEN_HANDLE_PENDING)) {
             handle->opencnt++;
+            if (unlikely(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
+                chimera_vfs_unlinked_ref_inc(shard, handle);
+            }
             found = handle;
             break;
         }
@@ -1123,7 +1546,15 @@ chimera_vfs_open_cache_release_doc(
 
     handle->opencnt--;
 
-    if (handle->opencnt == 0 && handle->doc_delete_on_close) {
+    if (unlikely(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
+        chimera_vfs_unlinked_ref_dec(cache, shard, handle);
+    }
+
+    /* A file that already lost its last link has no name left for the
+     * delete-on-close to remove, and its handle must go through the close
+     * thread like any other of its file, so it takes the plain release. */
+    if (handle->opencnt == 0 && handle->doc_delete_on_close &&
+        !(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED)) {
         /* Last reference with DOC — extract deletion info and remove
          * from cache.  The caller is responsible for the actual unlink
          * and for closing the underlying VFS module handle. */
@@ -1136,6 +1567,7 @@ chimera_vfs_open_cache_release_doc(
         memcpy(doc_out->name, handle->doc_name, handle->doc_name_len);
 
         if (handle->flags & CHIMERA_VFS_OPEN_HANDLE_DETACHED) {
+            DL_DELETE(shard->detached, handle);
             chimera_vfs_open_cache_free(shard, handle);
         } else {
             chimera_vfs_open_cache_shard_remove(shard, handle);
@@ -1153,12 +1585,23 @@ chimera_vfs_open_cache_release_doc(
     if (handle->opencnt == 0) {
         if (handle->flags & CHIMERA_VFS_OPEN_HANDLE_DETACHED) {
             struct chimera_vfs_close_ref close_ref;
+            int                          routed;
 
-            chimera_vfs_close_ref_capture(&close_ref, handle);
+            DL_DELETE(shard->detached, handle);
+
+            routed = !!(handle->flags & CHIMERA_VFS_OPEN_HANDLE_UNLINKED);
+
+            if (routed) {
+                chimera_vfs_unlinked_route(cache, shard, handle, 0);
+            } else {
+                chimera_vfs_close_ref_capture(&close_ref, handle);
+            }
             chimera_vfs_open_cache_free(shard, handle);
             evpl_mutex_unlock(&shard->lock);
             chimera_vfs_open_cache_release_blocked(thread, requests, 0);
-            chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+            if (!routed) {
+                chimera_vfs_close_ref_dispatch(thread, &close_ref, NULL, NULL);
+            }
             return 0;
         }
         handle->timestamp = chimera_vfs_now_ticks();

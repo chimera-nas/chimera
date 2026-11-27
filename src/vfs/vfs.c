@@ -254,6 +254,13 @@ chimera_vfs_close_thread_wake_shutdown(
 
     min_age = shutdown ? 0 : chimera_vfs_close_sweep_min_age_ns();
 
+    /* A reference whose holder never gave it back would keep its handle, and so
+     * the drain below, from ever finishing.  Nobody is left to recall at this
+     * point: forget the recallable references and let the handles close. */
+    if (shutdown) {
+        chimera_vfs_unlinked_abandon_recallable(close_thread);
+    }
+
     /* Sweep OUTSIDE close_thread->lock.  A close can re-enter this thread's
      * event loop -- diskfs commit drains its submission queue with a nested
      * evpl_continue() -- which re-fires this doorbell (and the periodic timer)
@@ -264,6 +271,11 @@ chimera_vfs_close_thread_wake_shutdown(
      * per-shard cache locks, so it needs no protection here. */
     count  = chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_path_cache, min_age);
     count += chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_file_cache, min_age);
+
+    /* Handles of unlinked files that left the cache since the last pass.  A
+     * non-zero count keeps the shutdown drain going, like a handle that is
+     * still in the cache. */
+    count += chimera_vfs_unlinked_drain(close_thread);
 
     /* Backend-lease service work rides this doorbell too. */
     if (close_thread->vfs->vfs_state) {
@@ -346,6 +358,7 @@ chimera_vfs_close_thread_wake_timer(
      * loop and re-fires this timer (see chimera_vfs_close_thread_wake_shutdown). */
     chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_path_cache, min_age);
     chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_file_cache, min_age);
+    chimera_vfs_unlinked_drain(close_thread);
 
     /* Drop implicit I/O leases that have gone idle, bounding resident
      * per-file state for write-once / read-once workloads; drain any
@@ -1021,6 +1034,8 @@ chimera_vfs_init(
     evpl_cond_init(&vfs->close_thread.cond, NULL);
     vfs->close_thread.vfs      = vfs;
     vfs->close_thread.shutdown = 0;
+
+    chimera_vfs_unlinked_attach_close_thread(vfs->vfs_open_file_cache, &vfs->close_thread);
 
     vfs->close_thread.evpl_thread = evpl_thread_create(
         chimera_thread_config("chm_close"),

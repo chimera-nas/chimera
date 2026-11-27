@@ -24,6 +24,8 @@
 #include "nfs4_state.h"
 #include "nfs4_status.h"
 #include "nfs4_callback.h"
+#include "nfs4_cb.h"
+#include "nfs4_pnfs_test_hooks.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_procs.h"
@@ -510,11 +512,26 @@ struct ff_layoutget_ctx {
     struct chimera_vfs_open_handle *backing_handle;
     struct chimera_vfs_ds          *ds;
     uint64_t                        fileid;
+    uint32_t                        want_class;   /* backend-sourced path */
     struct chimera_vfs_attrs        set_attr;
     uint8_t                         blob[CHIMERA_VFS_PNFS_LAYOUT_MAX];
     uint32_t                        blob_len;
     char                            backing_name[CHIMERA_VFS_PNFS_BACKING_NAME_MAX];
 };
+
+SYMBOL_EXPORT struct chimera_nfs_pnfs_test_hooks chimera_nfs_pnfs_test_hooks;
+
+SYMBOL_EXPORT void
+chimera_nfs_pnfs_test_recall(
+    struct chimera_server_nfs_thread *thread,
+    const uint8_t                    *fh,
+    uint16_t                          fh_len,
+    void (                           *resume )(
+        void *arg),
+    void                             *resume_arg)
+{
+    chimera_nfs4_cb_recall_and_wait(thread, fh, fh_len, resume, resume_arg);
+} /* chimera_nfs_pnfs_test_recall */
 
 static void
 ff_lg_fail(
@@ -550,6 +567,51 @@ lg_layout4_xdr_len(uint32_t body_len)
     return 28 + ((body_len + 3) & ~3u);
 } /* lg_layout4_xdr_len */
 
+/* Test seam: the window between LAYOUTGET's VFS work and its taking a
+ * reference for the layout. */
+static void
+lg_before_recallable(struct ff_layoutget_ctx *ctx)
+{
+    struct nfs_request *req = ctx->req;
+
+    if (chimera_nfs_pnfs_test_hooks.layoutget_before_recallable) {
+        chimera_nfs_pnfs_test_hooks.layoutget_before_recallable(
+            req->thread->vfs_thread, req->fh, (uint16_t) req->fhlen,
+            chimera_nfs_pnfs_test_hooks.arg);
+    }
+} /* lg_before_recallable */
+
+/* Make the layout for a new holder.  Its reference on the file is LAYOUTGET's
+ * own open, converted to a recallable one before the layout is registered, so a
+ * file whose last real reference this is, or whose purge has begun, is refused
+ * (the client then does its I/O through the metadata server, or finds the file
+ * gone) and a refused registration leaves nothing behind.  On success the
+ * layout owns the handle; on every other outcome ff_lg_fail releases whatever
+ * is still in ctx->mds_handle. */
+static struct nfs_layout_state *
+lg_layout_create(
+    struct ff_layoutget_ctx *ctx,
+    struct nfs_client       *client,
+    uint32_t                 client_short_id,
+    struct nfs_state_table  *table,
+    nfsstat4                *status)
+{
+    struct nfs_request      *req  = ctx->req;
+    struct LAYOUTGET4args   *args = &req->args_compound->argarray[req->index].oplayoutget;
+    struct LAYOUTGET4res    *res  = &req->res_compound.resarray[req->index].oplayoutget;
+    struct nfs_layout_state *layout;
+
+    layout = nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
+                                     client_short_id, table,
+                                     &req->thread->shared->nfs4_layout_table,
+                                     &res->logr_resok4.logr_stateid,
+                                     req->thread->vfs_thread, &ctx->mds_handle, status);
+    if (layout) {
+        *status = NFS4_OK;
+    }
+    return layout;
+} /* lg_layout_create */
+
 static void
 ff_lg_emit(struct ff_layoutget_ctx *ctx)
 {
@@ -559,6 +621,7 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
     struct nfs_state_table  *table  = &req->thread->shared->nfs4_state_table;
     struct nfs_client       *client = req->session ? req->session->client_unified : NULL;
     struct nfs_layout_state *layout;
+    nfsstat4                 status;
     const uint8_t           *deviceid, *backing_fh, *native_fh;
     uint32_t                 backing_fh_len, native_fh_len, client_short_id;
     uint8_t                 *body;
@@ -625,21 +688,38 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
 
     client_short_id = (uint32_t) client->client_id;
 
+    if (chimera_nfs_pnfs_test_hooks.layoutget_before_register) {
+        chimera_nfs_pnfs_test_hooks.layoutget_before_register(
+            req->thread, req->fh, (uint16_t) req->fhlen,
+            chimera_nfs_pnfs_test_hooks.arg);
+    }
+
+    /* A recall of this file may have started since the entry check in
+     * chimera_nfs4_layoutget: the VFS work above ran in between.  The layout
+     * table decides under its lock, so a holder is never added, or advanced,
+     * behind a recall's back; the client retries once that recall is done.
+     * Nothing has been taken at this point, so refusing leaks nothing beyond
+     * the handles ff_lg_fail releases. */
     layout = nfs_layout_state_find(client, req->fh, req->fhlen);
     if (layout) {
         /* One layout per (client, file), so a later RW LAYOUTGET over a
          * layout first taken for READ widens that layout rather than making a
          * second one -- otherwise the RW access the client just acquired is
-         * invisible to LAYOUTCOMMIT, which requires it. */
-        if (args->loga_iomode == LAYOUTIOMODE4_RW) {
+         * invisible to LAYOUTCOMMIT, which requires it.  The layout already
+         * holds its reference on the file; this open is released below. */
+        status = nfs_layout_state_bump(layout, client_short_id,
+                                       &res->logr_resok4.logr_stateid);
+        if (status == NFS4_OK && args->loga_iomode == LAYOUTIOMODE4_RW) {
             layout->iomode = LAYOUTIOMODE4_RW;
         }
-        nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
     } else {
-        layout = nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
-                                         client_short_id, table,
-                                         &req->thread->shared->nfs4_layout_table,
-                                         &res->logr_resok4.logr_stateid);
+        lg_before_recallable(ctx);
+        layout = lg_layout_create(ctx, client, client_short_id, table, &status);
+    }
+
+    if (status != NFS4_OK) {
+        ff_lg_fail(ctx, status);
+        return;
     }
 
     /* Remember what we handed out so CB_LAYOUTRECALL can name the same type. */
@@ -832,6 +912,19 @@ ff_lg_dsroot_cb(
                         ff_lg_create_cb, ctx);
 } /* ff_lg_dsroot_cb */
 
+/* A failed getattr on a file we hold open: some backends report a zero-link
+ * inode as ESTALE or ENOENT, which for LAYOUTGET means the file has gone, not
+ * STALE for a handle that was valid a moment ago.  NFS4ERR_LAYOUTUNAVAILABLE
+ * (RFC 8881 15.1.10.4) sends the client to the metadata server. */
+static inline nfsstat4
+lg_getattr_status(enum chimera_vfs_error error_code)
+{
+    if (error_code == CHIMERA_VFS_ESTALE || error_code == CHIMERA_VFS_ENOENT) {
+        return NFS4ERR_LAYOUTUNAVAILABLE;
+    }
+    return chimera_nfs4_errno_to_nfsstat4(error_code);
+} /* lg_getattr_status */
+
 static void
 ff_lg_getattr_cb(
     enum chimera_vfs_error    error_code,
@@ -842,7 +935,7 @@ ff_lg_getattr_cb(
     struct nfs_request      *req = ctx->req;
 
     if (error_code != CHIMERA_VFS_OK) {
-        ff_lg_fail(ctx, chimera_nfs4_errno_to_nfsstat4(error_code));
+        ff_lg_fail(ctx, lg_getattr_status(error_code));
         return;
     }
 
@@ -906,6 +999,7 @@ lg_sourced_cb(
     struct nfs_state_table  *table  = &req->thread->shared->nfs4_state_table;
     struct nfs_client       *client = req->session ? req->session->client_unified : NULL;
     struct nfs_layout_state *layout;
+    nfsstat4                 status;
     uint32_t                 client_short_id, i, loc_type;
     uint32_t                 layouts_len = 0;
 
@@ -1011,18 +1105,30 @@ lg_sourced_cb(
     }
 
     client_short_id = (uint32_t) client->client_id;
-    layout          = nfs_layout_state_find(client, req->fh, req->fhlen);
+
+    if (chimera_nfs_pnfs_test_hooks.layoutget_before_register) {
+        chimera_nfs_pnfs_test_hooks.layoutget_before_register(
+            req->thread, req->fh, (uint16_t) req->fhlen,
+            chimera_nfs_pnfs_test_hooks.arg);
+    }
+
+    /* See ff_lg_emit(): refused here when a recall started in the meantime. */
+    layout = nfs_layout_state_find(client, req->fh, req->fhlen);
     if (layout) {
         /* See ff_lg_emit(): widen an existing READ layout to RW. */
-        if (args->loga_iomode == LAYOUTIOMODE4_RW) {
+        status = nfs_layout_state_bump(layout, client_short_id,
+                                       &res->logr_resok4.logr_stateid);
+        if (status == NFS4_OK && args->loga_iomode == LAYOUTIOMODE4_RW) {
             layout->iomode = LAYOUTIOMODE4_RW;
         }
-        nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
     } else {
-        layout = nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
-                                         client_short_id, table,
-                                         &req->thread->shared->nfs4_layout_table,
-                                         &res->logr_resok4.logr_stateid);
+        lg_before_recallable(ctx);
+        layout = lg_layout_create(ctx, client, client_short_id, table, &status);
+    }
+
+    if (status != NFS4_OK) {
+        ff_lg_fail(ctx, status);
+        return;
     }
 
     /* Remember the backend-sourced type: a block/SCSI holder must be recalled
@@ -1084,9 +1190,10 @@ ff_lg_open_cb(
             return;
         }
 
-        chimera_vfs_get_layout(req->thread->vfs_thread, &req->cred, handle,
+        ctx->want_class = want_class;
+        chimera_vfs_get_layout(req->thread->vfs_thread, &req->cred, ctx->mds_handle,
                                args->loga_offset, args->loga_length, args->loga_iomode,
-                               want_class, CHIMERA_VFS_LAYOUT_MAX_SEGMENTS,
+                               ctx->want_class, CHIMERA_VFS_LAYOUT_MAX_SEGMENTS,
                                lg_sourced_cb, ctx);
         return;
     }

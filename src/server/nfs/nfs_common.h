@@ -24,6 +24,7 @@
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "nfs4_layout_table.h"
+#include "nfs4_cb.h"
 #include "nfs4_recovery.h"
 #include "nfs3_drc.h"
 #include "nfs4_v40_drc.h"
@@ -493,6 +494,7 @@ struct chimera_server_nfs_shared {
     struct prometheus_metrics          *metrics;
     struct nfs4_replay_metrics          replay_metrics;
     struct nfs4_table_metrics           table_metrics;
+    struct nfs4_layout_metrics          layout_metrics;
     struct nfs4_v40_drc                 v40_drc;
     struct nfs3_drc                     nfs3_drc;
 
@@ -535,6 +537,9 @@ struct chimera_server_nfs_thread {
     /* Cross-thread pNFS CB_LAYOUTRECALL marshalling (same rationale as
      * cb_recall_queue, but for layout holders).  Via layout->recall_qnext. */
     struct nfs_layout_state          *cb_layoutrecall_queue;
+    /* CB_LAYOUTRECALL re-sends waiting on their timer (nfs4_cb.c); only this
+     * thread touches the list. */
+    struct nfs4_cb_layout_retry      *cb_layout_retries;
     /* Deferred-op resumes bounced back to their home thread: a layout recall
      * completes (LAYOUTRETURN) on the backchannel owner thread, but the deferred
      * op's request/iovecs are owned by the thread that received it.  See

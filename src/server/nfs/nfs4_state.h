@@ -20,6 +20,7 @@
 struct nfs_request;
 #include "vfs/vfs.h"
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_ref.h"
 #include "common/macros.h"
 
 /* One held NFSv4 byte-range, tracked so it can be released on LOCKU or
@@ -533,36 +534,61 @@ struct nfs_delegation {
 struct nfs_layout_table;
 
 struct nfs_layout_state {
-    struct nfs_client       *client;    /* borrowed; client outlives the layout */
-    uint8_t                  fh[NFS4_FHSIZE];
-    uint16_t                 fh_len;
-    uint16_t                 export_id; /* to re-wrap fh for CB_LAYOUTRECALL */
-    uint32_t                 seqid;     /* server-incremented layout stateid seqid */
-    uint32_t                 iomode;    /* current LAYOUTIOMODE4 */
+    struct nfs_client              *client; /* borrowed; client outlives the layout */
+    uint8_t                         fh[NFS4_FHSIZE];
+    uint16_t                        fh_len;
+    uint16_t                        export_id; /* to re-wrap fh for CB_LAYOUTRECALL */
+    uint32_t                        seqid; /* server-incremented layout stateid seqid */
+    uint32_t                        iomode; /* current LAYOUTIOMODE4 */
 
     /* layouttype4 granted for this file (RFC 8881 3.3.13): flex-files, block
      * or SCSI.  CB_LAYOUTRECALL must echo it -- the client matches a recall by
      * {layout type, fh, iomode, range} and answers NFS4ERR_NOMATCHING_LAYOUT
      * otherwise.  Set by LAYOUTGET; 0 means "not yet granted". */
-    uint32_t                 layout_type;
+    uint32_t                        layout_type;
 
-    uint8_t                  shard;
-    uint32_t                 slot_idx;
-    uint32_t                 generation;
+    /* Set, under the layout table's shard lock, once a recall has snapshotted
+     * this holder.  A later batch of the same recall, or an overlapping recall
+     * of the same file, skips it, so a holder is sent one CB_LAYOUTRECALL and
+     * is never on a cb_layoutrecall_queue twice. */
+    uint8_t                         recall_snapped;
+
+    /* When that recall snapshotted it (nfs_lease_now_ns clock, set with
+     * recall_snapped under the shard lock).  The lease sweeper revokes a
+     * recalled layout still held two lease periods later (RFC 8881 12.5.5.2
+     * lets the server revoke a layout whose recall is not honoured). */
+    uint64_t                        recall_snapped_ns;
+
+    /* CB_LAYOUTRECALL re-sends so far (the client answered NFS4ERR_DELAY or
+     * the call failed); sets the delay before the next one. */
+    uint32_t                        recall_retries;
+
+    uint8_t                         shard;
+    uint32_t                        slot_idx;
+    uint32_t                        generation;
 
     /* Membership in the server-wide layout table (keyed by fh): the table this
      * layout is registered in, and the next holder of the same file. */
-    struct nfs_layout_table *global_table;
-    struct nfs_layout_state *global_next;
+    struct nfs_layout_table        *global_table;
+    struct nfs_layout_state        *global_next;
 
-    UT_hash_handle           hh;        /* by fh in client->layouts_by_fh */
+    UT_hash_handle                  hh; /* by fh in client->layouts_by_fh */
+
+    /* The layout's reference on the file: the open handle LAYOUTGET took, kept
+     * until the layout is returned, revoked or its client torn down, so the
+     * file's data lives as long as any layout does.  Registered with the VFS
+     * as recallable (`recall`), so the VFS asks for it back, through
+     * nfs4_layout_vfs_recall, once an unlinked file has no real open left.
+     * NULL for a layout made without a VFS (the unit tests). */
+    struct chimera_vfs_open_handle *handle;
+    struct chimera_vfs_recallable   recall;
 
     /* Link on an owner thread's cb_layoutrecall_queue while a CB_LAYOUTRECALL
      * is being marshalled cross-thread (see nfs4_cb_recall_holder). */
-    struct nfs_layout_state *recall_qnext;
+    struct nfs_layout_state        *recall_qnext;
 
-    _Atomic uint32_t         refcount;
-    _Atomic uint8_t          destroyed;
+    _Atomic uint32_t                refcount;
+    _Atomic uint8_t                 destroyed;
 };
 
 /* Refcount helpers for pinning a layout across a recall (the table snapshots
@@ -1289,22 +1315,38 @@ nfs_layout_state_find(
     uint16_t           fh_len);
 
 /* Create a layout_state for {client, fh}, allocate a slot, and write the
- * encoded layout stateid (seqid = 1) to out_stateid.  Lifetime ref = 1. */
+ * encoded layout stateid (seqid = 1) to out_stateid.  Lifetime ref = 1.
+ *
+ * `*handle`, when non-NULL, is the caller's open reference on the file
+ * (`vfs_thread` is the caller's).  The layout takes it over, as a recallable
+ * reference, before it is registered.  On success `*handle` is cleared: the
+ * layout owns it.  Returns NULL with *status set otherwise:
+ *   NFS4ERR_STALE            the file's purge has been decided;
+ *   NFS4ERR_LAYOUTUNAVAILABLE  the caller's open is the file's last real
+ *                            reference on an unlinked file;
+ *   NFS4ERR_RECALLCONFLICT   a recall is outstanding on the file.
+ * For the first two *handle is left with the caller, who releases it; for the
+ * last the layout had already taken it and has released it, so *handle is
+ * cleared there too. */
 SYMBOL_EXPORT struct nfs_layout_state *
 nfs_layout_state_create(
-    struct nfs_client       *client,
-    const uint8_t           *fh,
-    uint16_t                 fh_len,
-    uint16_t                 export_id,
-    uint32_t                 iomode,
-    uint32_t                 client_short_id,
-    struct nfs_state_table  *table,
-    struct nfs_layout_table *layout_table,
-    struct stateid4         *out_stateid);
+    struct nfs_client               *client,
+    const uint8_t                   *fh,
+    uint16_t                         fh_len,
+    uint16_t                         export_id,
+    uint32_t                         iomode,
+    uint32_t                         client_short_id,
+    struct nfs_state_table          *table,
+    struct nfs_layout_table         *layout_table,
+    struct stateid4                 *out_stateid,
+    struct chimera_vfs_thread       *vfs_thread,
+    struct chimera_vfs_open_handle **handle,
+    nfsstat4                        *status);
 
 /* Advance the layout stateid seqid and re-encode (subsequent LAYOUTGET /
- * LAYOUTRETURN on an existing layout). */
-SYMBOL_EXPORT void
+ * LAYOUTRETURN on an existing layout).  NFS4ERR_RECALLCONFLICT, nothing
+ * changed, while a recall is outstanding on the file. */
+SYMBOL_EXPORT nfsstat4
 nfs_layout_state_bump(
     struct nfs_layout_state *state,
     uint32_t                 client_short_id,

@@ -28,6 +28,24 @@ set(CHIMERA_TEST_TIER quick)
 add_test(NAME chimera/server/nfs/open_state_lookup COMMAND test_open_state_lookup)
 set(CHIMERA_TEST_TIER extended)
 
+# The layout table's recall barrier: batched holder snapshots, overlapping
+# recalls, waiter withdrawal.  The table's symbols are internal to chimera_nfs,
+# so it is compiled in directly and the test supplies the two layout-state
+# refcount helpers it calls.
+add_executable(test_layout_table test_layout_table.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c)
+target_include_directories(test_layout_table PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${NFS_COMMON_INCLUDE_DIR})
+target_compile_definitions(test_layout_table PRIVATE XXH_INLINE_ALL)
+target_link_libraries(test_layout_table chimera_common evpl ${CHIMERA_UUID_LIB})
+add_dependencies(test_layout_table chimera_nfs_common)
+set(CHIMERA_TEST_TIER quick)
+add_test(NAME chimera/server/nfs/layout_table COMMAND test_layout_table)
+set_tests_properties(chimera/server/nfs/layout_table PROPERTIES TIMEOUT 30)
+set(CHIMERA_TEST_TIER extended)
+
 # Exercise the asynchronous RPC2 disconnect / NLM grant-job lifetime directly.
 add_executable(test_nlm_grant_disconnect test_nlm_grant_disconnect.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_peer_probe.c)

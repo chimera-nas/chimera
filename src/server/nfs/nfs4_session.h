@@ -322,13 +322,11 @@ struct nfs4_session {
      * later (BIND_CONN_TO_SESSION) carries them.  backchannel_conn is the
      * connection bound as the back channel, by CREATE_SESSION with
      * CREATE_SESSION4_FLAG_CONN_BACK_CHAN or by BIND_CONN_TO_SESSION.  It is a
-     * borrowed pointer with no reference behind it: nfs4_session_unbind_conn
-     * clears it when the connection closes while still bound to this session,
-     * but a connection since bound to another session (rebound by
-     * CREATE_SESSION or SEQUENCE) is freed on close with this pointer still
-     * set, and a later recall over it is a use-after-free.  That needs every
-     * session whose backchannel is the closing connection to be found, which
-     * the connection's single bound session cannot do. */
+     * borrowed pointer with no reference behind it.  A connection records only
+     * the session it was last bound to, so nfs4_session_unbind_conn finds the
+     * sessions that rode it by remembering, in nfs4_session_conn_rebound, that
+     * the connection moved off a session carrying its backchannel; the close
+     * then clears the pointer in every session of the table that names it. */
     uint32_t                          nfs4_session_cb_program;
     uint32_t                          nfs4_session_cb_sec_flavor;
     uint32_t                          nfs4_session_cb_sec_uid;
@@ -339,6 +337,10 @@ struct nfs4_session {
      * Callbacks must be sent from this thread -- evpl sends are not cross-thread
      * safe -- so cross-thread recalls marshal to it (nfs4_cb_recall_holder). */
     struct chimera_server_nfs_thread *nfs4_session_backchannel_owner;
+    /* The connection this session is bound to has, at some point, been moved
+     * here from a session whose backchannel it was.  Touched only on that
+     * connection's thread.  See nfs4_session_backchannel_conn. */
+    bool                              nfs4_session_conn_rebound;
     /* CREATE_SESSION4_FLAG_PERSIST was advertised for this session (server
      * nfs4_drc on AND client requested it): the per-slot reply cache is
      * written through to the KV store so retransmits replay across a restart. */
@@ -845,7 +847,8 @@ void nfs4_session_bind_conn(
     struct evpl_rpc2_conn *conn,
     struct nfs4_session   *session);
 void nfs4_session_unbind_conn(
-    struct evpl_rpc2_conn *conn);
+    struct nfs4_client_table *table,
+    struct evpl_rpc2_conn    *conn);
 bool nfs4_session_conn_associated(
     struct evpl_rpc2_conn *conn,
     struct nfs4_session   *session);

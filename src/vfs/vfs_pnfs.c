@@ -33,6 +33,12 @@ chimera_vfs_pnfs_set_enabled(
     int                 enabled)
 {
     vfs->pnfs->enabled = enabled;
+
+    /* A layout is a reference the VFS may have to recall, whether or not the
+     * file's data lives on a data server (a block layout does not). */
+    if (enabled) {
+        vfs->ref_tracking = 1;
+    }
 } /* chimera_vfs_pnfs_set_enabled */
 
 SYMBOL_EXPORT int
@@ -88,6 +94,10 @@ chimera_vfs_pnfs_add_device(
     ds->minorversion = minorversion;
 
     ds->root_fh_len = 0;
+
+    /* Data on a data server outlives its metadata file's name, so the VFS has
+     * to follow references to unlinked files from here on. */
+    vfs->ref_tracking = 1;
 
     return idx;
 } /* chimera_vfs_pnfs_add_device */
@@ -251,6 +261,31 @@ chimera_vfs_pnfs_fh_is_ds_backing(
 
     return 0;
 } /* chimera_vfs_pnfs_fh_is_ds_backing */
+
+SYMBOL_EXPORT int
+chimera_vfs_pnfs_fh_is_local_ds_backing(
+    const struct chimera_vfs *vfs,
+    const void               *fh,
+    int                       fhlen)
+{
+    const struct chimera_vfs_pnfs *pnfs = vfs->pnfs;
+    int                            i;
+
+    if (!pnfs || fhlen < CHIMERA_VFS_MOUNTID_SIZE) {
+        return 0;
+    }
+
+    for (i = 0; i < pnfs->num_ds; i++) {
+        const struct chimera_vfs_ds *ds = &pnfs->ds[i];
+
+        if (ds->backing_local && ds->root_fh_len >= CHIMERA_VFS_MOUNTID_SIZE &&
+            memcmp(ds->root_fh, fh, CHIMERA_VFS_MOUNTID_SIZE) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+} /* chimera_vfs_pnfs_fh_is_local_ds_backing */
 
 SYMBOL_EXPORT struct chimera_vfs_ds *
 chimera_vfs_pnfs_steer(struct chimera_vfs *vfs)

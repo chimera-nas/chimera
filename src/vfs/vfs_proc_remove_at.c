@@ -15,6 +15,7 @@
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
 #include "vfs/vfs_open_cache.h"
+#include "vfs/vfs_unlink_track.h"
 #include "vfs/vfs_notify.h"
 #include "vfs/sdk/vfs_access.h"
 #include "vfs/sdk/vfs_acl.h"
@@ -391,7 +392,7 @@ chimera_vfs_remove_at_toolong(
 } /* chimera_vfs_remove_at_toolong */
 
 static void
-chimera_vfs_remove_at_common(
+chimera_vfs_remove_at_untracked(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
     struct chimera_vfs_open_handle  *handle,
@@ -482,6 +483,204 @@ chimera_vfs_remove_at_common(
                                    flags, pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,
                                    callback, private_data);
+} /* chimera_vfs_remove_at_untracked */
+
+/*
+ * A regular file that is unlinked while its data may live on a data server is
+ * tracked (see vfs_unlink_track.h): a pin is taken before the unlink and the
+ * link count is read through it afterwards, and the reply to the caller waits
+ * for that.  Everything else, and every server with tracking off, goes
+ * straight to the unlink.
+ */
+struct chimera_vfs_remove_at_tracked {
+    struct chimera_vfs_thread       *thread;
+    const struct chimera_vfs_cred   *cred;
+    struct chimera_vfs_open_handle  *handle;
+    const char                      *name;
+    int                              namelen;
+    /* The caller's own, which it keeps valid until the reply. */
+    const uint8_t                   *child_fh;
+    int                              child_fh_len;
+    int                              match_child_fh;
+    unsigned int                     flags;
+    uint64_t                         pre_attr_mask;
+    uint64_t                         post_attr_mask;
+    uint8_t                          parent_lease_skip[16];
+    int                              parent_lease_skip_valid;
+    chimera_vfs_remove_at_callback_t callback;
+    void                            *private_data;
+    struct chimera_vfs_unlink_pin   *pin;
+    enum chimera_vfs_error status;
+    /* The reply's attributes outlive the request that produced them only as
+     * copies, and only the plain ones: the pointers they may carry (ACL,
+     * SIDs) are valid for the duration of the unlink's own callback. */
+    struct chimera_vfs_attrs         pre_attr, post_attr;
+    int                              have_pre, have_post;
+};
+
+static void
+chimera_vfs_remove_at_tracked_replied(void *private_data)
+{
+    struct chimera_vfs_remove_at_tracked *t        = private_data;
+    chimera_vfs_remove_at_callback_t      callback = t->callback;
+    void                                 *arg      = t->private_data;
+    enum chimera_vfs_error                status   = t->status;
+    struct chimera_vfs_attrs              pre      = t->pre_attr;
+    struct chimera_vfs_attrs              post     = t->post_attr;
+    int                                   have_pre = t->have_pre, have_post = t->have_post;
+
+    free(t);
+
+    callback(status, have_pre ? &pre : NULL, have_post ? &post : NULL, arg);
+} /* chimera_vfs_remove_at_tracked_replied */
+
+static void
+chimera_vfs_remove_at_attrs_copy(
+    struct chimera_vfs_attrs       *to,
+    const struct chimera_vfs_attrs *from)
+{
+    *to              = *from;
+    to->va_acl       = NULL;
+    to->va_owner_sid = NULL;
+    to->va_group_sid = NULL;
+    to->va_set_mask &= ~(uint64_t) (CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_OWNER_SID |
+                                    CHIMERA_VFS_ATTR_GROUP_SID);
+} /* chimera_vfs_remove_at_attrs_copy */
+
+static void
+chimera_vfs_remove_at_tracked_unlinked(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_remove_at_tracked *t = private_data;
+
+    t->status    = error_code;
+    t->have_pre  = pre_attr != NULL;
+    t->have_post = post_attr != NULL;
+    if (pre_attr) {
+        chimera_vfs_remove_at_attrs_copy(&t->pre_attr, pre_attr);
+    }
+    if (post_attr) {
+        chimera_vfs_remove_at_attrs_copy(&t->post_attr, post_attr);
+    }
+
+    chimera_vfs_unlink_pin_finish(t->pin, error_code, chimera_vfs_remove_at_tracked_replied, t);
+} /* chimera_vfs_remove_at_tracked_unlinked */
+
+static void
+chimera_vfs_remove_at_tracked_pinned(
+    struct chimera_vfs_unlink_pin *pin,
+    void                          *private_data)
+{
+    struct chimera_vfs_remove_at_tracked *t = private_data;
+
+    if (!pin) {
+        chimera_vfs_remove_at_untracked(t->thread, t->cred, t->handle, t->name, t->namelen,
+                                        t->child_fh, t->child_fh_len,
+                                        t->match_child_fh, t->flags, t->pre_attr_mask,
+                                        t->post_attr_mask,
+                                        t->parent_lease_skip_valid ? t->parent_lease_skip : NULL,
+                                        t->callback, t->private_data);
+        free(t);
+        return;
+    }
+
+    t->pin = pin;
+
+    chimera_vfs_remove_at_untracked(t->thread, t->cred, t->handle, t->name, t->namelen,
+                                    t->child_fh, t->child_fh_len,
+                                    t->match_child_fh, t->flags, t->pre_attr_mask,
+                                    t->post_attr_mask,
+                                    t->parent_lease_skip_valid ? t->parent_lease_skip : NULL,
+                                    chimera_vfs_remove_at_tracked_unlinked, t);
+} /* chimera_vfs_remove_at_tracked_pinned */
+
+static void
+chimera_vfs_remove_at_tracked_resolved(
+    int                                     found,
+    const struct chimera_vfs_unlink_victim *victim,
+    void                                   *private_data)
+{
+    struct chimera_vfs_remove_at_tracked *t = private_data;
+
+    if (!found) {
+        /* The unlink itself reports why. */
+        chimera_vfs_remove_at_tracked_pinned(NULL, t);
+        return;
+    }
+
+    chimera_vfs_unlink_pin_take(t->thread, t->cred, victim, chimera_vfs_remove_at_tracked_pinned, t);
+} /* chimera_vfs_remove_at_tracked_resolved */
+
+static void
+chimera_vfs_remove_at_common(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    const char                      *name,
+    int                              namelen,
+    const uint8_t                   *child_fh,
+    int                              child_fh_len,
+    int                              match_child_fh,
+    unsigned int                     flags,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    chimera_vfs_remove_at_callback_t callback,
+    void                            *private_data)
+{
+    struct chimera_vfs_remove_at_tracked *t;
+
+    /* The names the unlink itself refuses, and the mounts it cannot touch, are
+     * for it to report. */
+    if (!chimera_vfs_unlink_track_wanted(thread, handle->fh, handle->fh_len, name, namelen) ||
+        namelen >= CHIMERA_VFS_NAME_MAX || namelen < 1 ||
+        (namelen == 1 && name[0] == '.') ||
+        (namelen == 2 && name[0] == '.' && name[1] == '.') ||
+        child_fh_len > CHIMERA_VFS_FH_SIZE) {
+        chimera_vfs_remove_at_untracked(thread, cred, handle, name, namelen, child_fh,
+                                        child_fh_len, match_child_fh, flags, pre_attr_mask,
+                                        post_attr_mask, parent_lease_skip, callback,
+                                        private_data);
+        return;
+    }
+
+    t = calloc(1, sizeof(*t));
+
+    t->thread         = thread;
+    t->cred           = cred;
+    t->handle         = handle;
+    t->name           = name;
+    t->namelen        = namelen;
+    t->child_fh       = child_fh;
+    t->child_fh_len   = child_fh_len;
+    t->match_child_fh = match_child_fh;
+    t->flags          = flags;
+    t->pre_attr_mask  = pre_attr_mask;
+    t->post_attr_mask = post_attr_mask;
+    t->callback       = callback;
+    t->private_data   = private_data;
+    if (parent_lease_skip) {
+        memcpy(t->parent_lease_skip, parent_lease_skip, 16);
+        t->parent_lease_skip_valid = 1;
+    }
+
+    if (child_fh && child_fh_len > 0) {
+        struct chimera_vfs_unlink_victim victim;
+
+        /* The caller already has the victim's file handle (NFSv4 REMOVE and
+         * delete-on-close do); what it is gets settled by the pin. */
+        memset(&victim, 0, sizeof(victim));
+        memcpy(victim.fh, child_fh, child_fh_len);
+        victim.fh_len = (uint16_t) child_fh_len;
+        chimera_vfs_remove_at_tracked_resolved(1, &victim, t);
+        return;
+    }
+
+    chimera_vfs_unlink_victim_lookup(thread, cred, handle->fh, handle->fh_len, name, namelen,
+                                     chimera_vfs_remove_at_tracked_resolved, t);
 } /* chimera_vfs_remove_at_common */
 
 /*

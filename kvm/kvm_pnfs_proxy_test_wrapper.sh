@@ -417,4 +417,20 @@ if echo "$TEST_CMD_ARG" | grep -q "RECALL_EXPECTED"; then
     echo "=== verified: proxy received + handled CB_LAYOUTRECALL ==="
 fi
 
+# An unlinked file's data server file must be deleted once the last client
+# reference goes.  The proxy may return its layout itself at close, in which
+# case no recall is needed, so assert the delete and that nothing was revoked.
+if echo "$TEST_CMD_ARG" | grep -q "UNLINK_DELETE_EXPECTED"; then
+    for i in $(seq 1 1500); do
+        grep -qE "pNFS: deleting data-server backing file|pNFS: data-server backing file .* already gone" "$MDS_LOG" 2>/dev/null && break
+        sleep 0.02
+    done
+    if ! grep -qE "pNFS: deleting data-server backing file|pNFS: data-server backing file .* already gone" "$MDS_LOG"; then
+        echo "=== the data server's backing file was not deleted after the unlink ===" >&2
+        grep -E "pNFS:" "$MDS_LOG" | tail -15 >&2
+        exit 1
+    fi
+    echo "=== verified: unlinked file's backing file deleted ==="
+fi
+
 exit 0

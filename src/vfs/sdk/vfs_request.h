@@ -279,6 +279,11 @@ _Static_assert(CHIMERA_VFS_OP_NUM <= 64,
  * cache must not serve or store attributes for it (chimera_vfs_getattr). */
 #define CHIMERA_VFS_OPEN_HANDLE_STREAM          0x10
 #define CHIMERA_VFS_OPEN_HANDLE_NO_BACKEND_OPEN 0x20
+/* The file this handle belongs to lost its last link while referenced and has
+ * a chimera_vfs_unlinked record in its open cache shard.  Set on every handle
+ * of that file, including pending and detached ones; the cache's release and
+ * eviction paths test it and keep the record's counts exact. */
+#define CHIMERA_VFS_OPEN_HANDLE_UNLINKED        0x40
 
 #define CHIMERA_VFS_ACCESS_MODE_RW              0
 #define CHIMERA_VFS_ACCESS_MODE_RO              1
@@ -301,6 +306,8 @@ chimera_vfs_nonreg_error(uint32_t mode)
     return CHIMERA_VFS_EINVAL;
 } /* chimera_vfs_nonreg_error */
 
+struct chimera_vfs_recallable;
+
 struct chimera_vfs_open_handle {
     /* Identity: the owning module plus the handle's place in the open cache. */
     struct chimera_vfs_module      *vfs_module;
@@ -315,6 +322,12 @@ struct chimera_vfs_open_handle {
      * create path immediately afterwards to report OPENED vs CREATED. */
     uint8_t                         r_created;
     uint32_t                        opencnt;
+    /* The part of opencnt held as recallable references (see vfs_unlinked.h).
+     * Always a subset of opencnt, so opencnt keeps its meaning everywhere. */
+    uint32_t                        recallcnt;
+    /* The recallable references behind recallcnt, one entry each (see
+     * vfs_ref.h).  Guarded by the shard lock of the cache that owns the handle. */
+    struct chimera_vfs_recallable  *recallables;
 
     /* Identity hash of the credential that opened this handle: the open cache
      * is keyed by (fh, access_mode, cred_hash) so each caller gets its own

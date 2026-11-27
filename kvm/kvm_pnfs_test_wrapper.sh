@@ -422,4 +422,9 @@ for pid in "$MDS_PID" "$DS_PID"; do
     fi
 done
 
+if [ "$GUEST_STATUS" = 0 ]; then
+    . "$(dirname "${BASH_SOURCE[0]}")/kvm_pnfs_deferred_delete_check.sh"
+    pnfs_deferred_delete_check "$TEST_CMD_ARG" "$MDS_LOG" "$NETNS_NAME" "$MDS_IP" || exit 1
+fi
+
 exit "$GUEST_STATUS"

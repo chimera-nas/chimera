@@ -271,6 +271,9 @@ ip netns add "${NETNS_NAME}"
 ip netns exec "${NETNS_NAME}" ip link set lo up
 ip netns exec "${NETNS_NAME}" ip tuntap add dev "${TAP_NAME}" mode tap
 ip netns exec "${NETNS_NAME}" ip addr add 10.0.0.1/24 dev "${TAP_NAME}"
+# A second server address: a guest mounting both 10.0.0.1 and 10.0.0.5 acts
+# as two distinct pNFS clients (cross-client layout recall).
+ip netns exec "${NETNS_NAME}" ip addr add 10.0.0.5/24 dev "${TAP_NAME}"
 ip netns exec "${NETNS_NAME}" ip link set "${TAP_NAME}" up
 
 generate_mds_config
@@ -329,4 +332,8 @@ if ! kill -0 "$MDS_PID" 2>/dev/null; then
 fi
 
 EXIT_CODE=$(grep -oP 'CHIMERA_KVM_EXIT_CODE=\K[0-9]+' "$LOG_FILE" | tail -1)
+if [ "${EXIT_CODE:-1}" = 0 ]; then
+    . "$(dirname "${BASH_SOURCE[0]}")/kvm_pnfs_deferred_delete_check.sh"
+    pnfs_deferred_delete_check "$TEST_CMD_ARG" "$MDS_LOG" "$NETNS_NAME" "$MDS_IP" || exit 1
+fi
 exit ${EXIT_CODE:-1}

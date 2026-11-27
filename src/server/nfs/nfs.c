@@ -352,6 +352,9 @@ nfs_server_init(
         tm->sessions = prometheus_gauge_series_create_instance(tm->sessions_series);
     }
 
+    nfs4_layout_metrics_init(shared);
+    shared->nfs4_layout_table.owner = shared;
+
     if (!external_portmap) {
         /* PORTMAP V2 */
         PORTMAP_V2_init(&shared->portmap_v2);
@@ -850,6 +853,8 @@ nfs_server_destroy(void *data)
     nfs_recovery_free(&shared->nfs4_recovery);
     nfs_fh_keyring_free(&shared->nfs_fh_keyring);
 
+    nfs4_layout_metrics_destroy(shared);
+
     if (shared->op_histogram) {
         prometheus_histogram_destroy(shared->metrics, shared->op_histogram);
     }
@@ -1065,7 +1070,7 @@ chimera_nfs_server_notify(
                     }
                 }
             } else if (magic == NFS4_SESSION_MAGIC) {
-                nfs4_session_unbind_conn(conn);
+                nfs4_session_unbind_conn(&shared->nfs4_shared_clients, conn);
             } else if (magic == NFS4_CB_CLIENT_MAGIC) {
                 /* A 4.0 outbound delegation callback connection dropped;
                  * invalidate the channel so recalls stop using a freed conn. */
@@ -1147,6 +1152,7 @@ nfs_server_thread_destroy(void *data)
         thread->lease_sweeper = NULL;
     }
 
+    nfs4_cb_layout_retries_destroy(thread);
     nfs4_cb_thread_destroy(thread);
     chimera_nfs_nlm4_thread_destroy(thread);
 

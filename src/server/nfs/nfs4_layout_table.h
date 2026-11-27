@@ -55,6 +55,10 @@ struct nfs_layout_shard {
 };
 
 struct nfs_layout_table {
+    /* The server this table belongs to (struct chimera_server_nfs_shared), for
+     * the VFS's recall callback, which is given only the table.  Set by the
+     * server after init; NULL in unit tests. */
+    void                   *owner;
     struct nfs_layout_shard shards[NFS_LAYOUT_TABLE_SHARDS];
 };
 
@@ -66,8 +70,19 @@ void nfs_layout_table_destroy(
 
 /* Add/remove a holder.  Called as layouts are granted (LAYOUTGET) and torn
  * down (LAYOUTRETURN / lease expiry / recall decline).  Deregistering the last
- * holder of a file resumes any operations deferred on its recall. */
-void nfs_layout_table_register(
+ * holder of a file resumes any operations deferred on its recall.
+ *
+ * Registering refuses with NFS4ERR_RECALLCONFLICT, leaving ls unlinked, when a
+ * recall is outstanding on the file: that recall has snapshotted its holders
+ * already and would never call this one back.  Otherwise NFS4_OK. */
+nfsstat4 nfs_layout_table_register(
+    struct nfs_layout_table *table,
+    struct nfs_layout_state *ls);
+
+/* Advance ls's layout stateid seqid for a LAYOUTGET over a layout the client
+ * already holds.  Refused with NFS4ERR_RECALLCONFLICT, seqid untouched, while
+ * a recall is outstanding on the file, decided under the shard lock. */
+nfsstat4 nfs_layout_table_advance(
     struct nfs_layout_table *table,
     struct nfs_layout_state *ls);
 
@@ -76,11 +91,22 @@ void nfs_layout_table_deregister(
     struct nfs_layout_state *ls);
 
 /*
- * Begin a recall for fh: if any layouts are held, append `waiter` to the file's
- * deferred-op list and snapshot the current holders into out_holders (each
- * pinned with a layout ref the caller must release with nfs_layout_state_put).
- * Returns the number of holders snapshotted, or 0 if none are held (in which
- * case `waiter` is NOT enqueued and the caller should resume immediately).
+ * One batch of a recall for fh.
+ *
+ * Returns -1 when the file has no layout holders; `waiter` is then NOT
+ * enqueued and the caller resumes at once.  Otherwise, when `waiter` is
+ * non-NULL it is appended to the file's deferred-op list (starting the recall,
+ * or joining one already active); pass NULL to fetch a further batch of a
+ * recall already started.
+ *
+ * Either way it snapshots into out_holders up to max_holders holders that no
+ * earlier batch or overlapping recall has snapshotted, marks them
+ * (recall_snapped), pins each with a layout ref the caller releases with
+ * nfs_layout_state_put, and returns how many (0 when every current holder has
+ * already been snapshotted, or when `waiter` is NULL and no recall is active
+ * any more).  LAYOUTGET is refused while the deferred-op list
+ * is non-empty, so a caller that repeats until a batch comes back shorter than
+ * max_holders has recalled every holder.
  */
 int nfs_layout_table_recall_prepare(
     struct nfs_layout_table         *table,
@@ -101,3 +127,39 @@ bool nfs_layout_table_recall_active(
     struct nfs_layout_table *table,
     const uint8_t           *fh,
     uint16_t                 fh_len);
+
+/* True while fh has at least one layout holder, of any layout type. */
+bool nfs_layout_table_has_holders(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len);
+
+/*
+ * Withdraw a parked waiter: remove from fh's deferred-op list the first
+ * waiter `match` accepts and return it (the caller frees it and its arg).
+ * NULL when none matches -- the barrier has already fired it, or it was never
+ * parked.  A withdrawn waiter never runs.
+ */
+struct nfs_layout_recall_waiter *
+nfs_layout_table_take_waiter(
+    struct nfs_layout_table *table,
+    const uint8_t           *fh,
+    uint16_t                 fh_len,
+    bool (                  *match )(
+        const struct nfs_layout_recall_waiter *w,
+        const void                            *key),
+    const void              *key);
+
+/*
+ * Holders a recall snapshotted at least max_age_ns before now_ns, on files
+ * whose recall is still active: pinned into out, up to max.  Each is pinned
+ * twice, a layout ref and a ref on its client; release both
+ * (nfs_client_put(ls->client), then nfs_layout_state_put(ls)).  The caller revokes them; a revoked holder leaves the
+ * table, so calling again until fewer than max come back visits each once.
+ */
+int nfs_layout_table_collect_overdue(
+    struct nfs_layout_table  *table,
+    uint64_t                  now_ns,
+    uint64_t                  max_age_ns,
+    struct nfs_layout_state **out,
+    int                       max);

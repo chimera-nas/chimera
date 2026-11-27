@@ -30,6 +30,8 @@
  * nfs4_replay.py, in git history -- compared raw bytes.)
  */
 
+#include "common/atomic.h"
+#include "common/pthread_util.h"
 #include "common/compiler.h"
 #include "common/test_host.h"
 #include "common/getopt.h"
@@ -763,13 +765,14 @@ check_cinfo(
 
 /* ---- CB_COMPOUND recorder (backchannel) ---------------------------------- */
 
-static struct oracle *g_recall_oracle;
+static struct oracle  *g_recall_oracle;
+static struct mbt_env *g_cb_env;
 
 /* Bumped once per trace so every trace's SETCLIENTID/EXCHANGE_ID owner id is
  * globally distinct: when many traces share one long-lived server (batched
  * replay), each must register as a brand-new client so it gets a fresh
  * clientid/session/slot state rather than colliding with a prior trace's. */
-static uint64_t       g_owner_epoch;
+static uint64_t        g_owner_epoch;
 
 /*
  * CB_NULL.  The server probes a client's callback path with one before it will
@@ -787,17 +790,18 @@ v4_cb_null(
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data)
 {
-    struct oracle *o = private_data ? private_data : g_recall_oracle;
-    int            rc;
+    struct mbt_env *cbenv = g_cb_env;
+    int             rc;
 
     (void) conn;
     (void) cred;
+    (void) private_data;
 
-    if (!o) {
+    if (!cbenv) {
         return;
     }
 
-    rc = o->env->nfs_v4_cb.send_reply_CB_NULL(evpl, NULL, encoding);
+    rc = cbenv->nfs_v4_cb.send_reply_CB_NULL(evpl, NULL, encoding);
     (void) rc;
 } /* v4_cb_null */
 
@@ -810,7 +814,15 @@ v4_cb_compound(
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data)
 {
-    struct oracle         *o = private_data ? private_data : g_recall_oracle;
+    /* A callback can land between traces: the server recalls a layout at the
+     * last close of an unlinked file and at unmount, which is after the trace
+     * that opened it has finished.  The oracle is per trace and is gone by
+     * then, so it is looked up through g_recall_oracle (cleared before the
+     * oracle is freed) and may be NULL.  The reply must not depend on it, or
+     * the server waits on a callback nobody answers; only the recall log does.
+     */
+    struct oracle         *o     = g_recall_oracle;
+    struct mbt_env        *cbenv = g_cb_env;
     struct CB_COMPOUND4res res;
     struct nfs_cb_resop4  *resarray;
     uint32_t               i;
@@ -820,8 +832,10 @@ v4_cb_compound(
     (void) conn;
     (void) cred;
 
-    if (!o) {
-        return;   /* no oracle bound to this backchannel; cannot reply */
+    (void) private_data;
+
+    if (!cbenv) {
+        return;
     }
 
     memset(&res, 0, sizeof(res));
@@ -833,8 +847,8 @@ v4_cb_compound(
         encoding->dbuf);
     if (!resarray) {
         res.status = NFS4ERR_RESOURCE;
-        rc         = o->env->nfs_v4_cb.send_reply_CB_COMPOUND(evpl, NULL,
-                                                              &res, encoding);
+        rc         = cbenv->nfs_v4_cb.send_reply_CB_COMPOUND(evpl, NULL,
+                                                             &res, encoding);
         (void) rc;
         return;
     }
@@ -900,7 +914,7 @@ v4_cb_compound(
     res.num_resarray = args->num_argarray;
     res.resarray     = resarray;
 
-    rc = o->env->nfs_v4_cb.send_reply_CB_COMPOUND(evpl, NULL, &res, encoding);
+    rc = cbenv->nfs_v4_cb.send_reply_CB_COMPOUND(evpl, NULL, &res, encoding);
     (void) rc;
 } /* v4_cb_compound */
 
@@ -4714,6 +4728,65 @@ v4_destroy_leftover_clients(struct oracle *o)
     }
 } /* v4_destroy_leftover_clients */
 
+/* The unmount blocks its caller until the mount is idle, and the server's
+ * unmount-time recall of a still-held layout (CB_LAYOUTRECALL, answered by
+ * v4_cb_compound) can only be answered by the thread that runs the client's
+ * event loop.  Unmounting on that thread therefore waits out the full
+ * timeout for an answer it is itself holding up, and reports the mount busy.
+ * So the teardown runs on a helper thread while this one keeps the loop
+ * turning until the helper is done.  The helper's own bounded retries limit
+ * the wait; a recall that is never answered is reported as a busy unmount.
+ */
+struct v4_teardown {
+    struct mbt_env *env;
+    const char     *fsname;
+    int             done;
+};
+
+static void *
+v4_teardown_thread(void *arg)
+{
+    struct v4_teardown *t = arg;
+
+    mbt_env_fs_teardown(t->env, t->fsname);
+    chimera_atomic_store_n(&t->done, 1, CHIMERA_MEMORY_RELEASE);
+    return NULL;
+} /* v4_teardown_thread */
+
+static void
+v4_teardown_pumped(
+    struct mbt_env *env,
+    const char     *fsname)
+{
+    struct v4_teardown   t = { .env = env, .fsname = fsname, .done = 0 };
+    struct evpl_timer    tick;
+    evpl_native_thread_t th;
+    double               deadline  = now_seconds() + 90.0;
+    int                  timed_out = 0;
+
+    if (chimera_pthread_create(&th, NULL, v4_teardown_thread, &t) != 0) {
+        mbt_env_fs_teardown(env, fsname);
+        return;
+    }
+
+    /* Periodic, so evpl_continue returns even when no event arrives (see
+     * await_recalls). */
+    evpl_add_timer(env->evpl, &tick, await_tick, 50000);
+
+    while (!chimera_atomic_load_n(&t.done, CHIMERA_MEMORY_ACQUIRE)) {
+        if (!timed_out && now_seconds() >= deadline) {
+            timed_out = 1;
+            fprintf(stderr,
+                    "error: teardown of %s has not finished after 90s; a "
+                    "layout recall is probably unanswered\n", fsname);
+        }
+        evpl_continue(env->evpl);
+    }
+
+    evpl_remove_timer(env->evpl, &tick);
+    evpl_native_thread_join(th, NULL);
+} /* v4_teardown_pumped */
+
 static int
 run_trace(
     struct mbt_env *env,
@@ -4994,6 +5067,12 @@ run_trace(
         }
     }
 
+    /* Unmount first, with the connections still up: the server recalls any
+     * layout that is still held when the mount goes away, and the recall is
+     * carried on a client connection, so dropping the connection first leaves
+     * the recall with nowhere to go. */
+    v4_teardown_pumped(env, fsname);
+
     for (c = 0; c < V4_MAX_CLIENTS; c++) {
         if (o->conns[c]) {
             evpl_rpc2_client_disconnect(env->rpc2_thread, o->conns[c]);
@@ -5004,7 +5083,7 @@ run_trace(
             evpl_rpc2_client_disconnect(env->rpc2_thread, o->ds_conns[c]);
         }
     }
-    mbt_env_fs_teardown(env, fsname);
+    g_recall_oracle = NULL;
     free(o->arena);
     free(o->scratch);
     free(o);
@@ -5186,6 +5265,7 @@ main(
 
     if (!dry_run) {
         mbt_env_open_opts(&env, &opts);
+        g_cb_env                            = &env;
         env.nfs_v4_cb.recv_call_CB_COMPOUND = v4_cb_compound;
         env.nfs_v4_cb.recv_call_CB_NULL     = v4_cb_null;
     }
