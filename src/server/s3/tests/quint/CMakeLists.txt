@@ -179,6 +179,16 @@ if(CAIRN_ENABLED)
         TIMEOUT 300)
 endif()
 
+if(CHIMERA_DAOS_ENGINE)
+    add_test(NAME chimera/server/s3/mbt/batch_daos
+        COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${S3_BASE_TRACES}
+                --backend daos)
+    set_tests_properties(chimera/server/s3/mbt/batch_daos PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_daos"
+        LABELS "quint;s3_mbt;daos"
+        TIMEOUT 300)
+endif()
+
 # The base corpus signed with AWS Signature V2 ("AWS <key>:<hmac-sha1>"),
 # exercising the server's V2 verifier end to end.  Multipart is left out
 # only for the block-size reason above -- V2 signing itself covers every

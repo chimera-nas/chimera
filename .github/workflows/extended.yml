@@ -310,6 +310,7 @@ jobs:
 
           build-args: |
             UBUNTU_MIRROR=azure
+            ENABLE_DAOS=${{ matrix.arch == 'amd64' && '1' || '0' }}
 
   build-rocky10:
     name: Build rocky10 ${{ matrix.arch }}
