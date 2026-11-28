@@ -560,7 +560,7 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
     struct nfs_client       *client = req->session ? req->session->client_unified : NULL;
     struct nfs_layout_state *layout;
     const uint8_t           *deviceid, *backing_fh, *native_fh;
-    uint32_t                 backing_fh_len, native_fh_len, client_short_id;
+    uint32_t                 backing_fh_len, native_fh_len;
     uint8_t                 *body;
     uint32_t                 body_len;
     struct layout4          *lo;
@@ -623,8 +623,6 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
         return;
     }
 
-    client_short_id = (uint32_t) client->client_id;
-
     layout = nfs_layout_state_find(client, req->fh, req->fhlen);
     if (layout) {
         /* One layout per (client, file), so a later RW LAYOUTGET over a
@@ -634,10 +632,10 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
         if (args->loga_iomode == LAYOUTIOMODE4_RW) {
             layout->iomode = LAYOUTIOMODE4_RW;
         }
-        nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
+        nfs_layout_state_bump(layout, &res->logr_resok4.logr_stateid);
     } else {
         layout = nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
-                                         client_short_id, table,
+                                         table,
                                          &req->thread->shared->nfs4_layout_table,
                                          &res->logr_resok4.logr_stateid);
     }
@@ -906,7 +904,7 @@ lg_sourced_cb(
     struct nfs_state_table  *table  = &req->thread->shared->nfs4_state_table;
     struct nfs_client       *client = req->session ? req->session->client_unified : NULL;
     struct nfs_layout_state *layout;
-    uint32_t                 client_short_id, i, loc_type;
+    uint32_t                 i, loc_type;
     uint32_t                 layouts_len = 0;
 
     if (error_code != CHIMERA_VFS_OK) {
@@ -1010,17 +1008,16 @@ lg_sourced_cb(
         return;
     }
 
-    client_short_id = (uint32_t) client->client_id;
-    layout          = nfs_layout_state_find(client, req->fh, req->fhlen);
+    layout = nfs_layout_state_find(client, req->fh, req->fhlen);
     if (layout) {
         /* See ff_lg_emit(): widen an existing READ layout to RW. */
         if (args->loga_iomode == LAYOUTIOMODE4_RW) {
             layout->iomode = LAYOUTIOMODE4_RW;
         }
-        nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
+        nfs_layout_state_bump(layout, &res->logr_resok4.logr_stateid);
     } else {
         layout = nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
-                                         client_short_id, table,
+                                         table,
                                          &req->thread->shared->nfs4_layout_table,
                                          &res->logr_resok4.logr_stateid);
     }

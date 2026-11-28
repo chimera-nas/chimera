@@ -15,6 +15,8 @@
 
 set -u
 
+source "$(dirname "${BASH_SOURCE[0]}")/chimera_clientid_test_env.sh"
+
 # Save and clear LD_PRELOAD immediately to avoid ASAN interference with
 # system binaries (ip, sysctl, etc.) which exit non-zero under ASAN.
 # LD_PRELOAD is restored only for the chimera daemon.
@@ -199,6 +201,7 @@ sysctl -q -w fs.aio-max-nr=2097152 2>/dev/null || true
 # Start chimera daemon in the netns (restore LD_PRELOAD for chimera only).
 # Chimera writes log lines to stdout and ASAN/signal-handler output to stderr,
 # so capture both into the same log file for post-mortem on crash.
+chimera_clientid_test_env   # a fresh supervisor grant per start
 if [ -n "${SAVED_LD_PRELOAD}" ]; then
     ip netns exec "${NETNS_NAME}" env LD_PRELOAD="${SAVED_LD_PRELOAD}" "$CHIMERA_BINARY" -c "$CONFIG_FILE" >"$CHIMERA_LOG" 2>&1 &
 else

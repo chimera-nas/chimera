@@ -100,6 +100,8 @@ struct chimera_server_config {
     uint32_t                              nfs3_nsm_monitor_expiry_s;
     int                                   nfs3_drc_persist;
     int                                   nfs4_node_id;
+    /* "nfs4_clientid_allocator" JSON object, as text; "" = not configured. */
+    char                                  nfs4_clientid_allocator[4096];
     uint32_t                              nfs4_lease_time_s;
     uint32_t                              nfs4_grace_time_s;
     uint32_t                              nfs4_courtesy_time_s;

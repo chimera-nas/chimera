@@ -363,12 +363,29 @@ struct nfs4_table_metrics {
     struct prometheus_gauge_instance *sessions;
 };
 
+/* Whether NFSv4 is offered, and the client ID allocator's counters (one
+ * gauge, labelled by stat; see nfs_clientid_metrics_update).  5 plain stats
+ * plus rejected_<status> and failed_<status> for the 6 closed-set statuses. */
+#define NFS4_CLIENTID_METRIC_COUNT 17
+
+struct nfs4_clientid_metrics {
+    struct prometheus_gauge          *offered_gauge;
+    struct prometheus_gauge_series   *offered_series;
+    struct prometheus_gauge_instance *offered;
+    struct prometheus_gauge          *alloc_gauge;
+    struct prometheus_gauge_series   *alloc_series[NFS4_CLIENTID_METRIC_COUNT];
+    struct prometheus_gauge_instance *alloc[NFS4_CLIENTID_METRIC_COUNT];
+};
+
 /* The NFSv4.0 reply cache is keyed per connection; see nfs4_v40_drc.{c,h}.
  * The NFSv3 DRC (struct nfs3_drc) is keyed by client address, which is the only
  * client identity NFSv3 has. */
 
 /* uthash-tracked in-flight 4.1 session hydrate (defined in nfs4_drc.c). */
 struct nfs4_drc_hydra;
+
+struct clientid_allocator;
+struct json_t;
 
 struct chimera_server_nfs_shared {
 
@@ -484,6 +501,13 @@ struct chimera_server_nfs_shared {
     uint32_t                            nfs4_max_slots;
 
     struct nfs4_client_table            nfs4_shared_clients;
+    /* NFSv4 client ID allocator (clientid_allocator.h): the resolved
+     * configuration from nfs_server_init, the allocator itself from
+     * nfs_server_start.  nfs4_offered is 0 when the configuration was
+     * rejected, in which case the NFSv4 program is never registered. */
+    struct clientid_allocator          *clientid_alloc;
+    struct json_t                      *clientid_config;
+    int                                 nfs4_offered;
     struct nfs_state_table              nfs4_state_table;
     struct nfs_layout_table             nfs4_layout_table;   /* fh -> layout holders */
     struct nfs_pnfs_devcache            nfs4_pnfs_devcache;  /* sourced deviceid -> descriptor */
@@ -493,6 +517,12 @@ struct chimera_server_nfs_shared {
     struct prometheus_metrics          *metrics;
     struct nfs4_replay_metrics          replay_metrics;
     struct nfs4_table_metrics           table_metrics;
+    struct nfs4_clientid_metrics        clientid_metrics;
+    /* Refreshes clientid_metrics from an allocator stats snapshot; set by
+     * the server (nfs.c), called by the lease sweeper.  NULL in unit tests
+     * that build the sweeper without the server. */
+    void                                (*clientid_metrics_update)(
+        struct chimera_server_nfs_shared *shared);
     struct nfs4_v40_drc                 v40_drc;
     struct nfs3_drc                     nfs3_drc;
 

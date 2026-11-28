@@ -16,6 +16,15 @@ import pytest
 import requests
 import urllib3
 
+
+def _clientid_test_env():
+    """A stand-in supervisor grant for the daemon under test: NFSv4 is offered
+    only with a client ID namespace (scripts/chimera_clientid_test_env.sh is
+    the shell counterpart).  Generation comes from the millisecond clock."""
+    import time
+    return {"CHIMERA_NODE_ID": "1", "CHIMERA_INSTANCE": "0",
+            "CHIMERA_GENERATION": str(int(time.time() * 1000) % 1048575 + 1)}
+
 # Disable SSL warnings for self-signed certs in tests
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -105,6 +114,8 @@ def chimera_server():
     chimera_binary = find_chimera_binary()
 
     env = os.environ.copy()
+
+    env.update(_clientid_test_env())
     # Set library path to find shared libraries
     lib_dirs = [
         str(Path(chimera_binary).parent.parent / "src" / "server"),
@@ -202,6 +213,8 @@ def chimera_server_https():
     chimera_binary = find_chimera_binary()
 
     env = os.environ.copy()
+
+    env.update(_clientid_test_env())
     lib_dirs = [
         str(Path(chimera_binary).parent.parent / "src" / "server"),
         str(Path(chimera_binary).parent.parent / "src" / "server" / "rest"),

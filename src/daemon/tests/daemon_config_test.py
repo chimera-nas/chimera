@@ -14,6 +14,15 @@ import urllib.error
 import urllib.request
 
 
+def _clientid_test_env():
+    """A stand-in supervisor grant for the daemon under test: NFSv4 is offered
+    only with a client ID namespace (scripts/chimera_clientid_test_env.sh is
+    the shell counterpart).  Generation comes from the millisecond clock."""
+    import time
+    return {"CHIMERA_NODE_ID": "1", "CHIMERA_INSTANCE": "0",
+            "CHIMERA_GENERATION": str(int(time.time() * 1000) % 1048575 + 1)}
+
+
 def unused_ports(count):
     sockets = [socket.socket() for _ in range(count)]
     try:
@@ -36,6 +45,7 @@ def main():
         state = root / "state"
         state.mkdir()
         env = os.environ.copy()
+        env.update(_clientid_test_env())
         env.update(TEMP=scratch, TMP=scratch)
         config_path = root / "config.json"
 

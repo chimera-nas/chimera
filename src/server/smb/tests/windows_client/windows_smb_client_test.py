@@ -40,6 +40,15 @@ import time
 import traceback
 from xml.etree import ElementTree
 
+
+def _clientid_test_env():
+    """A stand-in supervisor grant for the daemon under test: NFSv4 is offered
+    only with a client ID namespace (scripts/chimera_clientid_test_env.sh is
+    the shell counterpart).  Generation comes from the millisecond clock."""
+    import time
+    return {"CHIMERA_NODE_ID": "1", "CHIMERA_INSTANCE": "0",
+            "CHIMERA_GENERATION": str(int(time.time() * 1000) % 1048575 + 1)}
+
 if os.name == "nt":
     import msvcrt
 
@@ -640,6 +649,7 @@ def run_all(chimera, backends, daemon_debug=False, daemon_log=None):
     config_path.write_text(json.dumps(daemon_config(backends, scratch, smb_port, metrics_port)),
                            encoding="utf-8")
     env = os.environ.copy()
+    env.update(_clientid_test_env())
     env.update(TEMP=str(scratch), TMP=str(scratch))
     drives = []
     results = []

@@ -951,6 +951,24 @@ apply_nfs_config(
         }
     }
 
+    /* The NFSv4 client ID allocator (src/server/nfs/clientid_allocator.h).
+     * Validated by the NFS server at startup, which refuses to offer NFSv4 if
+     * it is invalid; anything but an object is rejected here outright. */
+    json_value = json_object_get(server_params, "nfs4_clientid_allocator");
+    if (json_value) {
+        char *text = json_is_object(json_value) ?
+            json_dumps(json_value, JSON_COMPACT | JSON_SORT_KEYS) : NULL;
+
+        if (!text ||
+            chimera_server_config_set_nfs4_clientid_allocator(server_config, text) != 0) {
+            chimera_server_error("Invalid nfs4_clientid_allocator (expected a JSON "
+                                 "object of at most 4095 bytes)");
+            free(text);
+            startup_validation_fail();
+        }
+        free(text);
+    }
+
     json_value = json_object_get(server_params, "nfs4_courtesy_time");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);

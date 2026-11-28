@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "common/platform.h"
 #include "common/thread.h"
 #include "nfs4_procs.h"
 #include "nfs4_recovery.h"
@@ -9,6 +10,7 @@
 #include "vfs/vfs_pnfs.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
+#include "nfs4_registration.h"
 #include "evpl/evpl_rpc2.h"
 
 /* Flag bits a client is permitted to set in eia_flags (RFC 8881 §18.35.3).
@@ -97,25 +99,7 @@ chimera_nfs4_exchange_id(
 {
     struct EXCHANGE_ID4args *args = &argop->opexchange_id;
     struct EXCHANGE_ID4res  *res  = &resop->opexchange_id;
-    /* NFSv4.1 server identity.  A client treats two server addresses as the same
-     * server (shared state, eligible for trunking) when both the server-owner
-     * major id AND the server scope match (RFC 8881 sec 2.10.5); the Linux
-     * trunking-detection path keys on the major id.  Independent chimera servers
-     * that do not share state -- e.g. a pNFS data server co-deployed with its
-     * MDS -- must therefore differ in both, or the client coalesces them and
-     * misroutes the data path.  The "nfs_server_scope" knob sets both (default
-     * 42, preserving prior behavior). */
-    uint64_t                       server_scope = chimera_server_config_get_nfs_server_scope(
-        thread->shared->config);
-    uint64_t                       owner_major = server_scope;
-    uint64_t                       owner_minor = 42;
-    struct timespec                now;
-    struct nfs4_client_principal   principal;
-    struct nfs4_exchange_id_result eid;
-    bool                           update;
-    int                            rc;
-
-    clock_gettime(CLOCK_REALTIME, &now);
+    struct nfs4_reg_args     ra;
 
     /* While the persistent cold-start reconstruction is still in flight, hold
      * the client off so it cannot create a fresh record that races the
@@ -170,41 +154,57 @@ chimera_nfs4_exchange_id(
         return;
     }
 
-    update = (args->eia_flags & EXCHGID4_FLAG_UPD_CONFIRMED_REC_A) != 0;
+    memset(&ra, 0, sizeof(ra));
+    ra.kind                      = NFS4_REG_EXCHANGE_ID;
+    ra.owner                     = args->eia_clientowner.co_ownerid.data;
+    ra.owner_len                 = args->eia_clientowner.co_ownerid.len;
+    ra.verifier                  = *(uint64_t *) args->eia_clientowner.co_verifier;
+    ra.principal.flavor          = req->principal_flavor;
+    ra.principal.uid             = req->principal_uid;
+    ra.principal.gid             = req->principal_gid;
+    ra.principal.machinename     = req->principal_machinename;
+    ra.principal.machinename_len = req->principal_machinename_len;
+    ra.minorversion              = req->minorversion;
+    ra.update                    = (args->eia_flags & EXCHGID4_FLAG_UPD_CONFIRMED_REC_A) != 0;
+    ra.eia_flags                 = args->eia_flags;
+    ra.spa_how                   = args->eia_state_protect.spa_how;
 
-    principal.flavor          = req->principal_flavor;
-    principal.uid             = req->principal_uid;
-    principal.gid             = req->principal_gid;
-    principal.machinename     = req->principal_machinename;
-    principal.machinename_len = req->principal_machinename_len;
+    /* RFC 8881 §18.35.4 record matching.  A fresh client ID comes from the
+     * client ID allocator; the reply is sent once it answers
+     * (nfs4_registration.h). */
+    nfs4_registration_run(thread, req, argop, resop, &ra);
+} /* chimera_nfs4_exchange_id */
 
-    nfs4_client_exchange_id(
-        &thread->shared->nfs4_shared_clients,
-        args->eia_clientowner.co_ownerid.data,
-        args->eia_clientowner.co_ownerid.len,
-        *(uint64_t *) args->eia_clientowner.co_verifier,
-        &principal,
-        update,
-        req->minorversion,
-        &eid);
+void
+chimera_nfs4_exchange_id_reply(
+    struct chimera_server_nfs_thread     *thread,
+    struct nfs_request                   *req,
+    struct nfs_argop4                    *argop,
+    struct nfs_resop4                    *resop,
+    const struct nfs4_exchange_id_result *eid,
+    bool                                  primary)
+{
+    struct EXCHANGE_ID4args *args = &argop->opexchange_id;
+    struct EXCHANGE_ID4res  *res  = &resop->opexchange_id;
+    /* NFSv4.1 server identity.  A client treats two server addresses as the same
+     * server (shared state, eligible for trunking) when both the server-owner
+     * major id AND the server scope match (RFC 8881 sec 2.10.5); the Linux
+     * trunking-detection path keys on the major id.  Independent chimera servers
+     * that do not share state -- e.g. a pNFS data server co-deployed with its
+     * MDS -- must therefore differ in both, or the client coalesces them and
+     * misroutes the data path.  The "nfs_server_scope" knob sets both (default
+     * 42, preserving prior behavior). */
+    uint64_t        server_scope = chimera_server_config_get_nfs_server_scope(
+        thread->shared->config);
+    uint64_t        owner_major = server_scope;
+    uint64_t        owner_minor = 42;
+    struct timespec now;
+    int             rc;
 
-    /* A superseded record's state hierarchy is torn down outside the table
-     * lock (see nfs4_client_exchange_id). */
-    if (eid.destroy_unified) {
-        nfs_client_destroy(eid.destroy_unified,
-                           &thread->shared->nfs4_state_table,
-                           thread->vfs_thread,
-                           false);
-    }
-    if (eid.destroy_unified2) {
-        nfs_client_destroy(eid.destroy_unified2,
-                           &thread->shared->nfs4_state_table,
-                           thread->vfs_thread,
-                           false);
-    }
+    clock_gettime(CLOCK_REALTIME, &now);
 
-    if (eid.status != NFS4_OK) {
-        res->eir_status = eid.status;
+    if (eid->status != NFS4_OK) {
+        res->eir_status = eid->status;
         chimera_nfs4_compound_complete(req, res->eir_status);
         return;
     }
@@ -239,8 +239,8 @@ chimera_nfs4_exchange_id(
         evpl_mutex_lock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
         HASH_FIND(nfs4_client_hh_by_id,
                   thread->shared->nfs4_shared_clients.nfs4_ct_clients_by_id,
-                  &eid.clientid, sizeof(eid.clientid), c);
-        if (c && eid.confirmed) {
+                  &eid->clientid, sizeof(eid->clientid), c);
+        if (c && eid->confirmed) {
             spa_how   = c->nfs4_client_sp_how;
             immutable = 1;
         }
@@ -263,7 +263,8 @@ chimera_nfs4_exchange_id(
             }
         }
         evpl_mutex_unlock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
-        if (uc) {
+        /* Persist once per registration, not once per coalesced duplicate. */
+        if (uc && primary) {
             nfs_recovery_persist(thread->vfs_thread,
                                  &thread->shared->nfs4_recovery, uc);
         }
@@ -282,10 +283,10 @@ chimera_nfs4_exchange_id(
     }
 
     res->eir_status                = NFS4_OK;
-    res->eir_resok4.eir_clientid   = eid.clientid;
-    res->eir_resok4.eir_sequenceid = eid.sequenceid;
+    res->eir_resok4.eir_clientid   = eid->clientid;
+    res->eir_resok4.eir_sequenceid = eid->sequenceid;
     res->eir_resok4.eir_flags      = pnfs_flags |
-        (eid.confirmed ? EXCHGID4_FLAG_CONFIRMED_R : 0);
+        (eid->confirmed ? EXCHGID4_FLAG_CONFIRMED_R : 0);
     /* eir_state_protect was already filled (and the mode recorded on the
      * client) above. */
     res->eir_resok4.num_eir_server_impl_id = 1;
@@ -323,4 +324,4 @@ chimera_nfs4_exchange_id(
 
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
-} /* chimera_nfs4_setclientid */
+} /* chimera_nfs4_exchange_id_reply */

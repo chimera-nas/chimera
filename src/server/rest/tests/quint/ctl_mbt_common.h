@@ -53,6 +53,7 @@
 #include "evpl/evpl_http.h"
 
 #include "ctl_http.h"
+#include "common/test_clientid_env.h"
 
 struct ctl_env_opts {
     int         auth_enabled;    /* REST auth; off by default here */
@@ -129,6 +130,7 @@ ctl_env_open(
     chimera_server_config_set_rest_debug_fsops(config, env->opts.debug_fsops);
 
     chimera_server_config_set_nfs_enabled(config, env->opts.nfs_enabled);
+    chimera_test_clientid_env(); /* stand-in supervisor grant */
     chimera_server_config_set_smb_enabled(config, env->opts.smb_enabled);
     chimera_server_config_set_s3_enabled(config, env->opts.s3_enabled);
 

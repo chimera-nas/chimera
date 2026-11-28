@@ -15,6 +15,15 @@ import urllib.error
 import urllib.request
 
 
+def _clientid_test_env():
+    """A stand-in supervisor grant for the daemon under test: NFSv4 is offered
+    only with a client ID namespace (scripts/chimera_clientid_test_env.sh is
+    the shell counterpart).  Generation comes from the millisecond clock."""
+    import time
+    return {"CHIMERA_NODE_ID": "1", "CHIMERA_INSTANCE": "0",
+            "CHIMERA_GENERATION": str(int(time.time() * 1000) % 1048575 + 1)}
+
+
 def ports(count):
     listeners = [socket.socket() for _ in range(count)]
     try:
@@ -42,6 +51,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-") as scratch:
     config_path = root / "config.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
     env = os.environ.copy()
+    env.update(_clientid_test_env())
     env.update(TEMP=scratch, TMP=scratch)
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

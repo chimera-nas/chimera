@@ -41,6 +41,7 @@
 #else  /* ifdef _WIN32 */
 #include <unistd.h>
 #endif /* ifdef _WIN32 */
+#include "common/test_clientid_env.h"
 
 #define REST_PORT        18082
 
@@ -210,6 +211,7 @@ main(
     /* The export table these endpoints manipulate is owned by the NFS
      * protocol, so it must be enabled for exports to exist at all. */
     chimera_server_config_set_nfs_enabled(config, 1);
+    chimera_test_clientid_env(); /* stand-in supervisor grant */
     chimera_server_config_set_rest_http_port(config, REST_PORT);
     /* Disable auth so the export endpoints can be exercised directly,
      * mirroring the admin pytest setup. */

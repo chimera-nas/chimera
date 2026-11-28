@@ -5,8 +5,12 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "evpl/evpl_rpc2.h"
 #include "portmap_xdr.h"
+
+void portmap_set_nfs4_offered(
+    bool offered);
 
 void portmap_set_nlm_port(
     uint32_t port);

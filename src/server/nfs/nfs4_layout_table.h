@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "common/export.h"
 #include "common/thread.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -58,10 +59,10 @@ struct nfs_layout_table {
     struct nfs_layout_shard shards[NFS_LAYOUT_TABLE_SHARDS];
 };
 
-void nfs_layout_table_init(
+SYMBOL_EXPORT void nfs_layout_table_init(
     struct nfs_layout_table *table);
 
-void nfs_layout_table_destroy(
+SYMBOL_EXPORT void nfs_layout_table_destroy(
     struct nfs_layout_table *table);
 
 /* Add/remove a holder.  Called as layouts are granted (LAYOUTGET) and torn

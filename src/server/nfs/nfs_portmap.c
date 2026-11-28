@@ -200,6 +200,35 @@ portmap_build_rpcblist(
     return head;
 } /* portmap_build_rpcblist */
 
+/* Advertise NFS version 4 only when it is offered: a server with no usable
+ * client ID allocator does not register the NFSv4 program (nfs.c), and
+ * rpcbind must not tell clients otherwise.  Idempotent; the table is
+ * process-wide, so the last server initialised decides. */
+void
+portmap_set_nfs4_offered(bool offered)
+{
+    int at = -1;
+
+    for (int i = 0; i < num_portmap_services; i++) {
+        if (portmap_services[i].prog == 100003 && portmap_services[i].vers == 4) {
+            at = i;
+            break;
+        }
+    }
+
+    if (!offered && at >= 0) {
+        memmove(&portmap_services[at], &portmap_services[at + 1],
+                (size_t) (num_portmap_services - at - 1) * sizeof(portmap_services[0]));
+        num_portmap_services--;
+    } else if (offered && at < 0) {
+        if (num_portmap_services >= num_portmap_services_MAX) {
+            chimera_nfs_error("portmap_set_nfs4_offered: no room in portmap_services table");
+            return;
+        }
+        portmap_services[num_portmap_services++] = (struct portmap_service) { 100003, 4, 6, 2049 };
+    }
+} /* portmap_set_nfs4_offered */
+
 void
 portmap_set_nlm_port(uint32_t port)
 {

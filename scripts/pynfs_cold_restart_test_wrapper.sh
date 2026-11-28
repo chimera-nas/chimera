@@ -26,6 +26,8 @@
 
 set -u
 
+source "$(dirname "${BASH_SOURCE[0]}")/chimera_clientid_test_env.sh"
+
 SAVED_LD_PRELOAD="${LD_PRELOAD:-}"
 unset LD_PRELOAD
 
@@ -109,6 +111,7 @@ EOF
 start_chimera() {
     BOOT_N=$((BOOT_N + 1))
     CHIMERA_LOG="${SESSION_DIR}/chimera_${BOOT_N}.log"
+    chimera_clientid_test_env   # a fresh supervisor grant per start
     if [ -n "${SAVED_LD_PRELOAD}" ]; then
         ip netns exec "${NETNS_NAME}" env LD_PRELOAD="${SAVED_LD_PRELOAD}" \
             "$CHIMERA_BINARY" -c "$CONFIG_FILE" >"$CHIMERA_LOG" 2>&1 &

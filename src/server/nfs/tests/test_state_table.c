@@ -20,6 +20,7 @@
 
 #include "nfs4_state.h"
 #include "nfs4_stateid.h"
+#include "nfs4_layout_table.h"
 
 /* assert(3) compiles to a no-op under NDEBUG (Release builds), which
  * triggers -Werror=unused-but-set-variable for inputs only consumed by
@@ -560,6 +561,84 @@ test_lock_abandon_keeps_reused_state(void)
     printf("ok: lock_abandon_keeps_reused_state\n");
 } /* test_lock_abandon_keeps_reused_state */
 
+/* Layout stateids carry the state table's epoch, not bits of the client ID:
+ * generic validation (TEST_STATEID) recognises them, two clients with
+ * different IDs get the same epoch, a seqid bump keeps the identity, and an
+ * acquire takes a reference that release gives back -- so FREE_STATEID and
+ * teardown racing it neither underflow nor free early. */
+static void
+test_layout_stateid_epoch_and_refcount(void)
+{
+    struct nfs_state_table   table;
+    struct nfs_layout_table  ltable;
+    struct nfs_client       *c1, *c2;
+    struct nfs_layout_state *l1, *l2;
+    struct stateid4          sid1, sid2, sid1b;
+    struct nfs4_stateid_view v1, v2, v1b;
+    static const uint8_t     fh1[] = "layout-fh-1";
+    static const uint8_t     fh2[] = "layout-fh-2";
+    void                    *state = NULL;
+    uint8_t                  type  = 0;
+
+    nfs_state_table_init(&table, 3);
+    nfs_layout_table_init(&ltable);
+    /* Client IDs whose low 32 bits differ from each other and from the epoch. */
+    c1 = nfs_client_alloc(0x102a000069000001ULL, "layout-c1", 9, 0x1111, 1);
+    c2 = nfs_client_alloc(0x1007000003000005ULL, "layout-c2", 9, 0x2222, 1);
+
+    l1 = nfs_layout_state_create(c1, fh1, sizeof(fh1) - 1, 1, LAYOUTIOMODE4_RW,
+                                 &table, &ltable, &sid1);
+    l2 = nfs_layout_state_create(c2, fh2, sizeof(fh2) - 1, 1, LAYOUTIOMODE4_READ,
+                                 &table, &ltable, &sid2);
+    CHECK(l1 && l2);
+
+    nfs4_stateid_decode(&v1, &sid1);
+    nfs4_stateid_decode(&v2, &sid2);
+    CHECK(v1.epoch == table.epoch && v2.epoch == table.epoch);
+    CHECK(l1->stateid_epoch == table.epoch);
+    CHECK(v1.type == NFS4_STATEID_TYPE_LAYOUT);
+
+    /* LAYOUTGET -> TEST_STATEID: a live layout stateid is recognised. */
+    CHECK(nfs_state_table_validate(&table, &sid1) == NFS4_OK);
+    CHECK(nfs_state_table_validate(&table, &sid2) == NFS4_OK);
+
+    /* A later LAYOUTGET bumps the seqid but keeps the same stateid.other
+    * identity (what CB_LAYOUTRECALL re-encodes from the same fields). */
+    nfs_layout_state_bump(l1, &sid1b);
+    nfs4_stateid_decode(&v1b, &sid1b);
+    CHECK(sid1b.seqid == sid1.seqid + 1);
+    CHECK(memcmp(sid1b.other, sid1.other, sizeof(sid1.other)) == 0);
+    CHECK(v1b.epoch == table.epoch);
+
+    /* Acquire (as FREE_STATEID and the generic I/O ops do) takes a reference;
+     * release gives it back. */
+    CHECK(atomic_load(&l1->refcount) == 1);
+    CHECK(nfs_state_table_acquire(&table, &sid1b, 0, &state, &type) == NFS4_OK);
+    CHECK(state == l1 && type == NFS4_SLOT_TYPE_LAYOUT);
+    CHECK(atomic_load(&l1->refcount) == 2);
+    nfs_state_table_release(&table, state, type, NULL);
+    CHECK(atomic_load(&l1->refcount) == 1);
+
+    /* Held across teardown: LAYOUTRETURN destroys the layout while a
+     * FREE_STATEID still holds its acquire reference.  The layout survives
+     * until that release, which then frees it (AddressSanitizer catches a
+     * use-after-free or double free here). */
+    CHECK(nfs_state_table_acquire(&table, &sid2, 0, &state, &type) == NFS4_OK);
+    CHECK(atomic_load(&l2->refcount) == 2);
+    nfs_layout_state_destroy(l2, &table, NULL);
+    CHECK(atomic_load(&l2->refcount) == 1);
+    CHECK(nfs_state_table_validate(&table, &sid2) != NFS4_OK);
+    nfs_state_table_release(&table, state, type, NULL);
+
+    nfs_layout_state_destroy(l1, &table, NULL);
+    nfs_client_destroy(c1, &table, NULL, true);
+    nfs_client_destroy(c2, &table, NULL, true);
+    nfs_layout_table_destroy(&ltable);
+    nfs_state_table_free(&table, NULL);
+
+    printf("ok: layout_stateid_epoch_and_refcount\n");
+} /* test_layout_stateid_epoch_and_refcount */
+
 int
 main(
     int   argc,
@@ -577,6 +656,7 @@ main(
     test_lock_state_free_interlock();
     test_lock_pin_refused_after_close();
     test_lock_abandon_keeps_reused_state();
+    test_layout_stateid_epoch_and_refcount();
     printf("PASS: all state table tests\n");
     return 0;
 } /* main */

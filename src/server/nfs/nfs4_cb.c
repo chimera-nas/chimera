@@ -101,6 +101,21 @@ nfs4_cb_drain_resume_queue(struct chimera_server_nfs_thread *thread)
     }
 } /* nfs4_cb_drain_resume_queue */
 
+void
+nfs4_thread_run(
+    struct chimera_server_nfs_thread *target,
+    void (                           *fn )(void *arg),
+    void                             *arg)
+{
+    struct nfs4_cb_resume_ctx *ctx = calloc(1, sizeof(*ctx));
+
+    chimera_nfs_abort_if(ctx == NULL, "nfs4_thread_run: out of memory");
+    ctx->resume = fn;
+    ctx->arg    = arg;
+    ctx->origin = target;
+    nfs4_cb_resume_bounce(ctx);
+} /* nfs4_thread_run */
+
 /*
  * Recall `holder` from the client that holds it, over that client's shared
  * callback channel.  A client with no usable channel cannot be asked to return
@@ -141,7 +156,7 @@ nfs4_cb_recall_holder(
 
     nfs4_stateid_encode(&recall_stateid, holder->seqid, NFS4_STATEID_TYPE_LAYOUT,
                         holder->shard, holder->slot_idx, holder->generation,
-                        (uint32_t) client->client_id);
+                        holder->stateid_epoch);
 
     ctx         = calloc(1, sizeof(*ctx));
     ctx->thread = thread;

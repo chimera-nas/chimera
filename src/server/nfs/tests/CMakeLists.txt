@@ -16,6 +16,26 @@ target_include_directories(test_state_table PRIVATE
 add_test(NAME chimera/server/nfs/state_table
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_state_table)
 
+# NFSv4 client ID allocator: layouts, config schema, status set, completion
+# contract (quick tier: no I/O, sub-second).  It drives the threaded "test"
+# backend, which is not built for native Windows.
+set(CHIMERA_TEST_TIER quick)
+if (NOT WIN32)
+add_executable(test_clientid_allocator test_clientid_allocator.c)
+target_link_libraries(test_clientid_allocator chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB})
+target_include_directories(test_clientid_allocator PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server/nfs
+    ${NFS_COMMON_INCLUDE_DIR})
+add_test(NAME chimera/server/nfs/clientid_allocator COMMAND test_clientid_allocator)
+set_tests_properties(chimera/server/nfs/clientid_allocator PROPERTIES TIMEOUT 30)
+endif()
+add_test(NAME chimera/server/nfs/clientid_decode_cli
+    COMMAND $<TARGET_FILE:chimera-clientid> decode 0x102a300069000064 0x102a000000000005 0x2000000000000001)
+set_tests_properties(chimera/server/nfs/clientid_decode_cli PROPERTIES
+    PASS_REGULAR_EXPRESSION "node 42 instance 3 generation 105 sequence 100.*invalid fields.*Type 2, not decodable")
+set(CHIMERA_TEST_TIER extended)
+
 # Deterministic OPEN/CLOSE lifetime regression: cheap enough to gate merges,
 # and below the atomic wire operations modeled by the Quint tests.
 add_executable(test_open_state_lookup test_open_state_lookup.c)
@@ -403,6 +423,44 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py" AND
         ENVIRONMENT "PYTHONUNBUFFERED=1;NFS4_TEST_DELEGATIONS=true")
 endif()
 
+# Stale-clientid-across-restart regression (issue #1377): an NFSv4.0 clientid
+# (and setclientid_confirm verifier) minted before a server restart must never
+# be handed to a client of the new boot, and presenting it afterwards must be
+# NFS4ERR_STALE_CLIENTID -- the signal that sends a client into reboot
+# recovery -- rather than resolving to whichever client now holds the number.
+# Crashes and restarts a real daemon between the two phases; needs pynfs's
+# NFSv4.0 client and a network namespace to own port 2049.  The wrapper exits
+# 77 (skip) if pynfs is missing at run time.
+if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py")
+    add_test(NAME chimera/server/nfs/v40_stale_clientid
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_v40_stale_clientid_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs
+                ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_v40_stale_clientid.py)
+    set_tests_properties(chimera/server/nfs/v40_stale_clientid PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180
+        ENVIRONMENT "PYTHONUNBUFFERED=1")
+endif()
+
+# NFSv4 client ID allocator end to end: NFSv4 not offered without a grant, a Type 1
+# supervisor grant from the environment, NFSv4 not offered on an incomplete
+# grant, and coalescing of an identical SETCLIENTID retransmitted on another
+# connection while the (deliberately delayed) allocation is pending.  Needs
+# pynfs's NFSv4.0 client and a network namespace to own port 2049; the
+# wrapper exits 77 (skip) if pynfs is missing at run time.
+if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py")
+    add_test(NAME chimera/server/nfs/clientid_allocator_e2e
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_clientid_allocator_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs
+                ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_clientid_allocator_e2e.py)
+    set_tests_properties(chimera/server/nfs/clientid_allocator_e2e PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300
+        ENVIRONMENT "PYTHONUNBUFFERED=1")
+endif()
+
 # End-to-end NFSv4.1 presented-stateid validation: a superseded stateid seqid
 # must be NFS4ERR_OLD_STATEID (not silently honored -- a stale pipelined CLOSE
 # must not destroy live state), and a wrong-epoch stateid must be
@@ -421,6 +479,22 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
         SKIP_RETURN_CODE 77
         TIMEOUT 180
         ENVIRONMENT "PYTHONUNBUFFERED=1")
+endif()
+
+# pNFS: a layout stateid presented to READ, WRITE, READ_PLUS or WRITE_SAME on
+# the metadata server must be NFS4ERR_BAD_STATEID.  Layout stateids carry the
+# state table's epoch, so the generic stateid lookup resolves them, and a
+# handler that read the layout object as a lock state would dereference a wild
+# pointer.  Brings up a metadata server and a data server through the pNFS
+# wrapper; needs pynfs's nfs4.1 client and a network namespace.
+if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.1/nfs4client.py")
+    add_test(NAME chimera/server/nfs/nfs4_pnfs_layout_stateid_io
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/pynfs_pnfs_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs)
+    set_tests_properties(chimera/server/nfs/nfs4_pnfs_layout_stateid_io PROPERTIES
+        TIMEOUT 180
+        ENVIRONMENT "PYTHONUNBUFFERED=1;PNFS_TEST_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/nfs4_pnfs_layout_stateid_io.py")
 endif()
 
 # Tag every test registered above with the 'nfs' label so these NFS server unit

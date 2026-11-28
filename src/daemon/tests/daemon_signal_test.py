@@ -1,3 +1,4 @@
+import os
 # SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
 # SPDX-License-Identifier: LGPL-2.1-only
 """Stop the real daemon with SIGQUIT and expect an orderly shutdown, not a core."""
@@ -9,6 +10,15 @@ import subprocess
 import sys
 import tempfile
 import time
+
+
+def _clientid_test_env():
+    """A stand-in supervisor grant for the daemon under test: NFSv4 is offered
+    only with a client ID namespace (scripts/chimera_clientid_test_env.sh is
+    the shell counterpart).  Generation comes from the millisecond clock."""
+    import time
+    return {"CHIMERA_NODE_ID": "1", "CHIMERA_INSTANCE": "0",
+            "CHIMERA_GENERATION": str(int(time.time() * 1000) % 1048575 + 1)}
 
 
 def free_port():
@@ -31,6 +41,7 @@ with tempfile.TemporaryDirectory(prefix="chimera-daemon-signal-") as scratch:
     config_path.write_text(json.dumps(config), encoding="utf-8")
     log_path = root / "daemon.log"
     with log_path.open("w+b") as log:
+        os.environ.update(_clientid_test_env())
         proc = subprocess.Popen([sys.argv[1], "-c", str(config_path)],
                                 stdout=log, stderr=log)
         try:
